@@ -1,38 +1,23 @@
 /**
- * LoginScreen — Simple admin login gate.
+ * LoginScreen — Simple login gate.
  * No OIDC, just a basic admin check for now.
  */
 import React, { useState } from "react";
+import { useSmartAuth as useAuth } from "../hooks/useSmartAuth";
 import { motion } from "framer-motion";
-import { Zap, Lock, User, ArrowRight, AlertCircle } from "lucide-react";
+import { Zap, ArrowRight, AlertCircle } from "lucide-react";
 
-interface LoginScreenProps {
-    onLogin: () => void;
-}
-
-const ADMIN_USER = "admin";
-const ADMIN_PASS = "admin";
-
-export default function LoginScreen({ onLogin }: LoginScreenProps) {
-    const [username, setUsername] = useState("");
-    const [password, setPassword] = useState("");
-    const [error, setError] = useState("");
+export default function LoginScreen() {
+    const auth = useAuth();
     const [loading, setLoading] = useState(false);
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
-        setError("");
         setLoading(true);
-
-        setTimeout(() => {
-            if (username === ADMIN_USER && password === ADMIN_PASS) {
-                localStorage.setItem("isAuthenticated", "true");
-                onLogin();
-            } else {
-                setError("Invalid credentials. Use admin/admin.");
-                setLoading(false);
-            }
-        }, 600); // Simulate auth delay
+        auth.signinRedirect().catch(e => {
+            console.error("Login failed:", e);
+            setLoading(false);
+        });
     };
 
     return (
@@ -68,55 +53,18 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
                 {/* Login Card */}
                 <div className="glass-card p-6 space-y-5">
                     <div className="text-center">
-                        <h2 className="text-base font-semibold text-white">Admin Login</h2>
-                        <p className="text-xs text-astral-muted mt-1">Sign in to access the dashboard</p>
+                        <h2 className="text-base font-semibold text-white">Sign in to access the dashboard</h2>
                     </div>
 
                     <form onSubmit={handleSubmit} className="space-y-4">
-                        <div>
-                            <label className="text-xs text-astral-muted block mb-1.5">Username</label>
-                            <div className="relative">
-                                <User size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-astral-muted" />
-                                <input
-                                    type="text"
-                                    value={username}
-                                    onChange={(e) => setUsername(e.target.value)}
-                                    placeholder="admin"
-                                    className="w-full pl-9 pr-4 py-2.5 bg-astral-bg/60 border border-white/10
-                             rounded-lg text-sm text-white placeholder:text-astral-muted/40
-                             focus:outline-none focus:border-astral-primary/50 transition-colors"
-                                    id="login-username"
-                                    autoComplete="username"
-                                />
-                            </div>
-                        </div>
-
-                        <div>
-                            <label className="text-xs text-astral-muted block mb-1.5">Password</label>
-                            <div className="relative">
-                                <Lock size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-astral-muted" />
-                                <input
-                                    type="password"
-                                    value={password}
-                                    onChange={(e) => setPassword(e.target.value)}
-                                    placeholder="••••••"
-                                    className="w-full pl-9 pr-4 py-2.5 bg-astral-bg/60 border border-white/10
-                             rounded-lg text-sm text-white placeholder:text-astral-muted/40
-                             focus:outline-none focus:border-astral-primary/50 transition-colors"
-                                    id="login-password"
-                                    autoComplete="current-password"
-                                />
-                            </div>
-                        </div>
-
-                        {error && (
+                        {auth.error && (
                             <motion.div
                                 initial={{ opacity: 0, y: -5 }}
                                 animate={{ opacity: 1, y: 0 }}
                                 className="flex items-center gap-2 text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg p-3"
                             >
                                 <AlertCircle size={14} />
-                                <span>{error}</span>
+                                <span>{auth.error.message}</span>
                             </motion.div>
                         )}
 
@@ -133,7 +81,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
                                 <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                             ) : (
                                 <>
-                                    Sign In
+                                    Sign In with SSO
                                     <ArrowRight size={14} />
                                 </>
                             )}

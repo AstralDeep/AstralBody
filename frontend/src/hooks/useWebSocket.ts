@@ -27,7 +27,7 @@ export interface WSMessage {
     [key: string]: any;
 }
 
-export function useWebSocket(url: string = "ws://localhost:8001") {
+export function useWebSocket(url: string = "ws://localhost:8001", token?: string) {
     const [isConnected, setIsConnected] = useState(false);
     const [agents, setAgents] = useState<Agent[]>([]);
     const [chatStatus, setChatStatus] = useState<ChatStatus>({ status: "idle", message: "" });
@@ -39,6 +39,8 @@ export function useWebSocket(url: string = "ws://localhost:8001") {
     const reconnectTimer = useRef<number | null>(null);
 
     const connect = useCallback(() => {
+        if (!token) return; // Don't connect without token
+
         try {
             const ws = new WebSocket(url);
             wsRef.current = ws;
@@ -46,9 +48,10 @@ export function useWebSocket(url: string = "ws://localhost:8001") {
             ws.onopen = () => {
                 setIsConnected(true);
                 setChatStatus({ status: "idle", message: "" });
-                // Send RegisterUI
+                // Send RegisterUI with token
                 ws.send(JSON.stringify({
                     type: "register_ui",
+                    token: token,
                     capabilities: ["render", "stream"],
                     session_id: `ui-${Date.now()}`
                 }));
@@ -82,7 +85,7 @@ export function useWebSocket(url: string = "ws://localhost:8001") {
             console.error("WebSocket connection failed:", e);
             reconnectTimer.current = window.setTimeout(connect, 3000);
         }
-    }, [url]);
+    }, [url, token]);
 
     const handleMessage = (data: WSMessage) => {
         switch (data.type) {
