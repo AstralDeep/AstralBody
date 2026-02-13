@@ -8,12 +8,12 @@ Includes:
 """
 import os
 import sys
-import json
-import random
 from typing import List, Dict, Any
-from datetime import datetime
 import arxiv
 from openai import OpenAI
+from typing import Dict, Any, List, Optional
+from collections import Counter
+import json
 
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -113,143 +113,124 @@ def search_patients(min_age: int = 0, max_age: int = 200, condition: str = "") -
         "_data": {"patients": results, "total": len(results)}
     }
 
-
-def graph_patient_data(metric: str = "age", chart_type: str = "bar", min_age: int = 0, max_age: int = 200, condition: str = "") -> Dict[str, Any]:
-    """Graph patient data as a chart.
+def generate_dynamic_chart(
+    data: List[Dict[str, Any]] | str, 
+    x_key: str, 
+    y_key: Optional[str] = None, 
+    chart_type: str = "auto",
+    title: str = "Data Visualization"
+) -> Dict[str, Any]:
+    """Generate a chart dynamically based on generic input data.
 
     Args:
-        metric: The metric to graph — 'age', 'heart_rate', or 'blood_pressure' (default: 'age')
-        chart_type: Chart type — 'bar', 'line', or 'pie' (default: 'bar')
-        min_age: Minimum patient age filter (default: 0)
-        max_age: Maximum patient age filter (default: 200)
-        condition: Condition keyword to filter by (default: "")
+        data: List of dictionaries representing the dataset (e.g., [{"date": "2023", "sales": 10}, ...]).
+        x_key: The dictionary key to use for the X-axis (labels/categories).
+        y_key: The dictionary key for the Y-axis. If None, it plots the frequency count of x_key.
+        chart_type: 'auto', 'bar', 'line', 'pie', or 'scatter' (default: 'auto').
+        title: Title of the chart.
 
     Returns:
         Dict with _ui_components and _data keys.
     """
-    # Ensure ages are integers
-    try:
-        min_age = int(min_age)
-        max_age = int(max_age)
-    except ValueError:
-        pass
-
-    # Filter patients
-    filtered_patients = []
-    for p in MOCK_PATIENTS:
-        if p["age"] < min_age or p["age"] > max_age:
-            continue
-        if condition and condition.lower() not in p["condition"].lower():
-            continue
-        filtered_patients.append(p)
-
-    if not filtered_patients:
-        return create_ui_response([
-            Alert(message="No patients found matching your criteria to graph.", variant="warning")
-        ])
-
-    labels = [p["name"] for p in filtered_patients]
     
-    # Chart configuration variables
-    chart_data = []
-    layout_update = {}
-    
-    if metric == "severity":
-        # Map severity to numeric values for plotting
-        severity_map = {"Stable": 1, "Mild": 2, "Moderate": 3, "Severe": 4, "Critical": 5}
-        values = [severity_map.get(p["status"], 0) for p in filtered_patients]
-        title = "Patient Condition Severity"
-        
-        # Custom coloring for severity
-        colors = []
-        for v in values:
-            if v >= 5: colors.append("#EF4444")  # Critical - Red
-            elif v >= 4: colors.append("#F97316") # Severe - Orange
-            elif v >= 3: colors.append("#EAB308") # Moderate - Yellow
-            elif v >= 2: colors.append("#22C55E") # Mild - Green
-            else: colors.append("#3B82F6")        # Stable - Blue
-
-        chart_data = [{
-            "x": labels,
-            "y": values,
-            "type": "bar",
-            "marker": {"color": colors},
-            "text": [p["status"] for p in filtered_patients],  # Show text on hover
-            "hovertemplate": "<b>%{x}</b><br>Status: %{text}<extra></extra>"
-        }]
-        
-        layout_update = {
-            "yaxis": {
-                "tickmode": "array",
-                "tickvals": [1, 2, 3, 4, 5],
-                "ticktext": ["Stable", "Mild", "Moderate", "Severe", "Critical"],
-                "range": [0, 6],
-                "gridcolor": "rgba(255,255,255,0.1)",
-                "tickfont": {"size": 10, "color": "#9CA3AF"}
+    # 1. Parse stringified JSON if necessary
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except json.JSONDecodeError:
+            return {
+                "_ui_components": [Alert(message="Invalid data format provided. Expected JSON array.", variant="error").to_json()],
+                "_data": {}
             }
+
+    if not data:
+        return {
+            "_ui_components": [Alert(message="No data provided to graph.", variant="warning").to_json()],
+            "_data": {}
         }
 
-    elif metric == "heart_rate":
-        values = [float(p["heart_rate"]) for p in filtered_patients]
-        title = "Patient Heart Rates (BPM)"
-        chart_data = [{
-            "x": labels,
-            "y": values,
-            "type": "bar" if chart_type == "bar" else "scatter",
-            "mode": "lines+markers" if chart_type == "line" else None,
-            "marker": {"color": "#6366F1"},
-            "line": {"color": "#6366F1", "width": 3} if chart_type == "line" else None
-        }]
-        
-    elif metric == "blood_pressure":
-        # Use systolic
-        values = [float(p["blood_pressure"].split("/")[0]) for p in filtered_patients]
-        title = "Patient Systolic Blood Pressure (mmHg)"
-        chart_data = [{
-            "x": labels,
-            "y": values,
-            "type": "bar" if chart_type == "bar" else "scatter",
-            "mode": "lines+markers" if chart_type == "line" else None,
-            "marker": {"color": "#8B5CF6"},
-            "line": {"color": "#8B5CF6", "width": 3} if chart_type == "line" else None
-        }]
-        
-    else:  # age
-        values = [float(p["age"]) for p in filtered_patients]
-        title = "Patient Ages"
-        if chart_type == "pie":
-            colors = ["#6366F1", "#8B5CF6", "#06B6D4", "#10B981", "#F59E0B",
-                      "#EF4444", "#EC4899", "#3B82F6", "#14B8A6", "#F97316"]
-            chart_data = [{
-                "labels": labels,
-                "values": values,
-                "type": "pie",
-                "marker": {"colors": colors},
-                "textinfo": "label+percent",
-                "hole": 0.4
-            }]
-        else:
-            chart_data = [{
-                "x": labels,
-                "y": values,
-                "type": "bar" if chart_type == "bar" else "scatter",
-                "mode": "lines+markers" if chart_type == "line" else None,
-                "marker": {"color": "#3B82F6"},
-                "line": {"color": "#3B82F6", "width": 3} if chart_type == "line" else None
-            }]
-    
-    # Add filter context to title
-    if condition:
-        title += f" ({condition})"
-    if min_age > 0 or max_age < 200:
-        title += f" [Age {min_age}-{max_age}]"
+    # --- THE FIX ---
+    # Normalize y_key (LLMs sometimes pass the string "null", "None", or "")
+    if str(y_key).strip().lower() in ("null", "none", "", "undefined"):
+        y_key = None
 
-    # Create the PlotlyChart primitive
+    # 2. Extract Data Safely
+    labels = []
+    values = []
+
+    if y_key is None:
+        # Frequency count mode (Now triggered correctly!)
+        raw_labels = [str(row.get(x_key, "Unknown")) for row in data]
+        counts = Counter(raw_labels)
+        labels = list(counts.keys())
+        values = list(counts.values())
+        y_key = "count" 
+    else:
+        # Explicit X vs Y mode
+        labels = [str(row.get(x_key, "")) for row in data]
+        
+        for row in data:
+            try:
+                values.append(float(row.get(y_key, 0)))
+            except (ValueError, TypeError):
+                values.append(0)
+
+    # 3. Auto-determine Chart Type
+    if chart_type == "auto":
+        unique_labels = len(set(labels))
+        is_date_like = len(labels) > 0 and any(char in labels[0] for char in ['-', '/']) and any(char.isdigit() for char in labels[0])
+        
+        if is_date_like:
+            chart_type = "line" 
+        elif y_key == "count" and unique_labels <= 10:
+            chart_type = "pie"  
+        else:
+            chart_type = "bar" 
+
+    # 4. Build Plotly Configuration
+    chart_data = []
+    layout_update = {}
+    color_palette = ["#6366F1", "#8B5CF6", "#06B6D4", "#10B981", "#F59E0B", "#EF4444", "#EC4899", "#3B82F6"]
+
+    if chart_type == "pie":
+        chart_data = [{
+            "labels": labels,
+            "values": values,
+            "type": "pie",
+            "marker": {"colors": color_palette},
+            "textinfo": "label+percent",
+            "hole": 0.4 
+        }]
+    else:
+        trace = {
+            "x": labels,
+            "y": values,
+            "type": "bar" if chart_type == "bar" else "scatter",
+            "marker": {"color": color_palette[0]}
+        }
+        
+        if chart_type == "line":
+            trace["mode"] = "lines+markers"
+            trace["line"] = {"color": color_palette[0], "width": 3}
+        elif chart_type == "scatter":
+            trace["mode"] = "markers"
+            
+        chart_data.append(trace)
+
+        # Plotly layout fixes for categories
+        if chart_type == "bar":
+            layout_update["xaxis"] = {
+                "type": "category",
+                "tickangle": -45,
+                "categoryorder": "category ascending" # This forces the X-axis to sort neatly!
+            }
+
+    # 5. Build UI Primitives
     chart = PlotlyChart(
         title=title,
         data=chart_data,
         layout=layout_update,
-        id="patient-chart"
+        id="dynamic-chart"
     )
 
     components = [
@@ -262,7 +243,13 @@ def graph_patient_data(metric: str = "age", chart_type: str = "bar", min_age: in
 
     return {
         "_ui_components": [c.to_json() for c in components],
-        "_data": {"labels": labels, "values": values if metric != "severity" else [p["status"] for p in filtered_patients], "metric": metric}
+        "_data": {
+            "labels": labels, 
+            "values": values, 
+            "x_key": x_key, 
+            "y_key": y_key, 
+            "rendered_chart_type": chart_type
+        }
     }
 
 
@@ -672,18 +659,39 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
             }
         }
     },
-    "graph_patient_data": {
-        "function": graph_patient_data,
-        "description": "Create a chart/graph visualization of patient data. Supports age, heart_rate, or blood_pressure metrics as bar, line, or pie charts. Can filter data by age and condition.",
+   "generate_dynamic_chart": {
+        "function": generate_dynamic_chart,
+        "description": "Create a dynamic chart/graph visualization from generic tabular data. Automatically selects the best chart type ('bar', 'line', 'pie', 'scatter') based on data heuristics, or accepts a specific chart type. Supports plotting specific X and Y axes, or frequency counts if no Y axis is provided.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "metric": {"type": "string", "description": "Metric to graph: 'age', 'heart_rate', 'blood_pressure', or 'severity'", "default": "age"},
-                "chart_type": {"type": "string", "description": "Chart type: 'bar', 'line', or 'pie'", "default": "bar"},
-                "min_age": {"type": "integer", "description": "Minimum patient age", "default": 0},
-                "max_age": {"type": "integer", "description": "Maximum patient age", "default": 200},
-                "condition": {"type": "string", "description": "Condition keyword to filter by (partial match)", "default": ""}
-            }
+                "data": {
+                    "type": "array",
+                    "items": {
+                        "type": "object"
+                    },
+                    "description": "The dataset to visualize, formatted as a list of dictionaries (e.g., [{'category': 'A', 'value': 10}, ...])."
+                },
+                "x_key": {
+                    "type": "string",
+                    "description": "The dictionary key in the data to use for the X-axis (labels/categories)."
+                },
+                "y_key": {
+                    "type": "string",
+                    "description": "The dictionary key in the data for the Y-axis values. If omitted or null, the tool will plot the frequency count of the x_key categories."
+                },
+                "chart_type": {
+                    "type": "string",
+                    "description": "The type of chart to render. Options: 'auto', 'bar', 'line', 'pie', or 'scatter'.",
+                    "default": "auto"
+                },
+                "title": {
+                    "type": "string",
+                    "description": "The display title of the generated chart.",
+                    "default": "Data Visualization"
+                }
+            },
+            "required": ["data", "x_key"]
         }
     },
     "get_system_status": {

@@ -19,6 +19,7 @@ from dataclasses import asdict
 
 import websockets
 import aiohttp
+from jose import jwt as jose_jwt
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -47,6 +48,7 @@ class Orchestrator:
     def __init__(self):
         self.agents: Dict[str, websockets.WebSocketServerProtocol] = {}
         self.ui_clients: List[websockets.WebSocketServerProtocol] = []
+        self.ui_sessions: Dict[websockets.WebSocketServerProtocol, Dict] = {}
         self.agent_cards: Dict[str, AgentCard] = {}
         self.agent_capabilities: Dict[str, List[Dict]] = {}
         self.pending_requests: Dict[str, asyncio.Future] = {}
@@ -183,10 +185,35 @@ class Orchestrator:
             msg = Message.from_json(message)
 
             if isinstance(msg, RegisterUI):
-                logger.info(f"UI registered")
-                await self.send_dashboard(websocket)
+                token = msg.token
+                user_data = None
+                
+                # Check for token validation (skip if not configured or in debug/dev mode if desired, but we want security)
+                if token:
+                    user_data = await self.validate_token(token)
+                
+                if user_data:
+                    logger.info(f"UI registered: {user_data.get('preferred_username', 'unknown')}")
+                    self.ui_sessions[websocket] = user_data
+                    
+                    # Notify UI of success (optional, or just send dashboard)
+                    await self.send_dashboard(websocket)
+                else:
+                    logger.warning("UI registration failed: Invalid or missing token")
+                    await self.send_ui_render(websocket, [
+                        Alert(message="Authentication failed. Please log in again.", variant="error").to_json()
+                    ])
+                    # We might want to close, but let's let the UI handle the error alert
+                    return
 
             elif isinstance(msg, UIEvent):
+                # Ensure authenticated
+                if websocket not in self.ui_sessions:
+                    await self.send_ui_render(websocket, [
+                        Alert(message="Unauthorized. Please refresh.", variant="error").to_json()
+                    ])
+                    return
+
                 if msg.action == "chat_message":
                     user_message = msg.payload.get("message", "")
                     chat_id = msg.session_id or msg.payload.get("chat_id")
@@ -702,6 +729,8 @@ CRITICAL RULES:
             pass
         finally:
             self.ui_clients.remove(websocket)
+            if websocket in self.ui_sessions:
+                del self.ui_sessions[websocket]
             logger.info(f"UI client disconnected (total: {len(self.ui_clients)})")
 
     async def start(self):
@@ -767,6 +796,49 @@ CRITICAL RULES:
                 
         except Exception as e:
             logger.error(f"Failed to summarize chat title: {e}")
+
+    # =========================================================================
+    # AUTHENTICATION
+    # =========================================================================
+
+    async def validate_token(self, token: str) -> Optional[Dict]:
+        """Validate JWT token against KeyCloak."""
+        # 0. Mock Auth Bypass
+        if os.getenv("VITE_USE_MOCK_AUTH") == "true" and token == "dev-token":
+            logger.info("Mock Auth: Validated dev-token")
+            return {
+                "sub": "dev-user-id",
+                "preferred_username": "DevUser",
+                "email": "dev@local",
+                "realm_access": {"roles": ["admin", "user"]}
+            }
+
+        try:
+            authority = os.getenv("VITE_KEYCLOAK_AUTHORITY")
+            audience = os.getenv("VITE_KEYCLOAK_CLIENT_ID")
+            
+            if not authority or not audience:
+                logger.warning("Auth not configured (VITE_KEYCLOAK_AUTHORITY/CLIENT_ID missing)")
+                return None
+
+            # Fetch JWKS
+            jwks_url = f"{authority}/protocol/openid-connect/certs"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(jwks_url) as resp:
+                    jwks = await resp.json()
+
+            # Verify token
+            payload = jose_jwt.decode(
+                token,
+                jwks,
+                algorithms=["RS256"],
+                audience=audience,
+                options={"verify_at_hash": False}
+            )
+            return payload
+        except Exception as e:
+            logger.error(f"Token validation failed: {e}")
+            return None
 
 
 if __name__ == "__main__":
