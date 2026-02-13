@@ -1,0 +1,70 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-astral-bg text-astral-text;
+    font-family: 'Inter', sans-serif;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(99, 102, 241, 0.3) transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background: rgba(99, 102, 241, 0.3);
+    border-radius: 999px;
+  }
+}
+
+@layer utilities {
+  .glass {
+    @apply bg-astral-surface/60 backdrop-blur-md border border-white/10;
+  }
+
+  .glass-card {
+    @apply bg-astral-surface/40 backdrop-blur-lg border border-white/5 rounded-xl shadow-xl;
+  }
+}
+
+/* Loading shimmer */
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.shimmer {
+  background: linear-gradient(90deg, transparent, rgba(99, 102, 241, 0.1), transparent);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+/* Pulse glow */
+@keyframes pulse-glow {
+
+  0%,
+  100% {
+    box-shadow: 0 0 8px rgba(99, 102, 241, 0.2);
+  }
+
+  50% {
+    box-shadow: 0 0 20px rgba(99, 102, 241, 0.5);
+  }
+}
+
+.pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
