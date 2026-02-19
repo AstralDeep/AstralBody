@@ -5,19 +5,131 @@
  * this uses a direct component mapping from the registry implementations.
  * This approach is more resilient to shape mismatches in backend data.
  */
-import React, { Component, type ErrorInfo } from "react";
-import { motion } from "framer-motion";
+import React, { Component, type ErrorInfo, useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import {
     AlertCircle,
     CheckCircle,
     Info,
     AlertTriangle,
     ExternalLink,
+    ChevronRight,
+    Plus,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
+import ComponentSaveButton from "./ComponentSaveButton";
+
+// Helper to recursively extract savable components from a component tree
+function extractSavableComponents(component: any, result: { componentData: any; componentType: string; title?: string }[] = []): void {
+    if (!component || typeof component !== 'object') return;
+    const { type, ...props } = component;
+    const savableComponents = ["card", "table", "metric", "bar_chart", "line_chart", "pie_chart", "plotly_chart", "grid", "collapsible", "container", "text", "alert", "progress", "list", "code", "button"];
+    
+    if (savableComponents.includes(type)) {
+        const title = props.title || props.label || props.name || type;
+        result.push({ componentData: component, componentType: type, title });
+    }
+    
+    // Recursively process children
+    if (props.children && Array.isArray(props.children)) {
+        props.children.forEach((child: any) => extractSavableComponents(child, result));
+    }
+    if (props.content && Array.isArray(props.content)) {
+        props.content.forEach((child: any) => extractSavableComponents(child, result));
+    }
+}
+
+// Button to add all components
+function AddAllToUIButton({ components, onSave }: { components: any[]; onSave: (componentData: any, componentType: string) => Promise<boolean> }) {
+    const [isSaving, setIsSaving] = useState(false);
+    const [saved, setSaved] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    
+    const handleClick = async (e: React.MouseEvent) => {
+        e.stopPropagation();
+        
+        if (saved || isSaving) return;
+        
+        setError(null);
+        setIsSaving(true);
+        
+        try {
+            const savable: { componentData: any; componentType: string; title?: string }[] = [];
+            components.forEach(comp => extractSavableComponents(comp, savable));
+            
+            if (savable.length === 0) {
+                setError('No savable components found');
+                return;
+            }
+            
+            let successCount = 0;
+            for (const { componentData, componentType } of savable) {
+                const success = await onSave(componentData, componentType);
+                if (success) successCount++;
+            }
+            
+            if (successCount === savable.length) {
+                setSaved(true);
+                setTimeout(() => setSaved(false), 3000);
+            } else {
+                setError(`Saved ${successCount} of ${savable.length} components`);
+            }
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : 'Failed to save components';
+            setError(errorMessage);
+            console.error('Failed to save components:', error);
+            setTimeout(() => setError(null), 5000);
+        } finally {
+            setIsSaving(false);
+        }
+    };
+    
+    return (
+        <button
+            onClick={handleClick}
+            disabled={isSaving || saved}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all duration-200
+                ${saved
+                    ? 'bg-green-500/20 text-green-400 border border-green-500/30'
+                    : isSaving
+                        ? 'bg-astral-primary/20 text-astral-primary border border-astral-primary/30'
+                        : error
+                            ? 'bg-red-500/10 text-red-400 border border-red-500/30 hover:bg-red-500/20 hover:border-red-500/50'
+                            : 'bg-white/10 text-astral-muted hover:text-white hover:bg-white/20 border border-white/10 hover:border-astral-primary/30'
+                }
+                disabled:opacity-50 disabled:cursor-not-allowed`}
+            title={error ? `Error: ${error}` : saved ? 'All components added to UI drawer' : 'Add all components to UI drawer'}
+            aria-label={error ? 'Error saving components' : saved ? 'All components saved' : 'Add all components to UI drawer'}
+        >
+            {saved ? (
+                <>
+                    <CheckCircle size={12} />
+                    <span>All Added</span>
+                </>
+            ) : isSaving ? (
+                <>
+                    <div className="animate-spin rounded-full h-3 w-3 border-t-2 border-b-2 border-current" />
+                    <span>Saving...</span>
+                </>
+            ) : error ? (
+                <>
+                    <div className="text-red-400">!</div>
+                    <span>Error</span>
+                </>
+            ) : (
+                <>
+                    <Plus size={12} />
+                    <span>Add all to UI</span>
+                </>
+            )}
+        </button>
+    );
+}
 
 interface DynamicRendererProps {
     components: any[];
+    onSaveComponent?: (componentData: any, componentType: string) => Promise<boolean>;
+    activeChatId?: string | null;
 }
 
 // ─── Error Boundary ────────────────────────────────────────────────
@@ -50,63 +162,73 @@ class RenderErrorBoundary extends Component<
 
 // ─── Component Renderers ───────────────────────────────────────────
 
-function renderComponent(comp: any, index: number): React.ReactNode {
+function renderComponent(comp: any, index: number, onSaveComponent?: (componentData: any, componentType: string) => Promise<boolean>): React.ReactNode {
     if (!comp || typeof comp !== "object") return null;
     const { type, ...props } = comp;
-    console.log("Rendering component:", type, props);
+
+    // Components that should have save buttons
+    const savableComponents = ["card", "table", "metric", "bar_chart", "line_chart", "pie_chart", "plotly_chart", "grid", "collapsible"];
+    
+    const baseProps = { ...props, onSaveComponent, componentData: comp };
 
     switch (type) {
         case "container":
-            return <RenderContainer key={index} {...props} />;
+            return <RenderContainer key={index} {...baseProps} />;
         case "text":
-            return <RenderText key={index} {...props} />;
+            return <RenderText key={index} {...baseProps} />;
         case "card":
-            return <RenderCard key={index} {...props} />;
+            return <RenderCard key={index} {...baseProps} />;
         case "table":
-            return <RenderTable key={index} {...props} />;
+            return <RenderTable key={index} {...baseProps} />;
         case "metric":
-            return <RenderMetric key={index} {...props} />;
+            return <RenderMetric key={index} {...baseProps} />;
         case "alert":
-            return <RenderAlert key={index} {...props} />;
+            return <RenderAlert key={index} {...baseProps} />;
         case "progress":
-            return <RenderProgress key={index} {...props} />;
+            return <RenderProgress key={index} {...baseProps} />;
         case "grid":
-            return <RenderGrid key={index} {...props} />;
+            return <RenderGrid key={index} {...baseProps} />;
         case "list":
-            return <RenderList key={index} {...props} />;
+            return <RenderList key={index} {...baseProps} />;
         case "code":
-            return <RenderCode key={index} {...props} />;
+            return <RenderCode key={index} {...baseProps} />;
         case "bar_chart":
-            return <RenderBarChart key={index} {...props} />;
+            return <RenderBarChart key={index} {...baseProps} />;
         case "line_chart":
-            return <RenderLineChart key={index} {...props} />;
+            return <RenderLineChart key={index} {...baseProps} />;
         case "pie_chart":
-            return <RenderPieChart key={index} {...props} />;
+            return <RenderPieChart key={index} {...baseProps} />;
         case "plotly_chart":
-            return <RenderGenericPlotly key={index} {...props} />;
+            return <RenderGenericPlotly key={index} {...baseProps} />;
         case "divider":
             return <hr key={index} className="border-white/10 my-3" />;
         case "button":
-            return <RenderButton key={index} {...props} />;
+            return <RenderButton key={index} {...baseProps} />;
+        case "collapsible":
+            return <RenderCollapsible key={index} {...baseProps} />;
         default:
             console.warn(`Unknown component type: ${type}`);
             return null;
     }
 }
 
-function renderChildren(items: any[]): React.ReactNode {
+function renderChildren(items: any[], onSaveComponent?: (componentData: any, componentType: string) => Promise<boolean>): React.ReactNode {
     if (!Array.isArray(items)) return null;
-    return items.map((c, i) => renderComponent(c, i));
+    return items.map((c, i) => renderComponent(c, i, onSaveComponent));
 }
 
 // ── Container ──────────────────────────────────────────────────────
-function RenderContainer({ children, content }: any) {
+function RenderContainer({ children, content, onSaveComponent, componentData }: any) {
     const kids = children || content || [];
-    return <div className="flex flex-col gap-4">{renderChildren(kids)}</div>;
+    return (
+        <div className="flex flex-col gap-4 relative group">
+            {renderChildren(kids, onSaveComponent)}
+        </div>
+    );
 }
 
 // ── Text ───────────────────────────────────────────────────────────
-function RenderText({ content, variant = "body" }: any) {
+function RenderText({ content, variant = "body", onSaveComponent, componentData }: any) {
     const classes: Record<string, string> = {
         h1: "text-2xl font-bold text-white",
         h2: "text-xl font-semibold text-white",
@@ -118,18 +240,20 @@ function RenderText({ content, variant = "body" }: any) {
 
     if (variant === "markdown") {
         return (
-            <div className={classes.markdown}>
+            <div className={`${classes.markdown}`}>
                 <ReactMarkdown>{content}</ReactMarkdown>
             </div>
         );
     }
 
     const Tag = variant === "h1" ? "h1" : variant === "h2" ? "h2" : variant === "h3" ? "h3" : "p";
-    return <Tag className={classes[variant] || classes.body}>{content}</Tag>;
+    return (
+        <Tag className={`${classes[variant] || classes.body}`}>{content}</Tag>
+    );
 }
 
 // ── Card ───────────────────────────────────────────────────────────
-function RenderCard({ title, children, content }: any) {
+function RenderCard({ title, children, content, onSaveComponent, componentData }: any) {
     const kids = children || content || [];
     return (
         <motion.div
@@ -139,18 +263,20 @@ function RenderCard({ title, children, content }: any) {
             className="glass-card p-5"
         >
             {title && (
-                <h3 className="text-base font-semibold text-white mb-3 flex items-center gap-2">
-                    <span className="w-1 h-4 rounded-full bg-astral-primary inline-block" />
-                    {title}
-                </h3>
+                <div className="mb-3">
+                    <h3 className="text-base font-semibold text-white flex items-center gap-2">
+                        <span className="w-1 h-4 rounded-full bg-astral-primary inline-block" />
+                        {title}
+                    </h3>
+                </div>
             )}
-            <div className="space-y-3">{renderChildren(kids)}</div>
+            <div className="space-y-3">{renderChildren(kids, onSaveComponent)}</div>
         </motion.div>
     );
 }
 
 // ── Table ──────────────────────────────────────────────────────────
-function RenderTable({ headers, rows }: any) {
+function RenderTable({ headers, rows, onSaveComponent, componentData }: any) {
     if (!headers || !rows) return null;
     return (
         <div className="overflow-x-auto rounded-lg border border-white/5">
@@ -185,7 +311,7 @@ function RenderTable({ headers, rows }: any) {
 }
 
 // ── Metric ─────────────────────────────────────────────────────────
-function RenderMetric({ title, value, subtitle, progress, variant = "default" }: any) {
+function RenderMetric({ title, value, subtitle, progress, variant = "default", onSaveComponent, componentData }: any) {
     const variantColors: Record<string, string> = {
         default: "from-astral-primary/20 to-astral-primary/5",
         warning: "from-yellow-500/20 to-yellow-500/5",
@@ -199,9 +325,11 @@ function RenderMetric({ title, value, subtitle, progress, variant = "default" }:
             animate={{ opacity: 1, scale: 1 }}
             className={`rounded-xl p-4 bg-gradient-to-br ${bg} border border-white/5`}
         >
-            <p className="text-xs text-astral-muted font-medium uppercase tracking-wider mb-1">{title}</p>
-            <p className="text-2xl font-bold text-white">{value}</p>
-            {subtitle && <p className="text-xs text-astral-muted mt-1">{subtitle}</p>}
+            <div className="flex-1">
+                <p className="text-xs text-astral-muted font-medium uppercase tracking-wider mb-1">{title}</p>
+                <p className="text-2xl font-bold text-white">{value}</p>
+                {subtitle && <p className="text-xs text-astral-muted mt-1">{subtitle}</p>}
+            </div>
             {progress != null && (
                 <div className="mt-3 h-1.5 bg-white/10 rounded-full overflow-hidden">
                     <motion.div
@@ -217,7 +345,7 @@ function RenderMetric({ title, value, subtitle, progress, variant = "default" }:
 }
 
 // ── Alert ──────────────────────────────────────────────────────────
-function RenderAlert({ message, title, variant = "info" }: any) {
+function RenderAlert({ message, title, variant = "info", onSaveComponent, componentData }: any) {
     const config: Record<string, { bg: string; border: string; icon: React.ReactNode; text: string }> = {
         info: { bg: "bg-blue-500/10", border: "border-blue-500/20", icon: <Info size={16} />, text: "text-blue-400" },
         success: { bg: "bg-green-500/10", border: "border-green-500/20", icon: <CheckCircle size={16} />, text: "text-green-400" },
@@ -228,20 +356,22 @@ function RenderAlert({ message, title, variant = "info" }: any) {
     return (
         <div className={`${c.bg} ${c.border} border rounded-lg p-4 flex items-start gap-3`}>
             <span className={c.text}>{c.icon}</span>
-            <div>
-                {title && <p className={`font-medium text-sm ${c.text}`}>{title}</p>}
-                <p className="text-sm text-astral-text/80">{message}</p>
+            <div className="flex-1">
+                <div>
+                    {title && <p className={`font-medium text-sm ${c.text}`}>{title}</p>}
+                    <p className="text-sm text-astral-text/80">{message}</p>
+                </div>
             </div>
         </div>
     );
 }
 
 // ── Progress ───────────────────────────────────────────────────────
-function RenderProgress({ value, label, show_percentage }: any) {
+function RenderProgress({ value, label, show_percentage, onSaveComponent, componentData }: any) {
     return (
         <div>
             {label && (
-                <div className="flex justify-between text-xs text-astral-muted mb-1">
+                <div className="flex justify-between text-xs text-astral-muted w-full mb-1">
                     <span>{label}</span>
                     {show_percentage !== false && <span>{Math.round(value * 100)}%</span>}
                 </div>
@@ -259,7 +389,7 @@ function RenderProgress({ value, label, show_percentage }: any) {
 }
 
 // ── Grid ───────────────────────────────────────────────────────────
-function RenderGrid({ columns = 2, gap = 16, children, content }: any) {
+function RenderGrid({ columns = 2, gap = 16, children, content, onSaveComponent, componentData }: any) {
     const kids = children || content || [];
     return (
         <div
@@ -272,7 +402,7 @@ function RenderGrid({ columns = 2, gap = 16, children, content }: any) {
 }
 
 // ── List ───────────────────────────────────────────────────────────
-function RenderList({ items, ordered, variant = "default" }: any) {
+function RenderList({ items, ordered, variant = "default", onSaveComponent, componentData }: any) {
     if (!items) return null;
 
     if (variant === "detailed") {
@@ -321,11 +451,13 @@ function RenderList({ items, ordered, variant = "default" }: any) {
 }
 
 // ── Code ───────────────────────────────────────────────────────────
-function RenderCode({ code, language }: any) {
+function RenderCode({ code, language, onSaveComponent, componentData }: any) {
     return (
         <div className="rounded-lg bg-black/40 border border-white/5 overflow-hidden">
             {language && (
-                <div className="px-4 py-2 text-xs text-astral-muted border-b border-white/5">{language}</div>
+                <div className="px-4 py-2 border-b border-white/5 text-xs text-astral-muted">
+                    {language}
+                </div>
             )}
             <pre className="p-4 text-sm overflow-x-auto" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
                 <code className="text-green-400">{code}</code>
@@ -340,14 +472,14 @@ import Plot from 'react-plotly.js';
 // ... existing code ...
 
 // ── Bar Chart ──────────────────────────────────────────────────────
-function RenderBarChart({ title, labels, datasets }: any) {
+function RenderBarChart({ title, labels, datasets, onSaveComponent, componentData }: any) {
     const dataset = datasets?.[0];
     if (!dataset) return null;
     const data = dataset.data as number[];
 
     return (
         <div className="w-full">
-            <p className="text-sm font-medium text-white mb-3">{title}</p>
+            {title && <p className="text-sm font-medium text-white mb-3">{title}</p>}
             <Plot
                 data={[
                     {
@@ -382,14 +514,14 @@ function RenderBarChart({ title, labels, datasets }: any) {
 }
 
 // ── Line Chart ─────────────────────────────────────────────────────
-function RenderLineChart({ title, labels, datasets }: any) {
+function RenderLineChart({ title, labels, datasets, onSaveComponent, componentData }: any) {
     const dataset = datasets?.[0];
     if (!dataset) return null;
     const data = dataset.data as number[];
 
     return (
         <div className="w-full">
-            <p className="text-sm font-medium text-white mb-3">{title}</p>
+            {title && <p className="text-sm font-medium text-white mb-3">{title}</p>}
             <Plot
                 data={[
                     {
@@ -426,14 +558,14 @@ function RenderLineChart({ title, labels, datasets }: any) {
 }
 
 // ── Pie Chart ──────────────────────────────────────────────────────
-function RenderPieChart({ title, labels, data: pieData, colors }: any) {
+function RenderPieChart({ title, labels, data: pieData, colors, onSaveComponent, componentData }: any) {
     if (!pieData) return null;
     const defaultColors = ["#6366F1", "#8B5CF6", "#06B6D4", "#10B981", "#F59E0B", "#EF4444", "#EC4899", "#3B82F6"];
     const colorArr = colors?.length ? colors : defaultColors;
 
     return (
         <div className="w-full">
-            <p className="text-sm font-medium text-white mb-3">{title}</p>
+            {title && <p className="text-sm font-medium text-white mb-3">{title}</p>}
             <Plot
                 data={[
                     {
@@ -465,8 +597,7 @@ function RenderPieChart({ title, labels, data: pieData, colors }: any) {
 }
 
 // ── Generic Plotly Chart ───────────────────────────────────────────
-function RenderGenericPlotly({ title, data, layout, config }: any) {
-    console.log("RenderGenericPlotly", { title, data, layout });
+function RenderGenericPlotly({ title, data, layout, config, onSaveComponent, componentData }: any) {
     if (!data) return null;
 
     // Merge default layout with provided layout
@@ -503,7 +634,7 @@ function RenderGenericPlotly({ title, data, layout, config }: any) {
 }
 
 // ── Button ─────────────────────────────────────────────────────────
-function RenderButton({ label, variant = "primary" }: any) {
+function RenderButton({ label, variant = "primary", onSaveComponent, componentData }: any) {
     const variants: Record<string, string> = {
         primary: "bg-astral-primary hover:bg-astral-primary/80 text-white",
         secondary: "bg-white/10 hover:bg-white/20 text-astral-text",
@@ -516,16 +647,67 @@ function RenderButton({ label, variant = "primary" }: any) {
     );
 }
 
+// ── Collapsible ────────────────────────────────────────────────────
+function RenderCollapsible({ title, children, content, default_open, onSaveComponent, componentData }: any) {
+    const [isOpen, setIsOpen] = useState(default_open ?? false);
+    const kids = children || content || [];
+    return (
+        <motion.div
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.2 }}
+            className="rounded-xl border border-white/5 overflow-hidden bg-white/[0.02]"
+        >
+            <button
+                onClick={() => setIsOpen(!isOpen)}
+                className="flex items-center gap-2 text-left w-full px-4 py-2.5 hover:bg-white/5 transition-colors"
+            >
+                <motion.span
+                    animate={{ rotate: isOpen ? 90 : 0 }}
+                    transition={{ duration: 0.15 }}
+                    className="text-astral-muted"
+                >
+                    <ChevronRight size={14} />
+                </motion.span>
+                <span className="text-xs font-medium text-astral-muted uppercase tracking-wider">
+                    {title || "Details"}
+                </span>
+            </button>
+            <AnimatePresence initial={false}>
+                {isOpen && (
+                    <motion.div
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: "auto", opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        transition={{ duration: 0.2, ease: "easeInOut" }}
+                        className="overflow-hidden"
+                    >
+                        <div className="px-4 pb-3 pt-1 border-t border-white/5 space-y-2">
+                            {renderChildren(kids, onSaveComponent)}
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+        </motion.div>
+    );
+}
+
 // ─── Main DynamicRenderer ──────────────────────────────────────────
-export default function DynamicRenderer({ components }: DynamicRendererProps) {
+export default function DynamicRenderer({ components, onSaveComponent, activeChatId }: DynamicRendererProps) {
     if (!components || components.length === 0) return null;
 
     return (
         <RenderErrorBoundary>
             <div className="dynamic-renderer space-y-4">
+                {onSaveComponent && (
+                    <div className="flex items-center justify-between mb-2">
+                        <div className="text-xs text-astral-muted font-medium uppercase tracking-wider">Components</div>
+                        <AddAllToUIButton components={components} onSave={onSaveComponent} />
+                    </div>
+                )}
                 {components.map((comp, i) => (
                     <RenderErrorBoundary key={i}>
-                        {renderComponent(comp, i)}
+                        {renderComponent(comp, i, onSaveComponent)}
                     </RenderErrorBoundary>
                 ))}
             </div>
