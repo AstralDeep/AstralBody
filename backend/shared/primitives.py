@@ -28,7 +28,7 @@ class Component:
             'code': CodeBlock, 'image': Image, 'grid': Grids,
             'tabs': Tabs, 'divider': Divider, 'input': Input,
             'bar_chart': BarChart, 'line_chart': LineChart, 'pie_chart': PieChart,
-            'plotly_chart': PlotlyChart,
+            'plotly_chart': PlotlyChart, 'collapsible': Collapsible,
         }
         cls = type_map.get(comp_type, Component)
         if cls == Component:
@@ -196,6 +196,22 @@ class Tabs(Component):
     def to_json(self) -> Dict[str, Any]:
         d = asdict(self)
         d['tabs'] = [t.to_json() if hasattr(t, 'to_json') else t for t in self.tabs]
+        return d
+
+
+@dataclass
+class Collapsible(Component):
+    type: str = "collapsible"
+    title: str = ""
+    content: List[Component] = field(default_factory=list)
+    default_open: bool = False
+
+    def to_json(self) -> Dict[str, Any]:
+        d = asdict(self)
+        d['content'] = [
+            c.to_json() if hasattr(c, 'to_json') else c
+            for c in self.content
+        ]
         return d
 
 

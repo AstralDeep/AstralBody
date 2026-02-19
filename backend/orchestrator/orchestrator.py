@@ -19,9 +19,11 @@ from dataclasses import asdict
 
 import websockets
 import aiohttp
+import uvicorn
 from jose import jwt as jose_jwt
 from dotenv import load_dotenv
 from openai import OpenAI
+from httpx import Timeout
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from orchestrator.history import HistoryManager
@@ -32,7 +34,7 @@ from shared.protocol import (
 )
 from shared.primitives import (
     Container, Text, Card, Grid, Alert, MetricCard, ProgressBar,
-    create_ui_response
+    Collapsible, create_ui_response
 )
 
 load_dotenv(override=True)
@@ -59,7 +61,11 @@ class Orchestrator:
         self.llm_model = os.getenv("LLM_MODEL", "meta-llama/Llama-3.2-90B-Vision-Instruct")
 
         if api_key and base_url:
-            self.llm_client = OpenAI(api_key=api_key, base_url=base_url)
+            self.llm_client = OpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                timeout=Timeout(180.0, connect=10.0)  # 180s for large models (DeepSeek, etc.)
+            )
             logger.info(f"LLM configured: {base_url} model={self.llm_model}")
         else:
             self.llm_client = None
@@ -284,7 +290,7 @@ class Orchestrator:
             return
 
         # Send loading state to UI
-        await websocket.send(json.dumps({
+        await self._safe_send(websocket, json.dumps({
             "type": "chat_status",
             "status": "thinking",
             "message": "Analyzing request and planning actions..."
@@ -370,7 +376,27 @@ CRITICAL RULES:
                 llm_msg = await self._call_llm(websocket, messages, tools_desc)
                 if not llm_msg:
                     logger.error("LLM returned None, stopping loop.")
-                    break
+                    await self._safe_send(websocket, json.dumps({
+                        "type": "chat_status",
+                        "status": "done",
+                        "message": ""
+                    }))
+                    await self.send_ui_render(websocket, [
+                        Alert(message="Failed to get a response from the AI model. Please try again.", variant="error").to_json()
+                    ])
+                    return
+
+                # Check for reasoning content (DeepSeek, o1, etc.)
+                reasoning = getattr(llm_msg, 'reasoning_content', None)
+                if reasoning:
+                    logger.info(f"LLM returned reasoning content ({len(reasoning)} chars)")
+                    reasoning_components = [
+                        Collapsible(title="Reasoning", content=[
+                            Text(content=reasoning, variant="markdown")
+                        ]).to_json()
+                    ]
+                    await self.send_ui_render(websocket, reasoning_components)
+                    self.history.add_message(chat_id, "assistant", reasoning_components)
 
                 # Check if LLM wants to call tools
                 if llm_msg.tool_calls:
@@ -378,7 +404,7 @@ CRITICAL RULES:
                     
                     # Notify UI
                     tool_names = [tc.function.name for tc in llm_msg.tool_calls]
-                    await websocket.send(json.dumps({
+                    await self._safe_send(websocket, json.dumps({
                         "type": "chat_status",
                         "status": "executing",
                         "message": f"Running: {', '.join(tool_names)}..."
@@ -397,10 +423,28 @@ CRITICAL RULES:
                         res_list = await self.execute_parallel_tools(websocket, llm_msg.tool_calls, tool_to_agent, chat_id)
                         tool_results.extend(res_list)
 
-                    # Append tool outputs to history
-                    # We MUST ensure the tool_call_id matches what OpenAI sent
+                    # Collect tool UI components and send as a single collapsible
+                    tool_ui_components = []
+                    for res in tool_results:
+                        if res and res.ui_components and not res.error:
+                            tool_ui_components.extend(res.ui_components)
+
+                    if tool_ui_components:
+                        tool_label = ', '.join(tn.replace('_', ' ').title() for tn in tool_names)
+                        collapsible = Collapsible(
+                            title=f"Tool Results — {tool_label}",
+                            content=[
+                                comp if isinstance(comp, dict) else comp
+                                for comp in tool_ui_components
+                            ],
+                            default_open=False
+                        ).to_json()
+                        await self.send_ui_render(websocket, [collapsible])
+                        if chat_id:
+                            self.history.add_message(chat_id, "assistant", [collapsible])
+
+                    # Append tool outputs to LLM conversation history
                     for i, tc in enumerate(llm_msg.tool_calls):
-                        # Find corresponding result (preserves order)
                         res = tool_results[i] if i < len(tool_results) else None
                         
                         content_str = "No output"
@@ -421,25 +465,34 @@ CRITICAL RULES:
                         })
 
                     # Loop continues to next turn to let LLM analyze results
+                    await self._safe_send(websocket, json.dumps({
+                        "type": "chat_status",
+                        "status": "thinking",
+                        "message": "Analyzing results..."
+                    }))
                 
                 else:
                     # No tool calls -> Final Response
                     logger.info("LLM provided final response. conversation complete.")
                     content = llm_msg.content or "I'm not sure how to help with that."
                     
-                    # Send text response to UI
-                    await self.send_ui_render(websocket, [
+                    # Send response in a Card container
+                    response_components = [
                         Card(title="Analysis", content=[
                             Text(content=content, variant="markdown")
                         ]).to_json()
-                    ])
+                    ]
+                    await self.send_ui_render(websocket, response_components)
 
                     # Save complete interaction to history
-                    self.history.add_message(chat_id, "assistant", [
-                        Card(title="Analysis", content=[
-                            Text(content=content, variant="markdown")
-                        ]).to_json()
-                    ])
+                    self.history.add_message(chat_id, "assistant", response_components)
+
+                    # Signal that processing is complete
+                    await self._safe_send(websocket, json.dumps({
+                        "type": "chat_status",
+                        "status": "done",
+                        "message": ""
+                    }))
                     return
 
             # If loop exits without final response
@@ -448,11 +501,30 @@ CRITICAL RULES:
                 await self.send_ui_render(websocket, [
                     Alert(message="I stopped after several steps to avoid getting stuck. Please refine your request if more is needed.", variant="warning").to_json()
                 ])
+                await self._safe_send(websocket, json.dumps({
+                    "type": "chat_status",
+                    "status": "done",
+                    "message": ""
+                }))
 
+        except websockets.exceptions.ConnectionClosed:
+            logger.warning(f"WebSocket closed during chat processing for chat_id {chat_id} — client likely reconnected")
         except Exception as e:
             logger.error(f"LLM routing error: {e}", exc_info=True)
+            # Clear the 'thinking' spinner so the UI doesn't hang
+            await self._safe_send(websocket, json.dumps({
+                "type": "chat_status",
+                "status": "done",
+                "message": ""
+            }))
+            # Show a user-friendly error message
+            error_text = str(e)
+            if "504" in error_text or "Gateway Time-out" in error_text:
+                error_text = "The AI model timed out. It may be overloaded or still warming up. Please try again in a moment."
+            elif "timeout" in error_text.lower():
+                error_text = "Request timed out waiting for the AI model. Please try again."
             await self.send_ui_render(websocket, [
-                Alert(message=str(e), variant="error", title="Error").to_json()
+                Alert(message=error_text, variant="error", title="Error").to_json()
             ])
 
     async def _call_llm(self, websocket, messages, tools_desc=None):
@@ -504,19 +576,14 @@ CRITICAL RULES:
 
         result = await self._execute_with_retry(websocket, agent_id, tool_name, args)
 
-        if result and result.ui_components and not result.error:
-            if chat_id:
-                self.history.add_message(chat_id, "assistant", result.ui_components)
-            await self.send_ui_render(websocket, result.ui_components)
-        elif result and result.error:
-            # We render the error, but we also return it so the LLM knows it failed
+        # Don't render tool results immediately — the caller (handle_chat_message)
+        # batches all tool results into a single collapsible section.
+        if result and result.error:
+            # Errors are still shown immediately so the user knows something went wrong
             err_msg = result.error.get('message', 'Unknown error')
             await self.send_ui_render(websocket, [
                 Alert(message=f"Tool '{tool_name}' failed: {err_msg}", variant="error").to_json()
             ])
-        else:
-             # Fallback for generic results
-             pass
 
         return result
 
@@ -549,28 +616,23 @@ CRITICAL RULES:
         # Execute all tools concurrently
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        # Process results and render
+        # Process results — don't render here, caller batches into collapsible
         final_results = []
-        all_components = []
+        error_components = []
         
         for i, result in enumerate(results):
             if isinstance(result, Exception):
-                # System error during execution
                 err_res = MCPResponse(error={"message": str(result)})
                 final_results.append(err_res)
-                all_components.append(Alert(message=f"Tool error: {str(result)}", variant="error").to_json())
+                error_components.append(Alert(message=f"Tool error: {str(result)}", variant="error").to_json())
             else:
                 final_results.append(result)
-                if result:
-                    if result.ui_components:
-                        all_components.extend(result.ui_components)
-                    if result.error:
-                        all_components.append(Alert(message=f"Tool '{tool_names[i]}' failed: {result.error.get('message')}", variant="error").to_json())
+                if result and result.error:
+                    error_components.append(Alert(message=f"Tool '{tool_names[i]}' failed: {result.error.get('message')}", variant="error").to_json())
 
-        if all_components:
-            if chat_id:
-                self.history.add_message(chat_id, "assistant", all_components)
-            await self.send_ui_render(websocket, all_components)
+        # Only render errors immediately — successful results are batched by caller
+        if error_components:
+            await self.send_ui_render(websocket, error_components)
             
         return final_results
 
@@ -672,10 +734,19 @@ CRITICAL RULES:
     # UI HELPERS
     # =========================================================================
 
+    async def _safe_send(self, websocket, data: str) -> bool:
+        """Send data over a websocket, returning False if the connection is closed."""
+        try:
+            await websocket.send(data)
+            return True
+        except websockets.exceptions.ConnectionClosed:
+            logger.warning("WebSocket closed while sending — client likely reconnected")
+            return False
+
     async def send_ui_render(self, websocket, components: List):
         """Send a UIRender message to a UI client."""
         msg = UIRender(components=components)
-        await websocket.send(msg.to_json())
+        await self._safe_send(websocket, msg.to_json())
 
     async def send_dashboard(self, websocket):
         """Send the initial dashboard view."""
@@ -734,12 +805,20 @@ CRITICAL RULES:
             logger.info(f"UI client disconnected (total: {len(self.ui_clients)})")
 
     async def start(self):
-        """Start the orchestrator WebSocket server."""
+        """Start the orchestrator WebSocket server and auth HTTP server."""
         logger.info(f"Orchestrator starting on port {PORT}")
 
         # Auto-discover agents (continuous monitor)
         agent_port = int(os.getenv("AGENT_PORT", 8003))
         asyncio.create_task(self._monitor_agents(agent_port))
+
+        # Start BFF auth HTTP server on port 8002
+        from orchestrator.auth import app as auth_app
+        auth_port = int(os.getenv("AUTH_PORT", 8002))
+        config = uvicorn.Config(auth_app, host="0.0.0.0", port=auth_port, log_level="info")
+        auth_server = uvicorn.Server(config)
+        asyncio.create_task(auth_server.serve())
+        logger.info(f"Auth proxy listening on http://0.0.0.0:{auth_port}")
 
         async with websockets.serve(self.handle_ui_connection, "0.0.0.0", PORT):
             logger.info(f"Orchestrator listening on ws://0.0.0.0:{PORT}")
@@ -815,9 +894,9 @@ CRITICAL RULES:
 
         try:
             authority = os.getenv("VITE_KEYCLOAK_AUTHORITY")
-            audience = os.getenv("VITE_KEYCLOAK_CLIENT_ID")
+            expected_client = os.getenv("VITE_KEYCLOAK_CLIENT_ID")
             
-            if not authority or not audience:
+            if not authority or not expected_client:
                 logger.warning("Auth not configured (VITE_KEYCLOAK_AUTHORITY/CLIENT_ID missing)")
                 return None
 
@@ -827,14 +906,22 @@ CRITICAL RULES:
                 async with session.get(jwks_url) as resp:
                     jwks = await resp.json()
 
-            # Verify token
+            # Verify token — skip strict audience check since Keycloak
+            # confidential clients set aud="account", not the client_id.
+            # We validate azp (authorized party) instead.
             payload = jose_jwt.decode(
                 token,
                 jwks,
                 algorithms=["RS256"],
-                audience=audience,
-                options={"verify_at_hash": False}
+                options={"verify_aud": False, "verify_at_hash": False}
             )
+
+            # Verify authorized party matches our client
+            azp = payload.get("azp")
+            if azp and azp != expected_client:
+                logger.warning(f"Token azp '{azp}' does not match expected client '{expected_client}'")
+                return None
+
             return payload
         except Exception as e:
             logger.error(f"Token validation failed: {e}")
