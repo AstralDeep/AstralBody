@@ -167,11 +167,15 @@ class HistoryManager:
                 except:
                     preview = str(content)
             
+            # Check if chat has saved components
+            has_saved = self.chat_has_saved_components(row['id'])
+            
             results.append({
                 "id": row['id'],
                 "title": row['title'],
                 "updated_at": row['updated_at'],
-                "preview": preview
+                "preview": preview,
+                "has_saved_components": has_saved
             })
             
         return results
@@ -179,3 +183,116 @@ class HistoryManager:
     def delete_chat(self, chat_id: str):
         """Delete a chat and its messages."""
         self.db.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
+
+    # =========================================================================
+    # Saved UI Components Methods
+    # =========================================================================
+    
+    def save_component(self, chat_id: str, component_data: any, component_type: str, title: str = None) -> str:
+        """Save a UI component to the database."""
+        import json
+        import uuid
+        import time
+        
+        component_id = str(uuid.uuid4())
+        created_at = int(time.time() * 1000)
+        
+        # Serialize component data
+        component_json = json.dumps(component_data)
+        
+        # Use component type as title if not provided
+        if not title:
+            title = component_type.replace('_', ' ').title()
+        
+        self.db.execute(
+            """INSERT INTO saved_components 
+               (id, chat_id, component_data, component_type, title, created_at) 
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (component_id, chat_id, component_json, component_type, title, created_at)
+        )
+        
+        # Update chat flag
+        self.db.execute(
+            "UPDATE chats SET has_saved_components = 1 WHERE id = ?",
+            (chat_id,)
+        )
+        
+        return component_id
+    
+    def get_saved_components(self, chat_id: str = None) -> List[Dict]:
+        """Get saved components, optionally filtered by chat_id."""
+        import json
+        
+        if chat_id:
+            rows = self.db.fetch_all(
+                "SELECT * FROM saved_components WHERE chat_id = ? ORDER BY created_at DESC",
+                (chat_id,)
+            )
+        else:
+            rows = self.db.fetch_all(
+                "SELECT * FROM saved_components ORDER BY created_at DESC"
+            )
+        
+        components = []
+        for row in rows:
+            try:
+                component_data = json.loads(row['component_data'])
+            except (json.JSONDecodeError, TypeError):
+                component_data = row['component_data']
+            
+            components.append({
+                "id": row['id'],
+                "chat_id": row['chat_id'],
+                "component_data": component_data,
+                "component_type": row['component_type'],
+                "title": row['title'],
+                "created_at": row['created_at']
+            })
+        
+        return components
+    
+    def delete_component(self, component_id: str) -> bool:
+        """Delete a saved component."""
+        # Get chat_id before deleting
+        row = self.db.fetch_one(
+            "SELECT chat_id FROM saved_components WHERE id = ?",
+            (component_id,)
+        )
+        
+        if not row:
+            return False
+        
+        chat_id = row['chat_id']
+        
+        # Delete the component
+        self.db.execute(
+            "DELETE FROM saved_components WHERE id = ?",
+            (component_id,)
+        )
+        
+        # Check if chat still has components
+        count_row = self.db.fetch_one(
+            "SELECT COUNT(*) as count FROM saved_components WHERE chat_id = ?",
+            (chat_id,)
+        )
+        
+        if count_row['count'] == 0:
+            # Update chat flag
+            self.db.execute(
+                "UPDATE chats SET has_saved_components = 0 WHERE id = ?",
+                (chat_id,)
+            )
+        
+        return True
+    
+    def chat_has_saved_components(self, chat_id: str) -> bool:
+        """Check if a chat has saved components."""
+        row = self.db.fetch_one(
+            "SELECT has_saved_components FROM chats WHERE id = ?",
+            (chat_id,)
+        )
+        
+        if not row:
+            return False
+        
+        return bool(row['has_saved_components'])

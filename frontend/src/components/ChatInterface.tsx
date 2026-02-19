@@ -9,8 +9,9 @@
  */
 import React, { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Send, Bot, User, Sparkles, Loader2 } from "lucide-react";
+import { Send, Bot, User, Sparkles, Loader2, Grid, ChevronLeft } from "lucide-react";
 import DynamicRenderer from "./DynamicRenderer";
+import UISavedDrawer from "./UISavedDrawer";
 import type { ChatStatus } from "../hooks/useWebSocket";
 
 interface ChatInterfaceProps {
@@ -18,6 +19,10 @@ interface ChatInterfaceProps {
     chatStatus: ChatStatus;
     onSendMessage: (message: string) => void;
     isConnected: boolean;
+    activeChatId: string | null;
+    savedComponents: any[];
+    onSaveComponent: (componentData: any, componentType: string) => Promise<boolean>;
+    onDeleteSavedComponent: (componentId: string) => void;
 }
 
 const SUGGESTIONS = [
@@ -32,8 +37,13 @@ export default function ChatInterface({
     chatStatus,
     onSendMessage,
     isConnected,
+    activeChatId,
+    savedComponents,
+    onSaveComponent,
+    onDeleteSavedComponent,
 }: ChatInterfaceProps) {
     const [input, setInput] = useState("");
+    const [isDrawerOpen, setIsDrawerOpen] = useState(false);
     const bottomRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
@@ -115,7 +125,11 @@ export default function ChatInterface({
                             {msg.role === "user" ? (
                                 <p className="text-sm text-white">{msg.content}</p>
                             ) : (
-                                <DynamicRenderer components={msg.content} />
+                                <DynamicRenderer 
+                                    components={msg.content} 
+                                    onSaveComponent={onSaveComponent}
+                                    activeChatId={activeChatId}
+                                />
                             )}
                         </div>
                         {msg.role === "user" && (
@@ -180,6 +194,28 @@ export default function ChatInterface({
                     </button>
                 </form>
             </div>
+
+            {/* Saved Components Drawer */}
+            <UISavedDrawer
+                isOpen={isDrawerOpen}
+                onClose={() => setIsDrawerOpen(false)}
+                onOpen={() => setIsDrawerOpen(true)}
+                savedComponents={savedComponents}
+                onDeleteComponent={onDeleteSavedComponent}
+                activeChatId={activeChatId}
+            />
+
+            {/* Drawer Toggle Button */}
+            {!isDrawerOpen && savedComponents.length > 0 && (
+                <button
+                    onClick={() => setIsDrawerOpen(true)}
+                    className="fixed right-4 bottom-20 z-30 bg-astral-primary hover:bg-astral-primary/80 text-white p-3 rounded-full shadow-lg transition-all duration-200 hover:shadow-xl hover:scale-105 flex items-center gap-2"
+                    aria-label="Open saved components drawer"
+                >
+                    <Grid size={20} />
+                    <span className="text-xs font-medium">{savedComponents.length}</span>
+                </button>
+            )}
         </div>
     );
 }

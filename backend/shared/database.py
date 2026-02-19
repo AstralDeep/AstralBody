@@ -61,6 +61,26 @@ class Database:
                 timestamp INTEGER
             )
         ''')
+        
+        # Saved UI components table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS saved_components (
+                id TEXT PRIMARY KEY,
+                chat_id TEXT NOT NULL,
+                component_data TEXT NOT NULL,
+                component_type TEXT NOT NULL,
+                title TEXT,
+                created_at INTEGER,
+                FOREIGN KEY (chat_id) REFERENCES chats (id) ON DELETE CASCADE
+            )
+        ''')
+        
+        # Add has_saved_components flag to chats table
+        try:
+            cursor.execute("ALTER TABLE chats ADD COLUMN has_saved_components BOOLEAN DEFAULT 0")
+        except sqlite3.OperationalError:
+            # Column already exists, ignore
+            pass
 
         conn.commit()
         conn.close()

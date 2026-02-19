@@ -269,6 +269,71 @@ class Orchestrator:
                         "payload": {"chat_id": chat_id}
                     }))
 
+                # Saved components actions
+                elif msg.action == "save_component":
+                    chat_id = msg.payload.get("chat_id")
+                    component_data = msg.payload.get("component_data")
+                    component_type = msg.payload.get("component_type")
+                    title = msg.payload.get("title")
+                    
+                    if not chat_id or not component_data:
+                        await self.send_ui_render(websocket, [
+                            Alert(message="Missing required fields for saving component", variant="error").to_json()
+                        ])
+                        return
+                    
+                    try:
+                        component_id = self.history.save_component(
+                            chat_id, component_data, component_type, title
+                        )
+                        
+                        # Send success response
+                        await websocket.send(json.dumps({
+                            "type": "component_saved",
+                            "component": {
+                                "id": component_id,
+                                "chat_id": chat_id,
+                                "component_data": component_data,
+                                "component_type": component_type,
+                                "title": title or component_type.replace('_', ' ').title(),
+                                "created_at": int(time.time() * 1000)
+                            }
+                        }))
+                    except Exception as e:
+                        logger.error(f"Failed to save component: {e}")
+                        await websocket.send(json.dumps({
+                            "type": "component_save_error",
+                            "error": str(e)
+                        }))
+
+                elif msg.action == "get_saved_components":
+                    chat_id = msg.payload.get("chat_id")
+                    components = self.history.get_saved_components(chat_id)
+                    await websocket.send(json.dumps({
+                        "type": "saved_components_list",
+                        "components": components
+                    }))
+
+                elif msg.action == "delete_saved_component":
+                    component_id = msg.payload.get("component_id")
+                    if not component_id:
+                        await self.send_ui_render(websocket, [
+                            Alert(message="Missing component ID", variant="error").to_json()
+                        ])
+                        return
+                    
+                    success = self.history.delete_component(component_id)
+                    if success:
+                        await websocket.send(json.dumps({
+                            "type": "component_deleted",
+                            "component_id": component_id
+                        }))
+                    else:
+                        await websocket.send(json.dumps({
+                            "type": "component_save_error",
+                            "error": "Component not found"
+                        }))
+
         except Exception as e:
             logger.error(f"Error handling UI message: {e}")
 

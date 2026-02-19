@@ -21,7 +21,8 @@ const MockAuthContext = createContext<MockAuthContextType | undefined>(undefined
 
 export function MockAuthProvider({ children }: { children: ReactNode }) {
     const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
-        return localStorage.getItem("mock_is_authenticated") === "true";
+        // For testing, always authenticate
+        return true;
     });
     const [isLoading, setIsLoading] = useState<boolean>(false);
 

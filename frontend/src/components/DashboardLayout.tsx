@@ -16,6 +16,7 @@ import {
     Activity,
     MessageSquare,
     Plus,
+    Grid,
 } from "lucide-react";
 import type { Agent, ChatSession } from "../hooks/useWebSocket";
 
@@ -177,9 +178,19 @@ export default function DashboardLayout({
                                 >
                                     <MessageSquare size={14} className="flex-shrink-0" />
                                     <div className="flex-1 min-w-0">
-                                        <p className="text-xs font-medium truncate">
-                                            {chat.title || "Untitled Chat"}
-                                        </p>
+                                        <div className="flex items-center gap-1">
+                                            <p className="text-xs font-medium truncate">
+                                                {chat.title || "Untitled Chat"}
+                                            </p>
+                                            {chat.has_saved_components && (
+                                                <div className="relative group">
+                                                    <Grid size={10} className="text-astral-primary flex-shrink-0" />
+                                                    <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-1 px-2 py-1 text-xs bg-astral-surface border border-white/10 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-10">
+                                                        Contains saved UI components
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
                                         <p className="text-[10px] text-astral-muted/70 truncate">
                                             {new Date(chat.updated_at).toLocaleDateString()}
                                         </p>
