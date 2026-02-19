@@ -3,6 +3,9 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { X, ChevronLeft, ChevronRight, Grid, Trash2, ExternalLink } from 'lucide-react';
 import DynamicRenderer from './DynamicRenderer';
 
+// Debug logging
+console.log('UISavedDrawer component loaded');
+
 type SavedComponent = {
   id: string;
   chat_id: string;
@@ -30,23 +33,58 @@ export default function UISavedDrawer({
   activeChatId,
 }: UISavedDrawerProps) {
   const [isCollapsed, setIsCollapsed] = useState(false);
-  
+  const [isAnimating, setIsAnimating] = useState(false);
+
   // Filter components for current chat if activeChatId is provided
-  const filteredComponents = activeChatId 
+  const filteredComponents = activeChatId
     ? savedComponents.filter(comp => comp.chat_id === activeChatId)
     : savedComponents;
-  
+
+  // Log drawer state changes
+  useEffect(() => {
+    console.log('Drawer state changed - isOpen:', isOpen, 'isCollapsed:', isCollapsed, 'filteredComponents:', filteredComponents.length);
+  }, [isOpen, isCollapsed, filteredComponents.length]);
+
   const handleToggleCollapse = () => {
+    // Prevent toggling while animating
+    if (isAnimating) {
+      console.log('Drawer is animating, ignoring collapse toggle');
+      return;
+    }
+    console.log('Drawer toggle collapse clicked. Current isCollapsed:', isCollapsed, 'New value:', !isCollapsed);
+    setIsAnimating(true);
     setIsCollapsed(!isCollapsed);
+    // Reset animating flag after animation completes
+    // Using a timeout since spring animations don't have fixed duration
+    setTimeout(() => {
+      console.log('Collapse animation complete');
+      setIsAnimating(false);
+    }, 400); // Increased to 400ms to be safe
   };
-  
+
+  // Reset collapsed state when drawer closes and ensure it opens fully
+  useEffect(() => {
+    if (!isOpen) {
+      console.log('Drawer closed, resetting isCollapsed to false');
+      setIsCollapsed(false);
+      setIsAnimating(false); // Also reset animating flag
+    } else {
+      // When drawer opens, ensure it's not collapsed
+      console.log('Drawer opened, ensuring isCollapsed is false');
+      setIsCollapsed(false);
+      setIsAnimating(false); // Also reset animating flag
+    }
+  }, [isOpen]);
+
   const handleDelete = (e: React.MouseEvent, componentId: string) => {
     e.stopPropagation();
+    e.preventDefault();
+    console.log('handleDelete called for component:', componentId);
     if (window.confirm('Remove this component from the drawer?')) {
       onDeleteComponent(componentId);
     }
   };
-  
+
   return (
     <>
       {/* Persistent toggle arrow when drawer is closed */}
@@ -65,7 +103,7 @@ export default function UISavedDrawer({
           <ChevronLeft size={20} />
         </button>
       )}
-      
+
       <AnimatePresence>
         {isOpen && (
           <>
@@ -77,7 +115,7 @@ export default function UISavedDrawer({
               onClick={onClose}
               className="fixed inset-0 bg-black/50 z-40"
             />
-            
+
             {/* Drawer */}
             <motion.div
               initial={{ x: '100%' }}
@@ -102,7 +140,7 @@ export default function UISavedDrawer({
                     </p>
                   </div>
                 </div>
-                
+
                 <div className="flex items-center gap-2">
                   <button
                     onClick={handleToggleCollapse}
@@ -111,7 +149,7 @@ export default function UISavedDrawer({
                   >
                     {isCollapsed ? <ChevronRight size={20} /> : <ChevronLeft size={20} />}
                   </button>
-                  
+
                   <button
                     onClick={onClose}
                     className="p-2 rounded-lg hover:bg-white/10 text-astral-muted hover:text-white transition-colors"
@@ -121,7 +159,7 @@ export default function UISavedDrawer({
                   </button>
                 </div>
               </div>
-              
+
               {/* Content */}
               <div className="flex-1 overflow-y-auto p-4">
                 {isCollapsed ? (
@@ -151,40 +189,34 @@ export default function UISavedDrawer({
                           >
                             {/* Component header */}
                             <div className="flex items-center justify-between mb-3">
-                              <div>
+                              <div className="flex items-center gap-2">
                                 <h4 className="text-sm font-medium text-white truncate">
                                   {component.title || component.component_type.replace('_', ' ').replace('chart', 'Chart')}
                                 </h4>
-                                <p className="text-xs text-astral-muted">
-                                  {new Date(component.created_at).toLocaleDateString()}
-                                </p>
+                                <span className="text-[10px] px-2 py-1 rounded-full bg-astral-primary/20 text-astral-primary uppercase tracking-wider">
+                                  {component.component_type}
+                                </span>
                               </div>
-                              
+
                               <button
                                 onClick={(e) => handleDelete(e, component.id)}
-                                className="p-1.5 rounded-md text-astral-muted hover:text-red-400 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 transition-all"
+                                className="relative z-10 p-1.5 rounded-md text-astral-muted hover:text-red-400 hover:bg-red-500/10 transition-all"
                                 aria-label="Delete component"
                               >
                                 <Trash2 size={16} />
                               </button>
                             </div>
-                            
+
                             {/* Component preview */}
                             <div className="relative min-h-[120px] max-h-[300px] overflow-y-auto rounded-lg bg-black/20 p-3">
                               <DynamicRenderer
                                 components={[component.component_data]}
                               />
-                              
+
                               {/* Overlay to indicate it's interactive */}
                               <div className="absolute inset-0 bg-gradient-to-t from-astral-surface/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none" />
                             </div>
-                            
-                            {/* Component type badge */}
-                            <div className="absolute top-2 right-2">
-                              <span className="text-[10px] px-2 py-1 rounded-full bg-astral-primary/20 text-astral-primary uppercase tracking-wider">
-                                {component.component_type}
-                              </span>
-                            </div>
+
                           </div>
                         ))}
                       </div>
@@ -192,7 +224,7 @@ export default function UISavedDrawer({
                   </>
                 )}
               </div>
-              
+
               {/* Footer */}
               {!isCollapsed && (
                 <div className="p-3 border-t border-white/10 text-xs text-astral-muted flex items-center justify-between">

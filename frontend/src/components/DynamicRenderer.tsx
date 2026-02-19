@@ -17,25 +17,64 @@ import {
     Plus,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
-import ComponentSaveButton from "./ComponentSaveButton";
+
 
 // Helper to recursively extract savable components from a component tree
 function extractSavableComponents(component: any, result: { componentData: any; componentType: string; title?: string }[] = []): void {
     if (!component || typeof component !== 'object') return;
     const { type, ...props } = component;
     const savableComponents = ["card", "table", "metric", "bar_chart", "line_chart", "pie_chart", "plotly_chart", "grid", "collapsible", "container", "text", "alert", "progress", "list", "code", "button"];
-    
-    if (savableComponents.includes(type)) {
-        const title = props.title || props.label || props.name || type;
-        result.push({ componentData: component, componentType: type, title });
-    }
-    
-    // Recursively process children
+    const containerTypes = ["card", "container", "grid", "collapsible"];
+
+    // First, check if this component has any savable children
+    let hasSavableChildren = false;
+    const childSavableComponents: { componentData: any; componentType: string; title?: string }[] = [];
+
+    // Check children
     if (props.children && Array.isArray(props.children)) {
-        props.children.forEach((child: any) => extractSavableComponents(child, result));
+        props.children.forEach((child: any) => {
+            const childResult: { componentData: any; componentType: string; title?: string }[] = [];
+            extractSavableComponents(child, childResult);
+            if (childResult.length > 0) {
+                hasSavableChildren = true;
+                childSavableComponents.push(...childResult);
+            }
+        });
     }
+
+    // Check content
     if (props.content && Array.isArray(props.content)) {
-        props.content.forEach((child: any) => extractSavableComponents(child, result));
+        props.content.forEach((child: any) => {
+            const childResult: { componentData: any; componentType: string; title?: string }[] = [];
+            extractSavableComponents(child, childResult);
+            if (childResult.length > 0) {
+                hasSavableChildren = true;
+                childSavableComponents.push(...childResult);
+            }
+        });
+    }
+
+    // If this is a container type AND has savable children, skip saving the container
+    // Only save the container if it doesn't have any savable children (e.g., a card with just text)
+    if (savableComponents.includes(type)) {
+        if (containerTypes.includes(type) && hasSavableChildren) {
+            // Skip saving the container, only add its savable children
+            result.push(...childSavableComponents);
+        } else {
+            // Save this component (either it's not a container, or it's a container without savable children)
+            const title = props.title || props.label || props.name || type;
+            result.push({ componentData: component, componentType: type, title });
+
+            // Also add any savable children (for non-container types or containers without savable children)
+            // This handles nested structures where we want to save multiple components
+            // but avoids the duplicate issue for container + child combinations
+            if (!containerTypes.includes(type)) {
+                result.push(...childSavableComponents);
+            }
+        }
+    } else {
+        // If this component type is not savable, still process its children
+        result.push(...childSavableComponents);
     }
 }
 
@@ -44,30 +83,30 @@ function AddAllToUIButton({ components, onSave }: { components: any[]; onSave: (
     const [isSaving, setIsSaving] = useState(false);
     const [saved, setSaved] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    
+
     const handleClick = async (e: React.MouseEvent) => {
         e.stopPropagation();
-        
+
         if (saved || isSaving) return;
-        
+
         setError(null);
         setIsSaving(true);
-        
+
         try {
             const savable: { componentData: any; componentType: string; title?: string }[] = [];
             components.forEach(comp => extractSavableComponents(comp, savable));
-            
+
             if (savable.length === 0) {
                 setError('No savable components found');
                 return;
             }
-            
+
             let successCount = 0;
             for (const { componentData, componentType } of savable) {
                 const success = await onSave(componentData, componentType);
                 if (success) successCount++;
             }
-            
+
             if (successCount === savable.length) {
                 setSaved(true);
                 setTimeout(() => setSaved(false), 3000);
@@ -83,7 +122,7 @@ function AddAllToUIButton({ components, onSave }: { components: any[]; onSave: (
             setIsSaving(false);
         }
     };
-    
+
     return (
         <button
             onClick={handleClick}
@@ -168,7 +207,7 @@ function renderComponent(comp: any, index: number, onSaveComponent?: (componentD
 
     // Components that should have save buttons
     const savableComponents = ["card", "table", "metric", "bar_chart", "line_chart", "pie_chart", "plotly_chart", "grid", "collapsible"];
-    
+
     const baseProps = { ...props, onSaveComponent, componentData: comp };
 
     switch (type) {
@@ -260,7 +299,7 @@ function RenderCard({ title, children, content, onSaveComponent, componentData }
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.3 }}
-            className="glass-card p-5"
+            className="glass-card p-5 relative"
         >
             {title && (
                 <div className="mb-3">
@@ -278,8 +317,14 @@ function RenderCard({ title, children, content, onSaveComponent, componentData }
 // ── Table ──────────────────────────────────────────────────────────
 function RenderTable({ headers, rows, onSaveComponent, componentData }: any) {
     if (!headers || !rows) return null;
+
+    const title = componentData?.title || componentData?.label || "Table";
+
     return (
         <div className="overflow-x-auto rounded-lg border border-white/5">
+            <div className="p-3 border-b border-white/5 bg-astral-primary/5">
+                <div className="text-sm font-medium text-white">{title}</div>
+            </div>
             <table className="w-full text-sm">
                 <thead>
                     <tr className="bg-astral-primary/10 border-b border-white/5">
@@ -323,10 +368,10 @@ function RenderMetric({ title, value, subtitle, progress, variant = "default", o
         <motion.div
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
-            className={`rounded-xl p-4 bg-gradient-to-br ${bg} border border-white/5`}
+            className={`rounded-xl p-4 bg-gradient-to-br ${bg} border border-white/5 relative`}
         >
+            <p className="text-xs text-astral-muted font-medium uppercase tracking-wider mb-1">{title}</p>
             <div className="flex-1">
-                <p className="text-xs text-astral-muted font-medium uppercase tracking-wider mb-1">{title}</p>
                 <p className="text-2xl font-bold text-white">{value}</p>
                 {subtitle && <p className="text-xs text-astral-muted mt-1">{subtitle}</p>}
             </div>
@@ -391,12 +436,13 @@ function RenderProgress({ value, label, show_percentage, onSaveComponent, compon
 // ── Grid ───────────────────────────────────────────────────────────
 function RenderGrid({ columns = 2, gap = 16, children, content, onSaveComponent, componentData }: any) {
     const kids = children || content || [];
+
     return (
         <div
             className="grid"
             style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`, gap: `${gap}px` }}
         >
-            {renderChildren(kids)}
+            {renderChildren(kids, onSaveComponent)}
         </div>
     );
 }
@@ -479,7 +525,9 @@ function RenderBarChart({ title, labels, datasets, onSaveComponent, componentDat
 
     return (
         <div className="w-full">
-            {title && <p className="text-sm font-medium text-white mb-3">{title}</p>}
+            {title && (
+                <p className="text-sm font-medium text-white mb-3">{title}</p>
+            )}
             <Plot
                 data={[
                     {
@@ -521,7 +569,9 @@ function RenderLineChart({ title, labels, datasets, onSaveComponent, componentDa
 
     return (
         <div className="w-full">
-            {title && <p className="text-sm font-medium text-white mb-3">{title}</p>}
+            {title && (
+                <p className="text-sm font-medium text-white mb-3">{title}</p>
+            )}
             <Plot
                 data={[
                     {
@@ -565,7 +615,9 @@ function RenderPieChart({ title, labels, data: pieData, colors, onSaveComponent,
 
     return (
         <div className="w-full">
-            {title && <p className="text-sm font-medium text-white mb-3">{title}</p>}
+            {title && (
+                <p className="text-sm font-medium text-white mb-3">{title}</p>
+            )}
             <Plot
                 data={[
                     {
@@ -621,7 +673,9 @@ function RenderGenericPlotly({ title, data, layout, config, onSaveComponent, com
 
     return (
         <div className="w-full">
-            {title && <p className="text-sm font-medium text-white mb-3">{title}</p>}
+            {title && (
+                <p className="text-sm font-medium text-white mb-3">{title}</p>
+            )}
             <Plot
                 data={data}
                 layout={mergedLayout}
@@ -651,6 +705,8 @@ function RenderButton({ label, variant = "primary", onSaveComponent, componentDa
 function RenderCollapsible({ title, children, content, default_open, onSaveComponent, componentData }: any) {
     const [isOpen, setIsOpen] = useState(default_open ?? false);
     const kids = children || content || [];
+    const displayTitle = title || "Details";
+
     return (
         <motion.div
             initial={{ opacity: 0, y: 6 }}
@@ -658,21 +714,24 @@ function RenderCollapsible({ title, children, content, default_open, onSaveCompo
             transition={{ duration: 0.2 }}
             className="rounded-xl border border-white/5 overflow-hidden bg-white/[0.02]"
         >
-            <button
-                onClick={() => setIsOpen(!isOpen)}
-                className="flex items-center gap-2 text-left w-full px-4 py-2.5 hover:bg-white/5 transition-colors"
-            >
-                <motion.span
-                    animate={{ rotate: isOpen ? 90 : 0 }}
-                    transition={{ duration: 0.15 }}
-                    className="text-astral-muted"
+            <div className="flex items-center justify-between px-4 py-2.5 hover:bg-white/5 transition-colors">
+                <button
+                    onClick={() => setIsOpen(!isOpen)}
+                    className="flex items-center gap-2 text-left flex-1"
                 >
-                    <ChevronRight size={14} />
-                </motion.span>
-                <span className="text-xs font-medium text-astral-muted uppercase tracking-wider">
-                    {title || "Details"}
-                </span>
-            </button>
+                    <motion.span
+                        animate={{ rotate: isOpen ? 90 : 0 }}
+                        transition={{ duration: 0.15 }}
+                        className="text-astral-muted"
+                    >
+                        <ChevronRight size={14} />
+                    </motion.span>
+                    <span className="text-xs font-medium text-astral-muted uppercase tracking-wider">
+                        {displayTitle}
+                    </span>
+                </button>
+
+            </div>
             <AnimatePresence initial={false}>
                 {isOpen && (
                     <motion.div
@@ -694,6 +753,13 @@ function RenderCollapsible({ title, children, content, default_open, onSaveCompo
 
 // ─── Main DynamicRenderer ──────────────────────────────────────────
 export default function DynamicRenderer({ components, onSaveComponent, activeChatId }: DynamicRendererProps) {
+    console.log('DynamicRenderer rendered with:', {
+        componentCount: components?.length,
+        hasOnSaveComponent: !!onSaveComponent,
+        activeChatId,
+        components: components?.map(c => c?.type)
+    });
+
     if (!components || components.length === 0) return null;
 
     return (

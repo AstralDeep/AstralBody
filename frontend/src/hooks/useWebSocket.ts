@@ -50,6 +50,7 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
             wsRef.current = ws;
 
             ws.onopen = () => {
+                console.log('WebSocket connection opened - readyState:', ws.readyState, 'activeChatId:', activeChatId, 'timestamp:', new Date().toISOString());
                 setIsConnected(true);
                 setChatStatus({ status: "idle", message: "" });
                 // Send RegisterUI with token
@@ -65,6 +66,24 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
                     action: "get_history",
                     payload: {}
                 }));
+                
+                // If we have an active chat ID, reload it after reconnection
+                if (activeChatId) {
+                    console.log('Reloading active chat after reconnection:', activeChatId);
+                    setTimeout(() => {
+                        console.log('Attempting to reload chat - WebSocket readyState:', ws.readyState, 'activeChatId still:', activeChatId);
+                        if (ws.readyState === WebSocket.OPEN) {
+                            ws.send(JSON.stringify({
+                                type: "ui_event",
+                                action: "load_chat",
+                                payload: { chat_id: activeChatId }
+                            }));
+                            console.log('Chat reload request sent for:', activeChatId);
+                        } else {
+                            console.error('WebSocket not OPEN when trying to reload chat. State:', ws.readyState);
+                        }
+                    }, 500); // Small delay to ensure registration is processed
+                }
             };
 
             ws.onmessage = (event) => {
@@ -76,20 +95,22 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
                 }
             };
 
-            ws.onclose = () => {
+            ws.onclose = (event) => {
+                console.log('WebSocket connection closed:', event.code, event.reason);
                 setIsConnected(false);
                 // Auto-reconnect after 3s
                 reconnectTimer.current = window.setTimeout(connect, 3000);
             };
 
-            ws.onerror = () => {
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
                 ws.close();
             };
         } catch (e) {
             console.error("WebSocket connection failed:", e);
             reconnectTimer.current = window.setTimeout(connect, 3000);
         }
-    }, [url, token]);
+    }, [url, token, activeChatId]);
 
     const handleMessage = (data: WSMessage) => {
         switch (data.type) {
@@ -257,8 +278,21 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
 
     // Saved components functions
     const saveComponent = useCallback(async (componentData: any, componentType: string, title?: string): Promise<boolean> => {
-        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !activeChatId) {
-            throw new Error('WebSocket not connected or no active chat');
+        console.log('saveComponent called:', { componentType, title, wsRefCurrent: wsRef.current, wsReadyState: wsRef.current?.readyState, activeChatId, timestamp: new Date().toISOString() });
+        
+        if (!wsRef.current) {
+            console.error('WebSocket reference is null - cannot save component');
+            throw new Error('WebSocket connection lost. Please refresh the page.');
+        }
+        
+        if (wsRef.current.readyState !== WebSocket.OPEN) {
+            console.error('WebSocket not in OPEN state:', wsRef.current.readyState, 'Connection state:', wsRef.current.readyState === WebSocket.CONNECTING ? 'CONNECTING' : wsRef.current.readyState === WebSocket.CLOSING ? 'CLOSING' : wsRef.current.readyState === WebSocket.CLOSED ? 'CLOSED' : 'UNKNOWN');
+            throw new Error('WebSocket connection is not open. State: ' + wsRef.current.readyState + '. Please try again or refresh the page.');
+        }
+        
+        if (!activeChatId) {
+            console.error('No active chat ID - cannot save component without active chat');
+            throw new Error('No active chat session. Please start a new chat or load an existing one.');
         }
         
         // Validate required data
@@ -276,7 +310,7 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
                 if (pendingSaveRejectRef.current === reject) {
                     pendingSaveRejectRef.current = null;
                     pendingSaveResolveRef.current = null;
-                    reject(new Error('Save request timed out'));
+                    reject(new Error('Save request timed out after 10 seconds'));
                 }
             }, 10000);
         });
@@ -293,6 +327,7 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
             }
         }));
         
+        console.log('Save request sent for component:', componentType, 'to chat:', activeChatId);
         return promise;
     }, [activeChatId]);
 
