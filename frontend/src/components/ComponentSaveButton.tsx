@@ -55,7 +55,7 @@ export default function ComponentSaveButton({
     <button
       onClick={handleClick}
       disabled={isSaving || saved}
-      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all duration-200
+      className={`flex items-center justify-center p-1.5 rounded-lg text-xs font-medium transition-all duration-200
         ${saved
           ? 'bg-green-500/20 text-green-400 border border-green-500/30'
           : isSaving
@@ -69,26 +69,15 @@ export default function ComponentSaveButton({
       aria-label={error ? 'Error saving component' : saved ? 'Component saved' : 'Save component to UI drawer'}
     >
       {saved ? (
-        <>
-          <Check size={12} />
-          <span>Added</span>
-        </>
+        <Check size={14} />
       ) : isSaving ? (
-        <>
-          <div className="animate-spin rounded-full h-3 w-3 border-t-2 border-b-2 border-current" />
-          <span>Saving...</span>
-        </>
+        <div className="animate-spin rounded-full h-3.5 w-3.5 border-t-2 border-b-2 border-current" />
       ) : error ? (
-        <>
-          <div className="text-red-400">!</div>
-          <span>Error</span>
-        </>
+        <div className="text-red-400 text-sm font-bold">!</div>
       ) : (
-        <>
-          <Plus size={12} />
-          <span>Add to UI</span>
-        </>
+        <Plus size={14} />
       )}
     </button>
   );
 }
+

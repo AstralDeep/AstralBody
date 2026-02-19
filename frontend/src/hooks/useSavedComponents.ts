@@ -77,17 +77,19 @@ export function useSavedComponents({
         break;
         
       case 'component_saved':
-        // Add new component to list
-        setSavedComponents(prev => [data.component, ...prev]);
-        // Auto-open drawer if it's the first component
-        if (savedComponents.length === 0) {
-          setIsDrawerOpen(true);
-        }
+        // Add new component to list and auto-open drawer if it's the first component
+        setSavedComponents(prev => {
+          const isFirstComponent = prev.length === 0;
+          if (isFirstComponent) {
+            setIsDrawerOpen(true);
+          }
+          return [data.component, ...prev];
+        });
         break;
         
       case 'component_deleted':
         // Remove component from list
-        setSavedComponents(prev => 
+        setSavedComponents(prev =>
           prev.filter(comp => comp.id !== data.component_id)
         );
         break;
@@ -96,7 +98,7 @@ export function useSavedComponents({
         console.error('Failed to save component:', data.error);
         break;
     }
-  }, [savedComponents.length]);
+  }, []);
   
   const toggleDrawer = useCallback(() => {
     setIsDrawerOpen(prev => !prev);
