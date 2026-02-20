@@ -59,6 +59,15 @@ function extractSavableComponents(component: any, result: { componentData: any; 
     if (savableComponents.includes(type)) {
         if (containerTypes.includes(type) && hasSavableChildren) {
             // Skip saving the container, only add its savable children
+            // Propagate parent title to children that don't have their own
+            const parentTitle = props.title || props.label || props.name;
+            if (parentTitle) {
+                childSavableComponents.forEach(child => {
+                    if (!child.title || child.title === child.componentType) {
+                        child.title = parentTitle;
+                    }
+                });
+            }
             result.push(...childSavableComponents);
         } else {
             // Save this component (either it's not a container, or it's a container without savable children)
@@ -79,7 +88,7 @@ function extractSavableComponents(component: any, result: { componentData: any; 
 }
 
 // Button to add all components
-function AddAllToUIButton({ components, onSave }: { components: any[]; onSave: (componentData: any, componentType: string) => Promise<boolean> }) {
+function AddAllToUIButton({ components, onSave }: { components: any[]; onSave: (componentData: any, componentType: string, title?: string) => Promise<boolean> }) {
     const [isSaving, setIsSaving] = useState(false);
     const [saved, setSaved] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -102,8 +111,8 @@ function AddAllToUIButton({ components, onSave }: { components: any[]; onSave: (
             }
 
             let successCount = 0;
-            for (const { componentData, componentType } of savable) {
-                const success = await onSave(componentData, componentType);
+            for (const { componentData, componentType, title } of savable) {
+                const success = await onSave(componentData, componentType, title);
                 if (success) successCount++;
             }
 
@@ -167,7 +176,7 @@ function AddAllToUIButton({ components, onSave }: { components: any[]; onSave: (
 
 interface DynamicRendererProps {
     components: any[];
-    onSaveComponent?: (componentData: any, componentType: string) => Promise<boolean>;
+    onSaveComponent?: (componentData: any, componentType: string, title?: string) => Promise<boolean>;
     activeChatId?: string | null;
 }
 

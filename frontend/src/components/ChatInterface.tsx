@@ -9,7 +9,7 @@
  */
 import React, { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Send, Bot, User, Sparkles, Loader2, Grid, ChevronLeft } from "lucide-react";
+import { Send, Bot, User, Sparkles, Loader2, ChevronLeft } from "lucide-react";
 import DynamicRenderer from "./DynamicRenderer";
 import UISavedDrawer from "./UISavedDrawer";
 import type { ChatStatus } from "../hooks/useWebSocket";
@@ -23,6 +23,10 @@ interface ChatInterfaceProps {
     savedComponents: any[];
     onSaveComponent: (componentData: any, componentType: string) => Promise<boolean>;
     onDeleteSavedComponent: (componentId: string) => void;
+    onCombineComponents: (sourceId: string, targetId: string) => void;
+    onCondenseComponents: (componentIds: string[]) => void;
+    isCombining: boolean;
+    combineError: string | null;
 }
 
 const SUGGESTIONS = [
@@ -41,6 +45,10 @@ export default function ChatInterface({
     savedComponents,
     onSaveComponent,
     onDeleteSavedComponent,
+    onCombineComponents,
+    onCondenseComponents,
+    isCombining,
+    combineError,
 }: ChatInterfaceProps) {
     const [input, setInput] = useState("");
     const [isDrawerOpen, setIsDrawerOpen] = useState(false);
@@ -125,8 +133,8 @@ export default function ChatInterface({
                             {msg.role === "user" ? (
                                 <p className="text-sm text-white">{msg.content}</p>
                             ) : (
-                                <DynamicRenderer 
-                                    components={msg.content} 
+                                <DynamicRenderer
+                                    components={msg.content}
                                     onSaveComponent={onSaveComponent}
                                     activeChatId={activeChatId}
                                 />
@@ -202,6 +210,10 @@ export default function ChatInterface({
                 onOpen={() => setIsDrawerOpen(true)}
                 savedComponents={savedComponents}
                 onDeleteComponent={onDeleteSavedComponent}
+                onCombineComponents={onCombineComponents}
+                onCondenseComponents={onCondenseComponents}
+                isCombining={isCombining}
+                combineError={combineError}
                 activeChatId={activeChatId}
             />
 
@@ -209,11 +221,13 @@ export default function ChatInterface({
             {!isDrawerOpen && savedComponents.length > 0 && (
                 <button
                     onClick={() => setIsDrawerOpen(true)}
-                    className="fixed right-4 bottom-20 z-30 bg-astral-primary hover:bg-astral-primary/80 text-white p-3 rounded-full shadow-lg transition-all duration-200 hover:shadow-xl hover:scale-105 flex items-center gap-2"
+                    className="fixed right-0 top-1/2 -translate-y-1/2 z-30 bg-astral-surface/80 hover:bg-astral-surface border border-white/10 border-r-0 p-2 rounded-l-xl shadow-lg transition-all duration-200 flex flex-col items-center justify-center group"
                     aria-label="Open saved components drawer"
                 >
-                    <Grid size={20} />
-                    <span className="text-xs font-medium">{savedComponents.length}</span>
+                    <ChevronLeft size={24} className="text-astral-muted group-hover:text-white transition-colors" />
+                    <div className="absolute -top-2 -left-2 bg-astral-primary text-white text-[10px] w-5 h-5 rounded-full flex items-center justify-center shadow-sm">
+                        {savedComponents.length}
+                    </div>
                 </button>
             )}
         </div>

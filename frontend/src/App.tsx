@@ -13,20 +13,24 @@ function App() {
 
   // Pass the token to the WebSocket hook. 
   // It will only connect when token is available.
-  const { 
-    isConnected, 
-    agents, 
-    chatStatus, 
-    messages, 
-    sendMessage, 
-    activeChatId, 
-    chatHistory, 
-    loadChat, 
+  const {
+    isConnected,
+    agents,
+    chatStatus,
+    messages,
+    sendMessage,
+    activeChatId,
+    chatHistory,
+    loadChat,
     createNewChat,
     savedComponents,
     saveComponent,
     deleteSavedComponent,
-    loadSavedComponents
+    loadSavedComponents,
+    combineComponents,
+    condenseComponents,
+    isCombining,
+    combineError
   } = useWebSocket(
     "ws://localhost:8001",
     auth.user?.access_token
@@ -74,6 +78,10 @@ function App() {
         savedComponents={savedComponents}
         onSaveComponent={saveComponent}
         onDeleteSavedComponent={deleteSavedComponent}
+        onCombineComponents={combineComponents}
+        onCondenseComponents={condenseComponents}
+        isCombining={isCombining}
+        combineError={combineError}
       />
     </DashboardLayout>
   );
