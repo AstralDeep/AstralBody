@@ -285,6 +285,76 @@ class HistoryManager:
         
         return True
     
+    def get_component_by_id(self, component_id: str) -> Optional[Dict]:
+        """Get a single saved component by ID."""
+        row = self.db.fetch_one(
+            "SELECT * FROM saved_components WHERE id = ?",
+            (component_id,)
+        )
+        if not row:
+            return None
+        
+        try:
+            component_data = json.loads(row['component_data'])
+        except (json.JSONDecodeError, TypeError):
+            component_data = row['component_data']
+        
+        return {
+            "id": row['id'],
+            "chat_id": row['chat_id'],
+            "component_data": component_data,
+            "component_type": row['component_type'],
+            "title": row['title'],
+            "created_at": row['created_at']
+        }
+
+    def replace_components(self, old_ids: list, new_components: list, chat_id: str) -> list:
+        """Atomically delete old components and insert new ones. Returns list of new component dicts."""
+        # Delete old components
+        for old_id in old_ids:
+            self.db.execute(
+                "DELETE FROM saved_components WHERE id = ?",
+                (old_id,)
+            )
+        
+        # Insert new components
+        created = []
+        for comp in new_components:
+            component_id = str(uuid.uuid4())
+            created_at = int(time.time() * 1000)
+            component_json = json.dumps(comp.get("component_data", {}))
+            component_type = comp.get("component_type", "combined")
+            title = comp.get("title", "Combined Component")
+            
+            self.db.execute(
+                """INSERT INTO saved_components 
+                   (id, chat_id, component_data, component_type, title, created_at) 
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (component_id, chat_id, component_json, component_type, title, created_at)
+            )
+            
+            created.append({
+                "id": component_id,
+                "chat_id": chat_id,
+                "component_data": comp.get("component_data", {}),
+                "component_type": component_type,
+                "title": title,
+                "created_at": created_at
+            })
+        
+        # Check if chat still has components
+        count_row = self.db.fetch_one(
+            "SELECT COUNT(*) as count FROM saved_components WHERE chat_id = ?",
+            (chat_id,)
+        )
+        has_components = count_row and count_row['count'] > 0
+        self.db.execute(
+            "UPDATE chats SET has_saved_components = ? WHERE id = ?",
+            (1 if has_components else 0, chat_id)
+        )
+        
+        return created
+
     def chat_has_saved_components(self, chat_id: str) -> bool:
         """Check if a chat has saved components."""
         row = self.db.fetch_one(

@@ -229,8 +229,7 @@ class Orchestrator:
                         chat_id = self.history.create_chat()
                         # Inform UI about new chat ID
                         await websocket.send(json.dumps({
-                            "type": "ui_event",
-                            "action": "chat_created",
+                            "type": "chat_created",
                             "payload": {"chat_id": chat_id}
                         }))
 
@@ -334,8 +333,339 @@ class Orchestrator:
                             "error": "Component not found"
                         }))
 
+                elif msg.action == "combine_components":
+                    source_id = msg.payload.get("source_id")
+                    target_id = msg.payload.get("target_id")
+                    
+                    if not source_id or not target_id:
+                        await websocket.send(json.dumps({
+                            "type": "combine_error",
+                            "error": "Both source and target component IDs are required"
+                        }))
+                        return
+                    
+                    source = self.history.get_component_by_id(source_id)
+                    target = self.history.get_component_by_id(target_id)
+                    
+                    if not source or not target:
+                        await websocket.send(json.dumps({
+                            "type": "combine_error",
+                            "error": "One or both components not found"
+                        }))
+                        return
+                    
+                    # Send progress
+                    await websocket.send(json.dumps({
+                        "type": "combine_status",
+                        "status": "combining",
+                        "message": f"Combining {source['title']} with {target['title']}..."
+                    }))
+                    
+                    try:
+                        result = await self._combine_components_llm(
+                            [source, target],
+                            mode="combine"
+                        )
+                        
+                        if result.get("error"):
+                            await websocket.send(json.dumps({
+                                "type": "combine_error",
+                                "error": result["error"]
+                            }))
+                        else:
+                            chat_id = source["chat_id"]
+                            new_components = self.history.replace_components(
+                                [source_id, target_id],
+                                result["components"],
+                                chat_id
+                            )
+                            await websocket.send(json.dumps({
+                                "type": "components_combined",
+                                "removed_ids": [source_id, target_id],
+                                "new_components": new_components
+                            }))
+                    except Exception as e:
+                        logger.error(f"Combine failed: {e}", exc_info=True)
+                        await websocket.send(json.dumps({
+                            "type": "combine_error",
+                            "error": f"Failed to combine components: {str(e)}"
+                        }))
+
+                elif msg.action == "condense_components":
+                    component_ids = msg.payload.get("component_ids", [])
+                    
+                    if len(component_ids) < 2:
+                        await websocket.send(json.dumps({
+                            "type": "combine_error",
+                            "error": "At least 2 components are required to condense"
+                        }))
+                        return
+                    
+                    components = []
+                    for cid in component_ids:
+                        comp = self.history.get_component_by_id(cid)
+                        if comp:
+                            components.append(comp)
+                    
+                    if len(components) < 2:
+                        await websocket.send(json.dumps({
+                            "type": "combine_error",
+                            "error": "Not enough valid components found"
+                        }))
+                        return
+                    
+                    await websocket.send(json.dumps({
+                        "type": "combine_status",
+                        "status": "condensing",
+                        "message": f"Condensing {len(components)} components..."
+                    }))
+                    
+                    try:
+                        result = await self._combine_components_llm(
+                            components,
+                            mode="condense"
+                        )
+                        
+                        if result.get("error"):
+                            await websocket.send(json.dumps({
+                                "type": "combine_error",
+                                "error": result["error"]
+                            }))
+                        else:
+                            chat_id = components[0]["chat_id"]
+                            new_components = self.history.replace_components(
+                                component_ids,
+                                result["components"],
+                                chat_id
+                            )
+                            await websocket.send(json.dumps({
+                                "type": "components_condensed",
+                                "removed_ids": component_ids,
+                                "new_components": new_components
+                            }))
+                    except Exception as e:
+                        logger.error(f"Condense failed: {e}", exc_info=True)
+                        await websocket.send(json.dumps({
+                            "type": "combine_error",
+                            "error": f"Failed to condense components: {str(e)}"
+                        }))
+
         except Exception as e:
             logger.error(f"Error handling UI message: {e}")
+
+    # =========================================================================
+    # COMPONENT COMBINING (LLM-powered)
+    # =========================================================================
+
+    async def _combine_components_llm(self, components: list, mode: str = "combine") -> dict:
+        """Use LLM to combine/condense UI components.
+        
+        Args:
+            components: List of component dicts with component_data, title, etc.
+            mode: 'combine' for merging 2 components, 'condense' for reducing many.
+        
+        Returns:
+            {"components": [...]} on success, {"error": "..."} on failure.
+        """
+        if not self.llm_client:
+            return {"error": "LLM not configured"}
+
+        # Build the component descriptions for the prompt
+        component_descriptions = []
+        for i, comp in enumerate(components):
+            component_descriptions.append(
+                f"Component {i+1} (title: \"{comp['title']}\", type: \"{comp['component_type']}\"):\n"
+                f"```json\n{json.dumps(comp['component_data'], indent=2)}\n```"
+            )
+        
+        components_text = "\n\n".join(component_descriptions)
+
+        schema_description = """Available UI primitive types and their JSON structure:
+- "text": {type: "text", content: "...", variant: "body|h1|h2|h3|caption|markdown"}
+- "card": {type: "card", title: "...", content: [...child components...]}
+- "metric": {type: "metric", title: "...", value: "...", subtitle: "...", progress: 0.0-1.0, variant: "default|warning|error|success"}
+- "table": {type: "table", title: "...", headers: [...], rows: [[...],...]}
+- "grid": {type: "grid", columns: 2, gap: 16, children: [...child components...]}
+- "container": {type: "container", children: [...child components...]}
+- "list": {type: "list", items: [...], ordered: false, variant: "default|detailed"}
+- "alert": {type: "alert", message: "...", title: "...", variant: "info|success|warning|error"}
+- "progress": {type: "progress", value: 0.0-1.0, label: "...", show_percentage: true}
+- "bar_chart": {type: "bar_chart", title: "...", labels: [...], datasets: [{label: "...", data: [...]}]}
+- "line_chart": {type: "line_chart", title: "...", labels: [...], datasets: [{label: "...", data: [...]}]}
+- "pie_chart": {type: "pie_chart", title: "...", labels: [...], data: [...], colors: [...]}
+- "code": {type: "code", code: "...", language: "..."}
+- "divider": {type: "divider"}
+- "collapsible": {type: "collapsible", title: "...", content: [...child components...], default_open: false}"""
+
+        if mode == "combine":
+            prompt = f"""You are a UI component combiner. You are given 2 UI components and must merge them into a single cohesive component.
+
+{schema_description}
+
+RULES:
+1. Analyze whether these components can be meaningfully combined.
+2. If they contain RELATED data (e.g., patient data + disease chart, or multiple system metrics), combine them into a unified component using cards, grids, or tables.
+3. If they are UNRELATED or incompatible, respond ONLY with: ERROR: <brief reason>
+4. Preserve ALL data — do not lose any information from either component.
+5. Use grid layouts to arrange related metrics side-by-side.
+6. Use cards with descriptive titles to group related content.
+
+COMPONENTS TO COMBINE:
+
+{components_text}
+
+Respond with ONLY valid JSON (no markdown code fences) in this format:
+{{
+  "components": [
+    {{
+      "component_data": {{...the merged component tree...}},
+      "component_type": "card",
+      "title": "Descriptive Title For Merged Component"
+    }}
+  ]
+}}
+
+Or if they cannot be combined:
+ERROR: <reason>"""
+        else:  # condense
+            prompt = f"""You are a UI component condenser. You are given {len(components)} UI components and must combine as many as possible into fewer cohesive components.
+
+{schema_description}
+
+RULES:
+1. Group RELATED components together (e.g., all system metrics into one dashboard card, all patient data into one view).
+2. Keep UNRELATED components separate — don't force unrelated data together.
+3. Preserve ALL data — do not lose any information.
+4. Use grid layouts to arrange related metrics side-by-side.
+5. Use cards with descriptive titles to group related content.
+6. The goal is to REDUCE the total number of components while maintaining clarity.
+
+COMPONENTS TO CONDENSE:
+
+{components_text}
+
+Respond with ONLY valid JSON (no markdown code fences) in this format:
+{{
+  "components": [
+    {{
+      "component_data": {{...component tree...}},
+      "component_type": "card",
+      "title": "Descriptive Title"
+    }}
+  ]
+}}"""
+
+        try:
+            # Use _call_llm for built-in retries (important for transient 502s)
+            llm_msg = await self._call_llm(
+                None,  # no websocket needed for combine
+                [
+                    {"role": "system", "content": "You are a precise UI component combiner. Output ONLY valid JSON or an ERROR message. No explanations, no markdown fences."},
+                    {"role": "user", "content": prompt}
+                ],
+                tools_desc=None,
+                temperature=0.1
+            )
+            
+            if not llm_msg:
+                return {"error": "LLM returned no response"}
+            
+            content = (llm_msg.content or "").strip()
+            logger.info(f"LLM combine response ({len(content)} chars): {content[:200]}...")
+            
+            # Check for ERROR response
+            if content.upper().startswith("ERROR"):
+                error_msg = content.split(":", 1)[1].strip() if ":" in content else content
+                return {"error": error_msg}
+            
+            # Try to parse JSON
+            # Strip markdown code fences if present
+            if content.startswith("```"):
+                content = content.split("\n", 1)[1] if "\n" in content else content[3:]
+                if content.endswith("```"):
+                    content = content[:-3]
+                content = content.strip()
+            
+            try:
+                result = json.loads(content)
+            except json.JSONDecodeError:
+                # Try to find JSON in the response
+                import re
+                json_match = re.search(r'\{[\s\S]*\}', content)
+                if json_match:
+                    result = json.loads(json_match.group())
+                else:
+                    return {"error": f"Failed to parse LLM response as JSON"}
+            
+            if "components" not in result or not isinstance(result["components"], list):
+                return {"error": "LLM response missing 'components' array"}
+            
+            # Known valid primitive types from primitives.py
+            VALID_TYPES = {
+                "container", "text", "button", "card", "table", "list",
+                "alert", "progress", "metric", "code", "image", "grid",
+                "tabs", "divider", "input", "bar_chart", "line_chart",
+                "pie_chart", "plotly_chart", "collapsible"
+            }
+            
+            # Validate each component
+            for comp in result["components"]:
+                if "component_data" not in comp:
+                    return {"error": "LLM response component missing 'component_data'"}
+                
+                # Validate the component type
+                comp_data = comp["component_data"]
+                comp_type = comp_data.get("type", "")
+                if comp_type and comp_type not in VALID_TYPES:
+                    logger.warning(f"LLM produced unknown component type '{comp_type}', wrapping in card")
+                    # Wrap unknown types in a card to ensure they render
+                    comp["component_data"] = {
+                        "type": "card",
+                        "title": comp_data.get("title", "Combined Component"),
+                        "content": [comp_data] if comp_type else []
+                    }
+                    comp_type = "card"
+                
+                # Recursively validate children
+                self._validate_component_tree(comp_data, VALID_TYPES)
+                
+                if "component_type" not in comp:
+                    comp["component_type"] = comp_type or "card"
+                if "title" not in comp:
+                    comp["title"] = comp["component_data"].get("title", "Combined Component")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"LLM combine error: {e}", exc_info=True)
+            return {"error": f"LLM error: {str(e)}"}
+
+    def _validate_component_tree(self, node: dict, valid_types: set):
+        """Recursively validate component tree, fixing invalid types."""
+        if not isinstance(node, dict):
+            return
+        
+        node_type = node.get("type", "")
+        if node_type and node_type not in valid_types:
+            logger.warning(f"Fixing unknown component type '{node_type}' -> 'container'")
+            node["type"] = "container"
+        
+        # Validate children arrays
+        for key in ("children", "content"):
+            children = node.get(key, [])
+            if isinstance(children, list):
+                for child in children:
+                    if isinstance(child, dict):
+                        self._validate_component_tree(child, valid_types)
+        
+        # Validate tab items
+        tabs = node.get("tabs", [])
+        if isinstance(tabs, list):
+            for tab in tabs:
+                if isinstance(tab, dict):
+                    for child in tab.get("content", []):
+                        if isinstance(child, dict):
+                            self._validate_component_tree(child, valid_types)
 
     # =========================================================================
     # LLM-POWERED TOOL ROUTING
@@ -584,7 +914,11 @@ CRITICAL RULES:
             }))
             # Show a user-friendly error message
             error_text = str(e)
-            if "504" in error_text or "Gateway Time-out" in error_text:
+            if "424" in error_text or "Failed Dependency" in error_text or "Repository Not Found" in error_text:
+                error_text = f"The LLM server cannot find the configured model '{self.llm_model}'. Please verify the model name in your .env file and that the vLLM server has this model loaded."
+            elif "502" in error_text or "Bad Gateway" in error_text:
+                error_text = "The AI model returned a 502 Bad Gateway error. It may be overloaded or restarting. Please try again in a moment."
+            elif "504" in error_text or "Gateway Time-out" in error_text:
                 error_text = "The AI model timed out. It may be overloaded or still warming up. Please try again in a moment."
             elif "timeout" in error_text.lower():
                 error_text = "Request timed out waiting for the AI model. Please try again."
@@ -592,8 +926,12 @@ CRITICAL RULES:
                 Alert(message=error_text, variant="error", title="Error").to_json()
             ])
 
-    async def _call_llm(self, websocket, messages, tools_desc=None):
-        """Helper to call LLM with retries."""
+    async def _call_llm(self, websocket, messages, tools_desc=None, temperature=None):
+        """Helper to call LLM with retries and exponential backoff.
+        
+        Only retries on transient errors (502, 503, 504). Fails fast on
+        non-transient errors like 424 (model not found) or 401 (auth).
+        """
         for attempt in range(1, self.MAX_RETRIES + 1):
             try:
                 kwargs = {
@@ -603,6 +941,8 @@ CRITICAL RULES:
                 if tools_desc:
                     kwargs["tools"] = tools_desc
                     kwargs["tool_choice"] = "auto"
+                if temperature is not None:
+                    kwargs["temperature"] = temperature
                 
                 response = await asyncio.to_thread(
                     self.llm_client.chat.completions.create,
@@ -610,18 +950,33 @@ CRITICAL RULES:
                 )
                 return response.choices[0].message
             except Exception as e:
-                logger.warning(f"LLM Attempt {attempt} failed: {e}")
+                error_str = str(e)
+                is_transient = any(code in error_str for code in ["502", "503", "504", "Bad Gateway", "Service Unavailable", "Connection", "timeout"])
+                is_fatal = any(code in error_str for code in ["424", "401", "403", "Repository Not Found", "Invalid username"])
+                
+                logger.warning(f"LLM Attempt {attempt}/{self.MAX_RETRIES} failed: {e}")
+                
+                # Don't retry fatal errors — they won't resolve with retries
+                if is_fatal:
+                    logger.error(f"Fatal LLM error (no retry): {e}")
+                    raise e
+                
                 if attempt == self.MAX_RETRIES:
                     raise e
-                await asyncio.sleep(1)
+                
+                # Exponential backoff: 1s, 2s, 4s, 8s
+                backoff = min(2 ** (attempt - 1), 8)
+                if is_transient:
+                    logger.info(f"Transient error detected, retrying in {backoff}s...")
+                await asyncio.sleep(backoff)
         return None
 
     # =========================================================================
     # CONSTANTS
     # =========================================================================
 
-    MAX_RETRIES = 3
-    RETRY_BACKOFF = [1.0, 2.0]  # seconds between retries (attempt 1→2, 2→3)
+    MAX_RETRIES = 5
+    RETRY_BACKOFF = [1.0, 2.0, 4.0, 8.0]  # exponential backoff
 
     async def execute_single_tool(self, websocket, tool_call, tool_to_agent: Dict, chat_id: str = None) -> Optional[MCPResponse]:
         """Execute a single tool call and render its UI components. Returns the Result object."""

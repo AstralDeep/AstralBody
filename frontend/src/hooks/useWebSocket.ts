@@ -35,8 +35,18 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
     const [uiComponents, setUiComponents] = useState<any[]>([]);
     const [messages, setMessages] = useState<{ role: string; content: any }[]>([]);
     const [chatHistory, setChatHistory] = useState<ChatSession[]>([]);
-    const [activeChatId, setActiveChatId] = useState<string | null>(null);
+    const [activeChatIdState, setActiveChatIdState] = useState<string | null>(null);
+    const activeChatIdRef = useRef<string | null>(null);
+
+    const setActiveChatId = useCallback((id: string | null) => {
+        activeChatIdRef.current = id;
+        setActiveChatIdState(id);
+    }, []);
+
+    const activeChatId = activeChatIdState;
     const [savedComponents, setSavedComponents] = useState<any[]>([]);
+    const [isCombining, setIsCombining] = useState(false);
+    const [combineError, setCombineError] = useState<string | null>(null);
     const wsRef = useRef<WebSocket | null>(null);
     const reconnectTimer = useRef<number | null>(null);
     const pendingSaveResolveRef = useRef<((value: boolean) => void) | null>(null);
@@ -50,7 +60,8 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
             wsRef.current = ws;
 
             ws.onopen = () => {
-                console.log('WebSocket connection opened - readyState:', ws.readyState, 'activeChatId:', activeChatId, 'timestamp:', new Date().toISOString());
+                const currentChatId = activeChatIdRef.current;
+                console.log('WebSocket connection opened - readyState:', ws.readyState, 'activeChatId:', currentChatId, 'timestamp:', new Date().toISOString());
                 setIsConnected(true);
                 setChatStatus({ status: "idle", message: "" });
                 // Send RegisterUI with token
@@ -66,19 +77,19 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
                     action: "get_history",
                     payload: {}
                 }));
-                
+
                 // If we have an active chat ID, reload it after reconnection
-                if (activeChatId) {
-                    console.log('Reloading active chat after reconnection:', activeChatId);
+                if (currentChatId) {
+                    console.log('Reloading active chat after reconnection:', currentChatId);
                     setTimeout(() => {
-                        console.log('Attempting to reload chat - WebSocket readyState:', ws.readyState, 'activeChatId still:', activeChatId);
+                        console.log('Attempting to reload chat - WebSocket readyState:', ws.readyState, 'activeChatId still:', currentChatId);
                         if (ws.readyState === WebSocket.OPEN) {
                             ws.send(JSON.stringify({
                                 type: "ui_event",
                                 action: "load_chat",
-                                payload: { chat_id: activeChatId }
+                                payload: { chat_id: currentChatId }
                             }));
-                            console.log('Chat reload request sent for:', activeChatId);
+                            console.log('Chat reload request sent for:', currentChatId);
                         } else {
                             console.error('WebSocket not OPEN when trying to reload chat. State:', ws.readyState);
                         }
@@ -110,7 +121,7 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
             console.error("WebSocket connection failed:", e);
             reconnectTimer.current = window.setTimeout(connect, 3000);
         }
-    }, [url, token, activeChatId]);
+    }, [url, token]); // Removed activeChatId from dependencies to prevent reconnect on chat creation
 
     const handleMessage = (data: WSMessage) => {
         switch (data.type) {
@@ -213,7 +224,7 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
                 break;
 
             case "component_deleted":
-                setSavedComponents(prev => 
+                setSavedComponents(prev =>
                     prev.filter(comp => comp.id !== data.component_id)
                 );
                 break;
@@ -225,6 +236,31 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
                     pendingSaveResolveRef.current = null;
                     pendingSaveRejectRef.current = null;
                 }
+                break;
+
+            case "combine_status":
+                setIsCombining(true);
+                setCombineError(null);
+                break;
+
+            case "components_combined":
+            case "components_condensed":
+                setIsCombining(false);
+                setCombineError(null);
+                // Remove old components and add new ones
+                setSavedComponents(prev => {
+                    const removedIds = new Set(data.removed_ids || []);
+                    const remaining = prev.filter(c => !removedIds.has(c.id));
+                    return [...(data.new_components || []), ...remaining];
+                });
+                break;
+
+            case "combine_error":
+                setIsCombining(false);
+                setCombineError(data.error || "Failed to combine components");
+                console.error("Combine error:", data.error);
+                // Auto-clear error after 5 seconds
+                setTimeout(() => setCombineError(null), 5000);
                 break;
 
             default:
@@ -279,27 +315,27 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
     // Saved components functions
     const saveComponent = useCallback(async (componentData: any, componentType: string, title?: string): Promise<boolean> => {
         console.log('saveComponent called:', { componentType, title, wsRefCurrent: wsRef.current, wsReadyState: wsRef.current?.readyState, activeChatId, timestamp: new Date().toISOString() });
-        
+
         if (!wsRef.current) {
             console.error('WebSocket reference is null - cannot save component');
             throw new Error('WebSocket connection lost. Please refresh the page.');
         }
-        
+
         if (wsRef.current.readyState !== WebSocket.OPEN) {
             console.error('WebSocket not in OPEN state:', wsRef.current.readyState, 'Connection state:', wsRef.current.readyState === WebSocket.CONNECTING ? 'CONNECTING' : wsRef.current.readyState === WebSocket.CLOSING ? 'CLOSING' : wsRef.current.readyState === WebSocket.CLOSED ? 'CLOSED' : 'UNKNOWN');
             throw new Error('WebSocket connection is not open. State: ' + wsRef.current.readyState + '. Please try again or refresh the page.');
         }
-        
+
         if (!activeChatId) {
             console.error('No active chat ID - cannot save component without active chat');
             throw new Error('No active chat session. Please start a new chat or load an existing one.');
         }
-        
+
         // Validate required data
         if (!componentData || !componentType) {
             throw new Error('Component data and type are required');
         }
-        
+
         // Create a promise that will be resolved/rejected when WebSocket confirmation arrives
         const promise = new Promise<boolean>((resolve, reject) => {
             // Store resolve/reject functions
@@ -314,7 +350,7 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
                 }
             }, 10000);
         });
-        
+
         // Send the save request
         wsRef.current.send(JSON.stringify({
             type: "ui_event",
@@ -326,7 +362,7 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
                 title: title || componentType.replace('_', ' ').replace('chart', 'Chart'),
             }
         }));
-        
+
         console.log('Save request sent for component:', componentType, 'to chat:', activeChatId);
         return promise;
     }, [activeChatId]);
@@ -348,6 +384,28 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
             payload: { chat_id: activeChatId }
         }));
     }, [activeChatId]);
+
+    const combineComponents = useCallback((sourceId: string, targetId: string) => {
+        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+        setIsCombining(true);
+        setCombineError(null);
+        wsRef.current.send(JSON.stringify({
+            type: "ui_event",
+            action: "combine_components",
+            payload: { source_id: sourceId, target_id: targetId }
+        }));
+    }, []);
+
+    const condenseComponents = useCallback((componentIds: string[]) => {
+        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+        setIsCombining(true);
+        setCombineError(null);
+        wsRef.current.send(JSON.stringify({
+            type: "ui_event",
+            action: "condense_components",
+            payload: { component_ids: componentIds }
+        }));
+    }, []);
 
     useEffect(() => {
         connect();
@@ -372,6 +430,10 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
         savedComponents,
         saveComponent,
         deleteSavedComponent,
-        loadSavedComponents
+        loadSavedComponents,
+        combineComponents,
+        condenseComponents,
+        isCombining,
+        combineError
     };
 }
