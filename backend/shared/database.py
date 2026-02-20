@@ -82,6 +82,21 @@ class Database:
             # Column already exists, ignore
             pass
 
+        # Draft agents table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS draft_agents (
+                session_id TEXT PRIMARY KEY,
+                name TEXT,
+                persona TEXT,
+                model TEXT,
+                api_keys TEXT,
+                tools_desc TEXT,
+                messages TEXT,
+                created_at INTEGER,
+                updated_at INTEGER
+            )
+        ''')
+
         conn.commit()
         conn.close()
 

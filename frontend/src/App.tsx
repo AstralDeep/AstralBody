@@ -7,6 +7,8 @@ import DashboardLayout from "./components/DashboardLayout";
 import ChatInterface from "./components/ChatInterface";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { AlertCircle } from "lucide-react";
+import { useState } from "react";
+import AgentCreatorPage from "./components/AgentCreatorPage";
 
 function App() {
   const auth = useAuth();
@@ -35,6 +37,9 @@ function App() {
     "ws://localhost:8001",
     auth.user?.access_token
   );
+
+  const [activeView, setActiveView] = useState<"chat" | "agent-creator">("chat");
+  const [activeDraftId, setActiveDraftId] = useState<string | null>(null);
 
   if (auth.isLoading) {
     return (
@@ -66,23 +71,32 @@ function App() {
       onLogout={() => void auth.signoutRedirect()}
       chatHistory={chatHistory}
       activeChatId={activeChatId}
-      onLoadChat={loadChat}
-      onNewChat={createNewChat}
+      onLoadChat={(id) => { setActiveView("chat"); loadChat(id); }}
+      onNewChat={() => { setActiveView("chat"); createNewChat(); }}
+      onNewAgent={() => { setActiveDraftId(null); setActiveView("agent-creator"); }}
+      onLoadDraft={(id) => { setActiveDraftId(id); setActiveView("agent-creator"); }}
     >
-      <ChatInterface
-        messages={messages}
-        chatStatus={chatStatus}
-        onSendMessage={sendMessage}
-        isConnected={isConnected}
-        activeChatId={activeChatId}
-        savedComponents={savedComponents}
-        onSaveComponent={saveComponent}
-        onDeleteSavedComponent={deleteSavedComponent}
-        onCombineComponents={combineComponents}
-        onCondenseComponents={condenseComponents}
-        isCombining={isCombining}
-        combineError={combineError}
-      />
+      {activeView === "chat" ? (
+        <ChatInterface
+          messages={messages}
+          chatStatus={chatStatus}
+          onSendMessage={sendMessage}
+          isConnected={isConnected}
+          activeChatId={activeChatId}
+          savedComponents={savedComponents}
+          onSaveComponent={saveComponent}
+          onDeleteSavedComponent={deleteSavedComponent}
+          onCombineComponents={combineComponents}
+          onCondenseComponents={condenseComponents}
+          isCombining={isCombining}
+          combineError={combineError}
+        />
+      ) : (
+        <AgentCreatorPage
+          onBack={() => { setActiveDraftId(null); setActiveView("chat"); }}
+          initialDraftId={activeDraftId}
+        />
+      )}
     </DashboardLayout>
   );
 }
