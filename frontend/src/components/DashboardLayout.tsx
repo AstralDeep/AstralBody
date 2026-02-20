@@ -2,7 +2,7 @@
  * DashboardLayout — Main app shell with sidebar and header.
  * Shows connected agents, their tools, and connection status.
  */
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { motion } from "framer-motion";
 import {
     LayoutDashboard,
@@ -17,6 +17,7 @@ import {
     MessageSquare,
     Plus,
     Grid,
+    Trash2,
 } from "lucide-react";
 import type { Agent, ChatSession } from "../hooks/useWebSocket";
 
@@ -29,6 +30,8 @@ interface DashboardLayoutProps {
     activeChatId?: string | null;
     onLoadChat?: (chatId: string) => void;
     onNewChat?: () => void;
+    onNewAgent?: () => void;
+    onLoadDraft?: (draftId: string) => void;
 }
 
 export default function DashboardLayout({
@@ -40,8 +43,42 @@ export default function DashboardLayout({
     activeChatId,
     onLoadChat,
     onNewChat,
+    onNewAgent,
+    onLoadDraft,
 }: DashboardLayoutProps) {
     const [expandedAgents, setExpandedAgents] = useState<string[]>([]);
+    const [drafts, setDrafts] = useState<{ id: string; name: string }[]>([]);
+
+    useEffect(() => {
+        const fetchDrafts = async () => {
+            try {
+                const url = `${import.meta.env.VITE_AUTH_URL || "http://localhost:8002"}/api/agent-creator/drafts`;
+                const res = await fetch(url);
+                const data = await res.json();
+                setDrafts(data.drafts || []);
+            } catch (err) {
+                // Silently ignore fetching errors for drafts
+            }
+        };
+        fetchDrafts();
+        const interval = setInterval(fetchDrafts, 5000);
+        return () => clearInterval(interval);
+    }, []);
+
+    const handleDeleteDraft = async (draftId: string) => {
+        if (!confirm("Are you sure you want to delete this draft agent?")) return;
+        try {
+            const url = `${import.meta.env.VITE_AUTH_URL || "http://localhost:8002"}/api/agent-creator/session/${draftId}`;
+            const res = await fetch(url, { method: "DELETE" });
+            if (res.ok) {
+                setDrafts(prev => prev.filter(d => d.id !== draftId));
+            } else {
+                console.error("Failed to delete draft");
+            }
+        } catch (err) {
+            console.error("Error deleting draft", err);
+        }
+    };
 
     const toggleAgent = (id: string) => {
         setExpandedAgents((prev) =>
@@ -69,7 +106,7 @@ export default function DashboardLayout({
                 </div>
 
                 {/* Navigation */}
-                <nav className="flex-1 overflow-y-auto py-4 px-3 space-y-6">
+                <nav className="flex-1 overflow-y-auto overflow-x-hidden py-4 px-3 space-y-6">
 
                     {/* Status Section */}
                     <div>
@@ -100,59 +137,109 @@ export default function DashboardLayout({
 
                     {/* Agents Section */}
                     <div>
-                        <p className="px-2 text-[10px] font-semibold uppercase tracking-widest text-astral-muted mb-2">
-                            Connected Agents
-                        </p>
-                        <div className="space-y-1">
-                            {agents.length === 0 && (
-                                <p className="px-2 text-xs text-astral-muted/50 italic">
-                                    Waiting for agents...
-                                </p>
-                            )}
-                            {agents.map((agent) => (
-                                <div key={agent.id}>
-                                    <button
-                                        onClick={() => toggleAgent(agent.id)}
-                                        className="w-full flex items-center gap-2 px-2 py-2 rounded-lg
-                               hover:bg-white/5 transition-colors group text-left"
-                                    >
-                                        <div className="w-6 h-6 rounded-md bg-astral-primary/20 flex items-center justify-center flex-shrink-0">
-                                            <Activity size={12} className="text-astral-primary" />
-                                        </div>
-                                        <div className="flex-1 min-w-0">
-                                            <p className="text-xs font-medium text-white truncate">
-                                                {agent.name}
-                                            </p>
-                                            <p className="text-[10px] text-astral-muted">
-                                                {agent.tools.length} tools
-                                            </p>
-                                        </div>
-                                        {expandedAgents.includes(agent.id) ? (
-                                            <ChevronDown size={12} className="text-astral-muted" />
-                                        ) : (
-                                            <ChevronRight size={12} className="text-astral-muted" />
-                                        )}
-                                    </button>
-
-                                    {expandedAgents.includes(agent.id) && (
-                                        <motion.div
-                                            initial={{ opacity: 0, height: 0 }}
-                                            animate={{ opacity: 1, height: "auto" }}
-                                            className="ml-8 mt-1 space-y-0.5"
+                        <div className="flex items-center justify-between px-2 mb-2">
+                            <p className="text-[10px] font-semibold uppercase tracking-widest text-astral-muted">
+                                Agents
+                            </p>
+                            <button
+                                onClick={onNewAgent}
+                                title="Create New Agent"
+                                className="p-1 rounded bg-astral-primary/10 text-astral-primary hover:bg-astral-primary/20 transition-colors"
+                            >
+                                <Plus size={12} />
+                            </button>
+                        </div>
+                        <div className="space-y-4">
+                            {/* Connected Section */}
+                            <div className="space-y-1">
+                                <p className="px-2 text-[10px] text-astral-muted/70 uppercase">Connected</p>
+                                {agents.length === 0 && (
+                                    <p className="px-2 text-xs text-astral-muted/50 italic">
+                                        Waiting for agents...
+                                    </p>
+                                )}
+                                {agents.map((agent) => (
+                                    <div key={agent.id}>
+                                        <button
+                                            onClick={() => toggleAgent(agent.id)}
+                                            className="w-full flex items-center gap-2 px-2 py-2 rounded-lg
+                                   hover:bg-white/5 transition-colors group text-left"
                                         >
-                                            {agent.tools.map((tool) => (
-                                                <div
-                                                    key={tool}
-                                                    className="flex items-center gap-2 px-2 py-1.5 text-[11px] text-astral-muted rounded hover:bg-white/5"
-                                                >
-                                                    <span className="w-1 h-1 rounded-full bg-astral-accent" />
-                                                    <span className="truncate">{tool}</span>
+                                            <div className="w-6 h-6 rounded-md bg-astral-primary/20 flex items-center justify-center flex-shrink-0">
+                                                <Activity size={12} className="text-astral-primary" />
+                                            </div>
+                                            <div className="flex-1 min-w-0">
+                                                <p className="text-xs font-medium text-white truncate">
+                                                    {agent.name}
+                                                </p>
+                                                <p className="text-[10px] text-astral-muted">
+                                                    {agent.tools.length} tools
+                                                </p>
+                                            </div>
+                                            {expandedAgents.includes(agent.id) ? (
+                                                <ChevronDown size={12} className="text-astral-muted" />
+                                            ) : (
+                                                <ChevronRight size={12} className="text-astral-muted" />
+                                            )}
+                                        </button>
+
+                                        {expandedAgents.includes(agent.id) && (
+                                            <motion.div
+                                                initial={{ opacity: 0, height: 0 }}
+                                                animate={{ opacity: 1, height: "auto" }}
+                                                className="ml-8 mt-1 space-y-0.5"
+                                            >
+                                                {agent.tools.map((tool) => (
+                                                    <div
+                                                        key={tool}
+                                                        className="flex items-center gap-2 px-2 py-1.5 text-[11px] text-astral-muted rounded hover:bg-white/5"
+                                                    >
+                                                        <span className="w-1 h-1 rounded-full bg-astral-accent" />
+                                                        <span className="truncate">{tool}</span>
+                                                    </div>
+                                                ))}
+                                            </motion.div>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+
+                            {/* Drafts Section */}
+                            {drafts.length > 0 && (
+                                <div className="space-y-1">
+                                    <p className="px-2 text-[10px] text-astral-muted/70 uppercase">Drafts</p>
+                                    {drafts.map((draft) => (
+                                        <div key={draft.id} className="group flex items-center w-full px-2 py-2 rounded-lg hover:bg-white/5 transition-colors">
+                                            <button
+                                                onClick={() => onLoadDraft?.(draft.id)}
+                                                className="flex-1 flex items-center gap-2 text-left min-w-0"
+                                            >
+                                                <div className="w-6 h-6 rounded-md bg-white/5 border border-white/10 border-dashed flex items-center justify-center flex-shrink-0">
+                                                    <Bot size={12} className="text-astral-muted group-hover:text-astral-primary transition-colors" />
                                                 </div>
-                                            ))}
-                                        </motion.div>
-                                    )}
+                                                <div className="flex-1 min-w-0">
+                                                    <p className="text-xs font-medium text-astral-muted group-hover:text-white truncate transition-colors">
+                                                        {draft.name}
+                                                    </p>
+                                                    <p className="text-[10px] text-astral-muted/50">
+                                                        Pending Setup...
+                                                    </p>
+                                                </div>
+                                            </button>
+                                            <button
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    handleDeleteDraft(draft.id);
+                                                }}
+                                                className="opacity-0 group-hover:opacity-100 p-1.5 text-astral-muted hover:text-red-400 hover:bg-white/10 rounded transition-all"
+                                                title="Delete draft"
+                                            >
+                                                <Trash2 size={14} />
+                                            </button>
+                                        </div>
+                                    ))}
                                 </div>
-                            ))}
+                            )}
                         </div>
                     </div>
 

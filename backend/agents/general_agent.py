@@ -49,9 +49,10 @@ class GeneralAgent:
         """Build A2A Agent Card from registered MCP tools."""
         skills = []
         for name, info in self.mcp_server.tools.items():
+            desc = info.get("description", "No description provided")
             skills.append(AgentSkill(
-                name=info["description"],
-                description=info["description"],
+                name=name,
+                description=desc,
                 id=name,
                 input_schema=info.get("input_schema"),
                 tags=[]

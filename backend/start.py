@@ -30,7 +30,7 @@ def main():
 
     try:
         print("=" * 60)
-        print("  Final Product -- Multi-Agent Platform")
+        print("  AstralBody  ")
         print("=" * 60)
         print()
 
@@ -43,6 +43,24 @@ def main():
         p_agent = subprocess.Popen([python_exe, agent_script, "--port", "8003"])
         processes.append(p_agent)
         time.sleep(2)
+
+        # Auto-discover and start other agents created in the agents/ folder
+        agents_dir = os.path.join(base_dir, "agents")
+        next_port = 8004
+        for item in os.listdir(agents_dir):
+            item_path = os.path.join(agents_dir, item)
+            if os.path.isdir(item_path) and not item.startswith("__"):
+                agent_scripts = [f for f in os.listdir(item_path) if f.endswith("_agent.py")]
+                if agent_scripts:
+                    custom_agent_script = os.path.join(item_path, agent_scripts[0])
+                    print(f"Starting {item} agent on port {next_port}...")
+                    p_custom_agent = subprocess.Popen(
+                        [python_exe, custom_agent_script, "--port", str(next_port)],
+                        cwd=item_path
+                    )
+                    processes.append(p_custom_agent)
+                    next_port += 1
+                    time.sleep(1)
 
         print()
         print("-" * 60)
@@ -66,11 +84,22 @@ def main():
     finally:
         for p in processes:
             if p.poll() is None:
-                p.terminate()
-                try:
-                    p.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    p.kill()
+                if os.name == 'nt':
+                    try:
+                        subprocess.run(['taskkill', '/F', '/T', '/PID', str(p.pid)], capture_output=True)
+                    except Exception:
+                        p.terminate()
+                else:
+                    p.terminate()
+                    try:
+                        p.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        p.kill()
+                # Wait a bit for process to terminate
+                for _ in range(10):
+                    if p.poll() is not None:
+                        break
+                    time.sleep(0.2)
         print(" System stopped.")
 
 

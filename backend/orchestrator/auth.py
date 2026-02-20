@@ -10,6 +10,7 @@ the client_secret appended.
 """
 import os
 import logging
+import json
 
 import aiohttp
 from fastapi import FastAPI, Request
@@ -83,3 +84,189 @@ async def proxy_token(request: Request):
                 return JSONResponse(status_code=resp.status, content=body)
             logger.info(f"Token request successful ({grant_type})")
             return JSONResponse(content=body)
+
+from typing import Optional, Dict
+from pydantic import BaseModel
+
+class StartSessionRequest(BaseModel):
+    name: str
+    persona: str
+    toolsDescription: str
+    apiKeys: str
+
+class ChatSessionRequest(BaseModel):
+    session_id: str
+    message: str
+
+class ApproveSessionRequest(BaseModel):
+    session_id: str
+    code: str
+    files: Optional[Dict[str, str]] = None
+
+class ResolveInstallRequest(BaseModel):
+    session_id: str
+    tool_call_id: str
+    approved: bool
+    packages: list[str]
+
+class GenerateCodeRequest(BaseModel):
+    session_id: str
+
+class TestRequest(BaseModel):
+    session_id: str
+    code: Optional[str] = None
+    files: Optional[Dict[str, str]] = None
+
+@app.post("/api/agent-creator/start")
+async def agent_creator_start(req: StartSessionRequest):
+    from orchestrator.agent_generator import agent_generator
+    result = await agent_generator.start_session(
+        name=req.name,
+        persona=req.persona,
+        tools_desc=req.toolsDescription,
+        api_keys=req.apiKeys
+    )
+    return JSONResponse(content=result)
+
+@app.post("/api/agent-creator/chat")
+async def agent_creator_chat(req: ChatSessionRequest):
+    from orchestrator.agent_generator import agent_generator
+    result = await agent_generator.chat(req.session_id, req.message)
+    return JSONResponse(content=result)
+
+@app.post("/api/agent-creator/generate")
+async def agent_creator_generate(req: GenerateCodeRequest):
+    from orchestrator.agent_generator import agent_generator
+    result = await agent_generator.generate_code(req.session_id)
+    return JSONResponse(content=result)
+
+from fastapi.responses import StreamingResponse
+import asyncio
+from shared.progress import ProgressEvent
+
+@app.post("/api/agent-creator/generate-with-progress")
+async def agent_creator_generate_with_progress(req: GenerateCodeRequest):
+    """Generate code with Server-Sent Events progress streaming."""
+    from orchestrator.agent_generator import agent_generator
+    
+    async def progress_stream():
+        """Generator that yields SSE progress events during code generation."""
+        # Queue to collect progress events
+        queue = asyncio.Queue()
+        
+        def progress_callback(event: ProgressEvent):
+            # Convert ProgressEvent to dict and then to SSE format
+            queue.put_nowait(f"data: {json.dumps(event.to_dict())}\n\n")
+        
+        async def generate_and_collect():
+            try:
+                # Call generate_code with progress callback
+                result = await agent_generator.generate_code(
+                    req.session_id,
+                    progress_callback=progress_callback
+                )
+                # Send final result
+                await queue.put(json.dumps({
+                    "type": "progress",
+                    "phase": "generation",
+                    "step": "generation_complete",
+                    "percentage": 100,
+                    "message": "Generation successful",
+                    "data": {"result": result}
+                }))
+            except Exception as e:
+                await queue.put(json.dumps({
+                    "type": "progress",
+                    "phase": "generation",
+                    "step": "error",
+                    "percentage": 100,
+                    "message": f"Generation failed: {str(e)}",
+                    "data": {"error": True, "error_details": str(e)}
+                }))
+        
+        # Start generation in background
+        asyncio.create_task(generate_and_collect())
+        
+        # Yield events from queue
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=30.0)
+                if isinstance(item, str):
+                    if item.startswith('{'):
+                        # JSON object, wrap as SSE
+                        yield f"data: {item}\n\n"
+                    else:
+                        # Already SSE formatted
+                        yield item
+                else:
+                    # Should be string
+                    continue
+            except asyncio.TimeoutError:
+                # Timeout, send keep-alive
+                yield ":keep-alive\n\n"
+                continue
+            except Exception as e:
+                logger.error(f"Progress stream error: {e}")
+                break
+    
+    return StreamingResponse(
+        progress_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"  # Disable nginx buffering
+        }
+    )
+
+@app.post("/api/agent-creator/test")
+async def agent_creator_test(req: TestRequest):
+    from orchestrator.agent_generator import agent_generator
+    
+    # Determine what to send to save_and_test_agent
+    # Priority: files dict if provided, otherwise code string
+    if req.files:
+        # Send files dict as JSON string
+        files_data = json.dumps(req.files)
+        return StreamingResponse(
+            agent_generator.save_and_test_agent(req.session_id, files_data),
+            media_type="text/event-stream"
+        )
+    elif req.code:
+        # Backward compatibility: single code string
+        return StreamingResponse(
+            agent_generator.save_and_test_agent(req.session_id, req.code),
+            media_type="text/event-stream"
+        )
+    else:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Either 'code' or 'files' must be provided"}
+        )
+
+@app.get("/api/agent-creator/drafts")
+async def get_draft_agents():
+    from orchestrator.agent_generator import agent_generator
+    return JSONResponse(content={"drafts": agent_generator.get_all_sessions()})
+
+@app.get("/api/agent-creator/session/{session_id}")
+async def get_draft_session(session_id: str):
+    from orchestrator.agent_generator import agent_generator
+    details = agent_generator.get_session_details(session_id)
+    if not details:
+        return JSONResponse(status_code=404, content={"error": "Session not found"})
+    return JSONResponse(content=details)
+
+@app.delete("/api/agent-creator/session/{session_id}")
+async def delete_draft_session(session_id: str):
+    from orchestrator.agent_generator import agent_generator
+    success = agent_generator.delete_session(session_id)
+    if not success:
+        return JSONResponse(status_code=404, content={"error": "Session not found"})
+    return JSONResponse(content={"status": "success"})
+
+@app.post("/api/agent-creator/resolve-install")
+async def agent_creator_resolve_install(req: ResolveInstallRequest):
+    from orchestrator.agent_generator import agent_generator
+    result = await agent_generator.resolve_install(req.session_id, req.tool_call_id, req.approved, req.packages)
+    return JSONResponse(content=result)
