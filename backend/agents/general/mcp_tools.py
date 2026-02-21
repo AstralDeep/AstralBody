@@ -14,104 +14,19 @@ from openai import OpenAI
 from typing import Dict, Any, List, Optional
 from collections import Counter
 import json
+import csv
+import io
+import time
 
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from shared.primitives import (
     Text, Card, Table, Container, MetricCard, ProgressBar,
     Alert, Grid, BarChart, LineChart, PieChart, PlotlyChart, List_,
-    create_ui_response
+    FileDownload, create_ui_response
 )
 
-# =============================================================================
-# MOCK PATIENT TOOLS
-# =============================================================================
-
-MOCK_PATIENTS = [
-    {"id": "P-1024", "name": "Sarah Connor", "age": 45, "condition": "Degenerative Disc Disease - L4/L5", "status": "Severe", "blood_pressure": "142/88", "heart_rate": 78},
-    {"id": "P-1092", "name": "John Smith", "age": 38, "condition": "Degenerative Disc Disease - C5/C6", "status": "Moderate", "blood_pressure": "128/82", "heart_rate": 72},
-    {"id": "P-1123", "name": "Emily Davis", "age": 52, "condition": "Degenerative Disc Disease - L5/S1", "status": "Critical", "blood_pressure": "156/94", "heart_rate": 88},
-    {"id": "P-1245", "name": "Michael Brown", "age": 34, "condition": "Degenerative Disc Disease - L3/L4", "status": "Mild", "blood_pressure": "118/76", "heart_rate": 68},
-    {"id": "P-1301", "name": "Lisa Wilson", "age": 41, "condition": "Osteoarthritis - Knee", "status": "Moderate", "blood_pressure": "132/84", "heart_rate": 74},
-    {"id": "P-1388", "name": "Robert Taylor", "age": 55, "condition": "Chronic Back Pain", "status": "Severe", "blood_pressure": "148/90", "heart_rate": 82},
-    {"id": "P-1402", "name": "Jennifer Lee", "age": 29, "condition": "Scoliosis", "status": "Mild", "blood_pressure": "112/72", "heart_rate": 66},
-    {"id": "P-1455", "name": "David Martinez", "age": 47, "condition": "Spinal Stenosis", "status": "Moderate", "blood_pressure": "138/86", "heart_rate": 76},
-    {"id": "P-1500", "name": "Amanda Clark", "age": 36, "condition": "Herniated Disc - L4/L5", "status": "Moderate", "blood_pressure": "124/78", "heart_rate": 70},
-    {"id": "P-1567", "name": "James Anderson", "age": 62, "condition": "Degenerative Disc Disease - Multiple", "status": "Critical", "blood_pressure": "162/96", "heart_rate": 92},
-]
-
-
-def search_patients(min_age: int = 0, max_age: int = 200, condition: str = "") -> Dict[str, Any]:
-    """Search patients by age range and/or condition.
-
-    Args:
-        min_age: Minimum age filter (default: 0)
-        max_age: Maximum age filter (default: 200)
-        condition: Condition keyword to filter by (case-insensitive, partial match)
-
-    Returns:
-        Dict with _ui_components and _data keys.
-    """
-    # Ensure ages are integers (LLM might pass strings)
-    try:
-        min_age = int(min_age)
-        max_age = int(max_age)
-    except ValueError:
-        pass  # If casting fails, we'll likely get a TypeError later, or maybe we should default? For now, let's trust best effort.
-
-    results = []
-    for p in MOCK_PATIENTS:
-        if p["age"] < min_age or p["age"] > max_age:
-            continue
-        if condition and condition.lower() not in p["condition"].lower():
-            continue
-        results.append(p)
-
-    if not results:
-        return create_ui_response([
-            Alert(message="No patients found matching your criteria.", variant="info", title="Search Results")
-        ])
-
-    # Build a table component
-    headers = ["ID", "Name", "Age", "Condition", "Status"]
-    rows = [[p["id"], p["name"], str(p["age"]), p["condition"], p["status"]] for p in results]
-
-    status_summary = {}
-    for p in results:
-        status_summary[p["status"]] = status_summary.get(p["status"], 0) + 1
-
-    components = [
-        Card(
-            title=f"Patient Search Results ({len(results)} found)",
-            id="patient-results-card",
-            content=[
-                Text(content=f"Showing patients aged {min_age}+" +
-                     (f" with condition matching '{condition}'" if condition else ""),
-                     variant="caption"),
-                Table(headers=headers, rows=rows, id="patient-table"),
-            ]
-        ),
-        Grid(
-            columns=len(status_summary),
-            id="patient-metrics",
-            children=[
-                MetricCard(
-                    title=status,
-                    value=str(count),
-                    subtitle="patients",
-                    variant="warning" if status == "Severe" else "error" if status == "Critical" else "default",
-                    id=f"metric-{status.lower()}"
-                )
-                for status, count in status_summary.items()
-            ]
-        )
-    ]
-
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {"patients": results, "total": len(results)}
-    }
 
 def generate_dynamic_chart(
     data: List[Dict[str, Any]] | str, 
@@ -251,6 +166,115 @@ def generate_dynamic_chart(
             "rendered_chart_type": chart_type
         }
     }
+
+
+
+def modify_data(
+    csv_data: Optional[str] = None, 
+    modifications: List[Dict[str, Any]] = None, 
+    filename: Optional[str] = None,
+    file_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """Apply modifications to a CSV dataset and provide a download link.
+
+    Args:
+        csv_data: Raw CSV string data (optional if file_path is provided).
+        modifications: List of modifications to apply. Example: [{"action": "add_column", "name": "metadata", "value": "Banana"}]
+        filename: Optional filename for the modified file (default: modified_data_<timestamp>.csv).
+        file_path: Optional absolute path to a CSV file to modify.
+    """
+    if modifications is None:
+        modifications = []
+
+    rows = []
+    fieldnames = []
+
+    try:
+        if file_path:
+            if not os.path.exists(file_path):
+                return create_ui_response([Alert(message=f"File not found: {file_path}", variant="error")])
+            with open(file_path, mode='r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                fieldnames = list(reader.fieldnames) if reader.fieldnames else []
+                rows = list(reader)
+        elif csv_data:
+            # Strip markdown code fences
+            csv_data = csv_data.strip()
+            if csv_data.startswith("```csv"):
+                csv_data = csv_data[6:].strip()
+            elif csv_data.startswith("```"):
+                csv_data = csv_data[3:].strip()
+            if csv_data.endswith("```"):
+                csv_data = csv_data[:-3].strip()
+
+            reader = csv.DictReader(io.StringIO(csv_data))
+            fieldnames = list(reader.fieldnames) if reader.fieldnames else []
+            rows = list(reader)
+        else:
+            return create_ui_response([Alert(message="Neither csv_data nor file_path provided.", variant="error")])
+
+        # Apply modifications (to ALL rows)
+        for mod in modifications:
+            action = mod.get("action")
+            name = mod.get("name")
+            value = mod.get("value")
+
+            if action == "add_column" and name:
+                if name not in fieldnames:
+                    fieldnames.append(name)
+                for row in rows:
+                    row[name] = value
+            elif action == "update_column" and name:
+                for row in rows:
+                    row[name] = value
+
+        # Save to downloads directory
+        timestamp = int(time.time())
+        if not filename:
+            filename = f"modified_data_{timestamp}.csv"
+        
+        backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+        download_dir = os.path.join(backend_dir, "data", "downloads")
+        os.makedirs(download_dir, exist_ok=True)
+        out_file_path = os.path.join(download_dir, filename)
+
+        with open(out_file_path, mode='w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+
+        # The BFF URL
+        bff_port = int(os.getenv("AUTH_PORT", 8002))
+        bff_url = f"http://localhost:{bff_port}"
+        download_url = f"{bff_url}/api/download/{filename}"
+
+        components = [
+            Card(
+                title="Data Modified Successfully",
+                id="modify-data-card",
+                content=[
+                    Alert(message=f"Applied {len(modifications)} modifications to the full dataset ({len(rows)} rows).", variant="success"),
+                    FileDownload(
+                        label=f"Download {filename}",
+                        url=download_url,
+                        filename=filename
+                    ),
+                    Table(
+                        headers=fieldnames[:5], 
+                        rows=[[str(r.get(f, "")) for f in fieldnames[:5]] for r in rows[:5]],
+                        id="modify-data-preview"
+                    )
+                ]
+            )
+        ]
+
+        return {
+            "_ui_components": [c.to_json() for c in components],
+            "_data": {"filename": filename, "file_path": out_file_path, "rows_count": len(rows)}
+        }
+
+    except Exception as e:
+        return create_ui_response([Alert(message=f"Failed to modify data: {e}", variant="error")])
 
 
 # =============================================================================
@@ -647,18 +671,6 @@ def search_arxiv(query: str, max_results: int = 10) -> Dict[str, Any]:
 # =============================================================================
 
 TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
-    "search_patients": {
-        "function": search_patients,
-        "description": "Search patients by age range and/or condition. Returns a table of matching patients with status metrics.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "min_age": {"type": "integer", "description": "Minimum patient age", "default": 0},
-                "max_age": {"type": "integer", "description": "Maximum patient age", "default": 200},
-                "condition": {"type": "string", "description": "Condition keyword to filter by (partial match)", "default": ""}
-            }
-        }
-    },
    "generate_dynamic_chart": {
         "function": generate_dynamic_chart,
         "description": "Create a dynamic chart/graph visualization from generic tabular data. Automatically selects the best chart type ('bar', 'line', 'pie', 'scatter') based on data heuristics, or accepts a specific chart type. Supports plotting specific X and Y axes, or frequency counts if no Y axis is provided.",
@@ -748,6 +760,31 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
                 "max_results": {"type": "integer", "description": "Maximum number of results", "default": 10}
             },
             "required": ["query"]
+        }
+    },
+    "modify_data": {
+        "function": modify_data,
+        "description": "Modify CSV data (add or update columns) and provide a downloadable file link. Use this for ANY data modification request. IMPORTANT: If a 'file_path' is available in the chat context, you MUST use it instead of 'csv_data' to ensure the entire file is processed and not just a truncated preview.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "csv_data": {"type": "string", "description": "Raw CSV string data (use only for small/pasted data)"},
+                "file_path": {"type": "string", "description": "Absolute path to the CSV file on disk (MANDATORY for uploaded files)"},
+                "modifications": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "action": {"type": "string", "description": "Action to perform: 'add_column' or 'update_column'"},
+                            "name": {"type": "string", "description": "Column name"},
+                            "value": {"type": "string", "description": "Value to fill (string)"}
+                        },
+                        "required": ["action", "name", "value"]
+                    }
+                },
+                "filename": {"type": "string", "description": "Optional name for the result file"}
+            },
+            "required": ["modifications"]
         }
     },
 }

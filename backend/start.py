@@ -34,19 +34,28 @@ def main():
         print("=" * 60)
         print()
 
-        print("Starting Orchestrator on port 8001...")
-        p_orch = subprocess.Popen([python_exe, orchestrator_script])
+        # Auto-discover agents created in the agents/ folder to determine how many ports to scan
+        agents_dir = os.path.join(base_dir, "agents")
+        valid_agents = []
+        if os.path.exists(agents_dir):
+            for item in os.listdir(agents_dir):
+                item_path = os.path.join(agents_dir, item)
+                if os.path.isdir(item_path) and not item.startswith("__"):
+                    agent_scripts = [f for f in os.listdir(item_path) if f.endswith("_agent.py")]
+                    if agent_scripts:
+                        valid_agents.append(item)
+        
+        # Set MAX_AGENTS based on what we found, defaulting to 1 if none found to avoid errors
+        max_agents = max(1, len(valid_agents))
+        env = os.environ.copy()
+        env["MAX_AGENTS"] = str(max_agents)
+
+        print(f"Starting Orchestrator on port 8001 (expecting {max_agents} agents)...")
+        p_orch = subprocess.Popen([python_exe, orchestrator_script], env=env)
         processes.append(p_orch)
         time.sleep(2)
 
-        print("Starting General Agent on port 8003...")
-        p_agent = subprocess.Popen([python_exe, agent_script, "--port", "8003"])
-        processes.append(p_agent)
-        time.sleep(2)
-
-        # Auto-discover and start other agents created in the agents/ folder
-        agents_dir = os.path.join(base_dir, "agents")
-        next_port = 8004
+        next_port = 8003
         for item in os.listdir(agents_dir):
             item_path = os.path.join(agents_dir, item)
             if os.path.isdir(item_path) and not item.startswith("__"):
@@ -66,8 +75,7 @@ def main():
         print("-" * 60)
         print(" System started!")
         print("  Orchestrator WS: ws://localhost:8001")
-        print("  Agent API:       http://localhost:8003")
-        print("  Agent Card:      http://localhost:8003/.well-known/agent-card.json")
+        print("  Agent APIs start at: http://localhost:8003")
         print("-" * 60)
         print()
         print("Press Ctrl+C to stop.")

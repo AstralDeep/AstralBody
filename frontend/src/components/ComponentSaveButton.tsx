@@ -1,10 +1,10 @@
 import React, { useState } from 'react';
-import { Plus, Check, Bookmark } from 'lucide-react';
+import { Plus, Check } from 'lucide-react';
 
 type ComponentSaveButtonProps = {
-  componentData: any;
+  componentData: Record<string, unknown>;
   componentType: string;
-  onSave: (componentData: any, componentType: string) => Promise<boolean>;
+  onSave: (componentData: Record<string, unknown>, componentType: string) => Promise<boolean>;
   isSaved?: boolean;
   title?: string;
 };
@@ -19,18 +19,18 @@ export default function ComponentSaveButton({
   const [isSaving, setIsSaving] = useState(false);
   const [saved, setSaved] = useState(isSaved);
   const [error, setError] = useState<string | null>(null);
-  
+
   const handleClick = async (e: React.MouseEvent) => {
     e.stopPropagation();
-    
+
     if (saved || isSaving) return;
-    
+
     // Basic validation
     if (!componentData || !componentType) {
       setError('Component data and type are required');
       return;
     }
-    
+
     setError(null);
     setIsSaving(true);
     try {
@@ -50,7 +50,7 @@ export default function ComponentSaveButton({
       setIsSaving(false);
     }
   };
-  
+
   return (
     <button
       onClick={handleClick}

@@ -17,7 +17,7 @@ console.log('UISavedDrawer component loaded');
 type SavedComponent = {
   id: string;
   chat_id: string;
-  component_data: any;
+  component_data: Record<string, unknown>;
   component_type: string;
   title: string;
   created_at: number;

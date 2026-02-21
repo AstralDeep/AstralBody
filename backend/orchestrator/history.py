@@ -366,3 +366,20 @@ class HistoryManager:
             return False
         
         return bool(row['has_saved_components'])
+
+    def add_file_mapping(self, chat_id: str, original_name: str, backend_path: str):
+        """Register a mapping between an original filename and its backend UUID path."""
+        import time
+        timestamp = int(time.time() * 1000)
+        self.db.execute(
+            "INSERT INTO chat_files (chat_id, original_name, backend_path, uploaded_at) VALUES (?, ?, ?, ?)",
+            (chat_id, original_name, backend_path, timestamp)
+        )
+
+    def get_file_mappings(self, chat_id: str) -> List[Dict]:
+        """Retrieve all file mappings for a chat."""
+        rows = self.db.fetch_all(
+            "SELECT original_name, backend_path FROM chat_files WHERE chat_id = ? ORDER BY uploaded_at ASC",
+            (chat_id,)
+        )
+        return [{"original_name": r["original_name"], "backend_path": r["backend_path"]} for r in rows]

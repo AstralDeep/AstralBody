@@ -56,7 +56,7 @@ export default function DashboardLayout({
                 const res = await fetch(url);
                 const data = await res.json();
                 setDrafts(data.drafts || []);
-            } catch (err) {
+            } catch {
                 // Silently ignore fetching errors for drafts
             }
         };

@@ -13,9 +13,11 @@ import logging
 import json
 
 import aiohttp
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+import shutil
+import uuid
 
 logger = logging.getLogger("AuthProxy")
 
@@ -84,6 +86,65 @@ async def proxy_token(request: Request):
                 return JSONResponse(status_code=resp.status, content=body)
             logger.info(f"Token request successful ({grant_type})")
             return JSONResponse(content=body)
+
+@app.post("/api/upload")
+async def upload_file(file: UploadFile = File(...)):
+    """
+    Handle file uploads and save them to a temporary directory.
+    Returns the absolute file path.
+    """
+    try:
+        # Create tmp directory if it doesn't exist
+        # We go up one level from orchestrator to backend root
+        backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        upload_dir = os.path.join(backend_dir, "tmp_uploads")
+        os.makedirs(upload_dir, exist_ok=True)
+
+        file_id = str(uuid.uuid4())
+        file_extension = os.path.splitext(file.filename)[1]
+        safe_filename = f"{file_id}{file_extension}"
+        file_path = os.path.join(upload_dir, safe_filename)
+
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        logger.info(f"File uploaded: {file.filename} -> {file_path}")
+        return JSONResponse(content={
+            "status": "success",
+            "filename": file.filename,
+            "file_path": file_path
+        })
+    except Exception as e:
+        logger.error(f"Upload failed: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+@app.get("/api/download/{filename}")
+async def download_file(filename: str):
+    """
+    Serve files from the downloads directory.
+    """
+    try:
+        backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        download_dir = os.path.join(backend_dir, "data", "downloads")
+        file_path = os.path.join(download_dir, filename)
+
+        if not os.path.exists(file_path):
+            logger.error(f"File not found: {file_path}")
+            return JSONResponse(status_code=404, content={"error": "File not found"})
+
+        # Security: check that the file is actually inside the download_dir
+        if not os.path.abspath(file_path).startswith(os.path.abspath(download_dir)):
+            logger.error(f"Security violation: path traversal attempt for {filename}")
+            return JSONResponse(status_code=403, content={"error": "Forbidden"})
+
+        return FileResponse(
+            path=file_path,
+            filename=filename,
+            media_type='application/octet-stream'
+        )
+    except Exception as e:
+        logger.error(f"Download failed: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 from typing import Optional, Dict
 from pydantic import BaseModel

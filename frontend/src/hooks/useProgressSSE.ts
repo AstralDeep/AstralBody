@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import type { ProgressEvent, LegacyLogEvent, ProgressState, ProgressPhase } from '../types/progress';
 import { getPhaseSteps } from '../types/progress';
 
-type SSEData = ProgressEvent | LegacyLogEvent | { type: 'complete', result?: any } | { type: 'error', error: string };
+type SSEData = ProgressEvent | LegacyLogEvent | { type: 'complete', result?: unknown } | { type: 'error', error: string };
 
 interface UseProgressSSEResult {
   state: ProgressState;
@@ -26,14 +26,14 @@ export function useProgressSSE(sessionId: string, phase: ProgressPhase): UseProg
     isComplete: false,
     isError: false
   }));
-  
+
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  
+
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const maxReconnectAttempts = 5;
-  
+
   // Update elapsed time every second
   useEffect(() => {
     const interval = setInterval(() => {
@@ -42,32 +42,32 @@ export function useProgressSSE(sessionId: string, phase: ProgressPhase): UseProg
         elapsedTime: Date.now() - prev.startTime
       }));
     }, 1000);
-    
+
     return () => clearInterval(interval);
   }, []);
-  
+
   const handleProgressEvent = useCallback((event: ProgressEvent) => {
     setState(prev => {
       const completedSteps = new Set(prev.completedSteps);
       const failedSteps = new Set(prev.failedSteps);
-      
+
       // Mark previous step as completed if we're moving to a new step
       if (event.step !== prev.currentStep && !prev.isError) {
         completedSteps.add(prev.currentStep);
       }
-      
+
       // Check for error in data
-      const isError = event.step === 'error' || 
-                     event.data?.error === true || 
-                     event.message.toLowerCase().includes('error') ||
-                     event.message.toLowerCase().includes('failed');
-      
+      const isError = event.step === 'error' ||
+        event.data?.error === true ||
+        event.message.toLowerCase().includes('error') ||
+        event.message.toLowerCase().includes('failed');
+
       if (isError) {
         failedSteps.add(event.step);
       }
-      
+
       const isComplete = event.percentage >= 100 && !isError;
-      
+
       return {
         ...prev,
         phase: event.phase,
@@ -83,7 +83,7 @@ export function useProgressSSE(sessionId: string, phase: ProgressPhase): UseProg
       };
     });
   }, []);
-  
+
   const handleLegacyLogEvent = useCallback((event: LegacyLogEvent) => {
     // Convert legacy log event to progress event
     const progressEvent: ProgressEvent = {
@@ -95,9 +95,9 @@ export function useProgressSSE(sessionId: string, phase: ProgressPhase): UseProg
       data: { log: true, status: event.status },
       timestamp: event.timestamp || Date.now() / 1000
     };
-    
+
     handleProgressEvent(progressEvent);
-    
+
     // Handle success/error status
     if (event.status === 'success') {
       setState(prev => ({
@@ -115,47 +115,55 @@ export function useProgressSSE(sessionId: string, phase: ProgressPhase): UseProg
       }));
     }
   }, [phase, state.currentStep, state.percentage, handleProgressEvent]);
-  
+
+  const disconnect = useCallback(() => {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+    setIsConnected(false);
+  }, []);
+
   const connect = useCallback(() => {
     if (eventSourceRef.current) {
       disconnect();
     }
-    
+
     setError(null);
     reconnectAttemptsRef.current = 0;
-    
+
     // Determine endpoint based on phase
     let endpoint = '';
     const baseUrl = import.meta.env.VITE_AUTH_URL || 'http://localhost:8002';
-    
+
     if (phase === 'generation') {
       endpoint = `${baseUrl}/api/agent-creator/generate-with-progress`;
     } else if (phase === 'testing') {
       endpoint = `${baseUrl}/api/agent-creator/test`;
     }
-    
+
     if (!endpoint) {
       setError(`No endpoint configured for phase: ${phase}`);
       return;
     }
-    
+
     try {
       const eventSource = new EventSource(`${endpoint}?session_id=${sessionId}`, {
         withCredentials: false
       });
-      
+
       eventSourceRef.current = eventSource;
-      
+
       eventSource.onopen = () => {
         setIsConnected(true);
         setError(null);
         reconnectAttemptsRef.current = 0;
       };
-      
+
       eventSource.onmessage = (e) => {
         try {
           const data = JSON.parse(e.data) as SSEData;
-          
+
           if ('type' in data && data.type === 'progress') {
             // New progress event format
             handleProgressEvent(data as ProgressEvent);
@@ -168,7 +176,7 @@ export function useProgressSSE(sessionId: string, phase: ProgressPhase): UseProg
               ...prev,
               percentage: 100,
               isComplete: true,
-              data: { ...prev.data, result: (data as any).result }
+              data: { ...prev.data, result: (data as Record<string, unknown>).result }
             }));
           } else if ('type' in data && data.type === 'error') {
             // Error event
@@ -176,54 +184,60 @@ export function useProgressSSE(sessionId: string, phase: ProgressPhase): UseProg
               ...prev,
               percentage: 100,
               isError: true,
-              errorMessage: (data as any).error
+              errorMessage: (data as Record<string, unknown>).error as string
             }));
           }
         } catch (parseError) {
           console.error('Failed to parse SSE event:', parseError, e.data);
         }
       };
-      
+
       eventSource.onerror = (err) => {
         console.error('SSE connection error:', err);
         setError('Connection lost. Attempting to reconnect...');
         setIsConnected(false);
-        
+
         // Auto-reconnect with exponential backoff
         if (reconnectAttemptsRef.current < maxReconnectAttempts) {
           reconnectAttemptsRef.current++;
           const delay = 1000 * Math.pow(2, reconnectAttemptsRef.current - 1);
-          
+
           setTimeout(() => {
             if (eventSourceRef.current?.readyState === EventSource.CLOSED) {
-              connect();
+              // Safe reconnect call
+              const c = eventSourceRef.current as EventSource & { _reconnect?: () => void };
+              if (c && c._reconnect) c._reconnect();
             }
           }, delay);
         }
       };
-      
+
     } catch (err) {
       setError(`Failed to establish SSE connection: ${err}`);
       setIsConnected(false);
     }
-  }, [sessionId, phase, handleProgressEvent, handleLegacyLogEvent]);
-  
-  const disconnect = useCallback(() => {
+  }, [sessionId, phase, handleProgressEvent, handleLegacyLogEvent, disconnect]);
+
+  // Assign the connect function to _reconnect property of EventSource instance
+  // This ensures that the _reconnect method is always the latest 'connect' function
+  // and avoids issues with 'connect' being accessed before full initialization
+  useEffect(() => {
     if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-      eventSourceRef.current = null;
+      (eventSourceRef.current as EventSource & { _reconnect?: () => void })._reconnect = connect;
     }
-    setIsConnected(false);
-  }, []);
-  
+  }, [connect]);
+
   // Auto-connect on mount, disconnect on unmount
   useEffect(() => {
+    // The `connect` function itself handles state updates,
+    // and this effect is for initial setup, so `set-state-in-effect` is acceptable here.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     connect();
     return () => {
       disconnect();
     };
   }, [connect, disconnect]);
-  
+
   return {
     state,
     connect,

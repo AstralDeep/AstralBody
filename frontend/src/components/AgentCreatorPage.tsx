@@ -31,7 +31,7 @@ export default function AgentCreatorPage({ onBack, initialDraftId }: AgentCreato
     const [inputVal, setInputVal] = useState("");
     const [isProcessing, setIsProcessing] = useState(false);
     const [sessionId, setSessionId] = useState<string | null>(null);
-    const [generatedFiles, setGeneratedFiles] = useState<{tools: string, agent: string, server: string}>({
+    const [generatedFiles, setGeneratedFiles] = useState<{ tools: string, agent: string, server: string }>({
         tools: "",
         agent: "",
         server: ""
@@ -39,7 +39,7 @@ export default function AgentCreatorPage({ onBack, initialDraftId }: AgentCreato
     const [activeFile, setActiveFile] = useState<"tools" | "agent" | "server">("tools");
     const [testOutput, setTestOutput] = useState<string>("");
     const [pendingInstall, setPendingInstall] = useState<{ toolCallId: string, packages: string[] } | null>(null);
-    
+
     // Progress state
     const [generationProgress, setGenerationProgress] = useState<ProgressState | null>(null);
     const [testingProgress, setTestingProgress] = useState<ProgressState | null>(null);
@@ -171,43 +171,43 @@ export default function AgentCreatorPage({ onBack, initialDraftId }: AgentCreato
 
     const handleGenerateCode = async () => {
         if (!sessionId) return;
-        
+
         // Reset progress state
         setGenerationProgress(null);
         setStep("progress");
         setIsProcessing(true);
-        
+
         // Try to use the new progress endpoint first
-        const useProgressEndpoint = async () => {
+        const fetchProgressEndpoint = async () => {
             try {
                 const resp = await fetch(`${import.meta.env.VITE_AUTH_URL || "http://localhost:8002"}/api/agent-creator/generate-with-progress`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ session_id: sessionId })
                 });
-                
+
                 if (!resp.ok) {
                     throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
                 }
-                
+
                 const reader = resp.body?.getReader();
                 if (!reader) throw new Error("No response stream");
-                
+
                 const decoder = new TextDecoder();
-                let resultData: any = null;
-                
+                let resultData: Record<string, unknown> | null = null;
+
                 while (true) {
                     const { value, done } = await reader.read();
                     if (done) break;
                     const chunk = decoder.decode(value, { stream: true });
-                    
+
                     // Parse SSE stream
                     const lines = chunk.split('\n');
                     for (const line of lines) {
                         if (line.startsWith('data: ')) {
                             try {
                                 const data = JSON.parse(line.slice(6));
-                                
+
                                 // Handle progress events
                                 if (data.type === 'progress') {
                                     // Update progress state
@@ -244,16 +244,16 @@ export default function AgentCreatorPage({ onBack, initialDraftId }: AgentCreato
                         }
                     }
                 }
-                
+
                 return resultData;
             } catch (err) {
                 console.error("Progress endpoint failed, falling back to legacy endpoint", err);
                 throw err;
             }
         };
-        
+
         // Fallback to legacy endpoint
-        const useLegacyEndpoint = async () => {
+        const fetchLegacyEndpoint = async () => {
             const resp = await fetch(`${import.meta.env.VITE_AUTH_URL || "http://localhost:8002"}/api/agent-creator/generate`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -261,16 +261,16 @@ export default function AgentCreatorPage({ onBack, initialDraftId }: AgentCreato
             });
             return await resp.json();
         };
-        
+
         try {
             let data;
             try {
-                data = await useProgressEndpoint();
-            } catch (progressErr) {
+                data = await fetchProgressEndpoint();
+            } catch {
                 console.log("Falling back to legacy endpoint");
-                data = await useLegacyEndpoint();
+                data = await fetchLegacyEndpoint();
             }
-            
+
             // Handle both old and new response formats
             if (data?.files) {
                 // New format: three files
@@ -280,12 +280,12 @@ export default function AgentCreatorPage({ onBack, initialDraftId }: AgentCreato
                     server: data.files.server || ""
                 });
                 setStep("editor");
-                
+
                 // If fallback mode (missing agent/server), show message
                 if (data.fallback) {
-                    setMessages((prev) => [...prev, { 
-                        role: "system", 
-                        content: "Note: Agent and server files will be generated from templates. You can edit them in the editor." 
+                    setMessages((prev) => [...prev, {
+                        role: "system",
+                        content: "Note: Agent and server files will be generated from templates. You can edit them in the editor."
                     }]);
                 }
             } else if (data?.code) {
@@ -296,14 +296,14 @@ export default function AgentCreatorPage({ onBack, initialDraftId }: AgentCreato
                     server: ""
                 });
                 setStep("editor");
-                setMessages((prev) => [...prev, { 
-                    role: "system", 
-                    content: "Note: Only tools.py was generated. Agent and server files will be created from templates." 
+                setMessages((prev) => [...prev, {
+                    role: "system",
+                    content: "Note: Only tools.py was generated. Agent and server files will be created from templates."
                 }]);
             } else {
                 throw new Error("No code or files returned");
             }
-            
+
             // Mark progress as complete
             setGenerationProgress(prev => prev ? {
                 ...prev,
@@ -311,7 +311,7 @@ export default function AgentCreatorPage({ onBack, initialDraftId }: AgentCreato
                 isComplete: true,
                 message: "Code generation complete"
             } : null);
-            
+
         } catch (err) {
             console.error(err);
             setMessages((prev) => [...prev, { role: "system", content: "Failed to generate code." }]);
@@ -321,7 +321,7 @@ export default function AgentCreatorPage({ onBack, initialDraftId }: AgentCreato
                 errorMessage: err instanceof Error ? err.message : "Unknown error",
                 percentage: 100
             } : null);
-            
+
             // Return to chat after error
             setTimeout(() => {
                 setStep("chat");
@@ -342,9 +342,9 @@ export default function AgentCreatorPage({ onBack, initialDraftId }: AgentCreato
             const resp = await fetch(`${import.meta.env.VITE_AUTH_URL || "http://localhost:8002"}/api/agent-creator/test`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ 
-                    session_id: sessionId, 
-                    files: generatedFiles 
+                body: JSON.stringify({
+                    session_id: sessionId,
+                    files: generatedFiles
                 })
             });
 
@@ -364,7 +364,7 @@ export default function AgentCreatorPage({ onBack, initialDraftId }: AgentCreato
                     if (line.startsWith('data: ')) {
                         try {
                             const data = JSON.parse(line.slice(6));
-                            
+
                             // Handle both legacy and new progress formats
                             if (data.type === 'progress') {
                                 // New progress event format
@@ -423,7 +423,7 @@ export default function AgentCreatorPage({ onBack, initialDraftId }: AgentCreato
                                 }, 3000);
                                 return;
                             }
-                        } catch (e) {
+                        } catch {
                             console.error("Failed to parse SSE line", line);
                         }
                     }
@@ -632,9 +632,9 @@ export default function AgentCreatorPage({ onBack, initialDraftId }: AgentCreato
                                                 ? 'bg-astral-primary text-white'
                                                 : 'text-astral-muted hover:text-white hover:bg-white/5'}`}
                                         >
-                                            {fileType === "tools" ? "tools.py" : 
-                                             fileType === "agent" ? "agent.py" : 
-                                             "server.py"}
+                                            {fileType === "tools" ? "tools.py" :
+                                                fileType === "agent" ? "agent.py" :
+                                                    "server.py"}
                                         </button>
                                     ))}
                                 </div>
@@ -691,9 +691,9 @@ export default function AgentCreatorPage({ onBack, initialDraftId }: AgentCreato
                                         // Cancel generation and return to chat
                                         setStep("chat");
                                         setIsProcessing(false);
-                                        setMessages(prev => [...prev, { 
-                                            role: "system", 
-                                            content: "Code generation cancelled by user." 
+                                        setMessages(prev => [...prev, {
+                                            role: "system",
+                                            content: "Code generation cancelled by user."
                                         }]);
                                     }}
                                     onRetry={() => {

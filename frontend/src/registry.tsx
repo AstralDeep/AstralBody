@@ -76,12 +76,12 @@ export const { registry } = defineRegistry(catalog, {
                         </tr>
                     </thead>
                     <tbody>
-                        {props.rows.map((row: any[], ri: number) => (
+                        {props.rows.map((row: unknown[], ri: number) => (
                             <tr
                                 key={ri}
                                 className="border-b border-white/5 hover:bg-white/5 transition-colors"
                             >
-                                {row.map((cell: any, ci: number) => (
+                                {row.map((cell: unknown, ci: number) => (
                                     <td key={ci} className="px-4 py-3 text-astral-text">
                                         {typeof cell === "string" &&
                                             ["Critical", "Severe"].includes(cell) ? (
@@ -210,7 +210,7 @@ export const { registry } = defineRegistry(catalog, {
             const Tag = props.ordered ? "ol" : "ul";
             return (
                 <Tag className={`space-y-3 text-sm ${props.ordered ? "list-decimal" : "list-none"} list-inside text-astral-text`}>
-                    {props.items.map((item: any, i: number) => (
+                    {props.items.map((item: string | Record<string, unknown>, i: number) => (
                         <li key={i} className="leading-relaxed">
                             {typeof item === "string" ? (
                                 <span dangerouslySetInnerHTML={{ __html: item.replace(/\*\*(.*?)\*\*/g, '<strong class="text-white font-medium">$1</strong>') }} />
@@ -219,31 +219,31 @@ export const { registry } = defineRegistry(catalog, {
                                 <div className="bg-white/5 border border-white/5 rounded-lg p-4 hover:bg-white/10 transition-colors">
                                     <div className="flex justify-between items-start gap-4">
                                         <div>
-                                            {item.title && (
+                                            {(item.title as string | undefined) && (
                                                 <div className="font-semibold text-white mb-1">
-                                                    {item.url ? (
+                                                    {(item.url as string | undefined) ? (
                                                         <a
-                                                            href={item.url}
+                                                            href={item.url as string}
                                                             target="_blank"
                                                             rel="noopener noreferrer"
                                                             className="hover:text-astral-primary transition-colors flex items-center gap-2"
                                                         >
-                                                            {item.title}
+                                                            {item.title as string}
                                                             <span className="text-xs opacity-50">↗</span>
                                                         </a>
                                                     ) : (
-                                                        item.title
+                                                        item.title as string
                                                     )}
                                                 </div>
                                             )}
-                                            {item.subtitle && (
+                                            {(item.subtitle as string | undefined) && (
                                                 <div className="text-xs text-astral-muted mb-2 font-medium uppercase tracking-wide">
-                                                    {item.subtitle}
+                                                    {item.subtitle as string}
                                                 </div>
                                             )}
-                                            {item.description && (
+                                            {(item.description as string | undefined) && (
                                                 <div className="text-sm text-astral-text/90 line-clamp-3">
-                                                    {item.description}
+                                                    {item.description as string}
                                                 </div>
                                             )}
                                         </div>

@@ -28,7 +28,6 @@ function App() {
     savedComponents,
     saveComponent,
     deleteSavedComponent,
-    loadSavedComponents,
     combineComponents,
     condenseComponents,
     isCombining,
