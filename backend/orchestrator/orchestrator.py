@@ -299,6 +299,20 @@ class Orchestrator:
                                 "created_at": int(time.time() * 1000)
                             }
                         }))
+                        
+                        # Broadcast updated chat history to all UI clients
+                        if self.ui_clients:
+                            history_list = self.history.get_recent_chats()
+                            msg_history = json.dumps({
+                                "type": "history_list",
+                                "chats": history_list
+                            })
+                            # Create tasks for sending to avoid blocking
+                            await asyncio.gather(
+                                *[client.send(msg_history) for client in self.ui_clients],
+                                return_exceptions=True
+                            )
+                            
                     except Exception as e:
                         logger.error(f"Failed to save component: {e}")
                         await websocket.send(json.dumps({
@@ -328,6 +342,19 @@ class Orchestrator:
                             "type": "component_deleted",
                             "component_id": component_id
                         }))
+                        
+                        # Broadcast updated chat history to all UI clients
+                        if self.ui_clients:
+                            history_list = self.history.get_recent_chats()
+                            msg_history = json.dumps({
+                                "type": "history_list",
+                                "chats": history_list
+                            })
+                            # Create tasks for sending to avoid blocking
+                            await asyncio.gather(
+                                *[client.send(msg_history) for client in self.ui_clients],
+                                return_exceptions=True
+                            )
                     else:
                         await websocket.send(json.dumps({
                             "type": "component_save_error",
