@@ -1,5 +1,6 @@
 data/
 plans/
+tmp_uploads/
 
 # General
 .DS_Store

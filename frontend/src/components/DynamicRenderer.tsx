@@ -15,12 +15,16 @@ import {
     ExternalLink,
     ChevronRight,
     Plus,
+    UploadCloud,
+    Download,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyProps = any;
 
 // Helper to recursively extract savable components from a component tree
-function extractSavableComponents(component: any, result: { componentData: any; componentType: string; title?: string }[] = []): void {
+function extractSavableComponents(component: AnyProps, result: { componentData: AnyProps; componentType: string; title?: string }[] = []): void {
     if (!component || typeof component !== 'object') return;
     const { type, ...props } = component;
     const savableComponents = ["card", "table", "metric", "bar_chart", "line_chart", "pie_chart", "plotly_chart", "grid", "collapsible", "container", "text", "alert", "progress", "list", "code", "button"];
@@ -28,12 +32,12 @@ function extractSavableComponents(component: any, result: { componentData: any; 
 
     // First, check if this component has any savable children
     let hasSavableChildren = false;
-    const childSavableComponents: { componentData: any; componentType: string; title?: string }[] = [];
+    const childSavableComponents: { componentData: AnyProps; componentType: string; title?: string }[] = [];
 
     // Check children
     if (props.children && Array.isArray(props.children)) {
-        props.children.forEach((child: any) => {
-            const childResult: { componentData: any; componentType: string; title?: string }[] = [];
+        props.children.forEach((child: AnyProps) => {
+            const childResult: { componentData: AnyProps; componentType: string; title?: string }[] = [];
             extractSavableComponents(child, childResult);
             if (childResult.length > 0) {
                 hasSavableChildren = true;
@@ -44,8 +48,8 @@ function extractSavableComponents(component: any, result: { componentData: any; 
 
     // Check content
     if (props.content && Array.isArray(props.content)) {
-        props.content.forEach((child: any) => {
-            const childResult: { componentData: any; componentType: string; title?: string }[] = [];
+        props.content.forEach((child: AnyProps) => {
+            const childResult: { componentData: AnyProps; componentType: string; title?: string }[] = [];
             extractSavableComponents(child, childResult);
             if (childResult.length > 0) {
                 hasSavableChildren = true;
@@ -88,7 +92,7 @@ function extractSavableComponents(component: any, result: { componentData: any; 
 }
 
 // Button to add all components
-function AddAllToUIButton({ components, onSave }: { components: any[]; onSave: (componentData: any, componentType: string, title?: string) => Promise<boolean> }) {
+function AddAllToUIButton({ components, onSave }: { components: AnyProps[]; onSave: (componentData: AnyProps, componentType: string, title?: string) => Promise<boolean> }) {
     const [isSaving, setIsSaving] = useState(false);
     const [saved, setSaved] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -102,7 +106,7 @@ function AddAllToUIButton({ components, onSave }: { components: any[]; onSave: (
         setIsSaving(true);
 
         try {
-            const savable: { componentData: any; componentType: string; title?: string }[] = [];
+            const savable: { componentData: AnyProps; componentType: string; title?: string }[] = [];
             components.forEach(comp => extractSavableComponents(comp, savable));
 
             if (savable.length === 0) {
@@ -175,9 +179,10 @@ function AddAllToUIButton({ components, onSave }: { components: any[]; onSave: (
 }
 
 interface DynamicRendererProps {
-    components: any[];
-    onSaveComponent?: (componentData: any, componentType: string, title?: string) => Promise<boolean>;
+    components: unknown;
+    onSaveComponent?: (componentData: Record<string, unknown>, componentType: string, title?: string) => Promise<boolean>;
     activeChatId?: string | null;
+    onSendMessage?: (message: string) => void;
 }
 
 // ─── Error Boundary ────────────────────────────────────────────────
@@ -185,7 +190,7 @@ class RenderErrorBoundary extends Component<
     { children: React.ReactNode; fallback?: React.ReactNode },
     { hasError: boolean; error?: Error }
 > {
-    constructor(props: any) {
+    constructor(props: AnyProps) {
         super(props);
         this.state = { hasError: false };
     }
@@ -210,14 +215,15 @@ class RenderErrorBoundary extends Component<
 
 // ─── Component Renderers ───────────────────────────────────────────
 
-function renderComponent(comp: any, index: number, onSaveComponent?: (componentData: any, componentType: string) => Promise<boolean>): React.ReactNode {
+function renderComponent(comp: AnyProps, index: number, onSaveComponent?: (componentData: AnyProps, componentType: string) => Promise<boolean>, onSendMessage?: (message: string) => void): React.ReactNode {
     if (!comp || typeof comp !== "object") return null;
     const { type, ...props } = comp;
 
-    // Components that should have save buttons
     const savableComponents = ["card", "table", "metric", "bar_chart", "line_chart", "pie_chart", "plotly_chart", "grid", "collapsible"];
+    // Used inside extractSavableComponents, not needed here directly.
+    void savableComponents;
 
-    const baseProps = { ...props, onSaveComponent, componentData: comp };
+    const baseProps = { ...props, onSaveComponent, onSendMessage };
 
     switch (type) {
         case "container":
@@ -254,29 +260,33 @@ function renderComponent(comp: any, index: number, onSaveComponent?: (componentD
             return <RenderButton key={index} {...baseProps} />;
         case "collapsible":
             return <RenderCollapsible key={index} {...baseProps} />;
+        case "file_upload":
+            return <RenderFileUpload key={index} {...baseProps} />;
+        case "file_download":
+            return <RenderFileDownload key={index} {...baseProps} />;
         default:
             console.warn(`Unknown component type: ${type}`);
             return null;
     }
 }
 
-function renderChildren(items: any[], onSaveComponent?: (componentData: any, componentType: string) => Promise<boolean>): React.ReactNode {
+function renderChildren(items: unknown, onSaveComponent?: (componentData: Record<string, unknown>, componentType: string) => Promise<boolean>, onSendMessage?: (message: string) => void): React.ReactNode {
     if (!Array.isArray(items)) return null;
-    return items.map((c, i) => renderComponent(c, i, onSaveComponent));
+    return items.map((c, i) => renderComponent(c, i, onSaveComponent, onSendMessage));
 }
 
 // ── Container ──────────────────────────────────────────────────────
-function RenderContainer({ children, content, onSaveComponent, componentData }: any) {
+function RenderContainer({ children, content, onSaveComponent, onSendMessage }: AnyProps) {
     const kids = children || content || [];
     return (
         <div className="flex flex-col gap-4 relative group">
-            {renderChildren(kids, onSaveComponent)}
+            {renderChildren(kids, onSaveComponent, onSendMessage)}
         </div>
     );
 }
 
 // ── Text ───────────────────────────────────────────────────────────
-function RenderText({ content, variant = "body", onSaveComponent, componentData }: any) {
+function RenderText({ content, variant = "body" }: AnyProps) {
     const classes: Record<string, string> = {
         h1: "text-2xl font-bold text-white",
         h2: "text-xl font-semibold text-white",
@@ -301,7 +311,7 @@ function RenderText({ content, variant = "body", onSaveComponent, componentData 
 }
 
 // ── Card ───────────────────────────────────────────────────────────
-function RenderCard({ title, children, content, onSaveComponent, componentData }: any) {
+function RenderCard({ title, children, content, onSaveComponent, onSendMessage }: AnyProps) {
     const kids = children || content || [];
     return (
         <motion.div
@@ -318,16 +328,16 @@ function RenderCard({ title, children, content, onSaveComponent, componentData }
                     </h3>
                 </div>
             )}
-            <div className="space-y-3">{renderChildren(kids, onSaveComponent)}</div>
+            <div className="space-y-3">{renderChildren(kids, onSaveComponent, onSendMessage)}</div>
         </motion.div>
     );
 }
 
 // ── Table ──────────────────────────────────────────────────────────
-function RenderTable({ headers, rows, onSaveComponent, componentData }: any) {
+function RenderTable({ headers, rows, title: compTitle, label }: AnyProps) {
     if (!headers || !rows) return null;
 
-    const title = componentData?.title || componentData?.label || "Table";
+    const title = compTitle || label || "Table";
 
     return (
         <div className="overflow-x-auto rounded-lg border border-white/5">
@@ -343,9 +353,9 @@ function RenderTable({ headers, rows, onSaveComponent, componentData }: any) {
                     </tr>
                 </thead>
                 <tbody>
-                    {rows.map((row: any[], ri: number) => (
+                    {rows.map((row: AnyProps[], ri: number) => (
                         <tr key={ri} className="border-b border-white/5 hover:bg-white/5 transition-colors">
-                            {row.map((cell: any, ci: number) => (
+                            {row.map((cell: AnyProps, ci: number) => (
                                 <td key={ci} className="px-4 py-3 text-astral-text">
                                     {typeof cell === "string" && ["Critical", "Severe"].includes(cell)
                                         ? <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-red-500/20 text-red-400">{cell}</span>
@@ -365,7 +375,7 @@ function RenderTable({ headers, rows, onSaveComponent, componentData }: any) {
 }
 
 // ── Metric ─────────────────────────────────────────────────────────
-function RenderMetric({ title, value, subtitle, progress, variant = "default", onSaveComponent, componentData }: any) {
+function RenderMetric({ title, value, subtitle, progress, variant = "default" }: AnyProps) {
     const variantColors: Record<string, string> = {
         default: "from-astral-primary/20 to-astral-primary/5",
         warning: "from-yellow-500/20 to-yellow-500/5",
@@ -398,8 +408,7 @@ function RenderMetric({ title, value, subtitle, progress, variant = "default", o
     );
 }
 
-// ── Alert ──────────────────────────────────────────────────────────
-function RenderAlert({ message, title, variant = "info", onSaveComponent, componentData }: any) {
+function RenderAlert({ message, title, variant = "info" }: AnyProps) {
     const config: Record<string, { bg: string; border: string; icon: React.ReactNode; text: string }> = {
         info: { bg: "bg-blue-500/10", border: "border-blue-500/20", icon: <Info size={16} />, text: "text-blue-400" },
         success: { bg: "bg-green-500/10", border: "border-green-500/20", icon: <CheckCircle size={16} />, text: "text-green-400" },
@@ -421,7 +430,7 @@ function RenderAlert({ message, title, variant = "info", onSaveComponent, compon
 }
 
 // ── Progress ───────────────────────────────────────────────────────
-function RenderProgress({ value, label, show_percentage, onSaveComponent, componentData }: any) {
+function RenderProgress({ value, label, show_percentage }: AnyProps) {
     return (
         <div>
             {label && (
@@ -443,7 +452,7 @@ function RenderProgress({ value, label, show_percentage, onSaveComponent, compon
 }
 
 // ── Grid ───────────────────────────────────────────────────────────
-function RenderGrid({ columns = 2, gap = 16, children, content, onSaveComponent, componentData }: any) {
+function RenderGrid({ columns = 2, gap = 16, children, content, onSaveComponent, onSendMessage }: AnyProps) {
     const kids = children || content || [];
 
     return (
@@ -451,19 +460,19 @@ function RenderGrid({ columns = 2, gap = 16, children, content, onSaveComponent,
             className="grid"
             style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`, gap: `${gap}px` }}
         >
-            {renderChildren(kids, onSaveComponent)}
+            {renderChildren(kids, onSaveComponent, onSendMessage)}
         </div>
     );
 }
 
 // ── List ───────────────────────────────────────────────────────────
-function RenderList({ items, ordered, variant = "default", onSaveComponent, componentData }: any) {
+function RenderList({ items, ordered, variant = "default" }: AnyProps) {
     if (!items) return null;
 
     if (variant === "detailed") {
         return (
             <div className="space-y-3">
-                {items.map((item: any, i: number) => (
+                {items.map((item: AnyProps, i: number) => (
                     <div key={i} className="p-3 bg-white/5 rounded-lg border border-white/5 hover:bg-white/10 transition-colors">
                         <div className="flex justify-between items-start gap-4">
                             <div className="space-y-1 w-full">
@@ -494,7 +503,7 @@ function RenderList({ items, ordered, variant = "default", onSaveComponent, comp
     const Tag = ordered ? "ol" : "ul";
     return (
         <Tag className={`space-y-2 text-sm ${ordered ? "list-decimal" : "list-disc"} list-inside text-astral-text`}>
-            {items.map((item: any, i: number) => (
+            {items.map((item: AnyProps, i: number) => (
                 <li key={i} className="leading-relaxed">
                     {typeof item === "string" ? (
                         <span dangerouslySetInnerHTML={{ __html: item.replace(/\*\*(.*?)\*\*/g, '<strong class="text-white font-medium">$1</strong>') }} />
@@ -506,7 +515,7 @@ function RenderList({ items, ordered, variant = "default", onSaveComponent, comp
 }
 
 // ── Code ───────────────────────────────────────────────────────────
-function RenderCode({ code, language, onSaveComponent, componentData }: any) {
+function RenderCode({ code, language }: AnyProps) {
     return (
         <div className="rounded-lg bg-black/40 border border-white/5 overflow-hidden">
             {language && (
@@ -527,7 +536,7 @@ import Plot from 'react-plotly.js';
 // ... existing code ...
 
 // ── Bar Chart ──────────────────────────────────────────────────────
-function RenderBarChart({ title, labels, datasets, onSaveComponent, componentData }: any) {
+function RenderBarChart({ title, labels, datasets }: AnyProps) {
     const dataset = datasets?.[0];
     if (!dataset) return null;
     const data = dataset.data as number[];
@@ -571,7 +580,7 @@ function RenderBarChart({ title, labels, datasets, onSaveComponent, componentDat
 }
 
 // ── Line Chart ─────────────────────────────────────────────────────
-function RenderLineChart({ title, labels, datasets, onSaveComponent, componentData }: any) {
+function RenderLineChart({ title, labels, datasets }: AnyProps) {
     const dataset = datasets?.[0];
     if (!dataset) return null;
     const data = dataset.data as number[];
@@ -617,7 +626,7 @@ function RenderLineChart({ title, labels, datasets, onSaveComponent, componentDa
 }
 
 // ── Pie Chart ──────────────────────────────────────────────────────
-function RenderPieChart({ title, labels, data: pieData, colors, onSaveComponent, componentData }: any) {
+function RenderPieChart({ title, labels, data: pieData, colors }: AnyProps) {
     if (!pieData) return null;
     const defaultColors = ["#6366F1", "#8B5CF6", "#06B6D4", "#10B981", "#F59E0B", "#EF4444", "#EC4899", "#3B82F6"];
     const colorArr = colors?.length ? colors : defaultColors;
@@ -658,7 +667,7 @@ function RenderPieChart({ title, labels, data: pieData, colors, onSaveComponent,
 }
 
 // ── Generic Plotly Chart ───────────────────────────────────────────
-function RenderGenericPlotly({ title, data, layout, config, onSaveComponent, componentData }: any) {
+function RenderGenericPlotly({ title, data, layout, config }: AnyProps) {
     if (!data) return null;
 
     // Merge default layout with provided layout
@@ -697,7 +706,7 @@ function RenderGenericPlotly({ title, data, layout, config, onSaveComponent, com
 }
 
 // ── Button ─────────────────────────────────────────────────────────
-function RenderButton({ label, variant = "primary", onSaveComponent, componentData }: any) {
+function RenderButton({ label, variant = "primary" }: AnyProps) {
     const variants: Record<string, string> = {
         primary: "bg-astral-primary hover:bg-astral-primary/80 text-white",
         secondary: "bg-white/10 hover:bg-white/20 text-astral-text",
@@ -711,7 +720,7 @@ function RenderButton({ label, variant = "primary", onSaveComponent, componentDa
 }
 
 // ── Collapsible ────────────────────────────────────────────────────
-function RenderCollapsible({ title, children, content, default_open, onSaveComponent, componentData }: any) {
+function RenderCollapsible({ title, children, content, default_open, onSaveComponent, onSendMessage }: AnyProps) {
     const [isOpen, setIsOpen] = useState(default_open ?? false);
     const kids = children || content || [];
     const displayTitle = title || "Details";
@@ -751,7 +760,7 @@ function RenderCollapsible({ title, children, content, default_open, onSaveCompo
                         className="overflow-hidden"
                     >
                         <div className="px-4 pb-3 pt-1 border-t border-white/5 space-y-2">
-                            {renderChildren(kids, onSaveComponent)}
+                            {renderChildren(kids, onSaveComponent, onSendMessage)}
                         </div>
                     </motion.div>
                 )}
@@ -760,16 +769,110 @@ function RenderCollapsible({ title, children, content, default_open, onSaveCompo
     );
 }
 
+// ── File Upload ────────────────────────────────────────────────────
+function RenderFileUpload({ label, accept, onSendMessage }: AnyProps) {
+    const [isProcessing, setIsProcessing] = useState(false);
+
+    const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+
+        setIsProcessing(true);
+        const reader = new FileReader();
+
+        reader.onload = (event) => {
+            try {
+                const text = event.target?.result as string;
+                if (!text) throw new Error("File is empty");
+
+                // Very basic CSV parsing for headers
+                const lines = text.split(/\r?\n/).filter(line => line.trim() !== '');
+                if (lines.length === 0) throw new Error("File contains no data");
+
+                if (onSendMessage) {
+                    // Send data to the agent for generic analysis
+                    onSendMessage(
+                        `Here is my data from ${file.name}. Please run various data analyses on it and tell me the results:\n\n\`\`\`csv\n${text}\n\`\`\``,
+                        `[Uploaded File: ${file.name} for analysis]`
+                    );
+                } else {
+                    alert(`CSV file uploaded: ${file.name}`);
+                }
+            } catch (err: AnyProps) {
+                if (onSendMessage) {
+                    onSendMessage(
+                        `System Note: The user failed to upload a CSV file. The error was: ${err.message}. Ask them to try again with a valid CSV file.`,
+                        `[Failed to upload file: ${file.name}]`
+                    );
+                }
+            } finally {
+                setIsProcessing(false);
+                // Reset input
+                e.target.value = '';
+            }
+        };
+
+        reader.onerror = () => {
+            setIsProcessing(false);
+            if (onSendMessage) {
+                onSendMessage(
+                    "System Note: The user tried to upload a file but the browser failed to read it. Tell them there was an error reading the file.",
+                    `[Error reading file: ${file.name}]`
+                );
+            }
+        };
+
+        reader.readAsText(file);
+    };
+
+    return (
+        <div className="flex items-center gap-3 py-2">
+            <label className={`cursor-pointer inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${isProcessing
+                ? 'bg-astral-primary/10 text-astral-primary/50 border border-astral-primary/10 cursor-not-allowed'
+                : 'bg-astral-primary/20 hover:bg-astral-primary/30 text-astral-primary border border-astral-primary/30'
+                }`}>
+                {isProcessing ? (
+                    <div className="animate-spin rounded-full h-4 w-4 border-t-2 border-b-2 border-astral-primary" />
+                ) : (
+                    <UploadCloud size={16} />
+                )}
+                <span>{isProcessing ? "Processing..." : (label || "Upload File")}</span>
+                <input type="file" className="hidden" accept={accept} onChange={handleFileChange} disabled={isProcessing} />
+            </label>
+        </div>
+    );
+}
+
+// ── File Download ──────────────────────────────────────────────────
+function RenderFileDownload({ label, url, filename }: AnyProps) {
+    return (
+        <div className="flex items-center gap-3 py-2">
+            <a
+                href={url || "#"}
+                download={filename || "download"}
+                className="inline-flex items-center gap-2 px-4 py-2 bg-astral-secondary/20 hover:bg-astral-secondary/30 text-astral-secondary border border-astral-secondary/30 rounded-lg text-sm font-medium transition-colors"
+                target="_blank"
+                rel="noreferrer"
+            >
+                <Download size={16} />
+                <span>{label || "Download File"}</span>
+            </a>
+        </div>
+    );
+}
+
 // ─── Main DynamicRenderer ──────────────────────────────────────────
-export default function DynamicRenderer({ components, onSaveComponent, activeChatId }: DynamicRendererProps) {
+export default function DynamicRenderer({ components, onSaveComponent, activeChatId, onSendMessage }: DynamicRendererProps) {
+    const comps = Array.isArray(components) ? components : [components];
+
     console.log('DynamicRenderer rendered with:', {
-        componentCount: components?.length,
+        componentCount: comps.length,
         hasOnSaveComponent: !!onSaveComponent,
         activeChatId,
-        components: components?.map(c => c?.type)
+        components: comps.map(c => c?.type)
     });
 
-    if (!components || components.length === 0) return null;
+    if (!comps || comps.length === 0) return null;
 
     return (
         <RenderErrorBoundary>
@@ -777,12 +880,12 @@ export default function DynamicRenderer({ components, onSaveComponent, activeCha
                 {onSaveComponent && (
                     <div className="flex items-center justify-between mb-2">
                         <div className="text-xs text-astral-muted font-medium uppercase tracking-wider">Components</div>
-                        <AddAllToUIButton components={components} onSave={onSaveComponent} />
+                        <AddAllToUIButton components={comps} onSave={onSaveComponent} />
                     </div>
                 )}
-                {components.map((comp, i) => (
+                {comps.map((comp, i) => (
                     <RenderErrorBoundary key={i}>
-                        {renderComponent(comp, i, onSaveComponent)}
+                        {renderComponent(comp, i, onSaveComponent, onSendMessage)}
                     </RenderErrorBoundary>
                 ))}
             </div>

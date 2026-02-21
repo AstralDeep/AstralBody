@@ -97,6 +97,18 @@ class Database:
             )
         ''')
 
+        # Chat files mapping table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS chat_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id TEXT NOT NULL,
+                original_name TEXT NOT NULL,
+                backend_path TEXT NOT NULL,
+                uploaded_at INTEGER,
+                FOREIGN KEY (chat_id) REFERENCES chats (id) ON DELETE CASCADE
+            )
+        ''')
+
         conn.commit()
         conn.close()
 

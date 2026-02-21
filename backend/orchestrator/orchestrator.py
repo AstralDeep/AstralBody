@@ -14,10 +14,12 @@ import time
 import os
 import sys
 import logging
+import re
 from typing import Dict, List, Optional, Any
 from dataclasses import asdict
 
 import websockets
+import websockets.exceptions
 import aiohttp
 import uvicorn
 from jose import jwt as jose_jwt
@@ -131,9 +133,9 @@ class Orchestrator:
                 logger.info(f"Agent {agent_id} already connected")
                 return
 
-            # Connect via WebSocket
+            # Connect via WebSocket with no size limit to allow large files
             ws_url = f"ws://{base_url.replace('http://', '').replace('https://', '')}/agent"
-            ws = await websockets.connect(ws_url)
+            ws = await websockets.connect(ws_url, max_size=50 * 1024 * 1024)
 
             # Listen for RegisterAgent message
             raw = await asyncio.wait_for(ws.recv(), timeout=5)
@@ -227,13 +229,15 @@ class Orchestrator:
                     # If no chat_id provided, create one
                     if not chat_id:
                         chat_id = self.history.create_chat()
+                        from_message = True
                         # Inform UI about new chat ID
                         await websocket.send(json.dumps({
                             "type": "chat_created",
-                            "payload": {"chat_id": chat_id}
+                            "payload": {"chat_id": chat_id, "from_message": True}
                         }))
 
-                    await self.handle_chat_message(websocket, user_message, chat_id)
+                    display_message = msg.payload.get("display_message")
+                    await self.handle_chat_message(websocket, user_message, chat_id, display_message)
 
                 elif msg.action == "get_dashboard":
                     await self.send_dashboard(websocket)
@@ -265,7 +269,7 @@ class Orchestrator:
                     chat_id = self.history.create_chat()
                     await websocket.send(json.dumps({
                         "type": "chat_created",
-                        "payload": {"chat_id": chat_id}
+                        "payload": {"chat_id": chat_id, "from_message": False}
                     }))
 
                 # Saved components actions
@@ -698,7 +702,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
     # LLM-POWERED TOOL ROUTING
     # =========================================================================
 
-    async def handle_chat_message(self, websocket, message: str, chat_id: str):
+    async def handle_chat_message(self, websocket, message: str, chat_id: str, display_message: str = None):
         """Process a chat message: LLM determines which tools to call (Multi-Turn Re-Act Loop)."""
         logger.info(f"Processing chat message: '{message}' for chat_id {chat_id}")
         if not message:
@@ -718,13 +722,22 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             "message": "Analyzing request and planning actions..."
         }))
         
-        # Save User Message to History
-        self.history.add_message(chat_id, "user", message)
+        # Save User Message to History. If display_message is provided, save that instead.
+        msg_to_save = display_message if display_message else message
+        self.history.add_message(chat_id, "user", msg_to_save)
+
+        # Capture File Upload Mapping
+        upload_match = re.search(r"I have uploaded (.*?) to the backend at: `(.*?)`" , message)
+        if upload_match:
+            original_name = upload_match.group(1)
+            backend_path = upload_match.group(2)
+            logger.info(f"Captured file upload mapping: {original_name} -> {backend_path}")
+            self.history.add_file_mapping(chat_id, original_name, backend_path)
 
         # Async title summarization for new chats
         chat_data = self.history.get_chat(chat_id)
         if chat_data and len(chat_data.get("messages", [])) == 1:
-            asyncio.create_task(self.summarize_chat_title(chat_id, message))
+            asyncio.create_task(self.summarize_chat_title(chat_id, msg_to_save))
 
         # Build tool definitions from registered agents
         logger.info(f"Building tool definitions from {len(self.agent_cards)} agents...")
@@ -757,7 +770,18 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             # ------------------------------------------------------------------
             # SYSTEM PROMPT
             # ------------------------------------------------------------------
-            system_prompt = """You are an AI orchestrator. Your goal is to simplify complex tasks for the user by intelligently using available tools.
+            # Fetch file mappings for this chat
+            file_mappings = self.history.get_file_mappings(chat_id)
+            file_context = ""
+            if file_mappings:
+                file_context = "\nFILES ACCESSED IN THIS CHAT (Original Name -> Backend Path):\n"
+                for mapping in file_mappings:
+                    file_context += f"- {mapping['original_name']} -> {mapping['backend_path']}\n"
+                file_context += "\nIMPORTANT: You MUST use the absolute backend path (right side) when calling tools for these files. Never use just the original filename.\n"
+
+            system_prompt = f"""You are an AI orchestrator. Your goal is to simplify complex tasks for the user by intelligently using available tools.
+
+{file_context}
 
 AVAILABLE TOOLS: sent in the `tools` parameter.
 
@@ -781,9 +805,31 @@ CRITICAL RULES:
             # ------------------------------------------------------------------
             # MULTI-TURN LOOP
             # ------------------------------------------------------------------
+            # Fetch recent history
+            history_messages = []
+            chat_data = self.history.get_chat(chat_id)
+            if chat_data and "messages" in chat_data:
+                # Get last 10 messages (excluding the one we just added)
+                raw_history = chat_data["messages"][:-1]
+                for h_msg in raw_history[-10:]:
+                    role = h_msg.get("role")
+                    content = h_msg.get("content")
+                    
+                    # If content is UI component list, stringify it or summarize it
+                    if isinstance(content, list):
+                        # Try to find text content or just stringify the whole thing
+                        content_str = json.dumps(content)
+                        # Optional: limit size of historical UI components
+                        if len(content_str) > 2000:
+                            content_str = content_str[:2000] + "... [TRUNCATED]"
+                    else:
+                        content_str = str(content)
+                        
+                    history_messages.append({"role": role, "content": content_str})
+
             messages = [
                 {"role": "system", "content": system_prompt},
-                # For context, we could add recent history here, but let's keep it focused on the current task
+                *history_messages,
                 {"role": "user", "content": message}
             ]
 
@@ -1257,7 +1303,8 @@ CRITICAL RULES:
 
         # Auto-discover agents (continuous monitor)
         agent_port = int(os.getenv("AGENT_PORT", 8003))
-        asyncio.create_task(self._monitor_agents(agent_port))
+        max_agents = int(os.getenv("MAX_AGENTS", 10))
+        asyncio.create_task(self._monitor_agents(agent_port, max_agents))
 
         # Start BFF auth HTTP server on port 8002
         from orchestrator.auth import app as auth_app
@@ -1267,23 +1314,22 @@ CRITICAL RULES:
         asyncio.create_task(auth_server.serve())
         logger.info(f"Auth proxy listening on http://0.0.0.0:{auth_port}")
 
-        async with websockets.serve(self.handle_ui_connection, "0.0.0.0", PORT):
+        async with websockets.serve(self.handle_ui_connection, "0.0.0.0", PORT, max_size=50 * 1024 * 1024):
             logger.info(f"Orchestrator listening on ws://0.0.0.0:{PORT}")
             await asyncio.Future()  # Run forever
 
-    async def _monitor_agents(self, agent_port: int):
-        """Continuously monitor and discover agents."""
-        agent_url = f"http://localhost:{agent_port}"
-        logger.info(f"Starting agent monitor for {agent_url}...")
+    async def _monitor_agents(self, start_port: int, max_ports: int = 10):
+        """Continuously monitor and discover agents across a range of ports."""
+        logger.info(f"Starting agent monitor for ports {start_port} to {start_port + max_ports - 1}...")
 
         while True:
-            try:
-                # This will connect if not already connected
-                await self.discover_agent(agent_url)
-            except Exception as e:
-                # Log only on state change or verbose debug? For now, keep it quiet
-                # discover_agent already logs errors
-                pass
+            for port in range(start_port, start_port + max_ports):
+                agent_url = f"http://localhost:{port}"
+                try:
+                    # This will connect if not already connected
+                    await self.discover_agent(agent_url)
+                except Exception as e:
+                    pass
             
             await asyncio.sleep(5)  # Check every 5 seconds
 

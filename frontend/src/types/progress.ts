@@ -33,7 +33,7 @@ export interface ProgressEvent {
   step: ProgressStep;
   percentage: number; // 0-100
   message: string;
-  data?: Record<string, any>;
+  data?: Record<string, unknown>;
   timestamp: number;
 }
 
@@ -48,7 +48,7 @@ export interface ProgressState {
   currentStep: ProgressStep;
   percentage: number;
   message: string;
-  data?: Record<string, any>;
+  data?: Record<string, unknown>;
   startTime: number;
   elapsedTime: number;
   steps: ProgressStep[];
@@ -89,7 +89,7 @@ export function getPhaseSteps(phase: ProgressPhase): ProgressStep[] {
       'testing_complete'
     ]
   };
-  
+
   return phaseSteps[phase] || [];
 }
 
@@ -103,7 +103,7 @@ export function getStepLabel(step: ProgressStep): string {
     structure_validation: 'Validating Structure',
     code_cleaning: 'Cleaning Code',
     generation_complete: 'Generation Complete',
-    
+
     // Testing steps
     saving_files: 'Saving Files',
     starting_process: 'Starting Process',
@@ -115,13 +115,13 @@ export function getStepLabel(step: ProgressStep): string {
     validation_complete: 'Validation Complete',
     integration_ready: 'Integration Ready',
     testing_complete: 'Testing Complete',
-    
+
     // Error/status steps
     error: 'Error',
     warning: 'Warning',
     info: 'Info'
   };
-  
+
   return labels[step] || step;
 }
 
@@ -135,7 +135,7 @@ export function getStepDescription(step: ProgressStep): string {
     structure_validation: 'Validating required file structure',
     code_cleaning: 'Removing markdown fences and cleaning code',
     generation_complete: 'Code files ready for editing',
-    
+
     // Testing steps
     saving_files: 'Writing files to agent directory',
     starting_process: 'Launching agent subprocess on free port',
@@ -147,13 +147,13 @@ export function getStepDescription(step: ProgressStep): string {
     validation_complete: 'All protocol tests passed',
     integration_ready: 'Agent ready for orchestrator discovery',
     testing_complete: 'All tests passed, agent active',
-    
+
     // Error/status steps
     error: 'An error occurred during processing',
     warning: 'A warning was generated during processing',
     info: 'Informational message'
   };
-  
+
   return descriptions[step] || '';
 }
 
@@ -164,7 +164,7 @@ export function isCriticalStep(step: ProgressStep): boolean {
     'starting_process',
     'websocket_connection'
   ];
-  
+
   return criticalSteps.includes(step);
 }
 

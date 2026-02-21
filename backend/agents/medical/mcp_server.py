@@ -7,38 +7,24 @@ import json
 import logging
 from typing import Dict, Any
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 from shared.protocol import MCPRequest, MCPResponse
-from agents.mcp_tools import TOOL_REGISTRY
+from agents.medical.mcp_tools import TOOL_REGISTRY
 
 logger = logging.getLogger('MCPServer')
 
-# Exceptions that indicate a transient/network issue worth retrying
 RETRYABLE_EXCEPTIONS = (
     ConnectionError, TimeoutError, json.JSONDecodeError,
-    OSError,  # covers socket errors
+    OSError,
 )
 
-try:
-    import requests
-    RETRYABLE_EXCEPTIONS = RETRYABLE_EXCEPTIONS + (
-        requests.exceptions.RequestException,
-    )
-except ImportError:
-    pass
-
-# Exceptions that indicate bad arguments / logic errors — never retry
 NON_RETRYABLE_EXCEPTIONS = (TypeError, KeyError, ValueError, AttributeError)
 
-
 class MCPServer:
-    """Simple MCP server that routes tool/call requests to registered functions."""
-
     def __init__(self):
         self.tools = TOOL_REGISTRY
 
     def get_tool_list(self) -> list:
-        """Return list of available tools with their schemas."""
         return [
             {
                 "name": name,
@@ -50,16 +36,13 @@ class MCPServer:
 
     @staticmethod
     def _classify_error(exc: Exception) -> bool:
-        """Return True if the error is retryable (transient), False otherwise."""
         if isinstance(exc, RETRYABLE_EXCEPTIONS):
             return True
         if isinstance(exc, NON_RETRYABLE_EXCEPTIONS):
             return False
-        # Default: mark unknown errors as retryable to give them a chance
         return True
 
     def process_request(self, request: MCPRequest) -> MCPResponse:
-        """Process an MCP request and return a response."""
         if request.method == "tools/list":
             return MCPResponse(
                 request_id=request.request_id,
@@ -81,16 +64,13 @@ class MCPServer:
                 tool_fn = self.tools[tool_name]["function"]
                 result = tool_fn(**arguments)
 
-                # Check if the tool itself returned an error via UI components
                 if isinstance(result, dict) and "_ui_components" in result:
                     ui_comps = result["_ui_components"]
-                    # Detect tool-level errors (Alert with variant="error")
                     has_error = any(
                         isinstance(c, dict) and c.get("variant") == "error"
                         for c in ui_comps
                     )
                     if has_error:
-                        # Extract the error message from the alert
                         error_msg = "Tool returned an error"
                         for c in ui_comps:
                             if isinstance(c, dict) and c.get("variant") == "error":

@@ -29,6 +29,7 @@ class Component:
             'tabs': Tabs, 'divider': Divider, 'input': Input,
             'bar_chart': BarChart, 'line_chart': LineChart, 'pie_chart': PieChart,
             'plotly_chart': PlotlyChart, 'collapsible': Collapsible,
+            'file_upload': FileUpload, 'file_download': FileDownload,
         }
         cls = type_map.get(comp_type, Component)
         if cls == Component:
@@ -259,6 +260,20 @@ class PlotlyChart(Component):
     data: List[Dict[str, Any]] = field(default_factory=list)
     layout: Dict[str, Any] = field(default_factory=dict)
     config: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class FileUpload(Component):
+    type: str = "file_upload"
+    label: str = "Upload File"
+    accept: str = "*/*"
+    action: str = ""
+
+@dataclass
+class FileDownload(Component):
+    type: str = "file_download"
+    label: str = "Download File"
+    url: str = ""
+    filename: Optional[str] = None
 
 
 def create_ui_response(components: List[Component]) -> Dict[str, Any]:
