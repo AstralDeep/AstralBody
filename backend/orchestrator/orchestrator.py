@@ -235,6 +235,13 @@ class Orchestrator:
                             "type": "chat_created",
                             "payload": {"chat_id": chat_id, "from_message": True}
                         }))
+                    else:
+                        if not self.history.get_chat(chat_id):
+                            self.history.create_chat(chat_id)
+                            await websocket.send(json.dumps({
+                                "type": "chat_created",
+                                "payload": {"chat_id": chat_id, "from_message": True}
+                            }))
 
                     display_message = msg.payload.get("display_message")
                     await self.handle_chat_message(websocket, user_message, chat_id, display_message)
@@ -698,6 +705,42 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                         if isinstance(child, dict):
                             self._validate_component_tree(child, valid_types)
 
+    def _map_file_paths(self, chat_id: str, args: Dict) -> Dict:
+        """Replace original filenames in tool arguments with backend paths.
+        
+        Uses file mappings stored in history for the given chat.
+        """
+        if not chat_id:
+            return args
+        
+        mappings = self.history.get_file_mappings(chat_id)
+        if not mappings:
+            return args
+        
+        # Build mapping dict: original_name -> backend_path
+        mapping_dict = {m["original_name"]: m["backend_path"] for m in mappings}
+        
+        # Recursively traverse args dict and replace strings that match original names
+        def replace_in_dict(obj):
+            if isinstance(obj, dict):
+                return {k: replace_in_dict(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [replace_in_dict(item) for item in obj]
+            elif isinstance(obj, str):
+                # Check if the string matches any original name (exact match)
+                for orig, backend in mapping_dict.items():
+                    if obj == orig:
+                        logger.info(f"Mapping file path: '{orig}' -> '{backend}'")
+                        return backend
+                return obj
+            else:
+                return obj
+        
+        new_args = replace_in_dict(args)
+        if new_args != args:
+            logger.info(f"Mapped file paths in tool arguments for chat {chat_id}")
+        return new_args
+
     # =========================================================================
     # LLM-POWERED TOOL ROUTING
     # =========================================================================
@@ -1059,6 +1102,11 @@ CRITICAL RULES:
         except json.JSONDecodeError:
             args = {}
 
+        # Map file paths if chat_id provided
+        if chat_id:
+            args = self._map_file_paths(chat_id, args)
+            args["session_id"] = chat_id
+
         agent_id = tool_to_agent.get(tool_name)
         if not agent_id or agent_id not in self.agents:
             err_msg = f"No agent available for tool '{tool_name}'"
@@ -1091,6 +1139,11 @@ CRITICAL RULES:
                 args = json.loads(tc.function.arguments) if tc.function.arguments else {}
             except json.JSONDecodeError:
                 args = {}
+
+            # Map file paths if chat_id provided
+            if chat_id:
+                args = self._map_file_paths(chat_id, args)
+                args["session_id"] = chat_id
 
             agent_id = tool_to_agent.get(tool_name)
             if agent_id and agent_id in self.agents:
