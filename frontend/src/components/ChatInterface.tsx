@@ -17,7 +17,7 @@ import type { ChatStatus } from "../hooks/useWebSocket";
 interface ChatInterfaceProps {
     messages: { role: string; content: unknown }[];
     chatStatus: ChatStatus;
-    onSendMessage: (message: string, displayMessage?: string) => void;
+    onSendMessage: (message: string, displayMessage?: string, explicitChatId?: string) => void;
     isConnected: boolean;
     activeChatId: string | null;
     savedComponents: Array<{ id: string; chat_id: string; component_data: Record<string, unknown>; component_type: string; title: string; created_at: number }>;
@@ -89,6 +89,8 @@ export default function ChatInterface({
             if (fileError) {
                 onSendMessage(`System Note: The user tried to upload a file (${attachedFile.name}) but there was an error: ${fileError}. Try to explain to the user what went wrong.`);
             } else if (fileContent) {
+                const targetChatId = activeChatId || crypto.randomUUID();
+
                 // If file is large (> 10KB), upload it and send path + preview
                 const isLarge = attachedFile.size > 10 * 1024;
 
@@ -97,6 +99,7 @@ export default function ChatInterface({
                     try {
                         const formData = new FormData();
                         formData.append('file', attachedFile);
+                        formData.append('session_id', targetChatId);
 
                         // Port 8002 is the auth proxy/BFF where we added the upload endpoint
                         const uploadUrl = `http://${window.location.hostname}:8002/api/upload`;
@@ -127,10 +130,11 @@ export default function ChatInterface({
  
  Please use the provided absolute \`file_path\` with an appropriate tool (like \`analyze_csv_file\`) to handle this request. Only use \`modify_data\` if the user explicitly asks to edit the file or add columns.`;
 
-                        onSendMessage(fullMsg, displayMsg);
-                    } catch (err: any) {
+                        onSendMessage(fullMsg, displayMsg, targetChatId);
+                    } catch (err: unknown) {
+                        const errorMessage = err instanceof Error ? err.message : String(err);
                         console.error("Upload error:", err);
-                        onSendMessage(`System Note: Failed to upload large file ${attachedFile.name}: ${err.message}. The model might fail if the full file is sent instead.`);
+                        onSendMessage(`System Note: Failed to upload large file ${attachedFile.name}: ${errorMessage}. The model might fail if the full file is sent instead.`, undefined, targetChatId);
                     } finally {
                         setIsProcessingFile(false);
                     }
@@ -139,16 +143,17 @@ export default function ChatInterface({
                     if (attachedFile.name.toLowerCase().endsWith('.csv')) {
                         const prompt = hasText ? `${input.trim()}\n\n` : '';
                         const displayMsg = `${prompt}[Attached File: ${attachedFile.name}]\n\n\`\`\`csv\n${fileContent}\n\`\`\``;
-                        onSendMessage(`${prompt}Here is my data from ${attachedFile.name}. Please run various data analyses on it and tell me the results:\n\n\`\`\`csv\n${fileContent}\n\`\`\``, displayMsg);
+                        onSendMessage(`${prompt}Here is my data from ${attachedFile.name}. Please run various data analyses on it and tell me the results:\n\n\`\`\`csv\n${fileContent}\n\`\`\``, displayMsg, targetChatId);
                     } else {
                         const prompt = hasText ? `${input.trim()}\n\n` : '';
                         const displayMsg = `${prompt}[Attached File: ${attachedFile.name}]\n\n\`\`\`text\n${fileContent}\n\`\`\``;
-                        onSendMessage(`${prompt}I've attached a file named ${attachedFile.name}. Here are the contents:\n\n\`\`\`text\n${fileContent}\n\`\`\``, displayMsg);
+                        onSendMessage(`${prompt}I've attached a file named ${attachedFile.name}. Here are the contents:\n\n\`\`\`text\n${fileContent}\n\`\`\``, displayMsg, targetChatId);
                     }
                 }
             }
         } else if (hasText) {
-            onSendMessage(input.trim());
+            const targetChatId = activeChatId || crypto.randomUUID();
+            onSendMessage(input.trim(), undefined, targetChatId);
         }
 
         setInput("");
@@ -170,7 +175,7 @@ export default function ChatInterface({
     // Helper to render user message with visual file tokens
     const renderUserMessage = (content: string) => {
         // Cleanup instructions and other boilerplate from full messages in history
-        let cleanContent = content
+        const cleanContent = content
             .replace(/I have uploaded .* to the backend at: `.*`/g, "")
             .replace(/Here is a preview \(first 50 lines\):/g, "")
             .replace(/Please use the `analyze_csv_file` tool .*/g, "")
