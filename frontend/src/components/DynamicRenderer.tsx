@@ -845,14 +845,31 @@ function RenderFileUpload({ label, accept, onSendMessage }: AnyProps) {
 
 // ── File Download ──────────────────────────────────────────────────
 function RenderFileDownload({ label, url, filename }: AnyProps) {
+    // If URL is empty or invalid, show a disabled button instead of a link that refreshes the page
+    const isValidUrl = url && url !== "#" && url.startsWith("http");
+    
+    if (!isValidUrl) {
+        return (
+            <div className="flex items-center gap-3 py-2">
+                <button
+                    disabled
+                    className="inline-flex items-center gap-2 px-4 py-2 bg-gray-500/20 text-gray-400 border border-gray-500/30 rounded-lg text-sm font-medium cursor-not-allowed opacity-50"
+                >
+                    <Download size={16} />
+                    <span>{label || "Download File (unavailable)"}</span>
+                </button>
+            </div>
+        );
+    }
+    
     return (
         <div className="flex items-center gap-3 py-2">
             <a
-                href={url || "#"}
+                href={url}
                 download={filename || "download"}
                 className="inline-flex items-center gap-2 px-4 py-2 bg-astral-secondary/20 hover:bg-astral-secondary/30 text-astral-secondary border border-astral-secondary/30 rounded-lg text-sm font-medium transition-colors"
-                target="_blank"
-                rel="noreferrer"
+                // Remove target="_blank" to allow proper download behavior
+                // target="_blank" can interfere with the download attribute in some browsers
             >
                 <Download size={16} />
                 <span>{label || "Download File"}</span>

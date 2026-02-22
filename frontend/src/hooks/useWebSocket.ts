@@ -309,8 +309,10 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
 
 
 
-    const sendMessage = useCallback((message: string, displayMessage?: string) => {
+    const sendMessage = useCallback((message: string, displayMessage?: string, explicitChatId?: string) => {
         if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+
+        const targetChatId = explicitChatId || activeChatId;
 
         setMessages(prev => [...prev, { role: "user", content: displayMessage || message }]);
         setChatStatus({ status: "thinking", message: "Processing..." });
@@ -318,10 +320,10 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
         wsRef.current.send(JSON.stringify({
             type: "ui_event",
             action: "chat_message",
-            session_id: activeChatId || undefined,
+            session_id: targetChatId || undefined,
             payload: {
                 message,
-                chat_id: activeChatId,
+                chat_id: targetChatId,
                 display_message: displayMessage
             }
         }));
