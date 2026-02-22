@@ -3,9 +3,9 @@ import os
 import time
 
 def test_download():
-    # 1. Create a dummy file in the downloads directory
+    # 1. Create a dummy file in the tmp/test_session directory
     backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    download_dir = os.path.join(backend_dir, "data", "downloads")
+    download_dir = os.path.join(backend_dir, "tmp", "test_session")
     os.makedirs(download_dir, exist_ok=True)
     
     filename = f"test_download_{int(time.time())}.txt"
@@ -17,7 +17,7 @@ def test_download():
     print(f"Created test file at: {file_path}")
     
     # 2. Try to download it via the BFF
-    url = f"http://localhost:8002/api/download/{filename}"
+    url = f"http://localhost:8002/api/download/test_session/{filename}"
     print(f"Attempting to download from: {url}")
     
     try:

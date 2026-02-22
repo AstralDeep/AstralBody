@@ -13,7 +13,7 @@ import logging
 import json
 
 import aiohttp
-from fastapi import FastAPI, Request, UploadFile, File
+from fastapi import FastAPI, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 import shutil
@@ -88,21 +88,20 @@ async def proxy_token(request: Request):
             return JSONResponse(content=body)
 
 @app.post("/api/upload")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(file: UploadFile = File(...), session_id: str = Form("default")):
     """
-    Handle file uploads and save them to a temporary directory.
+    Handle file uploads and save them to a temporary directory under the session id.
     Returns the absolute file path.
     """
     try:
         # Create tmp directory if it doesn't exist
         # We go up one level from orchestrator to backend root
         backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-        upload_dir = os.path.join(backend_dir, "tmp_uploads")
+        upload_dir = os.path.join(backend_dir, "tmp", session_id)
         os.makedirs(upload_dir, exist_ok=True)
 
-        file_id = str(uuid.uuid4())
-        file_extension = os.path.splitext(file.filename)[1]
-        safe_filename = f"{file_id}{file_extension}"
+        # Remove UUID renaming and instead use original filename (sanitize to avoid path traversal)
+        safe_filename = os.path.basename(file.filename)
         file_path = os.path.join(upload_dir, safe_filename)
 
         with open(file_path, "wb") as buffer:
@@ -118,14 +117,14 @@ async def upload_file(file: UploadFile = File(...)):
         logger.error(f"Upload failed: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-@app.get("/api/download/{filename}")
-async def download_file(filename: str):
+@app.get("/api/download/{session_id}/{filename}")
+async def download_file(session_id: str, filename: str):
     """
-    Serve files from the downloads directory.
+    Serve files from the downloads directory for a specific session.
     """
     try:
         backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-        download_dir = os.path.join(backend_dir, "data", "downloads")
+        download_dir = os.path.join(backend_dir, "tmp", session_id)
         file_path = os.path.join(download_dir, filename)
 
         if not os.path.exists(file_path):

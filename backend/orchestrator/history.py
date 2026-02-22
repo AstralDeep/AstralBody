@@ -69,9 +69,10 @@ class HistoryManager:
         except Exception as e:
             logger.error(f"Migration failed: {e}")
 
-    def create_chat(self) -> str:
+    def create_chat(self, chat_id: Optional[str] = None) -> str:
         """Create a new chat session."""
-        chat_id = str(uuid.uuid4())
+        if not chat_id:
+            chat_id = str(uuid.uuid4())
         timestamp = int(time.time() * 1000)
         self.db.execute(
             "INSERT INTO chats (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",

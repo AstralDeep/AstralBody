@@ -18,6 +18,17 @@ import csv
 import io
 import time
 
+# Data processing dependencies (optional)
+try:
+    import pandas as pd
+    PANDAS_AVAILABLE = True
+except ImportError:
+    pd = None
+    PANDAS_AVAILABLE = False
+
+# Expression evaluator
+from shared.expression_evaluator import ExpressionEvaluator, safe_eval
+
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
@@ -33,7 +44,9 @@ def generate_dynamic_chart(
     x_key: str, 
     y_key: Optional[str] = None, 
     chart_type: str = "auto",
-    title: str = "Data Visualization"
+    title: str = "Data Visualization",
+    session_id: str = "default",
+    **kwargs
 ) -> Dict[str, Any]:
     """Generate a chart dynamically based on generic input data.
 
@@ -170,98 +183,265 @@ def generate_dynamic_chart(
 
 
 def modify_data(
-    csv_data: Optional[str] = None, 
-    modifications: List[Dict[str, Any]] = None, 
+    modifications: Optional[List[Dict[str, Any]]] = None,
+    csv_data: Optional[str] = None,
     filename: Optional[str] = None,
-    file_path: Optional[str] = None
+    file_path: Optional[str] = None,
+    output_format: Optional[str] = None,
+    session_id: str = "default",
+    **kwargs
 ) -> Dict[str, Any]:
-    """Apply modifications to a CSV dataset and provide a download link.
+    """Apply modifications to a CSV/Excel dataset and provide a download link.
+
+    Supports row-based calculations, conditional logic, and Excel file formats.
 
     Args:
         csv_data: Raw CSV string data (optional if file_path is provided).
-        modifications: List of modifications to apply. Example: [{"action": "add_column", "name": "metadata", "value": "Banana"}]
-        filename: Optional filename for the modified file (default: modified_data_<timestamp>.csv).
-        file_path: Optional absolute path to a CSV file to modify.
+        modifications: List of modifications to apply. Each modification can have:
+            - action: "add_column", "update_column", "calculate_column"
+            - name: Column name
+            - value: Static value (optional if expression provided)
+            - expression: Python-like expression using row["column"] (optional)
+            - default: Fallback value if expression fails (optional)
+            - overwrite: Whether to overwrite existing column (default True)
+            - dtype: Data type for conversion ("string", "integer", "float", "boolean")
+        filename: Optional filename for the modified file (default: modified_data_<timestamp>.<ext>).
+        file_path: Optional absolute path to a CSV/Excel file to modify.
+        output_format: Output file format ("csv" or "excel"). Defaults to input format.
     """
     if modifications is None:
         modifications = []
 
-    rows = []
-    fieldnames = []
-
     try:
+        # Determine input format
+        input_format = None
         if file_path:
             if not os.path.exists(file_path):
                 return create_ui_response([Alert(message=f"File not found: {file_path}", variant="error")])
-            with open(file_path, mode='r', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
+            # Detect format from extension
+            if file_path.lower().endswith('.csv'):
+                input_format = 'csv'
+            elif file_path.lower().endswith(('.xlsx', '.xls')):
+                input_format = 'excel'
+            else:
+                # Default to CSV
+                input_format = 'csv'
+        else:
+            # No file path, assume CSV data
+            input_format = 'csv'
+
+        # Load data
+        rows = []
+        fieldnames = []
+        df = None
+        
+        if PANDAS_AVAILABLE and input_format == 'excel':
+            # Use pandas for Excel
+            df = pd.read_excel(file_path)
+            rows = df.to_dict('records')
+            fieldnames = list(df.columns)
+        else:
+            # CSV fallback (or pandas not available)
+            if file_path:
+                with open(file_path, mode='r', encoding='utf-8') as f:
+                    reader = csv.DictReader(f)
+                    fieldnames = list(reader.fieldnames) if reader.fieldnames else []
+                    rows = list(reader)
+            elif csv_data:
+                # Strip markdown code fences
+                csv_data = csv_data.strip()
+                if csv_data.startswith("```csv"):
+                    csv_data = csv_data[6:].strip()
+                elif csv_data.startswith("```"):
+                    csv_data = csv_data[3:].strip()
+                if csv_data.endswith("```"):
+                    csv_data = csv_data[:-3].strip()
+
+                reader = csv.DictReader(io.StringIO(csv_data))
                 fieldnames = list(reader.fieldnames) if reader.fieldnames else []
                 rows = list(reader)
-        elif csv_data:
-            # Strip markdown code fences
-            csv_data = csv_data.strip()
-            if csv_data.startswith("```csv"):
-                csv_data = csv_data[6:].strip()
-            elif csv_data.startswith("```"):
-                csv_data = csv_data[3:].strip()
-            if csv_data.endswith("```"):
-                csv_data = csv_data[:-3].strip()
+            else:
+                return create_ui_response([Alert(message="Neither csv_data nor file_path provided.", variant="error")])
 
-            reader = csv.DictReader(io.StringIO(csv_data))
-            fieldnames = list(reader.fieldnames) if reader.fieldnames else []
-            rows = list(reader)
-        else:
-            return create_ui_response([Alert(message="Neither csv_data nor file_path provided.", variant="error")])
-
-        # Apply modifications (to ALL rows)
+        # Process each modification
         for mod in modifications:
             action = mod.get("action")
-            name = mod.get("name")
+            name = mod.get("name", "")
             value = mod.get("value")
+            expression = mod.get("expression")
+            default = mod.get("default")
+            overwrite = mod.get("overwrite", True)
+            dtype = mod.get("dtype")
 
-            if action == "add_column" and name:
-                if name not in fieldnames:
-                    fieldnames.append(name)
-                for row in rows:
-                    row[name] = value
-            elif action == "update_column" and name:
-                for row in rows:
-                    row[name] = value
+            if action == "drop_column":
+                if name in fieldnames:
+                    fieldnames.remove(name)
+                    for row in rows:
+                        row.pop(name, None)
+                    if df is not None and PANDAS_AVAILABLE:
+                        df = df.drop(columns=[name])
+                continue
+                
+            elif action == "rename_column":
+                new_name = value
+                if name in fieldnames and new_name:
+                    idx = fieldnames.index(name)
+                    fieldnames[idx] = new_name
+                    for row in rows:
+                        if name in row:
+                            row[new_name] = row.pop(name)
+                    if df is not None and PANDAS_AVAILABLE:
+                        df = df.rename(columns={name: new_name})
+                continue
+                
+            elif action == "filter_rows":
+                if expression:
+                    evaluator = None
+                    try:
+                        evaluator = ExpressionEvaluator(expression)
+                    except Exception as e:
+                        return create_ui_response([Alert(message=f"Invalid expression '{expression}': {e}", variant="error")])
+                    
+                    filtered_rows = []
+                    for row in rows:
+                        try:
+                            if evaluator.evaluate(row):
+                                filtered_rows.append(row)
+                        except Exception:
+                            # if error evaluating, keep or drop? let's drop if evaluate fails unless default is True
+                            if str(default).lower() == 'true':
+                                filtered_rows.append(row)
+                    rows = filtered_rows
+                    if df is not None and PANDAS_AVAILABLE:
+                        df = pd.DataFrame(rows)
+                continue
+                
+            elif action == "sort_rows":
+                 reverse = str(value).lower() == 'desc'
+                 rows.sort(key=lambda r: (r.get(name) is None, r.get(name, "")), reverse=reverse)
+                 if df is not None and PANDAS_AVAILABLE:
+                     df = pd.DataFrame(rows)
+                 continue
 
-        # Save to downloads directory
+            # Determine if column exists
+            column_exists = name in fieldnames
+            
+            # Add column to fieldnames if needed
+            if action in ("add_column", "calculate_column") and not column_exists:
+                fieldnames.append(name)
+            elif action == "update_column" and not column_exists:
+                # update_column on non-existing column is treated as add_column
+                fieldnames.append(name)
+                column_exists = True
+            
+            # Prepare evaluator if expression provided
+            evaluator = None
+            if expression:
+                try:
+                    evaluator = ExpressionEvaluator(expression)
+                except Exception as e:
+                    return create_ui_response([
+                        Alert(message=f"Invalid expression '{expression}': {e}", variant="error")
+                    ])
+            
+            # Apply modification row by row
+            for i, row in enumerate(rows):
+                result = None
+                if expression and evaluator:
+                    try:
+                        result = evaluator.evaluate(row)
+                    except Exception:
+                        result = default if default is not None else value
+                else:
+                    result = value
+                
+                # Apply data type conversion
+                if dtype and result is not None:
+                    try:
+                        if dtype == "integer":
+                            result = int(float(result))
+                        elif dtype == "float":
+                            result = float(result)
+                        elif dtype == "boolean":
+                            result = bool(result)
+                        elif dtype == "string":
+                            result = str(result)
+                    except (ValueError, TypeError):
+                        pass  # Keep original result
+                
+                # Store result
+                if overwrite or not column_exists or action == "add_column":
+                    row[name] = result
+                elif action == "update_column" and column_exists:
+                    row[name] = result
+                # calculate_column always overwrites if overwrite=True (default)
+                
+            # Update DataFrame if using pandas (for vectorized operations)
+            if df is not None and name in fieldnames and PANDAS_AVAILABLE:
+                # Reconstruct column from rows (simpler but less efficient)
+                # In future could use pandas vectorized evaluation
+                df[name] = [row.get(name) for row in rows]
+
+        # Determine output format
+        if output_format is None:
+            output_format = input_format  # Default to same as input
+        
+        if output_format not in ("csv", "excel"):
+            output_format = "csv"
+        
+        # Generate filename
         timestamp = int(time.time())
         if not filename:
-            filename = f"modified_data_{timestamp}.csv"
+            ext = "csv" if output_format == "csv" else "xlsx"
+            if file_path:
+                basename = os.path.basename(file_path)
+                name_without_ext = os.path.splitext(basename)[0]
+                filename = f"{name_without_ext}_modified.{ext}"
+            else:
+                filename = f"modified_data_{timestamp}.{ext}"
         
         backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-        download_dir = os.path.join(backend_dir, "data", "downloads")
+        download_dir = os.path.join(backend_dir, "tmp", session_id)
         os.makedirs(download_dir, exist_ok=True)
         out_file_path = os.path.join(download_dir, filename)
 
-        with open(out_file_path, mode='w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(rows)
+        # Save output
+        if PANDAS_AVAILABLE and output_format == "excel" and df is not None:
+            # Use pandas to write Excel
+            df.to_excel(out_file_path, index=False)
+        else:
+            # Write CSV (fallback)
+            with open(out_file_path, mode='w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
 
         # The BFF URL
         bff_port = int(os.getenv("AUTH_PORT", 8002))
         bff_url = f"http://localhost:{bff_port}"
-        download_url = f"{bff_url}/api/download/{filename}"
+        download_url = f"{bff_url}/api/download/{session_id}/{filename}"
+
+        # Prepare preview (first 5 rows, first 5 columns)
+        preview_headers = fieldnames[:5]
+        preview_rows = [[str(row.get(f, "")) for f in preview_headers] for row in rows[:5]]
 
         components = [
             Card(
                 title="Data Modified Successfully",
                 id="modify-data-card",
                 content=[
-                    Alert(message=f"Applied {len(modifications)} modifications to the full dataset ({len(rows)} rows).", variant="success"),
+                    Alert(
+                        message=f"Applied {len(modifications)} modifications to {len(rows)} rows. Output format: {output_format.upper()}.",
+                        variant="success"
+                    ),
                     FileDownload(
                         label=f"Download {filename}",
                         url=download_url,
                         filename=filename
                     ),
                     Table(
-                        headers=fieldnames[:5], 
-                        rows=[[str(r.get(f, "")) for f in fieldnames[:5]] for r in rows[:5]],
+                        headers=preview_headers,
+                        rows=preview_rows,
                         id="modify-data-preview"
                     )
                 ]
@@ -270,7 +450,13 @@ def modify_data(
 
         return {
             "_ui_components": [c.to_json() for c in components],
-            "_data": {"filename": filename, "file_path": out_file_path, "rows_count": len(rows)}
+            "_data": {
+                "filename": filename,
+                "file_path": out_file_path,
+                "rows_count": len(rows),
+                "output_format": output_format,
+                "modifications_applied": len(modifications)
+            }
         }
 
     except Exception as e:
@@ -284,7 +470,7 @@ import psutil
 import platform
 
 
-def get_system_status() -> Dict[str, Any]:
+def get_system_status(session_id: str = "default", **kwargs) -> Dict[str, Any]:
     """Get comprehensive system status information."""
     cpu_percent = psutil.cpu_percent(interval=0.5)
     mem = psutil.virtual_memory()
@@ -345,7 +531,7 @@ def get_system_status() -> Dict[str, Any]:
     }
 
 
-def get_cpu_info() -> Dict[str, Any]:
+def get_cpu_info(session_id: str = "default", **kwargs) -> Dict[str, Any]:
     """Get detailed CPU information."""
     cpu_freq = psutil.cpu_freq()
     cpu_count = psutil.cpu_count()
@@ -378,7 +564,7 @@ def get_cpu_info() -> Dict[str, Any]:
     }
 
 
-def get_memory_info() -> Dict[str, Any]:
+def get_memory_info(session_id: str = "default", **kwargs) -> Dict[str, Any]:
     """Get detailed memory information."""
     mem = psutil.virtual_memory()
     swap = psutil.swap_memory()
@@ -414,7 +600,7 @@ def get_memory_info() -> Dict[str, Any]:
     }
 
 
-def get_disk_info() -> Dict[str, Any]:
+def get_disk_info(session_id: str = "default", **kwargs) -> Dict[str, Any]:
     """Get disk partition information."""
     partitions = psutil.disk_partitions()
     headers = ["Device", "Mount", "FS Type", "Total GB", "Used GB", "Free GB", "Usage %"]
@@ -457,7 +643,7 @@ def get_disk_info() -> Dict[str, Any]:
 import requests
 
 
-def search_wikipedia(query: str, language: str = "en") -> Dict[str, Any]:
+def search_wikipedia(query: str, language: str = "en", session_id: str = "default", **kwargs) -> Dict[str, Any]:
     """Search Wikipedia for articles and summaries.
 
     Args:
@@ -551,7 +737,7 @@ def extract_search_terms(query: str) -> str:
         print(f"Error extracting search terms: {e}")
         return query.strip()
 
-def search_arxiv(query: str, max_results: int = 10) -> Dict[str, Any]:
+def search_arxiv(query: str, max_results: int = 10, session_id: str = "default", **kwargs) -> Dict[str, Any]:
     """Search arXiv for papers related to the query.
     
     Args:
@@ -764,25 +950,30 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "modify_data": {
         "function": modify_data,
-        "description": "Modify CSV data (add or update columns) and provide a downloadable file link. Use this for ANY data modification request. IMPORTANT: If a 'file_path' is available in the chat context, you MUST use it instead of 'csv_data' to ensure the entire file is processed and not just a truncated preview.",
+        "description": "Modify CSV/Excel data with basic CRUD operations like dropping columns as well as row-based calculations. Supports add_column, update_column, calculate_column, drop_column, rename_column, filter_rows, and sort_rows. IMPORTANT: If a 'file_path' is available in the chat context, you MUST use it instead of 'csv_data' to ensure the entire file is processed.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "csv_data": {"type": "string", "description": "Raw CSV string data (use only for small/pasted data)"},
-                "file_path": {"type": "string", "description": "Absolute path to the CSV file on disk (MANDATORY for uploaded files)"},
+                "file_path": {"type": "string", "description": "Absolute path to the CSV/Excel file on disk (MANDATORY for uploaded files)"},
                 "modifications": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "action": {"type": "string", "description": "Action to perform: 'add_column' or 'update_column'"},
-                            "name": {"type": "string", "description": "Column name"},
-                            "value": {"type": "string", "description": "Value to fill (string)"}
+                            "action": {"type": "string", "description": "Action to perform: 'add_column', 'update_column', 'calculate_column', 'drop_column', 'rename_column', 'filter_rows', 'sort_rows'"},
+                            "name": {"type": "string", "description": "Column name (can be empty for filter_rows)"},
+                            "value": {"type": "string", "description": "Static value, or new_name for rename_column, or 'asc'/'desc' for sort_rows"},
+                            "expression": {"type": "string", "description": "Python-like expression using row['column'] for per‑row calculation (e.g., \"row['age'] * 2\" or \"row['age'] > 18\" for filtering)"},
+                            "default": {"type": "string", "description": "Fallback value if expression evaluation fails"},
+                            "overwrite": {"type": "boolean", "description": "Whether to overwrite existing column (default true)"},
+                            "dtype": {"type": "string", "description": "Data type for conversion: 'string', 'integer', 'float', 'boolean'"}
                         },
-                        "required": ["action", "name", "value"]
+                        "required": ["action"]
                     }
                 },
-                "filename": {"type": "string", "description": "Optional name for the result file"}
+                "filename": {"type": "string", "description": "Optional name for the result file"},
+                "output_format": {"type": "string", "description": "Output file format: 'csv' or 'excel' (defaults to input format)"}
             },
             "required": ["modifications"]
         }

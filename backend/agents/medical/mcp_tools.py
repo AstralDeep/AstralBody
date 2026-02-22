@@ -35,7 +35,7 @@ MOCK_PATIENTS = [
 ]
 
 
-def search_patients(min_age: int = 0, max_age: int = 200, condition: str = "") -> Dict[str, Any]:
+def search_patients(min_age: int = 0, max_age: int = 200, condition: str = "", session_id: str = "default", **kwargs) -> Dict[str, Any]:
     """Search patients by age range and/or condition.
 
     Args:
@@ -105,7 +105,7 @@ def search_patients(min_age: int = 0, max_age: int = 200, condition: str = "") -
     }
 
 
-def generate_synthetic_patients(count: int = 50) -> Dict[str, Any]:
+def generate_synthetic_patients(count: int = 50, session_id: str = "default", **kwargs) -> Dict[str, Any]:
     """Generate synthetic patient records and return a downloadable file component.
 
     Args:
@@ -125,12 +125,10 @@ def generate_synthetic_patients(count: int = 50) -> Dict[str, Any]:
         })
 
     # Save to CSV
-    import time
-    timestamp = int(time.time())
-    filename = f"synthetic_patients_{count}_{timestamp}.csv"
+    filename = f"synthetic_patients_{count}.csv"
     
     backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-    download_dir = os.path.join(backend_dir, "data", "downloads")
+    download_dir = os.path.join(backend_dir, "tmp", session_id)
     os.makedirs(download_dir, exist_ok=True)
     file_path = os.path.join(download_dir, filename)
     
@@ -143,9 +141,10 @@ def generate_synthetic_patients(count: int = 50) -> Dict[str, Any]:
     headers = ["ID", "Age", "Condition", "Status", "Heart Rate"]
     rows = [[p["id"], str(p["age"]), p["condition"], p["status"], str(p["heart_rate"])] for p in patients[:5]]
 
-    # The BFF URL (hardcoded for now as it's the standard for this system)
-    bff_url = "http://localhost:8002"
-    download_url = f"{bff_url}/api/download/{filename}"
+    # Use the same BFF URL as the general tools
+    bff_port = int(os.getenv("AUTH_PORT", 8002))
+    bff_url = f"http://localhost:{bff_port}"
+    download_url = f"{bff_url}/api/download/{session_id}/{filename}"
 
     components = [
         Card(
@@ -293,7 +292,7 @@ def _process_csv_data(rows: List[Dict[str, str]], fieldnames: List[str], missing
     }
 
 
-def analyze_generic_data(csv_data: str, missing_strategy: str = 'ask') -> Dict[str, Any]:
+def analyze_generic_data(csv_data: str, missing_strategy: str = 'ask', session_id: str = "default", **kwargs) -> Dict[str, Any]:
     """Analyze a generic CSV dataset.
     
     Args:
@@ -320,7 +319,7 @@ def analyze_generic_data(csv_data: str, missing_strategy: str = 'ask') -> Dict[s
         return create_ui_response([Alert(message=f"Failed to parse CSV: {e}", variant="error")])
 
 
-def analyze_csv_file(file_path: str, missing_strategy: str = 'ask') -> Dict[str, Any]:
+def analyze_csv_file(file_path: str, missing_strategy: str = 'ask', session_id: str = "default", **kwargs) -> Dict[str, Any]:
     """Analyze a CSV file stored on the backend.
     
     Args:
