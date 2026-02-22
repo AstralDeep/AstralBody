@@ -87,8 +87,84 @@ async def proxy_token(request: Request):
             logger.info(f"Token request successful ({grant_type})")
             return JSONResponse(content=body)
 
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from jose import jwt as jose_jwt
+
+security = HTTPBearer(auto_error=False)
+
+async def get_current_user_payload(request: Request, credentials: HTTPAuthorizationCredentials = Depends(security)):
+    if request.method == "OPTIONS":
+        return {}
+        
+    if not credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    token = credentials.credentials
+    if os.getenv("VITE_USE_MOCK_AUTH") == "true" and token == "dev-token":
+        return {
+            "sub": "dev-user-id",
+            "preferred_username": "DevUser",
+            "realm_access": {"roles": ["admin", "user"]}
+        }
+    
+    authority, client_id, _ = _get_keycloak_config()
+    if not authority or not client_id:
+        raise HTTPException(status_code=500, detail="Auth not configured")
+        
+    try:
+        jwks_url = f"{authority}/protocol/openid-connect/certs"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(jwks_url) as resp:
+                jwks = await resp.json()
+                
+        payload = jose_jwt.decode(
+            token, jwks, algorithms=["RS256"],
+            options={"verify_aud": False, "verify_at_hash": False}
+        )
+        azp = payload.get("azp")
+        if azp and azp != client_id:
+             raise HTTPException(status_code=401, detail="Invalid client")
+        return payload
+    except Exception as e:
+        logger.error(f"Token validation failed in auth wrapper: {e}")
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+def _extract_roles(user_data: dict) -> list:
+    roles = user_data.get("realm_access", {}).get("roles", [])
+    if "resource_access" in user_data:
+        client_id = os.getenv("VITE_KEYCLOAK_CLIENT_ID", "astral-frontend")
+        if client_id in user_data["resource_access"]:
+            client_roles = user_data["resource_access"][client_id].get("roles", [])
+            roles.extend(client_roles)
+        if "account" in user_data["resource_access"]:
+            account_roles = user_data["resource_access"]["account"].get("roles", [])
+            roles.extend(account_roles)
+    return roles
+
+async def verify_user(user_data: dict = Depends(get_current_user_payload)):
+    if not user_data:
+        return {}
+    roles = _extract_roles(user_data)
+        
+    if "user" not in roles and "admin" not in roles:
+        raise HTTPException(status_code=403, detail="Not authorized (Requires 'user' or 'admin' role)")
+    return user_data
+
+async def verify_admin(user_data: dict = Depends(get_current_user_payload)):
+    if not user_data:
+        return {}
+    roles = _extract_roles(user_data)
+
+    if "admin" not in roles:
+        raise HTTPException(status_code=403, detail="Not authorized (Requires 'admin' role)")
+    return user_data
+
 @app.post("/api/upload")
-async def upload_file(file: UploadFile = File(...), session_id: str = Form("default")):
+async def upload_file(file: UploadFile = File(...), session_id: str = Form("default"), user=Depends(verify_user)):
     """
     Handle file uploads and save them to a temporary directory under the session id.
     Returns the absolute file path.
@@ -118,7 +194,7 @@ async def upload_file(file: UploadFile = File(...), session_id: str = Form("defa
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.get("/api/download/{session_id}/{filename}")
-async def download_file(session_id: str, filename: str):
+async def download_file(session_id: str, filename: str, user=Depends(verify_user)):
     """
     Serve files from the downloads directory for a specific session.
     """
@@ -178,7 +254,7 @@ class TestRequest(BaseModel):
     files: Optional[Dict[str, str]] = None
 
 @app.post("/api/agent-creator/start")
-async def agent_creator_start(req: StartSessionRequest):
+async def agent_creator_start(req: StartSessionRequest, admin=Depends(verify_admin)):
     from orchestrator.agent_generator import agent_generator
     result = await agent_generator.start_session(
         name=req.name,
@@ -189,13 +265,13 @@ async def agent_creator_start(req: StartSessionRequest):
     return JSONResponse(content=result)
 
 @app.post("/api/agent-creator/chat")
-async def agent_creator_chat(req: ChatSessionRequest):
+async def agent_creator_chat(req: ChatSessionRequest, admin=Depends(verify_admin)):
     from orchestrator.agent_generator import agent_generator
     result = await agent_generator.chat(req.session_id, req.message)
     return JSONResponse(content=result)
 
 @app.post("/api/agent-creator/generate")
-async def agent_creator_generate(req: GenerateCodeRequest):
+async def agent_creator_generate(req: GenerateCodeRequest, admin=Depends(verify_admin)):
     from orchestrator.agent_generator import agent_generator
     result = await agent_generator.generate_code(req.session_id)
     return JSONResponse(content=result)
@@ -205,7 +281,7 @@ import asyncio
 from shared.progress import ProgressEvent
 
 @app.post("/api/agent-creator/generate-with-progress")
-async def agent_creator_generate_with_progress(req: GenerateCodeRequest):
+async def agent_creator_generate_with_progress(req: GenerateCodeRequest, admin=Depends(verify_admin)):
     """Generate code with Server-Sent Events progress streaming."""
     from orchestrator.agent_generator import agent_generator
     
@@ -280,7 +356,7 @@ async def agent_creator_generate_with_progress(req: GenerateCodeRequest):
     )
 
 @app.post("/api/agent-creator/test")
-async def agent_creator_test(req: TestRequest):
+async def agent_creator_test(req: TestRequest, admin=Depends(verify_admin)):
     from orchestrator.agent_generator import agent_generator
     
     # Determine what to send to save_and_test_agent
@@ -305,12 +381,12 @@ async def agent_creator_test(req: TestRequest):
         )
 
 @app.get("/api/agent-creator/drafts")
-async def get_draft_agents():
+async def get_draft_agents(admin=Depends(verify_admin)):
     from orchestrator.agent_generator import agent_generator
     return JSONResponse(content={"drafts": agent_generator.get_all_sessions()})
 
 @app.get("/api/agent-creator/session/{session_id}")
-async def get_draft_session(session_id: str):
+async def get_draft_session(session_id: str, admin=Depends(verify_admin)):
     from orchestrator.agent_generator import agent_generator
     details = agent_generator.get_session_details(session_id)
     if not details:
@@ -318,7 +394,7 @@ async def get_draft_session(session_id: str):
     return JSONResponse(content=details)
 
 @app.delete("/api/agent-creator/session/{session_id}")
-async def delete_draft_session(session_id: str):
+async def delete_draft_session(session_id: str, admin=Depends(verify_admin)):
     from orchestrator.agent_generator import agent_generator
     success = agent_generator.delete_session(session_id)
     if not success:
@@ -326,7 +402,7 @@ async def delete_draft_session(session_id: str):
     return JSONResponse(content={"status": "success"})
 
 @app.post("/api/agent-creator/resolve-install")
-async def agent_creator_resolve_install(req: ResolveInstallRequest):
+async def agent_creator_resolve_install(req: ResolveInstallRequest, admin=Depends(verify_admin)):
     from orchestrator.agent_generator import agent_generator
     result = await agent_generator.resolve_install(req.session_id, req.tool_call_id, req.approved, req.packages)
     return JSONResponse(content=result)

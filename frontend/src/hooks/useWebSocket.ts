@@ -122,7 +122,9 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
                 if (!(data.payload as Record<string, unknown>).from_message) {
                     setMessages([]);
                     setUiComponents([]);
+                    setSavedComponents([]);
                 }
+
 
                 // Refresh history
                 if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -151,6 +153,15 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
                     // If the last message was from assistant, we might want to restore UI components?
                     // For simplicity, we just clear current UI components unless we reconstruct them
                     setUiComponents([]);
+                    setSavedComponents([]);
+
+                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                        wsRef.current.send(JSON.stringify({
+                            type: "ui_event",
+                            action: "get_saved_components",
+                            payload: { chat_id: (data.chat as Record<string, unknown>).id as string }
+                        }));
+                    }
                 }
                 break;
 
@@ -182,6 +193,8 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
                 break;
 
             case "components_combined":
+                setIsCombining(false);
+                setCombineError(null);
                 if (data.new_components) {
                     // Prepend new combined components and remove deleted ones if any
                     setSavedComponents(prev => {
@@ -213,7 +226,7 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
                 break;
 
             default:
-                console.log("Unknown message type:", data.type, data);
+            // console.log("Unknown message type:", data.type, data);
         }
     }, [setActiveChatId]);
 
@@ -226,7 +239,7 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
 
             ws.onopen = () => {
                 const currentChatId = activeChatIdRef.current;
-                console.log('WebSocket connection opened - readyState:', ws.readyState, 'activeChatId:', currentChatId, 'timestamp:', new Date().toISOString());
+                // console.log('WebSocket connection opened - readyState:', ws.readyState, 'activeChatId:', currentChatId, 'timestamp:', new Date().toISOString());
                 setIsConnected(true);
                 setChatStatus({ status: "idle", message: "" });
                 // Send RegisterUI with token
@@ -245,16 +258,16 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
 
                 // If we have an active chat ID, reload it after reconnection
                 if (currentChatId) {
-                    console.log('Reloading active chat after reconnection:', currentChatId);
+                    // console.log('Reloading active chat after reconnection:', currentChatId);
                     setTimeout(() => {
-                        console.log('Attempting to reload chat - WebSocket readyState:', ws.readyState, 'activeChatId still:', currentChatId);
+                        // console.log('Attempting to reload chat - WebSocket readyState:', ws.readyState, 'activeChatId still:', currentChatId);
                         if (ws.readyState === WebSocket.OPEN) {
                             ws.send(JSON.stringify({
                                 type: "ui_event",
                                 action: "load_chat",
                                 payload: { chat_id: currentChatId }
                             }));
-                            console.log('Chat reload request sent for:', currentChatId);
+                            // console.log('Chat reload request sent for:', currentChatId);
                         } else {
                             console.error('WebSocket not OPEN when trying to reload chat. State:', ws.readyState);
                         }
@@ -271,8 +284,8 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
                 }
             };
 
-            ws.onclose = (event) => {
-                console.log('WebSocket connection closed:', event.code, event.reason);
+            ws.onclose = () => {
+                // console.log('WebSocket connection closed:', event.code, event.reason);
                 setIsConnected(false);
                 // Auto-reconnect after 3s
                 reconnectTimer.current = window.setTimeout(() => {
@@ -358,7 +371,7 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
 
     // Saved components functions
     const saveComponent = useCallback(async (componentData: Record<string, unknown>, componentType: string, title?: string): Promise<boolean> => {
-        console.log('saveComponent called:', { componentType, title, wsRefCurrent: wsRef.current, wsReadyState: wsRef.current?.readyState, activeChatId, timestamp: new Date().toISOString() });
+        // console.log('saveComponent called:', { componentType, title, wsRefCurrent: wsRef.current, wsReadyState: wsRef.current?.readyState, activeChatId, timestamp: new Date().toISOString() });
 
         if (!wsRef.current) {
             console.error('WebSocket reference is null - cannot save component');
@@ -407,7 +420,7 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
             }
         }));
 
-        console.log('Save request sent for component:', componentType, 'to chat:', activeChatId);
+        // console.log('Save request sent for component:', componentType, 'to chat:', activeChatId);
         return promise;
     }, [activeChatId]);
 

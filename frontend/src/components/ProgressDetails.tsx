@@ -1,4 +1,3 @@
-import React from 'react';
 import type { ProgressState } from '../types/progress';
 import { getStepLabel, getStepDescription } from '../types/progress';
 
@@ -11,13 +10,13 @@ export function ProgressDetails({ state }: ProgressDetailsProps) {
     const seconds = Math.floor(ms / 1000);
     const minutes = Math.floor(seconds / 60);
     const remainingSeconds = seconds % 60;
-    
+
     if (minutes > 0) {
       return `${minutes}m ${remainingSeconds}s`;
     }
     return `${remainingSeconds}s`;
   };
-  
+
   return (
     <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-4 border border-gray-200 dark:border-gray-700">
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -53,7 +52,7 @@ export function ProgressDetails({ state }: ProgressDetailsProps) {
             </div>
           </div>
         </div>
-        
+
         {/* Step details */}
         <div>
           <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">
@@ -89,7 +88,7 @@ export function ProgressDetails({ state }: ProgressDetailsProps) {
           </div>
         </div>
       </div>
-      
+
       {/* Progress summary */}
       <div className="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
         <div className="flex justify-between text-sm">

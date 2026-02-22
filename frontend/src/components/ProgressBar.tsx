@@ -1,4 +1,3 @@
-import React from 'react';
 import type { ProgressStep } from '../types/progress';
 import { getStepLabel, isCriticalStep } from '../types/progress';
 
@@ -22,12 +21,12 @@ export function ProgressBar({
   isComplete
 }: ProgressBarProps) {
   const stepWidth = 100 / Math.max(steps.length, 1);
-  
+
   return (
     <div className="w-full">
       {/* Overall progress bar */}
       <div className="relative h-4 w-full bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden mb-4">
-        <div 
+        <div
           className={`h-full transition-all duration-300 ease-out ${isError ? 'bg-red-500' : isComplete ? 'bg-green-500' : 'bg-blue-500'}`}
           style={{ width: `${percentage}%` }}
         />
@@ -37,22 +36,22 @@ export function ProgressBar({
           </span>
         </div>
       </div>
-      
+
       {/* Step indicators */}
       <div className="flex justify-between relative mb-8">
         {/* Connecting line */}
         <div className="absolute top-3 left-0 right-0 h-0.5 bg-gray-300 dark:bg-gray-600 -z-10" />
-        
+
         {steps.map((step, index) => {
           const isCompleted = completedSteps.has(step);
           const isFailed = failedSteps.has(step);
           const isCurrent = step === currentStep && !isCompleted && !isFailed;
           const isCritical = isCriticalStep(step);
-          
+
           let bgColor = 'bg-gray-300 dark:bg-gray-600';
           let borderColor = 'border-gray-400 dark:border-gray-500';
           let textColor = 'text-gray-600 dark:text-gray-400';
-          
+
           if (isFailed) {
             bgColor = 'bg-red-500';
             borderColor = 'border-red-600 dark:border-red-700';
@@ -66,15 +65,15 @@ export function ProgressBar({
             borderColor = 'border-blue-600 dark:border-blue-700';
             textColor = 'text-blue-700 dark:text-blue-300';
           }
-          
+
           return (
-            <div 
+            <div
               key={step}
               className="flex flex-col items-center relative"
               style={{ width: `${stepWidth}%` }}
             >
               {/* Step circle */}
-              <div 
+              <div
                 className={`w-6 h-6 rounded-full border-2 ${borderColor} ${bgColor} flex items-center justify-center transition-all duration-300`}
               >
                 {isFailed ? (
@@ -85,7 +84,7 @@ export function ProgressBar({
                   <span className="text-xs font-bold text-white">{index + 1}</span>
                 )}
               </div>
-              
+
               {/* Step label */}
               <div className="mt-2 text-center">
                 <div className={`text-xs font-medium ${textColor}`}>

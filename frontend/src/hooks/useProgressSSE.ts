@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import type { ProgressEvent, LegacyLogEvent, ProgressState, ProgressPhase } from '../types/progress';
 import { getPhaseSteps } from '../types/progress';
+import { BFF_URL } from '../config';
 
 type SSEData = ProgressEvent | LegacyLogEvent | { type: 'complete', result?: unknown } | { type: 'error', error: string };
 
@@ -134,7 +135,7 @@ export function useProgressSSE(sessionId: string, phase: ProgressPhase): UseProg
 
     // Determine endpoint based on phase
     let endpoint = '';
-    const baseUrl = import.meta.env.VITE_AUTH_URL || 'http://localhost:8002';
+    const baseUrl = BFF_URL;
 
     if (phase === 'generation') {
       endpoint = `${baseUrl}/api/agent-creator/generate-with-progress`;

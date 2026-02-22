@@ -19,6 +19,7 @@ import {
     Download,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
+import { useSmartAuth } from "../hooks/useSmartAuth";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyProps = any;
@@ -845,9 +846,49 @@ function RenderFileUpload({ label, accept, onSendMessage }: AnyProps) {
 
 // ── File Download ──────────────────────────────────────────────────
 function RenderFileDownload({ label, url, filename }: AnyProps) {
+    const auth = useSmartAuth();
+    const [isDownloading, setIsDownloading] = useState(false);
+
     // If URL is empty or invalid, show a disabled button instead of a link that refreshes the page
     const isValidUrl = url && url !== "#" && url.startsWith("http");
-    
+
+    const handleDownload = async (e: React.MouseEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+
+        if (!isValidUrl || isDownloading) return;
+
+        try {
+            setIsDownloading(true);
+            const headers: HeadersInit = {};
+            if (auth.user?.access_token) {
+                headers["Authorization"] = `Bearer ${auth.user.access_token}`;
+            }
+
+            const response = await fetch(url, { headers });
+            if (!response.ok) {
+                throw new Error(response.status === 401 || response.status === 403 ? "Unauthorized" : "Download failed");
+            }
+
+            const blob = await response.blob();
+            const downloadUrl = window.URL.createObjectURL(blob);
+
+            const a = document.createElement("a");
+            a.href = downloadUrl;
+            a.download = filename || "download";
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(downloadUrl);
+            setTimeout(() => document.body.removeChild(a), 0);
+        } catch (error) {
+            console.error("Error downloading file:", error);
+            // Ideally use a more integrated toast or alert
+            alert("Failed to download file. Please check your connection or permissions.");
+        } finally {
+            setIsDownloading(false);
+        }
+    };
+
     if (!isValidUrl) {
         return (
             <div className="flex items-center gap-3 py-2">
@@ -861,33 +902,38 @@ function RenderFileDownload({ label, url, filename }: AnyProps) {
             </div>
         );
     }
-    
+
     return (
         <div className="flex items-center gap-3 py-2">
-            <a
-                href={url}
-                download={filename || "download"}
-                className="inline-flex items-center gap-2 px-4 py-2 bg-astral-secondary/20 hover:bg-astral-secondary/30 text-astral-secondary border border-astral-secondary/30 rounded-lg text-sm font-medium transition-colors"
-                // Remove target="_blank" to allow proper download behavior
-                // target="_blank" can interfere with the download attribute in some browsers
+            <button
+                onClick={handleDownload}
+                disabled={isDownloading}
+                className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${isDownloading
+                    ? 'bg-astral-secondary/10 text-astral-secondary/50 border border-astral-secondary/10 cursor-wait'
+                    : 'bg-astral-secondary/20 hover:bg-astral-secondary/30 text-astral-secondary border border-astral-secondary/30'
+                    }`}
             >
-                <Download size={16} />
-                <span>{label || "Download File"}</span>
-            </a>
+                {isDownloading ? (
+                    <div className="animate-spin rounded-full h-4 w-4 border-t-2 border-b-2 border-astral-secondary" />
+                ) : (
+                    <Download size={16} />
+                )}
+                <span>{isDownloading ? "Downloading..." : (label || "Download File")}</span>
+            </button>
         </div>
     );
 }
 
 // ─── Main DynamicRenderer ──────────────────────────────────────────
-export default function DynamicRenderer({ components, onSaveComponent, activeChatId, onSendMessage }: DynamicRendererProps) {
+export default function DynamicRenderer({ components, onSaveComponent, onSendMessage }: DynamicRendererProps) {
     const comps = Array.isArray(components) ? components : [components];
 
-    console.log('DynamicRenderer rendered with:', {
-        componentCount: comps.length,
-        hasOnSaveComponent: !!onSaveComponent,
-        activeChatId,
-        components: comps.map(c => c?.type)
-    });
+    // console.log('DynamicRenderer rendered with:', {
+    //     componentCount: comps.length,
+    //     hasOnSaveComponent: !!onSaveComponent,
+    //     activeChatId,
+    //     components: comps.map(c => c?.type)
+    // });
 
     if (!comps || comps.length === 0) return null;
 

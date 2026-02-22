@@ -7,10 +7,12 @@ import "prismjs/components/prism-python";
 import "prismjs/themes/prism-tomorrow.css";
 import { ProgressDisplay } from "./ProgressDisplay";
 import type { ProgressState } from "../types/progress";
+import { BFF_URL } from "../config";
 
 interface AgentCreatorPageProps {
     onBack: () => void;
     initialDraftId?: string | null;
+    accessToken?: string;
 }
 
 interface Message {
@@ -18,7 +20,7 @@ interface Message {
     content: string;
 }
 
-export default function AgentCreatorPage({ onBack, initialDraftId }: AgentCreatorPageProps) {
+export default function AgentCreatorPage({ onBack, initialDraftId, accessToken }: AgentCreatorPageProps) {
     const [step, setStep] = useState<"form" | "chat" | "progress" | "editor" | "testing" | "approved">("form");
     const [formData, setFormData] = useState({
         name: "",
@@ -55,7 +57,12 @@ export default function AgentCreatorPage({ onBack, initialDraftId }: AgentCreato
             const fetchDraft = async () => {
                 setIsProcessing(true);
                 try {
-                    const resp = await fetch(`${import.meta.env.VITE_AUTH_URL || "http://localhost:8002"}/api/agent-creator/session/${initialDraftId}`);
+                    const headers: HeadersInit = {};
+                    if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
+
+                    const resp = await fetch(`${BFF_URL}/api/agent-creator/session/${initialDraftId}`, {
+                        headers
+                    });
                     if (resp.ok) {
                         const data = await resp.json();
                         setFormData({
@@ -90,7 +97,7 @@ export default function AgentCreatorPage({ onBack, initialDraftId }: AgentCreato
             setTestOutput("");
             setPendingInstall(null);
         }
-    }, [initialDraftId]);
+    }, [initialDraftId, accessToken]);
 
     const handleFormSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -98,9 +105,12 @@ export default function AgentCreatorPage({ onBack, initialDraftId }: AgentCreato
 
         setIsProcessing(true);
         try {
-            const resp = await fetch(`${import.meta.env.VITE_AUTH_URL || "http://localhost:8002"}/api/agent-creator/start`, {
+            const headers: HeadersInit = { "Content-Type": "application/json" };
+            if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
+
+            const resp = await fetch(`${BFF_URL}/api/agent-creator/start`, {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers,
                 body: JSON.stringify(formData)
             });
             const data = await resp.json();
@@ -126,9 +136,12 @@ export default function AgentCreatorPage({ onBack, initialDraftId }: AgentCreato
 
         setIsProcessing(true);
         try {
-            const resp = await fetch(`${import.meta.env.VITE_AUTH_URL || "http://localhost:8002"}/api/agent-creator/chat`, {
+            const headers: HeadersInit = { "Content-Type": "application/json" };
+            if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
+
+            const resp = await fetch(`${BFF_URL}/api/agent-creator/chat`, {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers,
                 body: JSON.stringify({ session_id: sessionId, message: msg })
             });
             const data = await resp.json();
@@ -148,9 +161,12 @@ export default function AgentCreatorPage({ onBack, initialDraftId }: AgentCreato
         if (!sessionId || !pendingInstall) return;
         setIsProcessing(true);
         try {
-            const resp = await fetch(`${import.meta.env.VITE_AUTH_URL || "http://localhost:8002"}/api/agent-creator/resolve-install`, {
+            const headers: HeadersInit = { "Content-Type": "application/json" };
+            if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
+
+            const resp = await fetch(`${BFF_URL}/api/agent-creator/resolve-install`, {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers,
                 body: JSON.stringify({
                     session_id: sessionId,
                     tool_call_id: pendingInstall.toolCallId,
@@ -180,9 +196,12 @@ export default function AgentCreatorPage({ onBack, initialDraftId }: AgentCreato
         // Try to use the new progress endpoint first
         const fetchProgressEndpoint = async () => {
             try {
-                const resp = await fetch(`${import.meta.env.VITE_AUTH_URL || "http://localhost:8002"}/api/agent-creator/generate-with-progress`, {
+                const headers: HeadersInit = { "Content-Type": "application/json" };
+                if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
+
+                const resp = await fetch(`${BFF_URL}/api/agent-creator/generate-with-progress`, {
                     method: "POST",
-                    headers: { "Content-Type": "application/json" },
+                    headers,
                     body: JSON.stringify({ session_id: sessionId })
                 });
 
@@ -254,9 +273,12 @@ export default function AgentCreatorPage({ onBack, initialDraftId }: AgentCreato
 
         // Fallback to legacy endpoint
         const fetchLegacyEndpoint = async () => {
-            const resp = await fetch(`${import.meta.env.VITE_AUTH_URL || "http://localhost:8002"}/api/agent-creator/generate`, {
+            const headers: HeadersInit = { "Content-Type": "application/json" };
+            if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
+
+            const resp = await fetch(`${BFF_URL}/api/agent-creator/generate`, {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers,
                 body: JSON.stringify({ session_id: sessionId })
             });
             return await resp.json();
@@ -339,9 +361,12 @@ export default function AgentCreatorPage({ onBack, initialDraftId }: AgentCreato
         setTestingProgress(null);
 
         try {
-            const resp = await fetch(`${import.meta.env.VITE_AUTH_URL || "http://localhost:8002"}/api/agent-creator/test`, {
+            const headers: HeadersInit = { "Content-Type": "application/json" };
+            if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
+
+            const resp = await fetch(`${BFF_URL}/api/agent-creator/test`, {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers,
                 body: JSON.stringify({
                     session_id: sessionId,
                     files: generatedFiles

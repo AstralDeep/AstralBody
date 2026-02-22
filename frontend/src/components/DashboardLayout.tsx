@@ -20,6 +20,7 @@ import {
     Trash2,
 } from "lucide-react";
 import type { Agent, ChatSession } from "../hooks/useWebSocket";
+import { BFF_URL } from "../config";
 
 interface DashboardLayoutProps {
     children: React.ReactNode;
@@ -32,6 +33,8 @@ interface DashboardLayoutProps {
     onNewChat?: () => void;
     onNewAgent?: () => void;
     onLoadDraft?: (draftId: string) => void;
+    isAdmin?: boolean;
+    accessToken?: string;
 }
 
 export default function DashboardLayout({
@@ -45,6 +48,8 @@ export default function DashboardLayout({
     onNewChat,
     onNewAgent,
     onLoadDraft,
+    isAdmin = false,
+    accessToken,
 }: DashboardLayoutProps) {
     const [expandedAgents, setExpandedAgents] = useState<string[]>([]);
     const [drafts, setDrafts] = useState<{ id: string; name: string }[]>([]);
@@ -52,8 +57,12 @@ export default function DashboardLayout({
     useEffect(() => {
         const fetchDrafts = async () => {
             try {
-                const url = `${import.meta.env.VITE_AUTH_URL || "http://localhost:8002"}/api/agent-creator/drafts`;
-                const res = await fetch(url);
+                const url = `${BFF_URL}/api/agent-creator/drafts`;
+                const headers: HeadersInit = {};
+                if (accessToken) {
+                    headers["Authorization"] = `Bearer ${accessToken}`;
+                }
+                const res = await fetch(url, { headers });
                 const data = await res.json();
                 setDrafts(data.drafts || []);
             } catch {
@@ -63,13 +72,17 @@ export default function DashboardLayout({
         fetchDrafts();
         const interval = setInterval(fetchDrafts, 5000);
         return () => clearInterval(interval);
-    }, []);
+    }, [accessToken]);
 
     const handleDeleteDraft = async (draftId: string) => {
         if (!confirm("Are you sure you want to delete this draft agent?")) return;
         try {
-            const url = `${import.meta.env.VITE_AUTH_URL || "http://localhost:8002"}/api/agent-creator/session/${draftId}`;
-            const res = await fetch(url, { method: "DELETE" });
+            const url = `${BFF_URL}/api/agent-creator/session/${draftId}`;
+            const headers: HeadersInit = {};
+            if (accessToken) {
+                headers["Authorization"] = `Bearer ${accessToken}`;
+            }
+            const res = await fetch(url, { method: "DELETE", headers });
             if (res.ok) {
                 setDrafts(prev => prev.filter(d => d.id !== draftId));
             } else {
@@ -141,13 +154,15 @@ export default function DashboardLayout({
                             <p className="text-[10px] font-semibold uppercase tracking-widest text-astral-muted">
                                 Agents
                             </p>
-                            <button
-                                onClick={onNewAgent}
-                                title="Create New Agent"
-                                className="p-1 rounded bg-astral-primary/10 text-astral-primary hover:bg-astral-primary/20 transition-colors"
-                            >
-                                <Plus size={12} />
-                            </button>
+                            {isAdmin && (
+                                <button
+                                    onClick={onNewAgent}
+                                    title="Create New Agent"
+                                    className="p-1 rounded bg-astral-primary/10 text-astral-primary hover:bg-astral-primary/20 transition-colors"
+                                >
+                                    <Plus size={12} />
+                                </button>
+                            )}
                         </div>
                         <div className="space-y-4">
                             {/* Connected Section */}

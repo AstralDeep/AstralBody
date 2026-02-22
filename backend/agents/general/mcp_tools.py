@@ -17,6 +17,9 @@ import json
 import csv
 import io
 import time
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Data processing dependencies (optional)
 try:
@@ -709,18 +712,18 @@ def search_wikipedia(query: str, language: str = "en", session_id: str = "defaul
 
 def extract_search_terms(query: str) -> str:
     """Extract relevant search terms from a natural language query using LLM."""
-    print(f"DEBUG: Extracting search terms for: {query}")
+    logger.debug(f"Extracting search terms for: {query}")
     api_key = os.getenv("OPENAI_API_KEY")
     base_url = os.getenv("OPENAI_BASE_URL")
     model = os.getenv("LLM_MODEL", "gpt-4o")
     
     if not api_key:
-        print("Warning: OPENAI_API_KEY not found, using raw query")
+        logger.warning("OPENAI_API_KEY not found, using raw query")
         return query.strip()
         
     try:
         client = OpenAI(api_key=api_key, base_url=base_url)
-        print("DEBUG: Calling LLM for search terms...")
+        logger.debug("Calling LLM for search terms...")
         response = client.chat.completions.create(
             model=model,
             messages=[
@@ -731,10 +734,10 @@ def extract_search_terms(query: str) -> str:
             timeout=10 # Add timeout
         )
         terms = response.choices[0].message.content.strip()
-        print(f"DEBUG: extracted terms: {terms}")
+        logger.debug(f"extracted terms: {terms}")
         return terms
     except Exception as e:
-        print(f"Error extracting search terms: {e}")
+        logger.error(f"Error extracting search terms: {e}")
         return query.strip()
 
 def search_arxiv(query: str, max_results: int = 10, session_id: str = "default", **kwargs) -> Dict[str, Any]:
@@ -744,13 +747,13 @@ def search_arxiv(query: str, max_results: int = 10, session_id: str = "default",
         query: The search query
         max_results: Maximum number of results (default: 10)
     """
-    print(f"DEBUG: search_arxiv called with query: {query}")
+    logger.debug(f"search_arxiv called with query: {query}")
     # Use LLM to extract clean search terms
     clean_query = extract_search_terms(query)
-    print(f"Original query: '{query}' -> Cleaned query: '{clean_query}'")
+    logger.debug(f"Original query: '{query}' -> Cleaned query: '{clean_query}'")
     
     try:
-        print("DEBUG: Executing arxiv search...")
+        logger.debug("Executing arxiv search...")
         search = arxiv.Search(
             query=clean_query,
             max_results=int(max_results),
@@ -767,7 +770,7 @@ def search_arxiv(query: str, max_results: int = 10, session_id: str = "default",
                 "url": paper.entry_id,
                 "pdf_url": paper.pdf_url
             })
-        print(f"DEBUG: Found {len(results)} papers")
+        logger.debug(f"Found {len(results)} papers")
         
         # Create UI components
         if not results:
@@ -841,7 +844,7 @@ def search_arxiv(query: str, max_results: int = 10, session_id: str = "default",
             "_data": results
         }
     except Exception as e:
-        print(f"Error searching arXiv: {e}")
+        logger.error(f"Error searching arXiv: {e}")
         components = [
             Alert(
                 title="Search Error",

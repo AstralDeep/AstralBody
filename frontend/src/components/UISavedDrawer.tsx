@@ -12,7 +12,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { X, ChevronDown, ChevronUp, Trash2, Loader2, Layers, GripVertical, AlertCircle, Maximize2, Minimize2 } from "lucide-react";
 import DynamicRenderer from "./DynamicRenderer";
 
-console.log('UISavedDrawer component loaded');
+// console.log('UISavedDrawer component loaded');
 
 type SavedComponent = {
   id: string;
