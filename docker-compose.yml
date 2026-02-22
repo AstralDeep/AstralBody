@@ -1,0 +1,16 @@
+services:
+  astralbody:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: astralbody:latest
+    container_name: astralbody
+    ports:
+      - "8001:8001"
+      - "5173:5173"
+    env_file:
+      - .env
+    volumes:
+      - ./backend/data:/app/backend/data
+      - ./backend/tmp:/app/backend/tmp
+    restart: unless-stopped

@@ -10,6 +10,8 @@ import { AlertCircle } from "lucide-react";
 import { useState } from "react";
 import AgentCreatorPage from "./components/AgentCreatorPage";
 
+import { WS_URL } from "./config";
+
 function App() {
   const auth = useAuth();
 
@@ -33,7 +35,7 @@ function App() {
     isCombining,
     combineError
   } = useWebSocket(
-    "ws://localhost:8001",
+    WS_URL,
     auth.user?.access_token
   );
 
@@ -63,6 +65,55 @@ function App() {
     return <LoginScreen />;
   }
 
+  // Helper to decode JWT payload without external libraries
+  const decodeJwt = (token: string) => {
+    try {
+      const base64Url = token.split('.')[1];
+      const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+      const jsonPayload = decodeURIComponent(atob(base64).split('').map(function (c) {
+        return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+      }).join(''));
+      return JSON.parse(jsonPayload);
+    } catch (e) {
+      console.error("Failed to decode JWT", e);
+      return null;
+    }
+  };
+
+  // The OIDC profile (ID Token) doesn't always contain roles unless configured in Keycloak mappers.
+  // We extract roles from the Access Token instead, where Keycloak guarantees they exist.
+  const tokenPayload = auth.user?.access_token ? decodeJwt(auth.user.access_token) : null;
+
+  const clientId = import.meta.env.VITE_KEYCLOAK_CLIENT_ID || "astral-frontend";
+
+  const realmRoles = tokenPayload?.realm_access?.roles || [];
+  const accountRoles = tokenPayload?.resource_access?.account?.roles || [];
+  const clientRoles = tokenPayload?.resource_access?.[clientId]?.roles || [];
+
+  const roles = [...realmRoles, ...accountRoles, ...clientRoles];
+
+  const isUser = roles.includes("user");
+  const isAdmin = roles.includes("admin");
+
+  if (!isUser && !isAdmin) {
+    return (
+      <div className="min-h-screen bg-astral-bg flex flex-col items-center justify-center text-white p-6 text-center">
+        <AlertCircle size={48} className="text-red-400 mb-4" />
+        <h1 className="text-2xl font-bold mb-2">Unauthorized Access</h1>
+        <p className="text-astral-muted mb-6">
+          You do not have the required roles to access this application.
+          Please contact an administrator.
+        </p>
+        <button
+          onClick={() => void auth.signoutRedirect()}
+          className="bg-astral-primary text-white px-6 py-2 rounded-lg hover:bg-astral-primary/90 transition-colors"
+        >
+          Sign Out
+        </button>
+      </div>
+    );
+  }
+
   return (
     <DashboardLayout
       agents={agents}
@@ -74,6 +125,8 @@ function App() {
       onNewChat={() => { setActiveView("chat"); createNewChat(); }}
       onNewAgent={() => { setActiveDraftId(null); setActiveView("agent-creator"); }}
       onLoadDraft={(id) => { setActiveDraftId(id); setActiveView("agent-creator"); }}
+      isAdmin={isAdmin}
+      accessToken={auth.user?.access_token}
     >
       {activeView === "chat" ? (
         <ChatInterface
@@ -89,11 +142,13 @@ function App() {
           onCondenseComponents={condenseComponents}
           isCombining={isCombining}
           combineError={combineError}
+          accessToken={auth.user?.access_token}
         />
       ) : (
         <AgentCreatorPage
           onBack={() => { setActiveDraftId(null); setActiveView("chat"); }}
           initialDraftId={activeDraftId}
+          accessToken={auth.user?.access_token}
         />
       )}
     </DashboardLayout>

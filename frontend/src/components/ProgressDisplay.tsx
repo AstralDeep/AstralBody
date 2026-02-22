@@ -1,4 +1,3 @@
-import React from 'react';
 import type { ProgressState } from '../types/progress';
 import { ProgressBar } from './ProgressBar';
 import { ProgressDetails } from './ProgressDetails';
@@ -22,7 +21,7 @@ export function ProgressDisplay({
 }: ProgressDisplayProps) {
   const isCompact = mode === 'compact';
   const isDetailed = mode === 'detailed' || mode === 'full';
-  
+
   return (
     <div className="w-full">
       {/* Header */}
@@ -35,7 +34,7 @@ export function ProgressDisplay({
             {state.isError ? 'Error occurred' : state.isComplete ? 'Completed successfully' : 'Processing...'}
           </div>
         </div>
-        
+
         <div className="flex space-x-2">
           {onCancel && !state.isComplete && !state.isError && (
             <button
@@ -55,7 +54,7 @@ export function ProgressDisplay({
           )}
         </div>
       </div>
-      
+
       {/* Progress bar */}
       <div className="mb-6">
         <ProgressBar
@@ -68,7 +67,7 @@ export function ProgressDisplay({
           isComplete={state.isComplete}
         />
       </div>
-      
+
       {/* Error display */}
       {state.isError && state.errorMessage && (
         <div className="mb-6 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
@@ -89,7 +88,7 @@ export function ProgressDisplay({
           </div>
         </div>
       )}
-      
+
       {/* Completion message */}
       {state.isComplete && !state.isError && (
         <div className="mb-6 p-4 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg">
@@ -110,14 +109,14 @@ export function ProgressDisplay({
           </div>
         </div>
       )}
-      
+
       {/* Details section */}
       {isDetailed && (
         <div className="mb-4">
           <ProgressDetails state={state} />
         </div>
       )}
-      
+
       {/* Log output (compact mode) */}
       {isCompact && (
         <div className="mt-4">

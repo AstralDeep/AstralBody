@@ -22,6 +22,9 @@ import websockets
 import websockets.exceptions
 import aiohttp
 import uvicorn
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 from jose import jwt as jose_jwt
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -43,7 +46,10 @@ load_dotenv(override=True)
 
 PORT = int(os.getenv("ORCHESTRATOR_PORT", 8001))
 
-logging.basicConfig(level=logging.INFO,
+debug_mode = os.getenv("DEBUG", "false").lower() == "true"
+log_level = logging.INFO if debug_mode else logging.WARNING
+
+logging.basicConfig(level=log_level,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('Orchestrator')
 
@@ -105,7 +111,7 @@ class Orchestrator:
         # Notify all UI clients
         for ui in self.ui_clients:
             try:
-                await ui.send(json.dumps({
+                await self._safe_send(ui, json.dumps({
                     "type": "agent_registered",
                     "agent_id": card.agent_id,
                     "name": card.name,
@@ -122,7 +128,8 @@ class Orchestrator:
             async with aiohttp.ClientSession() as session:
                 async with session.get(card_url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status != 200:
-                        logger.error(f"Failed to fetch agent card from {card_url}: {resp.status}")
+                        # Log as INFO during discovery to avoid noise during startup
+                        logger.info(f"Agent card not ready yet at {card_url} (status: {resp.status})")
                         return
                     card_data = await resp.json()
 
@@ -149,7 +156,7 @@ class Orchestrator:
             logger.info(f"Connected to agent: {agent_id} at {base_url}")
 
         except Exception as e:
-            logger.error(f"Failed to discover agent at {base_url}: {e}")
+            logger.debug(f"Discovery attempt to {base_url} skipped: {e}")
 
     async def _agent_listen_loop(self, ws, agent_id: str):
         """Listen for messages from a connected agent."""
@@ -231,14 +238,14 @@ class Orchestrator:
                         chat_id = self.history.create_chat()
                         from_message = True
                         # Inform UI about new chat ID
-                        await websocket.send(json.dumps({
+                        await self._safe_send(websocket, json.dumps({
                             "type": "chat_created",
                             "payload": {"chat_id": chat_id, "from_message": True}
                         }))
                     else:
                         if not self.history.get_chat(chat_id):
                             self.history.create_chat(chat_id)
-                            await websocket.send(json.dumps({
+                            await self._safe_send(websocket, json.dumps({
                                 "type": "chat_created",
                                 "payload": {"chat_id": chat_id, "from_message": True}
                             }))
@@ -254,7 +261,7 @@ class Orchestrator:
 
                 elif msg.action == "get_history":
                     chats = self.history.get_recent_chats()
-                    await websocket.send(json.dumps({
+                    await self._safe_send(websocket, json.dumps({
                         "type": "history_list",
                         "chats": chats
                     }))
@@ -263,7 +270,7 @@ class Orchestrator:
                     chat_id = msg.payload.get("chat_id")
                     chat = self.history.get_chat(chat_id)
                     if chat:
-                        await websocket.send(json.dumps({
+                        await self._safe_send(websocket, json.dumps({
                             "type": "chat_loaded",
                             "chat": chat
                         }))
@@ -274,7 +281,7 @@ class Orchestrator:
 
                 elif msg.action == "new_chat":
                     chat_id = self.history.create_chat()
-                    await websocket.send(json.dumps({
+                    await self._safe_send(websocket, json.dumps({
                         "type": "chat_created",
                         "payload": {"chat_id": chat_id, "from_message": False}
                     }))
@@ -298,7 +305,7 @@ class Orchestrator:
                         )
                         
                         # Send success response
-                        await websocket.send(json.dumps({
+                        await self._safe_send(websocket, json.dumps({
                             "type": "component_saved",
                             "component": {
                                 "id": component_id,
@@ -319,13 +326,13 @@ class Orchestrator:
                             })
                             # Create tasks for sending to avoid blocking
                             await asyncio.gather(
-                                *[client.send(msg_history) for client in self.ui_clients],
+                                *[self._safe_send(client, msg_history) for client in self.ui_clients],
                                 return_exceptions=True
                             )
                             
                     except Exception as e:
                         logger.error(f"Failed to save component: {e}")
-                        await websocket.send(json.dumps({
+                        await self._safe_send(websocket, json.dumps({
                             "type": "component_save_error",
                             "error": str(e)
                         }))
@@ -333,7 +340,7 @@ class Orchestrator:
                 elif msg.action == "get_saved_components":
                     chat_id = msg.payload.get("chat_id")
                     components = self.history.get_saved_components(chat_id)
-                    await websocket.send(json.dumps({
+                    await self._safe_send(websocket, json.dumps({
                         "type": "saved_components_list",
                         "components": components
                     }))
@@ -348,7 +355,7 @@ class Orchestrator:
                     
                     success = self.history.delete_component(component_id)
                     if success:
-                        await websocket.send(json.dumps({
+                        await self._safe_send(websocket, json.dumps({
                             "type": "component_deleted",
                             "component_id": component_id
                         }))
@@ -366,7 +373,7 @@ class Orchestrator:
                                 return_exceptions=True
                             )
                     else:
-                        await websocket.send(json.dumps({
+                        await self._safe_send(websocket, json.dumps({
                             "type": "component_save_error",
                             "error": "Component not found"
                         }))
@@ -376,7 +383,7 @@ class Orchestrator:
                     target_id = msg.payload.get("target_id")
                     
                     if not source_id or not target_id:
-                        await websocket.send(json.dumps({
+                        await self._safe_send(websocket, json.dumps({
                             "type": "combine_error",
                             "error": "Both source and target component IDs are required"
                         }))
@@ -386,14 +393,14 @@ class Orchestrator:
                     target = self.history.get_component_by_id(target_id)
                     
                     if not source or not target:
-                        await websocket.send(json.dumps({
+                        await self._safe_send(websocket, json.dumps({
                             "type": "combine_error",
                             "error": "One or both components not found"
                         }))
                         return
                     
                     # Send progress
-                    await websocket.send(json.dumps({
+                    await self._safe_send(websocket, json.dumps({
                         "type": "combine_status",
                         "status": "combining",
                         "message": f"Combining {source['title']} with {target['title']}..."
@@ -417,14 +424,14 @@ class Orchestrator:
                                 result["components"],
                                 chat_id
                             )
-                            await websocket.send(json.dumps({
+                            await self._safe_send(websocket, json.dumps({
                                 "type": "components_combined",
                                 "removed_ids": [source_id, target_id],
                                 "new_components": new_components
                             }))
                     except Exception as e:
                         logger.error(f"Combine failed: {e}", exc_info=True)
-                        await websocket.send(json.dumps({
+                        await self._safe_send(websocket, json.dumps({
                             "type": "combine_error",
                             "error": f"Failed to combine components: {str(e)}"
                         }))
@@ -433,7 +440,7 @@ class Orchestrator:
                     component_ids = msg.payload.get("component_ids", [])
                     
                     if len(component_ids) < 2:
-                        await websocket.send(json.dumps({
+                        await self._safe_send(websocket, json.dumps({
                             "type": "combine_error",
                             "error": "At least 2 components are required to condense"
                         }))
@@ -446,13 +453,13 @@ class Orchestrator:
                             components.append(comp)
                     
                     if len(components) < 2:
-                        await websocket.send(json.dumps({
+                        await self._safe_send(websocket, json.dumps({
                             "type": "combine_error",
                             "error": "Not enough valid components found"
                         }))
                         return
                     
-                    await websocket.send(json.dumps({
+                    await self._safe_send(websocket, json.dumps({
                         "type": "combine_status",
                         "status": "condensing",
                         "message": f"Condensing {len(components)} components..."
@@ -465,7 +472,7 @@ class Orchestrator:
                         )
                         
                         if result.get("error"):
-                            await websocket.send(json.dumps({
+                            await self._safe_send(websocket, json.dumps({
                                 "type": "combine_error",
                                 "error": result["error"]
                             }))
@@ -476,14 +483,14 @@ class Orchestrator:
                                 result["components"],
                                 chat_id
                             )
-                            await websocket.send(json.dumps({
+                            await self._safe_send(websocket, json.dumps({
                                 "type": "components_condensed",
                                 "removed_ids": component_ids,
                                 "new_components": new_components
                             }))
                     except Exception as e:
                         logger.error(f"Condense failed: {e}", exc_info=True)
-                        await websocket.send(json.dumps({
+                        await self._safe_send(websocket, json.dumps({
                             "type": "combine_error",
                             "error": f"Failed to condense components: {str(e)}"
                         }))
@@ -628,7 +635,6 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 result = json.loads(content)
             except json.JSONDecodeError:
                 # Try to find JSON in the response
-                import re
                 json_match = re.search(r'\{[\s\S]*\}', content)
                 if json_match:
                     result = json.loads(json_match.group())
@@ -984,15 +990,101 @@ CRITICAL RULES:
                 
                 else:
                     # No tool calls -> Final Response
-                    logger.info("LLM provided final response. conversation complete.")
                     content = llm_msg.content or "I'm not sure how to help with that."
                     
-                    # Send response in a Card container
-                    response_components = [
-                        Card(title="Analysis", content=[
-                            Text(content=content, variant="markdown")
-                        ]).to_json()
-                    ]
+                    parsed_components = None
+                    needs_retry = False
+                    error_msg = ""
+                    
+                    # Heuristic: if it looks like JSON containing a component
+                    if content.strip().startswith("{") or content.strip().startswith("[") or "```json" in content:
+                        raw_json = content
+                        if "```json" in content:
+                            match = re.search(r'```json\n(.*?)\n```', content, re.DOTALL)
+                            if match:
+                                raw_json = match.group(1)
+                            else:
+                                match = re.search(r'```(.*?)```', content, re.DOTALL)
+                                if match:
+                                    raw_json = match.group(1).strip()
+                        
+                        try:
+                            # Try to parse and find valid components
+                            # Using the same technique as the _combine_components_llm parser
+                            # First try to parse directly
+                            try:
+                                data = json.loads(raw_json)
+                            except json.JSONDecodeError:
+                                # Strip markdown code fences if present
+                                if raw_json.startswith("```"):
+                                    raw_json = raw_json.split("\n", 1)[1] if "\n" in raw_json else raw_json[3:]
+                                    if raw_json.endswith("```"):
+                                        raw_json = raw_json[:-3]
+                                    raw_json = raw_json.strip()
+                                
+                                try:
+                                    data = json.loads(raw_json)
+                                except json.JSONDecodeError:
+                                    # Fallback: regex search for JSON
+                                    json_match = re.search(r'(\{[\s\S]*\}|\[[\s\S]*\])', raw_json)
+                                    if json_match:
+                                        data = json.loads(json_match.group())
+                                    else:
+                                        raise
+                            
+                            if isinstance(data, dict):
+                                data = [data]
+                            
+                            valid_components = []
+                            if isinstance(data, list):
+                                for item in data:
+                                    if isinstance(item, dict) and "type" in item:
+                                        # Recursively validate component structure to ensure frontend won't crash
+                                        self._validate_component_tree(item, {
+                                            "container", "text", "button", "card", "table", "list",
+                                            "alert", "progress", "metric", "code", "image", "grid",
+                                            "tabs", "divider", "input", "bar_chart", "line_chart",
+                                            "pie_chart", "plotly_chart", "collapsible",
+                                            "file_upload", "file_download"
+                                        })
+                                        valid_components.append(item)
+                            
+                            if valid_components:
+                                parsed_components = valid_components
+                            else:
+                                needs_retry = True
+                                error_msg = "JSON parsed successfully but no valid UI components found. Each component MUST be an object with at least a 'type' field (e.g., {'type': 'card', 'title': '...', 'content': [...]})."
+                                
+                        except Exception as e:
+                            needs_retry = True
+                            error_msg = f"Failed to parse UI components. The output is not valid JSON. Error: {str(e)}. Please respond ONLY with valid JSON, with NO surrounding text or markdown formatting."
+                    
+                    if needs_retry and turn_count < MAX_TURNS:
+                        logger.warning(f"UI component generation failed parsing. Retrying. Error: {error_msg}")
+                        messages.append(llm_msg)
+                        messages.append({
+                            "role": "user",
+                            "content": f"SYSTEM RECOVERY ERROR: {error_msg}\nRemember, you MUST output ONLY valid JSON without Markdown formatting, enclosing explanations, or preamble. Return the complete corrected component array."
+                        })
+                        
+                        await self._safe_send(websocket, json.dumps({
+                            "type": "chat_status",
+                            "status": "thinking",
+                            "message": "Fixing formatting errors in UI component..."
+                        }))
+                        continue
+                    
+                    logger.info("LLM provided final response. conversation complete.")
+                    
+                    if parsed_components:
+                        response_components = parsed_components
+                    else:
+                        response_components = [
+                            Card(title="Analysis", content=[
+                                Text(content=content, variant="markdown")
+                            ]).to_json()
+                        ]
+
                     await self.send_ui_render(websocket, response_components)
 
                     # Save complete interaction to history
@@ -1226,7 +1318,7 @@ CRITICAL RULES:
                 )
                 # Notify UI about the retry
                 try:
-                    await websocket.send(json.dumps({
+                    await self._safe_send(websocket, json.dumps({
                         "type": "chat_status",
                         "status": "retrying",
                         "message": f"Tool '{tool_name.replace('_', ' ').title()}' failed. "
@@ -1283,10 +1375,15 @@ CRITICAL RULES:
     async def _safe_send(self, websocket, data: str) -> bool:
         """Send data over a websocket, returning False if the connection is closed."""
         try:
-            await websocket.send(data)
+            if hasattr(websocket, "send_text"):
+                # FastAPI WebSocket
+                await websocket.send_text(data)
+            else:
+                # websockets library WebSocket
+                await websocket.send(data)
             return True
-        except websockets.exceptions.ConnectionClosed:
-            logger.warning("WebSocket closed while sending — client likely reconnected")
+        except Exception as e:
+            logger.debug(f"Failed to send message (connection likely closed): {e}")
             return False
 
     async def send_ui_render(self, websocket, components: List):
@@ -1305,7 +1402,7 @@ CRITICAL RULES:
                 "status": "connected"
             })
 
-        await websocket.send(json.dumps({
+        await self._safe_send(websocket, json.dumps({
             "type": "system_config",
             "config": {
                 "agents": agent_list,
@@ -1325,7 +1422,7 @@ CRITICAL RULES:
                 "status": "connected"
             })
 
-        await websocket.send(json.dumps({
+        await self._safe_send(websocket, json.dumps({
             "type": "agent_list",
             "agents": agents
         }))
@@ -1334,24 +1431,45 @@ CRITICAL RULES:
     # SERVER
     # =========================================================================
 
-    async def handle_ui_connection(self, websocket, path=None):
-        """Handle a UI client WebSocket connection."""
+    async def handle_ui_connection_fastapi(self, websocket: WebSocket):
+        """Handle a UI client WebSocket connection using FastAPI."""
+        await websocket.accept()
         self.ui_clients.append(websocket)
         logger.info(f"UI client connected (total: {len(self.ui_clients)})")
+        try:
+            while True:
+                message = await websocket.receive_text()
+                await self.handle_ui_message(websocket, message)
+        except WebSocketDisconnect:
+            logger.info("UI client disconnected")
+        except Exception as e:
+            # Only log interesting errors
+            if "ConnectionClosed" not in str(e):
+                logger.error(f"WebSocket error: {e}")
+        finally:
+            if websocket in self.ui_clients:
+                self.ui_clients.remove(websocket)
+            if websocket in self.ui_sessions:
+                del self.ui_sessions[websocket]
+            logger.info(f"UI client session cleaned up (total: {len(self.ui_clients)})")
 
+    async def handle_ui_connection(self, websocket, path=None):
+        """Handle a UI client WebSocket connection (legacy websockets lib)."""
+        self.ui_clients.append(websocket)
+        logger.info(f"UI client connected (total: {len(self.ui_clients)})")
         try:
             async for message in websocket:
                 await self.handle_ui_message(websocket, message)
         except websockets.exceptions.ConnectionClosed:
-            pass
+            logger.info("UI client disconnected")
         finally:
-            self.ui_clients.remove(websocket)
+            if websocket in self.ui_clients:
+                self.ui_clients.remove(websocket)
             if websocket in self.ui_sessions:
                 del self.ui_sessions[websocket]
-            logger.info(f"UI client disconnected (total: {len(self.ui_clients)})")
+            logger.info(f"UI client session cleaned up (total: {len(self.ui_clients)})")
 
     async def start(self):
-        """Start the orchestrator WebSocket server and auth HTTP server."""
         logger.info(f"Orchestrator starting on port {PORT}")
 
         # Auto-discover agents (continuous monitor)
@@ -1359,17 +1477,32 @@ CRITICAL RULES:
         max_agents = int(os.getenv("MAX_AGENTS", 10))
         asyncio.create_task(self._monitor_agents(agent_port, max_agents))
 
-        # Start BFF auth HTTP server on port 8002
-        from orchestrator.auth import app as auth_app
-        auth_port = int(os.getenv("AUTH_PORT", 8002))
-        config = uvicorn.Config(auth_app, host="0.0.0.0", port=auth_port, log_level="info")
-        auth_server = uvicorn.Server(config)
-        asyncio.create_task(auth_server.serve())
-        logger.info(f"Auth proxy listening on http://0.0.0.0:{auth_port}")
+        # Create FastAPI app to consolidate everything
+        app = FastAPI(title="AstralBody Orchestrator")
+        
+        # CORS
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
-        async with websockets.serve(self.handle_ui_connection, "0.0.0.0", PORT, max_size=50 * 1024 * 1024):
-            logger.info(f"Orchestrator listening on ws://0.0.0.0:{PORT}")
-            await asyncio.Future()  # Run forever
+        @app.websocket("/ws")
+        async def websocket_endpoint(websocket: WebSocket):
+            await self.handle_ui_connection_fastapi(websocket)
+
+        # Mount Auth sub-app directly into the Orchestrator's FastAPI app.
+        # This allows port 8001 to handle both WS and all API/Auth requests.
+        from orchestrator.auth import app as auth_app
+        app.mount("/", auth_app)
+
+        # Start combined server
+        config = uvicorn.Config(app, host="0.0.0.0", port=PORT, log_level="info")
+        server = uvicorn.Server(config)
+        logger.info(f"Consolidated server (Gateway) listening on http://0.0.0.0:{PORT}")
+        await server.serve()
 
     async def _monitor_agents(self, start_port: int, max_ports: int = 10):
         """Continuously monitor and discover agents across a range of ports."""
@@ -1415,7 +1548,7 @@ CRITICAL RULES:
                 })
                 # Create tasks for sending to avoid blocking
                 await asyncio.gather(
-                    *[client.send(msg) for client in self.ui_clients],
+                    *[self._safe_send(client, msg) for client in self.ui_clients],
                     return_exceptions=True
                 )
                 
@@ -1466,6 +1599,21 @@ CRITICAL RULES:
             azp = payload.get("azp")
             if azp and azp != expected_client:
                 logger.warning(f"Token azp '{azp}' does not match expected client '{expected_client}'")
+                return None
+
+            # Extract Roles
+            client_id = os.getenv("VITE_KEYCLOAK_CLIENT_ID", "astral-frontend")
+            roles = payload.get("realm_access", {}).get("roles", [])
+            if "resource_access" in payload:
+                if client_id in payload["resource_access"]:
+                    client_roles = payload["resource_access"][client_id].get("roles", [])
+                    roles.extend(client_roles)
+                if "account" in payload["resource_access"]:
+                    account_roles = payload["resource_access"]["account"].get("roles", [])
+                    roles.extend(account_roles)
+            
+            if "admin" not in roles and "user" not in roles:
+                logger.warning(f"Token unauthorized (Requires 'admin' or 'user' role). Found roles: {roles}")
                 return None
 
             return payload

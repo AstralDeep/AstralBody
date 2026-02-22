@@ -5,7 +5,8 @@ import { MockAuthProvider } from './contexts/MockAuthContext'
 import './index.css'
 import App from './App.tsx'
 
-const BFF_URL = import.meta.env.VITE_BFF_URL || 'http://localhost:8002';
+import { BFF_URL } from './config'
+
 const AUTHORITY = import.meta.env.VITE_KEYCLOAK_AUTHORITY;
 
 const oidcConfig = {
@@ -23,6 +24,9 @@ const oidcConfig = {
     jwks_uri: `${AUTHORITY}/protocol/openid-connect/certs`,
     revocation_endpoint: `${AUTHORITY}/protocol/openid-connect/revoke`,
   },
+  scope: "openid profile email offline_access",
+  automaticSilentRenew: true,
+  filterProtocolClaims: true,
   onSigninCallback: () => {
     window.history.replaceState({}, document.title, window.location.pathname)
   }

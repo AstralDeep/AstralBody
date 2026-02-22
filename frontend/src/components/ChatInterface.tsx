@@ -12,6 +12,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Send, Bot, User, Sparkles, Loader2, ChevronLeft, Paperclip, UploadCloud, X, FileMinus, FileText } from "lucide-react";
 import DynamicRenderer from "./DynamicRenderer";
 import UISavedDrawer from "./UISavedDrawer";
+import { BFF_URL } from "../config";
 import type { ChatStatus } from "../hooks/useWebSocket";
 
 interface ChatInterfaceProps {
@@ -27,6 +28,7 @@ interface ChatInterfaceProps {
     onCondenseComponents: (componentIds: string[]) => void;
     isCombining: boolean;
     combineError: string | null;
+    accessToken?: string;
 }
 
 const SUGGESTIONS = [
@@ -49,6 +51,7 @@ export default function ChatInterface({
     onCondenseComponents,
     isCombining,
     combineError,
+    accessToken,
 }: ChatInterfaceProps) {
     const [input, setInput] = useState("");
     const [isDrawerOpen, setIsDrawerOpen] = useState(false);
@@ -101,10 +104,13 @@ export default function ChatInterface({
                         formData.append('file', attachedFile);
                         formData.append('session_id', targetChatId);
 
-                        // Port 8002 is the auth proxy/BFF where we added the upload endpoint
-                        const uploadUrl = `http://${window.location.hostname}:8002/api/upload`;
+                        const uploadUrl = `${BFF_URL}/api/upload`;
+                        const headers: HeadersInit = {};
+                        if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
+
                         const uploadRes = await fetch(uploadUrl, {
                             method: 'POST',
+                            headers,
                             body: formData
                         });
 
@@ -301,12 +307,17 @@ export default function ChatInterface({
 
     // Drag and Drop Handlers
     const handleDragOver = useCallback((e: React.DragEvent) => {
+        // Only react to file drag events, ignore component drags from drawer
+        if (!e.dataTransfer.types.includes("Files")) return;
+
         e.preventDefault();
         e.stopPropagation();
         if (!isDragging) setIsDragging(true);
     }, [isDragging]);
 
     const handleDragLeave = useCallback((e: React.DragEvent) => {
+        if (!e.dataTransfer.types.includes("Files")) return;
+
         e.preventDefault();
         e.stopPropagation();
         // Prevent flickering when dragging over children
@@ -316,6 +327,8 @@ export default function ChatInterface({
     }, []);
 
     const handleDrop = useCallback((e: React.DragEvent) => {
+        if (!e.dataTransfer.types.includes("Files")) return;
+
         e.preventDefault();
         e.stopPropagation();
         setIsDragging(false);
