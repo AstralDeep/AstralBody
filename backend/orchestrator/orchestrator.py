@@ -80,7 +80,9 @@ class Orchestrator:
             logger.warning("No LLM configured — tool routing disabled")
 
         # History Manager
-        self.history = HistoryManager()
+        backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        data_dir = os.path.join(backend_dir, 'data')
+        self.history = HistoryManager(data_dir=data_dir)
 
     # =========================================================================
     # AGENT MANAGEMENT
@@ -1204,6 +1206,8 @@ CRITICAL RULES:
         if chat_id:
             args = self._map_file_paths(chat_id, args, user_id=user_id)
             args["session_id"] = chat_id
+            if user_id:
+                args["user_id"] = user_id
 
         agent_id = tool_to_agent.get(tool_name)
         if not agent_id or agent_id not in self.agents:
@@ -1242,6 +1246,8 @@ CRITICAL RULES:
             if chat_id:
                 args = self._map_file_paths(chat_id, args, user_id=user_id)
                 args["session_id"] = chat_id
+                if user_id:
+                    args["user_id"] = user_id
 
             agent_id = tool_to_agent.get(tool_name)
             if agent_id and agent_id in self.agents:
@@ -1489,7 +1495,7 @@ CRITICAL RULES:
         # CORS
         app.add_middleware(
             CORSMiddleware,
-            allow_origins=["*"],
+            allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],

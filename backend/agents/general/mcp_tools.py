@@ -192,6 +192,7 @@ def modify_data(
     file_path: Optional[str] = None,
     output_format: Optional[str] = None,
     session_id: str = "default",
+    user_id: str = "legacy",
     **kwargs
 ) -> Dict[str, Any]:
     """Apply modifications to a CSV/Excel dataset and provide a download link.
@@ -404,7 +405,7 @@ def modify_data(
                 filename = f"modified_data_{timestamp}.{ext}"
         
         backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-        download_dir = os.path.join(backend_dir, "tmp", session_id)
+        download_dir = os.path.join(backend_dir, "tmp", user_id, session_id)
         os.makedirs(download_dir, exist_ok=True)
         out_file_path = os.path.join(download_dir, filename)
 
@@ -420,7 +421,7 @@ def modify_data(
                 writer.writerows(rows)
 
         # The BFF URL
-        bff_port = int(os.getenv("AUTH_PORT", 8002))
+        bff_port = int(os.getenv("ORCHESTRATOR_PORT", 8001))
         bff_url = f"http://localhost:{bff_port}"
         download_url = f"{bff_url}/api/download/{session_id}/{filename}"
 
