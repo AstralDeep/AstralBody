@@ -105,7 +105,7 @@ def search_patients(min_age: int = 0, max_age: int = 200, condition: str = "", s
     }
 
 
-def generate_synthetic_patients(count: int = 50, session_id: str = "default", **kwargs) -> Dict[str, Any]:
+def generate_synthetic_patients(count: int = 50, session_id: str = "default", user_id: str = "legacy", **kwargs) -> Dict[str, Any]:
     """Generate synthetic patient records and return a downloadable file component.
 
     Args:
@@ -128,7 +128,7 @@ def generate_synthetic_patients(count: int = 50, session_id: str = "default", **
     filename = f"synthetic_patients_{count}.csv"
     
     backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-    download_dir = os.path.join(backend_dir, "tmp", session_id)
+    download_dir = os.path.join(backend_dir, "tmp", user_id, session_id)
     os.makedirs(download_dir, exist_ok=True)
     file_path = os.path.join(download_dir, filename)
     
@@ -142,7 +142,7 @@ def generate_synthetic_patients(count: int = 50, session_id: str = "default", **
     rows = [[p["id"], str(p["age"]), p["condition"], p["status"], str(p["heart_rate"])] for p in patients[:5]]
 
     # Use the same BFF URL as the general tools
-    bff_port = int(os.getenv("AUTH_PORT", 8002))
+    bff_port = int(os.getenv("ORCHESTRATOR_PORT", 8001))
     bff_url = f"http://localhost:{bff_port}"
     download_url = f"{bff_url}/api/download/{session_id}/{filename}"
 
