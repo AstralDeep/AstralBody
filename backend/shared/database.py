@@ -85,6 +85,13 @@ class Database:
             # Column already exists, ignore
             pass
 
+        # Auto-migrate user_id column for all tables
+        for table in ['chats', 'messages', 'saved_components', 'draft_agents', 'chat_files']:
+            try:
+                cursor.execute(f"ALTER TABLE {table} ADD COLUMN user_id TEXT DEFAULT 'legacy'")
+            except sqlite3.OperationalError:
+                pass
+
         # Draft agents table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS draft_agents (

@@ -12,11 +12,14 @@ COPY .env ./.env
 
 # Copy frontend source
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci
+RUN npm ci --no-audit --no-fund
 
 COPY frontend/ ./
 # Sanitize all .env files to remove Windows line endings (\r)
 RUN find /app -name ".env" -exec sed -i 's/\r$//' {} +
+
+# Set memory limit for Node to prevent swap thrashing during Vite build
+ENV NODE_OPTIONS="--max-old-space-size=4096"
 
 # Source .env before build to ensure Vite sees the variables
 RUN set -a && . /app/.env && set +a && npm run build
@@ -27,8 +30,9 @@ RUN set -a && . /app/.env && set +a && npm run build
 FROM python:3.11-slim
 WORKDIR /app
 
-# Install requirements
-RUN apt-get update && apt-get install -y && rm -rf /var/lib/apt/lists/*
+# Upgrade pip and install wheel/setuptools first to ensure binary wheels are downloaded
+# instead of compiling heavy packages like pandas from source, saving lots of time and memory.
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # Copy backend requirements and install
 COPY backend/requirements.txt ./backend/
