@@ -27,7 +27,7 @@ class AgentGeneratorClient:
         self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         self.db = Database()
 
-    def _save_session(self, session: Dict):
+    def _save_session(self, session: Dict, user_id: str = 'legacy'):
         """Upsert a session into the database."""
         timestamp = int(time.time() * 1000)
         messages_json = json.dumps(session.get("messages", []))
@@ -36,23 +36,26 @@ class AgentGeneratorClient:
         existing = self.db.fetch_one("SELECT session_id FROM draft_agents WHERE session_id = ?", (session["session_id"],))
         if existing:
             self.db.execute(
-                """UPDATE draft_agents SET 
-                   name = ?, persona = ?, model = ?, api_keys = ?, tools_desc = ?, messages = ?, updated_at = ?
+                """UPDATE draft_agents SET
+                   name = ?, persona = ?, model = ?, api_keys = ?, tools_desc = ?, messages = ?, updated_at = ?, user_id = ?
                    WHERE session_id = ?""",
-                (session.get("name"), session.get("persona"), session.get("model"), session.get("api_keys"), 
-                 session.get("tools_desc"), messages_json, timestamp, session["session_id"])
+                (session.get("name"), session.get("persona"), session.get("model"), session.get("api_keys"),
+                 session.get("tools_desc"), messages_json, timestamp, user_id, session["session_id"])
             )
         else:
             self.db.execute(
-                """INSERT INTO draft_agents 
-                   (session_id, name, persona, model, api_keys, tools_desc, messages, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (session["session_id"], session.get("name"), session.get("persona"), session.get("model"), 
+                """INSERT INTO draft_agents
+                   (session_id, user_id, name, persona, model, api_keys, tools_desc, messages, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (session["session_id"], user_id, session.get("name"), session.get("persona"), session.get("model"),
                  session.get("api_keys"), session.get("tools_desc"), messages_json, timestamp, timestamp)
             )
 
-    def get_session(self, session_id: str) -> Optional[Dict]:
-        row = self.db.fetch_one("SELECT * FROM draft_agents WHERE session_id = ?", (session_id,))
+    def get_session(self, session_id: str, user_id: Optional[str] = None) -> Optional[Dict]:
+        if user_id is None:
+            row = self.db.fetch_one("SELECT * FROM draft_agents WHERE session_id = ?", (session_id,))
+        else:
+            row = self.db.fetch_one("SELECT * FROM draft_agents WHERE session_id = ? AND user_id = ?", (session_id, user_id))
         if not row:
             return None
         
@@ -63,6 +66,7 @@ class AgentGeneratorClient:
             
         return {
             "session_id": row['session_id'],
+            "user_id": row['user_id'],
             "name": row['name'],
             "persona": row['persona'],
             "model": row['model'],
@@ -71,19 +75,22 @@ class AgentGeneratorClient:
             "messages": messages
         }
 
-    def get_all_sessions(self) -> list:
-        rows = self.db.fetch_all("SELECT session_id, name, updated_at FROM draft_agents ORDER BY updated_at DESC")
+    def get_all_sessions(self, user_id: Optional[str] = None) -> list:
+        if user_id is None:
+            rows = self.db.fetch_all("SELECT session_id, name, updated_at FROM draft_agents ORDER BY updated_at DESC")
+        else:
+            rows = self.db.fetch_all("SELECT session_id, name, updated_at FROM draft_agents WHERE user_id = ? ORDER BY updated_at DESC", (user_id,))
         return [{"id": row['session_id'], "name": row['name'] or "Unnamed Draft"} for row in rows]
 
-    def get_session_details(self, session_id: str) -> Optional[Dict]:
+    def get_session_details(self, session_id: str, user_id: Optional[str] = None) -> Optional[Dict]:
         """Returns the full context of a draft session."""
-        session = self.get_session(session_id)
+        session = self.get_session(session_id, user_id)
         if not session: return None
         return session
 
-    def delete_session(self, session_id: str) -> bool:
+    def delete_session(self, session_id: str, user_id: Optional[str] = None) -> bool:
         """Deletes a draft session and its associated files."""
-        session = self.get_session(session_id)
+        session = self.get_session(session_id, user_id)
         if not session:
             return False
             
@@ -100,10 +107,13 @@ class AgentGeneratorClient:
                     logger.error(f"Failed to delete agent directory {agent_dir}: {e}")
                     
         # Delete from DB
-        self.db.execute("DELETE FROM draft_agents WHERE session_id = ?", (session_id,))
+        if user_id is None:
+            self.db.execute("DELETE FROM draft_agents WHERE session_id = ?", (session_id,))
+        else:
+            self.db.execute("DELETE FROM draft_agents WHERE session_id = ? AND user_id = ?", (session_id, user_id))
         return True
 
-    async def start_session(self, name: str, persona: str, tools_desc: str, api_keys: str) -> Dict:
+    async def start_session(self, name: str, persona: str, tools_desc: str, api_keys: str, user_id: str = 'legacy') -> Dict:
         """Initialize an agent creation session."""
         session_id = str(uuid.uuid4())
         
@@ -120,6 +130,7 @@ Greet the user and list out the tools you think are necessary based on their des
 
         session = {
             "session_id": session_id,
+            "user_id": user_id,
             "name": name,
             "persona": persona,
             "model": self.model,
@@ -138,17 +149,17 @@ Greet the user and list out the tools you think are necessary based on their des
         msg_content = resp.choices[0].message.content
         session["messages"].append({"role": "assistant", "content": msg_content})
         
-        self._save_session(session)
+        self._save_session(session, user_id)
         return {"session_id": session_id, "initial_response": msg_content}
 
-    async def chat(self, session_id: str, message: str) -> Dict:
+    async def chat(self, session_id: str, message: str, user_id: Optional[str] = None) -> Dict:
         """Chat with the LLM to refine the agent."""
-        session = self.get_session(session_id)
+        session = self.get_session(session_id, user_id)
         if not session:
             raise ValueError("Invalid session")
             
         session["messages"].append({"role": "user", "content": message})
-        self._save_session(session)
+        self._save_session(session, session.get("user_id", "legacy"))
         
         tools = [
             {
@@ -208,17 +219,17 @@ Greet the user and list out the tools you think are necessary based on their des
             assistant_msg["tool_calls"] = tool_calls_dump
 
         session["messages"].append(assistant_msg)
-        self._save_session(session)
+        self._save_session(session, session.get("user_id", "legacy"))
         
         return {
-            "response": msg.content or "", 
+            "response": msg.content or "",
             "required_packages": required_packages,
             "tool_call_id": tool_call_id
         }
 
-    async def resolve_install(self, session_id: str, tool_call_id: str, approved: bool, packages: list[str]) -> Dict:
+    async def resolve_install(self, session_id: str, tool_call_id: str, approved: bool, packages: list[str], user_id: Optional[str] = None) -> Dict:
         """Execute or decline pip install, then resume chat."""
-        session = self.get_session(session_id)
+        session = self.get_session(session_id, user_id)
         if not session:
             raise ValueError("Invalid session")
             
@@ -246,7 +257,7 @@ Greet the user and list out the tools you think are necessary based on their des
             "tool_call_id": tool_call_id,
             "content": tool_result
         })
-        self._save_session(session)
+        self._save_session(session, session.get("user_id", "legacy"))
         
         # Ask LLM to respond to tool result
         resp = await self.client.chat.completions.create(
@@ -256,16 +267,16 @@ Greet the user and list out the tools you think are necessary based on their des
         
         msg_content = resp.choices[0].message.content or ""
         session["messages"].append({"role": "assistant", "content": msg_content})
-        self._save_session(session)
+        self._save_session(session, session.get("user_id", "legacy"))
         
         return {"response": msg_content}
         
-    async def generate_code(self, session_id: str, progress_callback: Optional[Callable[[ProgressEvent], None]] = None) -> Dict:
+    async def generate_code(self, session_id: str, progress_callback: Optional[Callable[[ProgressEvent], None]] = None, user_id: Optional[str] = None) -> Dict:
         """Call LLM to generate the three python files and return them as a dict."""
         # Create progress emitter
         emitter = ProgressEmitter(ProgressPhase.GENERATION, progress_callback)
         
-        session = self.get_session(session_id)
+        session = self.get_session(session_id, user_id)
         if not session:
             raise ValueError("Invalid session")
         
@@ -479,7 +490,7 @@ IMPORTANT: Each file content must be a valid Python script. Do NOT include markd
                 "fallback": True
             }
 
-    async def save_and_test_agent(self, session_id: str, mcp_tools_code: str) -> str:
+    async def save_and_test_agent(self, session_id: str, mcp_tools_code: str, user_id: Optional[str] = None) -> str:
         """Save files and run tests yielding SSE.
         
         Accepts either:
@@ -488,7 +499,7 @@ IMPORTANT: Each file content must be a valid Python script. Do NOT include markd
         """
         from orchestrator.agent_tester import run_tests_and_yield_logs, save_agent_files
         
-        session = self.get_session(session_id)
+        session = self.get_session(session_id, user_id)
         if not session:
             yield f"data: {json.dumps({'status': 'error', 'message': 'invalid session'})}\n\n"
             return

@@ -11,6 +11,7 @@ the client_secret appended.
 import os
 import logging
 import json
+from typing import Optional
 
 import aiohttp
 from fastapi import FastAPI, Request, UploadFile, File, Form
@@ -133,16 +134,39 @@ async def get_current_user_payload(request: Request, credentials: HTTPAuthorizat
         logger.error(f"Token validation failed in auth wrapper: {e}")
         raise HTTPException(status_code=401, detail="Invalid token")
 
+
+async def get_current_user_id(payload: dict = Depends(get_current_user_payload)) -> Optional[str]:
+    """Extract user_id from JWT token."""
+    if not payload:
+        return None
+    return payload.get("sub")  # Keycloak sub claim
+
+
+async def require_user_id(user_id: str = Depends(get_current_user_id)) -> str:
+    """Require a valid user_id or raise 401."""
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated"
+        )
+    return user_id
+
+
 def _extract_roles(user_data: dict) -> list:
+    logger.debug(f"Extracting roles from user_data: {json.dumps(user_data, indent=2)}")
     roles = user_data.get("realm_access", {}).get("roles", [])
     if "resource_access" in user_data:
         client_id = os.getenv("VITE_KEYCLOAK_CLIENT_ID", "astral-frontend")
+        logger.debug(f"Client ID: {client_id}")
         if client_id in user_data["resource_access"]:
             client_roles = user_data["resource_access"][client_id].get("roles", [])
             roles.extend(client_roles)
+            logger.debug(f"Client roles: {client_roles}")
         if "account" in user_data["resource_access"]:
             account_roles = user_data["resource_access"]["account"].get("roles", [])
             roles.extend(account_roles)
+            logger.debug(f"Account roles: {account_roles}")
+    logger.debug(f"Final extracted roles: {roles}")
     return roles
 
 async def verify_user(user_data: dict = Depends(get_current_user_payload)):
@@ -156,15 +180,20 @@ async def verify_user(user_data: dict = Depends(get_current_user_payload)):
 
 async def verify_admin(user_data: dict = Depends(get_current_user_payload)):
     if not user_data:
+        logger.warning("verify_admin: user_data is empty")
         return {}
     roles = _extract_roles(user_data)
-
+    logger.info(f"verify_admin: extracted roles = {roles}")
     if "admin" not in roles:
+        logger.warning(f"verify_admin: admin role missing, roles = {roles}")
         raise HTTPException(status_code=403, detail="Not authorized (Requires 'admin' role)")
+    logger.info("verify_admin: admin role present")
+    # Add is_admin flag for downstream use
+    user_data["is_admin"] = True
     return user_data
 
 @app.post("/api/upload")
-async def upload_file(file: UploadFile = File(...), session_id: str = Form("default"), user=Depends(verify_user)):
+async def upload_file(file: UploadFile = File(...), session_id: str = Form("default"), user_id: str = Depends(require_user_id)):
     """
     Handle file uploads and save them to a temporary directory under the session id.
     Returns the absolute file path.
@@ -173,7 +202,8 @@ async def upload_file(file: UploadFile = File(...), session_id: str = Form("defa
         # Create tmp directory if it doesn't exist
         # We go up one level from orchestrator to backend root
         backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-        upload_dir = os.path.join(backend_dir, "tmp", session_id)
+        # User-specific upload directory
+        upload_dir = os.path.join(backend_dir, "tmp", user_id, session_id)
         os.makedirs(upload_dir, exist_ok=True)
 
         # Remove UUID renaming and instead use original filename (sanitize to avoid path traversal)
@@ -183,33 +213,35 @@ async def upload_file(file: UploadFile = File(...), session_id: str = Form("defa
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        logger.info(f"File uploaded: {file.filename} -> {file_path}")
+        logger.info(f"File uploaded by user {user_id}: {file.filename} -> {file_path}")
         return JSONResponse(content={
             "status": "success",
             "filename": file.filename,
-            "file_path": file_path
+            "file_path": file_path,
+            "user_id": user_id
         })
     except Exception as e:
-        logger.error(f"Upload failed: {e}")
+        logger.error(f"Upload failed for user {user_id}: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.get("/api/download/{session_id}/{filename}")
-async def download_file(session_id: str, filename: str, user=Depends(verify_user)):
+async def download_file(session_id: str, filename: str, user_id: str = Depends(require_user_id)):
     """
     Serve files from the downloads directory for a specific session.
     """
     try:
         backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-        download_dir = os.path.join(backend_dir, "tmp", session_id)
+        # User-specific download directory
+        download_dir = os.path.join(backend_dir, "tmp", user_id, session_id)
         file_path = os.path.join(download_dir, filename)
 
         if not os.path.exists(file_path):
-            logger.error(f"File not found: {file_path}")
+            logger.error(f"File not found for user {user_id}: {file_path}")
             return JSONResponse(status_code=404, content={"error": "File not found"})
 
         # Security: check that the file is actually inside the download_dir
         if not os.path.abspath(file_path).startswith(os.path.abspath(download_dir)):
-            logger.error(f"Security violation: path traversal attempt for {filename}")
+            logger.error(f"Security violation: path traversal attempt by user {user_id} for {filename}")
             return JSONResponse(status_code=403, content={"error": "Forbidden"})
 
         return FileResponse(
@@ -218,7 +250,7 @@ async def download_file(session_id: str, filename: str, user=Depends(verify_user
             media_type='application/octet-stream'
         )
     except Exception as e:
-        logger.error(f"Download failed: {e}")
+        logger.error(f"Download failed for user {user_id}: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 from typing import Optional, Dict
@@ -256,24 +288,28 @@ class TestRequest(BaseModel):
 @app.post("/api/agent-creator/start")
 async def agent_creator_start(req: StartSessionRequest, admin=Depends(verify_admin)):
     from orchestrator.agent_generator import agent_generator
+    user_id = admin.get('sub', 'legacy')
     result = await agent_generator.start_session(
         name=req.name,
         persona=req.persona,
         tools_desc=req.toolsDescription,
-        api_keys=req.apiKeys
+        api_keys=req.apiKeys,
+        user_id=user_id
     )
     return JSONResponse(content=result)
 
 @app.post("/api/agent-creator/chat")
 async def agent_creator_chat(req: ChatSessionRequest, admin=Depends(verify_admin)):
     from orchestrator.agent_generator import agent_generator
-    result = await agent_generator.chat(req.session_id, req.message)
+    user_id = admin.get('sub', 'legacy')
+    result = await agent_generator.chat(req.session_id, req.message, user_id=user_id)
     return JSONResponse(content=result)
 
 @app.post("/api/agent-creator/generate")
 async def agent_creator_generate(req: GenerateCodeRequest, admin=Depends(verify_admin)):
     from orchestrator.agent_generator import agent_generator
-    result = await agent_generator.generate_code(req.session_id)
+    user_id = admin.get('sub', 'legacy')
+    result = await agent_generator.generate_code(req.session_id, user_id=user_id)
     return JSONResponse(content=result)
 
 from fastapi.responses import StreamingResponse
@@ -284,6 +320,7 @@ from shared.progress import ProgressEvent
 async def agent_creator_generate_with_progress(req: GenerateCodeRequest, admin=Depends(verify_admin)):
     """Generate code with Server-Sent Events progress streaming."""
     from orchestrator.agent_generator import agent_generator
+    user_id = admin.get('sub', 'legacy')
     
     async def progress_stream():
         """Generator that yields SSE progress events during code generation."""
@@ -299,7 +336,8 @@ async def agent_creator_generate_with_progress(req: GenerateCodeRequest, admin=D
                 # Call generate_code with progress callback
                 result = await agent_generator.generate_code(
                     req.session_id,
-                    progress_callback=progress_callback
+                    progress_callback=progress_callback,
+                    user_id=user_id
                 )
                 # Send final result
                 await queue.put(json.dumps({
@@ -358,6 +396,7 @@ async def agent_creator_generate_with_progress(req: GenerateCodeRequest, admin=D
 @app.post("/api/agent-creator/test")
 async def agent_creator_test(req: TestRequest, admin=Depends(verify_admin)):
     from orchestrator.agent_generator import agent_generator
+    user_id = admin.get('sub', 'legacy')
     
     # Determine what to send to save_and_test_agent
     # Priority: files dict if provided, otherwise code string
@@ -365,13 +404,13 @@ async def agent_creator_test(req: TestRequest, admin=Depends(verify_admin)):
         # Send files dict as JSON string
         files_data = json.dumps(req.files)
         return StreamingResponse(
-            agent_generator.save_and_test_agent(req.session_id, files_data),
+            agent_generator.save_and_test_agent(req.session_id, files_data, user_id=user_id),
             media_type="text/event-stream"
         )
     elif req.code:
         # Backward compatibility: single code string
         return StreamingResponse(
-            agent_generator.save_and_test_agent(req.session_id, req.code),
+            agent_generator.save_and_test_agent(req.session_id, req.code, user_id=user_id),
             media_type="text/event-stream"
         )
     else:
@@ -383,12 +422,16 @@ async def agent_creator_test(req: TestRequest, admin=Depends(verify_admin)):
 @app.get("/api/agent-creator/drafts")
 async def get_draft_agents(admin=Depends(verify_admin)):
     from orchestrator.agent_generator import agent_generator
-    return JSONResponse(content={"drafts": agent_generator.get_all_sessions()})
+    # Admin users see all drafts (including legacy)
+    user_id = None if admin.get('is_admin') else admin.get('sub', 'legacy')
+    return JSONResponse(content={"drafts": agent_generator.get_all_sessions(user_id=user_id)})
 
 @app.get("/api/agent-creator/session/{session_id}")
 async def get_draft_session(session_id: str, admin=Depends(verify_admin)):
     from orchestrator.agent_generator import agent_generator
-    details = agent_generator.get_session_details(session_id)
+    # Admin users can access any session (including legacy)
+    user_id = None if admin.get('is_admin') else admin.get('sub', 'legacy')
+    details = agent_generator.get_session_details(session_id, user_id=user_id)
     if not details:
         return JSONResponse(status_code=404, content={"error": "Session not found"})
     return JSONResponse(content=details)
@@ -396,7 +439,9 @@ async def get_draft_session(session_id: str, admin=Depends(verify_admin)):
 @app.delete("/api/agent-creator/session/{session_id}")
 async def delete_draft_session(session_id: str, admin=Depends(verify_admin)):
     from orchestrator.agent_generator import agent_generator
-    success = agent_generator.delete_session(session_id)
+    # Admin users can delete any session (including legacy)
+    user_id = None if admin.get('is_admin') else admin.get('sub', 'legacy')
+    success = agent_generator.delete_session(session_id, user_id=user_id)
     if not success:
         return JSONResponse(status_code=404, content={"error": "Session not found"})
     return JSONResponse(content={"status": "success"})
@@ -404,5 +449,6 @@ async def delete_draft_session(session_id: str, admin=Depends(verify_admin)):
 @app.post("/api/agent-creator/resolve-install")
 async def agent_creator_resolve_install(req: ResolveInstallRequest, admin=Depends(verify_admin)):
     from orchestrator.agent_generator import agent_generator
-    result = await agent_generator.resolve_install(req.session_id, req.tool_call_id, req.approved, req.packages)
+    user_id = admin.get('sub', 'legacy')
+    result = await agent_generator.resolve_install(req.session_id, req.tool_call_id, req.approved, req.packages, user_id=user_id)
     return JSONResponse(content=result)

@@ -33,6 +33,7 @@ class Database:
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS chats (
                 id TEXT PRIMARY KEY,
+                user_id TEXT,
                 title TEXT,
                 created_at INTEGER,
                 updated_at INTEGER
@@ -44,6 +45,7 @@ class Database:
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 chat_id TEXT NOT NULL,
+                user_id TEXT,
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
                 timestamp INTEGER,
@@ -67,6 +69,7 @@ class Database:
             CREATE TABLE IF NOT EXISTS saved_components (
                 id TEXT PRIMARY KEY,
                 chat_id TEXT NOT NULL,
+                user_id TEXT,
                 component_data TEXT NOT NULL,
                 component_type TEXT NOT NULL,
                 title TEXT,
@@ -86,6 +89,7 @@ class Database:
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS draft_agents (
                 session_id TEXT PRIMARY KEY,
+                user_id TEXT,
                 name TEXT,
                 persona TEXT,
                 model TEXT,
@@ -102,6 +106,7 @@ class Database:
             CREATE TABLE IF NOT EXISTS chat_files (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 chat_id TEXT NOT NULL,
+                user_id TEXT,
                 original_name TEXT NOT NULL,
                 backend_path TEXT NOT NULL,
                 uploaded_at INTEGER,

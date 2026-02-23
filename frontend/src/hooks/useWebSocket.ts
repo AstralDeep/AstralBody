@@ -46,6 +46,35 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
     const [chatHistory, setChatHistory] = useState<ChatSession[]>([]);
     const [activeChatIdState, setActiveChatIdState] = useState<string | null>(null);
     const activeChatIdRef = useRef<string | null>(null);
+    const [userId, setUserId] = useState<string | null>(null);
+
+    // Decode token to extract user_id
+    useEffect(() => {
+        if (!token) {
+            setUserId(null);
+            return;
+        }
+        const decodeToken = (token: string): string | null => {
+            if (token === "dev-token") {
+                return "dev-user-id";
+            }
+            try {
+                const base64Url = token.split('.')[1];
+                const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+                const jsonPayload = decodeURIComponent(atob(base64).split('').map(function(c) {
+                    return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+                }).join(''));
+                const payload = JSON.parse(jsonPayload);
+                // console.log("Decoded JWT payload:", payload);
+                return payload.sub || null;
+            } catch (e) {
+                console.error("Failed to decode JWT", e);
+                return null;
+            }
+        };
+        const id = decodeToken(token);
+        setUserId(id);
+    }, [token]);
 
     const setActiveChatId = useCallback((id: string | null) => {
         activeChatIdRef.current = id;
@@ -309,7 +338,7 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
                 if (c && c._reconnect) c._reconnect();
             }, 3000);
         }
-    }, [url, token, handleMessage]); // Added handleMessage dependency
+    }, [url, token, handleMessage, userId]); // Added handleMessage dependency
 
     // Also update previously bound reconnect loop
     useEffect(() => {
