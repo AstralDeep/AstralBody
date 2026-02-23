@@ -47,8 +47,8 @@ class HistoryManager:
             
             for chat_id, chat_data in chats.items():
                 self.db.execute(
-                    "INSERT INTO chats (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                    (chat_id, chat_data.get('title'), chat_data.get('created_at'), chat_data.get('updated_at'))
+                    "INSERT INTO chats (id, user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                    (chat_id, 'legacy', chat_data.get('title'), chat_data.get('created_at'), chat_data.get('updated_at'))
                 )
                 
                 for msg in chat_data.get('messages', []):
@@ -58,8 +58,8 @@ class HistoryManager:
                         content = json.dumps(content)
                         
                     self.db.execute(
-                        "INSERT INTO messages (chat_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
-                        (chat_id, msg.get('role'), content, msg.get('timestamp'))
+                        "INSERT INTO messages (chat_id, user_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
+                        (chat_id, 'legacy', msg.get('role'), content, msg.get('timestamp'))
                     )
             
             # Rename JSON file to backup to prevent re-migration
@@ -69,18 +69,18 @@ class HistoryManager:
         except Exception as e:
             logger.error(f"Migration failed: {e}")
 
-    def create_chat(self, chat_id: Optional[str] = None) -> str:
+    def create_chat(self, chat_id: Optional[str] = None, user_id: str = 'legacy') -> str:
         """Create a new chat session."""
         if not chat_id:
             chat_id = str(uuid.uuid4())
         timestamp = int(time.time() * 1000)
         self.db.execute(
-            "INSERT INTO chats (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-            (chat_id, "New Chat", timestamp, timestamp)
+            "INSERT INTO chats (id, user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            (chat_id, user_id, "New Chat", timestamp, timestamp)
         )
         return chat_id
 
-    def add_message(self, chat_id: str, role: str, content: any):
+    def add_message(self, chat_id: str, role: str, content: any, user_id: str = 'legacy'):
         """Add a message to a chat session."""
         timestamp = int(time.time() * 1000)
         
@@ -106,25 +106,25 @@ class HistoryManager:
                 self.db.execute("UPDATE chats SET title = ? WHERE id = ?", (title, chat_id))
 
         self.db.execute(
-            "INSERT INTO messages (chat_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
-            (chat_id, role, content_str, timestamp)
+            "INSERT INTO messages (chat_id, user_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
+            (chat_id, user_id, role, content_str, timestamp)
         )
         
         # Update chat timestamp
         self.db.execute("UPDATE chats SET updated_at = ? WHERE id = ?", (timestamp, chat_id))
 
-    def update_chat_title(self, chat_id: str, title: str):
+    def update_chat_title(self, chat_id: str, title: str, user_id: str = 'legacy'):
         """Update the title of a specific chat."""
         timestamp = int(time.time() * 1000)
-        self.db.execute("UPDATE chats SET title = ?, updated_at = ? WHERE id = ?", (title, timestamp, chat_id))
+        self.db.execute("UPDATE chats SET title = ?, updated_at = ? WHERE id = ? AND user_id = ?", (title, timestamp, chat_id, user_id))
 
-    def get_chat(self, chat_id: str) -> Optional[Dict]:
+    def get_chat(self, chat_id: str, user_id: str = 'legacy') -> Optional[Dict]:
         """Get full details of a specific chat."""
-        chat_row = self.db.fetch_one("SELECT * FROM chats WHERE id = ?", (chat_id,))
+        chat_row = self.db.fetch_one("SELECT * FROM chats WHERE id = ? AND user_id = ?", (chat_id, user_id))
         if not chat_row:
             return None
 
-        messages_rows = self.db.fetch_all("SELECT * FROM messages WHERE chat_id = ? ORDER BY timestamp ASC", (chat_id,))
+        messages_rows = self.db.fetch_all("SELECT * FROM messages WHERE chat_id = ? AND user_id = ? ORDER BY timestamp ASC", (chat_id, user_id))
         messages = []
         for row in messages_rows:
             content = row['content']
@@ -148,14 +148,14 @@ class HistoryManager:
             "messages": messages
         }
 
-    def get_recent_chats(self, limit: int = 20) -> List[Dict]:
+    def get_recent_chats(self, limit: int = 20, user_id: str = 'legacy') -> List[Dict]:
         """Get list of recent chats (metadata only)."""
-        rows = self.db.fetch_all("SELECT * FROM chats ORDER BY updated_at DESC LIMIT ?", (limit,))
+        rows = self.db.fetch_all("SELECT * FROM chats WHERE user_id = ? ORDER BY updated_at DESC LIMIT ?", (user_id, limit))
         
         results = []
         for row in rows:
             # Get last message for preview
-            last_msg = self.db.fetch_one("SELECT content FROM messages WHERE chat_id = ? ORDER BY timestamp DESC LIMIT 1", (row['id'],))
+            last_msg = self.db.fetch_one("SELECT content FROM messages WHERE chat_id = ? AND user_id = ? ORDER BY timestamp DESC LIMIT 1", (row['id'], user_id))
             preview = ""
             if last_msg:
                 content = last_msg['content']
@@ -169,7 +169,7 @@ class HistoryManager:
                     preview = str(content)
             
             # Check if chat has saved components
-            has_saved = self.chat_has_saved_components(row['id'])
+            has_saved = self.chat_has_saved_components(row['id'], user_id)
             
             results.append({
                 "id": row['id'],
@@ -181,15 +181,15 @@ class HistoryManager:
             
         return results
     
-    def delete_chat(self, chat_id: str):
+    def delete_chat(self, chat_id: str, user_id: str = 'legacy'):
         """Delete a chat and its messages."""
-        self.db.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
+        self.db.execute("DELETE FROM chats WHERE id = ? AND user_id = ?", (chat_id, user_id))
 
     # =========================================================================
     # Saved UI Components Methods
     # =========================================================================
     
-    def save_component(self, chat_id: str, component_data: any, component_type: str, title: str = None) -> str:
+    def save_component(self, chat_id: str, component_data: any, component_type: str, title: str = None, user_id: str = 'legacy') -> str:
         """Save a UI component to the database."""
         import json
         import uuid
@@ -206,32 +206,33 @@ class HistoryManager:
             title = component_type.replace('_', ' ').title()
         
         self.db.execute(
-            """INSERT INTO saved_components 
-               (id, chat_id, component_data, component_type, title, created_at) 
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (component_id, chat_id, component_json, component_type, title, created_at)
+            """INSERT INTO saved_components
+               (id, chat_id, user_id, component_data, component_type, title, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (component_id, chat_id, user_id, component_json, component_type, title, created_at)
         )
         
         # Update chat flag
         self.db.execute(
-            "UPDATE chats SET has_saved_components = 1 WHERE id = ?",
-            (chat_id,)
+            "UPDATE chats SET has_saved_components = 1 WHERE id = ? AND user_id = ?",
+            (chat_id, user_id)
         )
         
         return component_id
     
-    def get_saved_components(self, chat_id: str = None) -> List[Dict]:
+    def get_saved_components(self, chat_id: str = None, user_id: str = 'legacy') -> List[Dict]:
         """Get saved components, optionally filtered by chat_id."""
         import json
         
         if chat_id:
             rows = self.db.fetch_all(
-                "SELECT * FROM saved_components WHERE chat_id = ? ORDER BY created_at DESC",
-                (chat_id,)
+                "SELECT * FROM saved_components WHERE chat_id = ? AND user_id = ? ORDER BY created_at DESC",
+                (chat_id, user_id)
             )
         else:
             rows = self.db.fetch_all(
-                "SELECT * FROM saved_components ORDER BY created_at DESC"
+                "SELECT * FROM saved_components WHERE user_id = ? ORDER BY created_at DESC",
+                (user_id,)
             )
         
         components = []
@@ -252,12 +253,12 @@ class HistoryManager:
         
         return components
     
-    def delete_component(self, component_id: str) -> bool:
+    def delete_component(self, component_id: str, user_id: str = 'legacy') -> bool:
         """Delete a saved component."""
         # Get chat_id before deleting
         row = self.db.fetch_one(
-            "SELECT chat_id FROM saved_components WHERE id = ?",
-            (component_id,)
+            "SELECT chat_id FROM saved_components WHERE id = ? AND user_id = ?",
+            (component_id, user_id)
         )
         
         if not row:
@@ -267,30 +268,30 @@ class HistoryManager:
         
         # Delete the component
         self.db.execute(
-            "DELETE FROM saved_components WHERE id = ?",
-            (component_id,)
+            "DELETE FROM saved_components WHERE id = ? AND user_id = ?",
+            (component_id, user_id)
         )
         
         # Check if chat still has components
         count_row = self.db.fetch_one(
-            "SELECT COUNT(*) as count FROM saved_components WHERE chat_id = ?",
-            (chat_id,)
+            "SELECT COUNT(*) as count FROM saved_components WHERE chat_id = ? AND user_id = ?",
+            (chat_id, user_id)
         )
         
         if count_row['count'] == 0:
             # Update chat flag
             self.db.execute(
-                "UPDATE chats SET has_saved_components = 0 WHERE id = ?",
-                (chat_id,)
+                "UPDATE chats SET has_saved_components = 0 WHERE id = ? AND user_id = ?",
+                (chat_id, user_id)
             )
         
         return True
     
-    def get_component_by_id(self, component_id: str) -> Optional[Dict]:
+    def get_component_by_id(self, component_id: str, user_id: str = 'legacy') -> Optional[Dict]:
         """Get a single saved component by ID."""
         row = self.db.fetch_one(
-            "SELECT * FROM saved_components WHERE id = ?",
-            (component_id,)
+            "SELECT * FROM saved_components WHERE id = ? AND user_id = ?",
+            (component_id, user_id)
         )
         if not row:
             return None
@@ -309,13 +310,13 @@ class HistoryManager:
             "created_at": row['created_at']
         }
 
-    def replace_components(self, old_ids: list, new_components: list, chat_id: str) -> list:
+    def replace_components(self, old_ids: list, new_components: list, chat_id: str, user_id: str = 'legacy') -> list:
         """Atomically delete old components and insert new ones. Returns list of new component dicts."""
         # Delete old components
         for old_id in old_ids:
             self.db.execute(
-                "DELETE FROM saved_components WHERE id = ?",
-                (old_id,)
+                "DELETE FROM saved_components WHERE id = ? AND user_id = ?",
+                (old_id, user_id)
             )
         
         # Insert new components
@@ -328,10 +329,10 @@ class HistoryManager:
             title = comp.get("title", "Combined Component")
             
             self.db.execute(
-                """INSERT INTO saved_components 
-                   (id, chat_id, component_data, component_type, title, created_at) 
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (component_id, chat_id, component_json, component_type, title, created_at)
+                """INSERT INTO saved_components
+                   (id, chat_id, user_id, component_data, component_type, title, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (component_id, chat_id, user_id, component_json, component_type, title, created_at)
             )
             
             created.append({
@@ -345,22 +346,22 @@ class HistoryManager:
         
         # Check if chat still has components
         count_row = self.db.fetch_one(
-            "SELECT COUNT(*) as count FROM saved_components WHERE chat_id = ?",
-            (chat_id,)
+            "SELECT COUNT(*) as count FROM saved_components WHERE chat_id = ? AND user_id = ?",
+            (chat_id, user_id)
         )
         has_components = count_row and count_row['count'] > 0
         self.db.execute(
-            "UPDATE chats SET has_saved_components = ? WHERE id = ?",
-            (1 if has_components else 0, chat_id)
+            "UPDATE chats SET has_saved_components = ? WHERE id = ? AND user_id = ?",
+            (1 if has_components else 0, chat_id, user_id)
         )
         
         return created
 
-    def chat_has_saved_components(self, chat_id: str) -> bool:
+    def chat_has_saved_components(self, chat_id: str, user_id: str = 'legacy') -> bool:
         """Check if a chat has saved components."""
         row = self.db.fetch_one(
-            "SELECT has_saved_components FROM chats WHERE id = ?",
-            (chat_id,)
+            "SELECT has_saved_components FROM chats WHERE id = ? AND user_id = ?",
+            (chat_id, user_id)
         )
         
         if not row:
@@ -368,19 +369,19 @@ class HistoryManager:
         
         return bool(row['has_saved_components'])
 
-    def add_file_mapping(self, chat_id: str, original_name: str, backend_path: str):
+    def add_file_mapping(self, chat_id: str, original_name: str, backend_path: str, user_id: str = 'legacy'):
         """Register a mapping between an original filename and its backend UUID path."""
         import time
         timestamp = int(time.time() * 1000)
         self.db.execute(
-            "INSERT INTO chat_files (chat_id, original_name, backend_path, uploaded_at) VALUES (?, ?, ?, ?)",
-            (chat_id, original_name, backend_path, timestamp)
+            "INSERT INTO chat_files (chat_id, user_id, original_name, backend_path, uploaded_at) VALUES (?, ?, ?, ?, ?)",
+            (chat_id, user_id, original_name, backend_path, timestamp)
         )
 
-    def get_file_mappings(self, chat_id: str) -> List[Dict]:
+    def get_file_mappings(self, chat_id: str, user_id: str = 'legacy') -> List[Dict]:
         """Retrieve all file mappings for a chat."""
         rows = self.db.fetch_all(
-            "SELECT original_name, backend_path FROM chat_files WHERE chat_id = ? ORDER BY uploaded_at ASC",
-            (chat_id,)
+            "SELECT original_name, backend_path FROM chat_files WHERE chat_id = ? AND user_id = ? ORDER BY uploaded_at ASC",
+            (chat_id, user_id)
         )
         return [{"original_name": r["original_name"], "backend_path": r["backend_path"]} for r in rows]

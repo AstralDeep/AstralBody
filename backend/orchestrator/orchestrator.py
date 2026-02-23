@@ -229,13 +229,15 @@ class Orchestrator:
                     ])
                     return
 
+                user_id = self._get_user_id(websocket)
+
                 if msg.action == "chat_message":
                     user_message = msg.payload.get("message", "")
                     chat_id = msg.session_id or msg.payload.get("chat_id")
                     
                     # If no chat_id provided, create one
                     if not chat_id:
-                        chat_id = self.history.create_chat()
+                        chat_id = self.history.create_chat(user_id=user_id)
                         from_message = True
                         # Inform UI about new chat ID
                         await self._safe_send(websocket, json.dumps({
@@ -243,15 +245,15 @@ class Orchestrator:
                             "payload": {"chat_id": chat_id, "from_message": True}
                         }))
                     else:
-                        if not self.history.get_chat(chat_id):
-                            self.history.create_chat(chat_id)
+                        if not self.history.get_chat(chat_id, user_id=user_id):
+                            self.history.create_chat(chat_id, user_id=user_id)
                             await self._safe_send(websocket, json.dumps({
                                 "type": "chat_created",
                                 "payload": {"chat_id": chat_id, "from_message": True}
                             }))
 
                     display_message = msg.payload.get("display_message")
-                    await self.handle_chat_message(websocket, user_message, chat_id, display_message)
+                    await self.handle_chat_message(websocket, user_message, chat_id, display_message, user_id=user_id)
 
                 elif msg.action == "get_dashboard":
                     await self.send_dashboard(websocket)
@@ -260,7 +262,7 @@ class Orchestrator:
                     await self.send_agent_list(websocket)
 
                 elif msg.action == "get_history":
-                    chats = self.history.get_recent_chats()
+                    chats = self.history.get_recent_chats(user_id=user_id)
                     await self._safe_send(websocket, json.dumps({
                         "type": "history_list",
                         "chats": chats
@@ -268,7 +270,7 @@ class Orchestrator:
 
                 elif msg.action == "load_chat":
                     chat_id = msg.payload.get("chat_id")
-                    chat = self.history.get_chat(chat_id)
+                    chat = self.history.get_chat(chat_id, user_id=user_id)
                     if chat:
                         await self._safe_send(websocket, json.dumps({
                             "type": "chat_loaded",
@@ -280,7 +282,7 @@ class Orchestrator:
                         ])
 
                 elif msg.action == "new_chat":
-                    chat_id = self.history.create_chat()
+                    chat_id = self.history.create_chat(user_id=user_id)
                     await self._safe_send(websocket, json.dumps({
                         "type": "chat_created",
                         "payload": {"chat_id": chat_id, "from_message": False}
@@ -301,7 +303,7 @@ class Orchestrator:
                     
                     try:
                         component_id = self.history.save_component(
-                            chat_id, component_data, component_type, title
+                            chat_id, component_data, component_type, title, user_id=user_id
                         )
                         
                         # Send success response
@@ -319,7 +321,7 @@ class Orchestrator:
                         
                         # Broadcast updated chat history to all UI clients
                         if self.ui_clients:
-                            history_list = self.history.get_recent_chats()
+                            history_list = self.history.get_recent_chats(user_id=user_id)
                             msg_history = json.dumps({
                                 "type": "history_list",
                                 "chats": history_list
@@ -339,7 +341,7 @@ class Orchestrator:
 
                 elif msg.action == "get_saved_components":
                     chat_id = msg.payload.get("chat_id")
-                    components = self.history.get_saved_components(chat_id)
+                    components = self.history.get_saved_components(chat_id, user_id=user_id)
                     await self._safe_send(websocket, json.dumps({
                         "type": "saved_components_list",
                         "components": components
@@ -353,7 +355,7 @@ class Orchestrator:
                         ])
                         return
                     
-                    success = self.history.delete_component(component_id)
+                    success = self.history.delete_component(component_id, user_id=user_id)
                     if success:
                         await self._safe_send(websocket, json.dumps({
                             "type": "component_deleted",
@@ -362,7 +364,7 @@ class Orchestrator:
                         
                         # Broadcast updated chat history to all UI clients
                         if self.ui_clients:
-                            history_list = self.history.get_recent_chats()
+                            history_list = self.history.get_recent_chats(user_id=user_id)
                             msg_history = json.dumps({
                                 "type": "history_list",
                                 "chats": history_list
@@ -389,8 +391,8 @@ class Orchestrator:
                         }))
                         return
                     
-                    source = self.history.get_component_by_id(source_id)
-                    target = self.history.get_component_by_id(target_id)
+                    source = self.history.get_component_by_id(source_id, user_id=user_id)
+                    target = self.history.get_component_by_id(target_id, user_id=user_id)
                     
                     if not source or not target:
                         await self._safe_send(websocket, json.dumps({
@@ -422,7 +424,8 @@ class Orchestrator:
                             new_components = self.history.replace_components(
                                 [source_id, target_id],
                                 result["components"],
-                                chat_id
+                                chat_id,
+                                user_id=user_id
                             )
                             await self._safe_send(websocket, json.dumps({
                                 "type": "components_combined",
@@ -448,7 +451,7 @@ class Orchestrator:
                     
                     components = []
                     for cid in component_ids:
-                        comp = self.history.get_component_by_id(cid)
+                        comp = self.history.get_component_by_id(cid, user_id=user_id)
                         if comp:
                             components.append(comp)
                     
@@ -481,7 +484,8 @@ class Orchestrator:
                             new_components = self.history.replace_components(
                                 component_ids,
                                 result["components"],
-                                chat_id
+                                chat_id,
+                                user_id=user_id
                             )
                             await self._safe_send(websocket, json.dumps({
                                 "type": "components_condensed",
@@ -711,7 +715,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                         if isinstance(child, dict):
                             self._validate_component_tree(child, valid_types)
 
-    def _map_file_paths(self, chat_id: str, args: Dict) -> Dict:
+    def _map_file_paths(self, chat_id: str, args: Dict, user_id: str = 'legacy') -> Dict:
         """Replace original filenames in tool arguments with backend paths.
         
         Uses file mappings stored in history for the given chat.
@@ -719,7 +723,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         if not chat_id:
             return args
         
-        mappings = self.history.get_file_mappings(chat_id)
+        mappings = self.history.get_file_mappings(chat_id, user_id=user_id)
         if not mappings:
             return args
         
@@ -751,9 +755,11 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
     # LLM-POWERED TOOL ROUTING
     # =========================================================================
 
-    async def handle_chat_message(self, websocket, message: str, chat_id: str, display_message: str = None):
+    async def handle_chat_message(self, websocket, message: str, chat_id: str, display_message: str = None, user_id: str = None):
         """Process a chat message: LLM determines which tools to call (Multi-Turn Re-Act Loop)."""
         logger.info(f"Processing chat message: '{message}' for chat_id {chat_id}")
+        if user_id is None:
+            user_id = self._get_user_id(websocket)
         if not message:
             logger.warning("Empty message received")
             return
@@ -773,7 +779,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         
         # Save User Message to History. If display_message is provided, save that instead.
         msg_to_save = display_message if display_message else message
-        self.history.add_message(chat_id, "user", msg_to_save)
+        self.history.add_message(chat_id, "user", msg_to_save, user_id=user_id)
 
         # Capture File Upload Mapping
         upload_match = re.search(r"I have uploaded (.*?) to the backend at: `(.*?)`" , message)
@@ -781,12 +787,12 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             original_name = upload_match.group(1)
             backend_path = upload_match.group(2)
             logger.info(f"Captured file upload mapping: {original_name} -> {backend_path}")
-            self.history.add_file_mapping(chat_id, original_name, backend_path)
+            self.history.add_file_mapping(chat_id, original_name, backend_path, user_id=user_id)
 
         # Async title summarization for new chats
-        chat_data = self.history.get_chat(chat_id)
+        chat_data = self.history.get_chat(chat_id, user_id=user_id)
         if chat_data and len(chat_data.get("messages", [])) == 1:
-            asyncio.create_task(self.summarize_chat_title(chat_id, msg_to_save))
+            asyncio.create_task(self.summarize_chat_title(chat_id, msg_to_save, user_id=user_id))
 
         # Build tool definitions from registered agents
         logger.info(f"Building tool definitions from {len(self.agent_cards)} agents...")
@@ -820,7 +826,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             # SYSTEM PROMPT
             # ------------------------------------------------------------------
             # Fetch file mappings for this chat
-            file_mappings = self.history.get_file_mappings(chat_id)
+            file_mappings = self.history.get_file_mappings(chat_id, user_id=user_id)
             file_context = ""
             if file_mappings:
                 file_context = "\nFILES ACCESSED IN THIS CHAT (Original Name -> Backend Path):\n"
@@ -856,7 +862,7 @@ CRITICAL RULES:
             # ------------------------------------------------------------------
             # Fetch recent history
             history_messages = []
-            chat_data = self.history.get_chat(chat_id)
+            chat_data = self.history.get_chat(chat_id, user_id=user_id)
             if chat_data and "messages" in chat_data:
                 # Get last 10 messages (excluding the one we just added)
                 raw_history = chat_data["messages"][:-1]
@@ -913,7 +919,7 @@ CRITICAL RULES:
                         ]).to_json()
                     ]
                     await self.send_ui_render(websocket, reasoning_components)
-                    self.history.add_message(chat_id, "assistant", reasoning_components)
+                    self.history.add_message(chat_id, "assistant", reasoning_components, user_id=user_id)
 
                 # Check if LLM wants to call tools
                 if llm_msg.tool_calls:
@@ -934,10 +940,10 @@ CRITICAL RULES:
                     tool_results = []
                     if len(llm_msg.tool_calls) == 1:
                         tc = llm_msg.tool_calls[0]
-                        res = await self.execute_single_tool(websocket, tc, tool_to_agent, chat_id)
+                        res = await self.execute_single_tool(websocket, tc, tool_to_agent, chat_id, user_id=user_id)
                         if res: tool_results.append(res)
                     else:
-                        res_list = await self.execute_parallel_tools(websocket, llm_msg.tool_calls, tool_to_agent, chat_id)
+                        res_list = await self.execute_parallel_tools(websocket, llm_msg.tool_calls, tool_to_agent, chat_id, user_id=user_id)
                         tool_results.extend(res_list)
 
                     # Collect tool UI components and send as a single collapsible
@@ -958,7 +964,7 @@ CRITICAL RULES:
                         ).to_json()
                         await self.send_ui_render(websocket, [collapsible])
                         if chat_id:
-                            self.history.add_message(chat_id, "assistant", [collapsible])
+                            self.history.add_message(chat_id, "assistant", [collapsible], user_id=user_id)
 
                     # Append tool outputs to LLM conversation history
                     for i, tc in enumerate(llm_msg.tool_calls):
@@ -1088,7 +1094,7 @@ CRITICAL RULES:
                     await self.send_ui_render(websocket, response_components)
 
                     # Save complete interaction to history
-                    self.history.add_message(chat_id, "assistant", response_components)
+                    self.history.add_message(chat_id, "assistant", response_components, user_id=user_id)
 
                     # Signal that processing is complete
                     await self._safe_send(websocket, json.dumps({
@@ -1186,7 +1192,7 @@ CRITICAL RULES:
     MAX_RETRIES = 5
     RETRY_BACKOFF = [1.0, 2.0, 4.0, 8.0]  # exponential backoff
 
-    async def execute_single_tool(self, websocket, tool_call, tool_to_agent: Dict, chat_id: str = None) -> Optional[MCPResponse]:
+    async def execute_single_tool(self, websocket, tool_call, tool_to_agent: Dict, chat_id: str = None, user_id: str = None) -> Optional[MCPResponse]:
         """Execute a single tool call and render its UI components. Returns the Result object."""
         tool_name = tool_call.function.name
         try:
@@ -1196,7 +1202,7 @@ CRITICAL RULES:
 
         # Map file paths if chat_id provided
         if chat_id:
-            args = self._map_file_paths(chat_id, args)
+            args = self._map_file_paths(chat_id, args, user_id=user_id)
             args["session_id"] = chat_id
 
         agent_id = tool_to_agent.get(tool_name)
@@ -1220,7 +1226,7 @@ CRITICAL RULES:
 
         return result
 
-    async def execute_parallel_tools(self, websocket, tool_calls, tool_to_agent: Dict, chat_id: str = None) -> List[Optional[MCPResponse]]:
+    async def execute_parallel_tools(self, websocket, tool_calls, tool_to_agent: Dict, chat_id: str = None, user_id: str = None) -> List[Optional[MCPResponse]]:
         """Execute multiple tool calls in parallel. Returns list of Results."""
         tasks = []
         tool_names = []
@@ -1234,7 +1240,7 @@ CRITICAL RULES:
 
             # Map file paths if chat_id provided
             if chat_id:
-                args = self._map_file_paths(chat_id, args)
+                args = self._map_file_paths(chat_id, args, user_id=user_id)
                 args["session_id"] = chat_id
 
             agent_id = tool_to_agent.get(tool_name)
@@ -1519,7 +1525,7 @@ CRITICAL RULES:
             
             await asyncio.sleep(5)  # Check every 5 seconds
 
-    async def summarize_chat_title(self, chat_id: str, message: str):
+    async def summarize_chat_title(self, chat_id: str, message: str, user_id: str = 'legacy'):
         """Generate a concise title for the chat using LLM."""
         if not self.llm_client:
             return
@@ -1537,11 +1543,11 @@ CRITICAL RULES:
             title = response.choices[0].message.content.strip().strip('"')
             
             # Update history and notify UI
-            self.history.update_chat_title(chat_id, title)
+            self.history.update_chat_title(chat_id, title, user_id=user_id)
             
             # Broadcast update to all connected UIs
             if self.ui_clients:
-                history_list = self.history.get_recent_chats()
+                history_list = self.history.get_recent_chats(user_id=user_id)
                 msg = json.dumps({
                     "type": "history_list",
                     "chats": history_list
@@ -1612,6 +1618,8 @@ CRITICAL RULES:
                     account_roles = payload["resource_access"]["account"].get("roles", [])
                     roles.extend(account_roles)
             
+            logger.info(f"Token validation: extracted roles {roles} from payload keys {list(payload.keys())}")
+            
             if "admin" not in roles and "user" not in roles:
                 logger.warning(f"Token unauthorized (Requires 'admin' or 'user' role). Found roles: {roles}")
                 return None
@@ -1620,6 +1628,14 @@ CRITICAL RULES:
         except Exception as e:
             logger.error(f"Token validation failed: {e}")
             return None
+
+    def _get_user_id(self, websocket) -> str:
+        """Extract user_id from the UI session, default to 'legacy' if not authenticated."""
+        if websocket not in self.ui_sessions:
+            return 'legacy'
+        user_data = self.ui_sessions[websocket]
+        # user_data is the JWT payload, sub is the subject (user ID)
+        return user_data.get('sub', 'legacy')
 
 
 if __name__ == "__main__":

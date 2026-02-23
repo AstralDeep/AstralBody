@@ -2,6 +2,7 @@ import { createContext, useContext, useState, type ReactNode } from 'react';
 
 interface User {
     access_token: string;
+    user_id: string;
     profile: {
         preferred_username: string;
         email?: string;
@@ -47,6 +48,7 @@ export function MockAuthProvider({ children }: { children: ReactNode }) {
 
     const user = isAuthenticated ? {
         access_token: "dev-token",
+        user_id: "dev-user-id",
         profile: {
             preferred_username: "Dev User",
             email: "dev@local"
