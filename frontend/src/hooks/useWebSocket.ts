@@ -47,6 +47,11 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
     const [activeChatIdState, setActiveChatIdState] = useState<string | null>(null);
     const activeChatIdRef = useRef<string | null>(null);
     const [userId, setUserId] = useState<string | null>(null);
+    const tokenRef = useRef<string | undefined>(token);
+
+    useEffect(() => {
+        tokenRef.current = token;
+    }, [token]);
 
     // Decode token to extract user_id
     useEffect(() => {
@@ -61,7 +66,7 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
             try {
                 const base64Url = token.split('.')[1];
                 const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
-                const jsonPayload = decodeURIComponent(atob(base64).split('').map(function(c) {
+                const jsonPayload = decodeURIComponent(atob(base64).split('').map(function (c) {
                     return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
                 }).join(''));
                 const payload = JSON.parse(jsonPayload);
@@ -260,7 +265,8 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
     }, [setActiveChatId]);
 
     const connect = useCallback(() => {
-        if (!token) return; // Don't connect without token
+        const currentToken = tokenRef.current;
+        if (!currentToken) return; // Don't connect without token
 
         try {
             const ws = new WebSocket(url);
@@ -274,7 +280,7 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
                 // Send RegisterUI with token
                 ws.send(JSON.stringify({
                     type: "register_ui",
-                    token: token,
+                    token: currentToken,
                     capabilities: ["render", "stream"],
                     session_id: `ui-${Date.now()}`
                 }));
@@ -338,7 +344,7 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
                 if (c && c._reconnect) c._reconnect();
             }, 3000);
         }
-    }, [url, token, handleMessage, userId]); // Added handleMessage dependency
+    }, [url, handleMessage, userId]); // Added handleMessage dependency, removed token
 
     // Also update previously bound reconnect loop
     useEffect(() => {
@@ -494,8 +500,16 @@ export function useWebSocket(url: string = "ws://localhost:8001", token?: string
     }, []);
 
     useEffect(() => {
-        connect();
+        // Only connect in the top-level window (avoids connections in OIDC renew iframes)
+        // and delay slightly to allow the environment to stabilize on reload.
+        if (window.self !== window.top) return;
+
+        const timer = setTimeout(() => {
+            connect();
+        }, 500);
+
         return () => {
+            clearTimeout(timer);
             if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
             wsRef.current?.close();
         };

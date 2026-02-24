@@ -68,7 +68,10 @@ export default function ChatInterface({
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     useEffect(() => {
-        bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+        const frameId = requestAnimationFrame(() => {
+            bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+        });
+        return () => cancelAnimationFrame(frameId);
     }, [messages, chatStatus]);
 
     const clearAttachment = () => {

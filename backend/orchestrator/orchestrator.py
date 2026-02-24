@@ -1624,7 +1624,7 @@ CRITICAL RULES:
                     account_roles = payload["resource_access"]["account"].get("roles", [])
                     roles.extend(account_roles)
             
-            logger.info(f"Token validation: extracted roles {roles} from payload keys {list(payload.keys())}")
+            logger.debug(f"Token validation: extracted roles {roles} from payload keys {list(payload.keys())}")
             
             if "admin" not in roles and "user" not in roles:
                 logger.warning(f"Token unauthorized (Requires 'admin' or 'user' role). Found roles: {roles}")
