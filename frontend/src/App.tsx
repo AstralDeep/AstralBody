@@ -69,13 +69,27 @@ function App() {
   const decodeJwt = (token: string) => {
     try {
       const base64Url = token.split('.')[1];
-      const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+      // Add padding if needed
+      let base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+      const padLength = 4 - (base64.length % 4);
+      if (padLength < 4) {
+        base64 += '='.repeat(padLength);
+      }
       const jsonPayload = decodeURIComponent(atob(base64).split('').map(function (c) {
         return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
       }).join(''));
       return JSON.parse(jsonPayload);
     } catch (e) {
-      console.error("Failed to decode JWT", e);
+      console.error("Failed to decode JWT", e, token);
+      // For mock auth, if decoding fails, return a mock payload
+      if (import.meta.env.VITE_USE_MOCK_AUTH === 'true') {
+        return {
+          realm_access: { roles: ['admin', 'user'] },
+          resource_access: { 'astral-frontend': { roles: ['admin', 'user'] } },
+          sub: 'dev-user-id',
+          preferred_username: 'DevUser'
+        };
+      }
       return null;
     }
   };
@@ -86,16 +100,50 @@ function App() {
 
   const clientId = import.meta.env.VITE_KEYCLOAK_CLIENT_ID || "astral-frontend";
 
-  const realmRoles = tokenPayload?.realm_access?.roles || [];
-  const accountRoles = tokenPayload?.resource_access?.account?.roles || [];
-  const clientRoles = tokenPayload?.resource_access?.[clientId]?.roles || [];
+  // For mock auth, always return admin and user roles
+  const useMockAuth = import.meta.env.VITE_USE_MOCK_AUTH === 'true';
+  
+  // Debug: log environment variable value
+  console.log('Environment debug:', {
+    VITE_USE_MOCK_AUTH: import.meta.env.VITE_USE_MOCK_AUTH,
+    VITE_KEYCLOAK_CLIENT_ID: import.meta.env.VITE_KEYCLOAK_CLIENT_ID,
+    useMockAuth
+  });
+  
+  let roles: string[] = [];
+  let isUser = false;
+  let isAdmin = false;
+  
+  if (useMockAuth) {
+    // Mock auth always has admin and user roles
+    console.log('Using mock auth - bypassing role checks');
+    roles = ['admin', 'user'];
+    isUser = true;
+    isAdmin = true;
+  } else {
+    // Real auth: extract roles from token
+    console.log('Using real auth - extracting roles from token');
+    const realmRoles = tokenPayload?.realm_access?.roles || [];
+    const accountRoles = tokenPayload?.resource_access?.account?.roles || [];
+    const clientRoles = tokenPayload?.resource_access?.[clientId]?.roles || [];
+    
+    roles = [...realmRoles, ...accountRoles, ...clientRoles];
+    isUser = roles.includes("user");
+    isAdmin = roles.includes("admin");
+  }
 
-  const roles = [...realmRoles, ...accountRoles, ...clientRoles];
-
-  const isUser = roles.includes("user");
-  const isAdmin = roles.includes("admin");
-
-  if (!isUser && !isAdmin) {
+  // Debug logging
+  console.log('Auth debug:', {
+    useMockAuth,
+    tokenPayload,
+    clientId,
+    roles,
+    isUser,
+    isAdmin,
+    hasToken: !!auth.user?.access_token
+  });
+  
+  if (!useMockAuth && !isUser && !isAdmin) {
     return (
       <div className="min-h-screen bg-astral-bg flex flex-col items-center justify-center text-white p-6 text-center">
         <AlertCircle size={48} className="text-red-400 mb-4" />

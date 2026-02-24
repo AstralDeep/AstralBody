@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 import shutil
 import uuid
+from orchestrator.unified_agent_generator import unified_agent_generator
 
 logger = logging.getLogger("AuthProxy")
 
@@ -113,12 +114,42 @@ async def get_current_user_payload(request: Request, credentials: HTTPAuthorizat
             detail="Not authenticated",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    if os.getenv("VITE_USE_MOCK_AUTH") == "true" and token == "dev-token":
-        return {
-            "sub": "dev-user-id",
-            "preferred_username": "DevUser",
-            "realm_access": {"roles": ["admin", "user"]}
-        }
+    if os.getenv("VITE_USE_MOCK_AUTH") == "true":
+        # Accept any token for mock auth (for testing)
+        # Check if it's the old dev-token or new JWT format
+        if token == "dev-token":
+            return {
+                "sub": "dev-user-id",
+                "preferred_username": "DevUser",
+                "realm_access": {"roles": ["admin", "user"]}
+            }
+        else:
+            # Try to decode as JWT for mock
+            try:
+                import base64
+                import json
+                # Extract payload from JWT
+                parts = token.split('.')
+                if len(parts) == 3:
+                    # Decode payload
+                    payload_b64 = parts[1]
+                    # Add padding if needed
+                    payload_b64 += '=' * ((4 - len(payload_b64) % 4) % 4)
+                    payload_json = base64.b64decode(payload_b64).decode('utf-8')
+                    payload = json.loads(payload_json)
+                    return payload
+            except:
+                # If decoding fails, return default mock user
+                pass
+            # Default mock user
+            return {
+                "sub": "dev-user-id",
+                "preferred_username": "DevUser",
+                "realm_access": {"roles": ["admin", "user"]},
+                "resource_access": {
+                    "astral-frontend": {"roles": ["admin", "user"]}
+                }
+            }
     
     authority, client_id, _ = _get_keycloak_config()
     if not authority or not client_id:
@@ -293,11 +324,11 @@ class TestRequest(BaseModel):
     code: Optional[str] = None
     files: Optional[Dict[str, str]] = None
 
+
 @app.post("/api/agent-creator/start")
 async def agent_creator_start(req: StartSessionRequest, admin=Depends(verify_admin)):
-    from orchestrator.agent_generator import agent_generator
     user_id = admin.get('sub', 'legacy')
-    result = await agent_generator.start_session(
+    result = await unified_agent_generator.start_session(
         name=req.name,
         persona=req.persona,
         tools_desc=req.toolsDescription,
@@ -308,16 +339,14 @@ async def agent_creator_start(req: StartSessionRequest, admin=Depends(verify_adm
 
 @app.post("/api/agent-creator/chat")
 async def agent_creator_chat(req: ChatSessionRequest, admin=Depends(verify_admin)):
-    from orchestrator.agent_generator import agent_generator
     user_id = admin.get('sub', 'legacy')
-    result = await agent_generator.chat(req.session_id, req.message, user_id=user_id)
+    result = await unified_agent_generator.chat(req.session_id, req.message, user_id=user_id)
     return JSONResponse(content=result)
 
 @app.post("/api/agent-creator/generate")
 async def agent_creator_generate(req: GenerateCodeRequest, admin=Depends(verify_admin)):
-    from orchestrator.agent_generator import agent_generator
     user_id = admin.get('sub', 'legacy')
-    result = await agent_generator.generate_code(req.session_id, user_id=user_id)
+    result = await unified_agent_generator.generate_code(req.session_id, user_id=user_id)
     return JSONResponse(content=result)
 
 from fastapi.responses import StreamingResponse
@@ -333,7 +362,6 @@ async def agent_creator_generate_with_progress(
     admin=Depends(verify_admin)
 ):
     """Generate code with Server-Sent Events progress streaming."""
-    from orchestrator.agent_generator import agent_generator
     user_id = admin.get('sub', 'legacy')
     
     # Determine session_id from request
@@ -360,7 +388,7 @@ async def agent_creator_generate_with_progress(
         async def generate_and_collect():
             try:
                 # Call generate_code with progress callback
-                result = await agent_generator.generate_code(
+                result = await unified_agent_generator.generate_code(
                     target_session_id,
                     progress_callback=progress_callback,
                     user_id=user_id
@@ -417,7 +445,6 @@ async def agent_creator_generate_with_progress(
 
 @app.post("/api/agent-creator/test")
 async def agent_creator_test(req: TestRequest, admin=Depends(verify_admin)):
-    from orchestrator.agent_generator import agent_generator
     user_id = admin.get('sub', 'legacy')
     
     # Determine what to send to save_and_test_agent
@@ -425,14 +452,15 @@ async def agent_creator_test(req: TestRequest, admin=Depends(verify_admin)):
     if req.files:
         # Send files dict as JSON string
         files_data = json.dumps(req.files)
+        # Use the original agent_generator for testing (maintains compatibility)
         return StreamingResponse(
-            agent_generator.save_and_test_agent(req.session_id, files_data, user_id=user_id),
+            unified_agent_generator.save_and_test_agent(req.session_id, files_data, user_id=user_id),
             media_type="text/event-stream"
         )
     elif req.code:
         # Backward compatibility: single code string
         return StreamingResponse(
-            agent_generator.save_and_test_agent(req.session_id, req.code, user_id=user_id),
+            unified_agent_generator.save_and_test_agent(req.session_id, req.code, user_id=user_id),
             media_type="text/event-stream"
         )
     else:
@@ -443,34 +471,34 @@ async def agent_creator_test(req: TestRequest, admin=Depends(verify_admin)):
 
 @app.get("/api/agent-creator/drafts")
 async def get_draft_agents(admin=Depends(verify_admin)):
-    from orchestrator.agent_generator import agent_generator
     # Admin users see all drafts (including legacy)
     user_id = None if admin.get('is_admin') else admin.get('sub', 'legacy')
-    return JSONResponse(content={"drafts": agent_generator.get_all_sessions(user_id=user_id)})
+    # Use enhanced generator for session management
+    sessions = unified_agent_generator.get_all_sessions(user_id=user_id)
+    return JSONResponse(content={"drafts": sessions})
 
 @app.get("/api/agent-creator/session/{session_id}")
 async def get_draft_session(session_id: str, admin=Depends(verify_admin)):
-    from orchestrator.agent_generator import agent_generator
     # Admin users can access any session (including legacy)
     user_id = None if admin.get('is_admin') else admin.get('sub', 'legacy')
-    details = agent_generator.get_session_details(session_id, user_id=user_id)
+    details = unified_agent_generator.get_session(session_id, user_id=user_id)
     if not details:
         return JSONResponse(status_code=404, content={"error": "Session not found"})
     return JSONResponse(content=details)
 
 @app.delete("/api/agent-creator/session/{session_id}")
 async def delete_draft_session(session_id: str, admin=Depends(verify_admin)):
-    from orchestrator.agent_generator import agent_generator
     # Admin users can delete any session (including legacy)
     user_id = None if admin.get('is_admin') else admin.get('sub', 'legacy')
-    success = agent_generator.delete_session(session_id, user_id=user_id)
+    # Use unified generator for deletion
+    success = unified_agent_generator.delete_session(session_id, user_id=user_id)
     if not success:
         return JSONResponse(status_code=404, content={"error": "Session not found"})
     return JSONResponse(content={"status": "success"})
 
 @app.post("/api/agent-creator/resolve-install")
 async def agent_creator_resolve_install(req: ResolveInstallRequest, admin=Depends(verify_admin)):
-    from orchestrator.agent_generator import agent_generator
     user_id = admin.get('sub', 'legacy')
-    result = await agent_generator.resolve_install(req.session_id, req.tool_call_id, req.approved, req.packages, user_id=user_id)
+    # Use unified generator for resolve_install
+    result = await unified_agent_generator.resolve_install(req.session_id, req.tool_call_id, req.approved, req.packages, user_id=user_id)
     return JSONResponse(content=result)
