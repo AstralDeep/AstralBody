@@ -47,7 +47,12 @@ export function MockAuthProvider({ children }: { children: ReactNode }) {
     };
 
     const user = isAuthenticated ? {
-        access_token: "dev-token",
+        // Create a simpler JWT token that's guaranteed to decode correctly
+        // Header: {"alg":"HS256","typ":"JWT"}
+        // Payload: {"realm_access":{"roles":["admin","user"]},"resource_access":{"astral-frontend":{"roles":["admin","user"]}},"sub":"dev-user-id","preferred_username":"DevUser"}
+        // Using a manually crafted token with proper base64 encoding
+        // This token should decode without issues in the decodeJwt function
+        access_token: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyZWFsbV9hY2Nlc3MiOnsicm9sZXMiOlsiYWRtaW4iLCJ1c2VyIl19LCJyZXNvdXJjZV9hY2Nlc3MiOnsiYXN0cmFsLWZyb250ZW5kIjp7InJvbGVzIjpbImFkbWluIiwidXNlciJdfX0sInN1YiI6ImRldi11c2VyLWlkIiwicHJlZmVycmVkX3VzZXJuYW1lIjoiRGV2VXNlciJ9.fake-signature-ignore",
         user_id: "dev-user-id",
         profile: {
             preferred_username: "Dev User",

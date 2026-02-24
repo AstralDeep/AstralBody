@@ -6,7 +6,7 @@ import Prism from "prismjs";
 import "prismjs/components/prism-python";
 import "prismjs/themes/prism-tomorrow.css";
 import { ProgressDisplay } from "./ProgressDisplay";
-import type { ProgressState, ProgressPhase } from "../types/progress";
+import type { ProgressState } from "../types/progress";
 import { getPhaseSteps } from "../types/progress";
 import { BFF_URL } from "../config";
 import { useProgressSSE } from "../hooks/useProgressSSE";
@@ -45,7 +45,6 @@ export default function AgentCreatorPage({ onBack, initialDraftId, accessToken }
     const [pendingInstall, setPendingInstall] = useState<{ toolCallId: string, packages: string[] } | null>(null);
 
     // Progress state
-    const [generationProgress, setGenerationProgress] = useState<ProgressState | null>(null);
     const [testingProgress, setTestingProgress] = useState<ProgressState | null>(null);
 
     // SSE hook for generation progress
@@ -53,8 +52,6 @@ export default function AgentCreatorPage({ onBack, initialDraftId, accessToken }
       state: hookGenerationProgress,
       connect: connectGeneration,
       disconnect: disconnectGeneration,
-      isConnected: isGenerationConnected,
-      error: generationError
     } = useProgressSSE(sessionId || '', 'generation', accessToken);
 
     // Effect to handle generation completion and errors

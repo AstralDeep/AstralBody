@@ -900,7 +900,7 @@ CRITICAL RULES:
                 {"role": "user", "content": message}
             ]
 
-            MAX_TURNS = 5
+            MAX_TURNS = 10
             turn_count = 0
 
             while turn_count < MAX_TURNS:
@@ -1120,7 +1120,7 @@ CRITICAL RULES:
             if turn_count >= MAX_TURNS:
                 logger.warning("Max turns reached. Stopping.")
                 await self.send_ui_render(websocket, [
-                    Alert(message="I stopped after several steps to avoid getting stuck. Please refine your request if more is needed.", variant="warning").to_json()
+                    Alert(message=f"I stopped after {turn_count} steps to avoid getting stuck. Please refine your request if more is needed. Review the tool outputs above for partial analysis.", variant="warning").to_json()
                 ])
                 await self._safe_send(websocket, json.dumps({
                     "type": "chat_status",
@@ -1584,14 +1584,45 @@ CRITICAL RULES:
     async def validate_token(self, token: str) -> Optional[Dict]:
         """Validate JWT token against KeyCloak."""
         # 0. Mock Auth Bypass
-        if os.getenv("VITE_USE_MOCK_AUTH") == "true" and token == "dev-token":
-            logger.info("Mock Auth: Validated dev-token")
-            return {
-                "sub": "dev-user-id",
-                "preferred_username": "DevUser",
-                "email": "dev@local",
-                "realm_access": {"roles": ["admin", "user"]}
-            }
+        if os.getenv("VITE_USE_MOCK_AUTH") == "true":
+            # Accept any token for mock auth (for testing)
+            # Check if it's the old dev-token or new JWT format
+            if token == "dev-token":
+                logger.info("Mock Auth: Validated dev-token")
+                return {
+                    "sub": "dev-user-id",
+                    "preferred_username": "DevUser",
+                    "email": "dev@local",
+                    "realm_access": {"roles": ["admin", "user"]}
+                }
+            else:
+                # Try to decode as JWT for mock
+                try:
+                    import base64
+                    import json
+                    # Extract payload from JWT
+                    parts = token.split('.')
+                    if len(parts) == 3:
+                        # Decode payload
+                        payload_b64 = parts[1]
+                        # Add padding if needed
+                        payload_b64 += '=' * ((4 - len(payload_b64) % 4) % 4)
+                        payload_json = base64.b64decode(payload_b64).decode('utf-8')
+                        payload = json.loads(payload_json)
+                        return payload
+                except:
+                    # If decoding fails, return default mock user
+                    pass
+                # Default mock user
+                logger.info("Mock Auth: Accepting any token as dev-user-id")
+                return {
+                    "sub": "dev-user-id",
+                    "preferred_username": "DevUser",
+                    "realm_access": {"roles": ["admin", "user"]},
+                    "resource_access": {
+                        "astral-frontend": {"roles": ["admin", "user"]}
+                    }
+                }
 
         try:
             authority = os.getenv("VITE_KEYCLOAK_AUTHORITY")
