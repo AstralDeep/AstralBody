@@ -54,6 +54,16 @@ logging.basicConfig(level=log_level,
 logger = logging.getLogger('Orchestrator')
 
 
+class EndpointFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Filter out uvicorn access logs for specific "poll" endpoints
+        msg = record.getMessage()
+        return "/api/agent-creator/drafts" not in msg and "/.well-known/agent-card.json" not in msg
+
+# Filter uvicorn access logs if they exist
+logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
+
+
 class Orchestrator:
     def __init__(self):
         self.agents: Dict[str, websockets.WebSocketServerProtocol] = {}
@@ -139,7 +149,7 @@ class Orchestrator:
             agent_id = card.agent_id
 
             if agent_id in self.agents:
-                logger.info(f"Agent {agent_id} already connected")
+                logger.debug(f"Agent {agent_id} already connected")
                 return
 
             # Connect via WebSocket with no size limit to allow large files

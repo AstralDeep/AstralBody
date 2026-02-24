@@ -28,6 +28,14 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('GeneralAgent')
 
+
+class EndpointFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "/.well-known/agent-card.json" not in record.getMessage()
+
+# Filter uvicorn access logs if they exist
+logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
+
 DEFAULT_PORT = 8003
 
 
