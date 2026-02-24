@@ -109,6 +109,17 @@ async def run_tests_and_yield_logs(agent_dir: str, agent_name: str) -> AsyncGene
             env=os.environ.copy()
         )
         
+        # Drain process stdout in the background to prevent it from blocking and deadlocking
+        def dump_output():
+            while True:
+                line = process.stdout.readline()
+                if not line and process.poll() is not None:
+                    break
+        
+        # Run it in a background thread
+        import threading
+        threading.Thread(target=dump_output, daemon=True).start()
+
         # Step 2: Waiting for boot
         yield emitter.emit_sse(
             ProgressStep.WAITING_FOR_BOOT,

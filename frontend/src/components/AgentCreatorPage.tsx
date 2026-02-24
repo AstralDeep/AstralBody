@@ -6,8 +6,10 @@ import Prism from "prismjs";
 import "prismjs/components/prism-python";
 import "prismjs/themes/prism-tomorrow.css";
 import { ProgressDisplay } from "./ProgressDisplay";
-import type { ProgressState } from "../types/progress";
+import type { ProgressState, ProgressPhase } from "../types/progress";
+import { getPhaseSteps } from "../types/progress";
 import { BFF_URL } from "../config";
+import { useProgressSSE } from "../hooks/useProgressSSE";
 
 interface AgentCreatorPageProps {
     onBack: () => void;
@@ -46,11 +48,74 @@ export default function AgentCreatorPage({ onBack, initialDraftId, accessToken }
     const [generationProgress, setGenerationProgress] = useState<ProgressState | null>(null);
     const [testingProgress, setTestingProgress] = useState<ProgressState | null>(null);
 
+    // SSE hook for generation progress
+    const {
+      state: hookGenerationProgress,
+      connect: connectGeneration,
+      disconnect: disconnectGeneration,
+      isConnected: isGenerationConnected,
+      error: generationError
+    } = useProgressSSE(sessionId || '', 'generation', accessToken);
+
+    // Effect to handle generation completion and errors
+    useEffect(() => {
+      if (hookGenerationProgress.isComplete) {
+        // Generation completed successfully
+        const result = hookGenerationProgress.data?.result as Record<string, any> | undefined;
+        if (result?.files) {
+          // New format: three files
+          setGeneratedFiles({
+            tools: result.files.tools || "",
+            agent: result.files.agent || "",
+            server: result.files.server || ""
+          });
+          setStep("editor");
+          if (result.fallback) {
+            setMessages((prev) => [...prev, {
+              role: "system",
+              content: "Note: Agent and server files will be generated from templates. You can edit them in the editor."
+            }]);
+          }
+        } else if (result?.code) {
+          // Old format: single tools file
+          setGeneratedFiles({
+            tools: result.code,
+            agent: "",
+            server: ""
+          });
+          setStep("editor");
+          setMessages((prev) => [...prev, {
+            role: "system",
+            content: "Note: Only tools.py was generated. Agent and server files will be created from templates."
+          }]);
+        } else {
+          // No code or files returned
+          setMessages((prev) => [...prev, { role: "system", content: "Failed to generate code." }]);
+          setStep("chat");
+        }
+        setIsProcessing(false);
+      }
+      if (hookGenerationProgress.isError) {
+        // Generation error
+        setMessages((prev) => [...prev, { role: "system", content: "Failed to generate code." }]);
+        setIsProcessing(false);
+        // Return to chat after a brief pause
+        setTimeout(() => {
+          setStep("chat");
+        }, 3000);
+      }
+    }, [hookGenerationProgress]);
+
     const messagesEndRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }, [messages]);
+
+    const tokenRef = useRef(accessToken);
+    useEffect(() => {
+        tokenRef.current = accessToken;
+    }, [accessToken]);
 
     useEffect(() => {
         if (initialDraftId) {
@@ -58,7 +123,7 @@ export default function AgentCreatorPage({ onBack, initialDraftId, accessToken }
                 setIsProcessing(true);
                 try {
                     const headers: HeadersInit = {};
-                    if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
+                    if (tokenRef.current) headers["Authorization"] = `Bearer ${tokenRef.current}`;
 
                     const resp = await fetch(`${BFF_URL}/api/agent-creator/session/${initialDraftId}`, {
                         headers
@@ -97,7 +162,7 @@ export default function AgentCreatorPage({ onBack, initialDraftId, accessToken }
             setTestOutput("");
             setPendingInstall(null);
         }
-    }, [initialDraftId, accessToken]);
+    }, [initialDraftId]); // Removed accessToken so silent renew doesn't reset form state
 
     const handleFormSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -188,169 +253,12 @@ export default function AgentCreatorPage({ onBack, initialDraftId, accessToken }
     const handleGenerateCode = async () => {
         if (!sessionId) return;
 
-        // Reset progress state
-        setGenerationProgress(null);
+        // Reset progress state (hook will reset on connect)
         setStep("progress");
         setIsProcessing(true);
 
-        // Try to use the new progress endpoint first
-        const fetchProgressEndpoint = async () => {
-            try {
-                const headers: HeadersInit = { "Content-Type": "application/json" };
-                if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
-
-                const resp = await fetch(`${BFF_URL}/api/agent-creator/generate-with-progress`, {
-                    method: "POST",
-                    headers,
-                    body: JSON.stringify({ session_id: sessionId })
-                });
-
-                if (!resp.ok) {
-                    throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
-                }
-
-                const reader = resp.body?.getReader();
-                if (!reader) throw new Error("No response stream");
-
-                const decoder = new TextDecoder();
-                let resultData: Record<string, unknown> | null = null;
-
-                while (true) {
-                    const { value, done } = await reader.read();
-                    if (done) break;
-                    const chunk = decoder.decode(value, { stream: true });
-
-                    // Parse SSE stream
-                    const lines = chunk.split('\n');
-                    for (const line of lines) {
-                        if (line.startsWith('data: ')) {
-                            try {
-                                const data = JSON.parse(line.slice(6));
-
-                                // Handle progress events
-                                if (data.type === 'progress') {
-                                    // Update progress state
-                                    setGenerationProgress({
-                                        phase: data.phase,
-                                        currentStep: data.step,
-                                        percentage: data.percentage,
-                                        message: data.message,
-                                        data: data.data,
-                                        startTime: Date.now() - (data.timestamp ? (Date.now() - data.timestamp * 1000) : 0),
-                                        elapsedTime: data.timestamp ? (Date.now() - data.timestamp * 1000) : 0,
-                                        steps: [], // Will be populated by component
-                                        completedSteps: new Set(),
-                                        failedSteps: new Set(),
-                                        isComplete: false,
-                                        isError: false
-                                    });
-                                } else if (data.type === 'complete') {
-                                    // Generation complete
-                                    resultData = data.result;
-                                } else if (data.type === 'error') {
-                                    // Error occurred
-                                    setGenerationProgress(prev => prev ? {
-                                        ...prev,
-                                        isError: true,
-                                        errorMessage: data.error,
-                                        percentage: 100
-                                    } : null);
-                                    throw new Error(data.error);
-                                }
-                            } catch (parseError) {
-                                console.error("Failed to parse SSE line", parseError, line);
-                            }
-                        }
-                    }
-                }
-
-                return resultData;
-            } catch (err) {
-                console.error("Progress endpoint failed, falling back to legacy endpoint", err);
-                throw err;
-            }
-        };
-
-        // Fallback to legacy endpoint
-        const fetchLegacyEndpoint = async () => {
-            const headers: HeadersInit = { "Content-Type": "application/json" };
-            if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
-
-            const resp = await fetch(`${BFF_URL}/api/agent-creator/generate`, {
-                method: "POST",
-                headers,
-                body: JSON.stringify({ session_id: sessionId })
-            });
-            return await resp.json();
-        };
-
-        try {
-            let data;
-            try {
-                data = await fetchProgressEndpoint();
-            } catch {
-                console.log("Falling back to legacy endpoint");
-                data = await fetchLegacyEndpoint();
-            }
-
-            // Handle both old and new response formats
-            if (data?.files) {
-                // New format: three files
-                setGeneratedFiles({
-                    tools: data.files.tools || "",
-                    agent: data.files.agent || "",
-                    server: data.files.server || ""
-                });
-                setStep("editor");
-
-                // If fallback mode (missing agent/server), show message
-                if (data.fallback) {
-                    setMessages((prev) => [...prev, {
-                        role: "system",
-                        content: "Note: Agent and server files will be generated from templates. You can edit them in the editor."
-                    }]);
-                }
-            } else if (data?.code) {
-                // Old format: single tools file
-                setGeneratedFiles({
-                    tools: data.code,
-                    agent: "",
-                    server: ""
-                });
-                setStep("editor");
-                setMessages((prev) => [...prev, {
-                    role: "system",
-                    content: "Note: Only tools.py was generated. Agent and server files will be created from templates."
-                }]);
-            } else {
-                throw new Error("No code or files returned");
-            }
-
-            // Mark progress as complete
-            setGenerationProgress(prev => prev ? {
-                ...prev,
-                percentage: 100,
-                isComplete: true,
-                message: "Code generation complete"
-            } : null);
-
-        } catch (err) {
-            console.error(err);
-            setMessages((prev) => [...prev, { role: "system", content: "Failed to generate code." }]);
-            setGenerationProgress(prev => prev ? {
-                ...prev,
-                isError: true,
-                errorMessage: err instanceof Error ? err.message : "Unknown error",
-                percentage: 100
-            } : null);
-
-            // Return to chat after error
-            setTimeout(() => {
-                setStep("chat");
-            }, 3000);
-        } finally {
-            setIsProcessing(false);
-        }
+        // Connect to SSE endpoint
+        connectGeneration();
     };
 
     const handleRunTests = async () => {
@@ -393,6 +301,7 @@ export default function AgentCreatorPage({ onBack, initialDraftId, accessToken }
                             // Handle both legacy and new progress formats
                             if (data.type === 'progress') {
                                 // New progress event format
+                                const testingSteps = getPhaseSteps('testing');
                                 setTestingProgress({
                                     phase: data.phase,
                                     currentStep: data.step,
@@ -401,7 +310,7 @@ export default function AgentCreatorPage({ onBack, initialDraftId, accessToken }
                                     data: data.data,
                                     startTime: Date.now() - (data.timestamp ? (Date.now() - data.timestamp * 1000) : 0),
                                     elapsedTime: data.timestamp ? (Date.now() - data.timestamp * 1000) : 0,
-                                    steps: [], // Will be populated by component
+                                    steps: testingSteps,
                                     completedSteps: new Set(),
                                     failedSteps: new Set(),
                                     isComplete: false,
@@ -707,13 +616,14 @@ export default function AgentCreatorPage({ onBack, initialDraftId, accessToken }
                             Generating Agent Code
                         </h3>
                         <div className="flex-1">
-                            {generationProgress ? (
+                            {hookGenerationProgress ? (
                                 <ProgressDisplay
-                                    state={generationProgress}
+                                    state={hookGenerationProgress}
                                     title="Code Generation Progress"
                                     mode="full"
                                     onCancel={() => {
                                         // Cancel generation and return to chat
+                                        disconnectGeneration();
                                         setStep("chat");
                                         setIsProcessing(false);
                                         setMessages(prev => [...prev, {

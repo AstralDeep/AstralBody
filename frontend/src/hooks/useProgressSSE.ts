@@ -13,7 +13,7 @@ interface UseProgressSSEResult {
   error: string | null;
 }
 
-export function useProgressSSE(sessionId: string, phase: ProgressPhase): UseProgressSSEResult {
+export function useProgressSSE(sessionId: string, phase: ProgressPhase, token?: string): UseProgressSSEResult {
   const [state, setState] = useState<ProgressState>(() => ({
     phase,
     currentStep: getPhaseSteps(phase)[0],
@@ -149,7 +149,14 @@ export function useProgressSSE(sessionId: string, phase: ProgressPhase): UseProg
     }
 
     try {
-      const eventSource = new EventSource(`${endpoint}?session_id=${sessionId}`, {
+      // Build query parameters
+      const params = new URLSearchParams();
+      params.append('session_id', sessionId);
+      if (token) {
+        params.append('token', token);
+      }
+      
+      const eventSource = new EventSource(`${endpoint}?${params.toString()}`, {
         withCredentials: false
       });
 
@@ -217,7 +224,7 @@ export function useProgressSSE(sessionId: string, phase: ProgressPhase): UseProg
       setError(`Failed to establish SSE connection: ${err}`);
       setIsConnected(false);
     }
-  }, [sessionId, phase, handleProgressEvent, handleLegacyLogEvent, disconnect]);
+  }, [sessionId, phase, token, handleProgressEvent, handleLegacyLogEvent, disconnect]);
 
   // Assign the connect function to _reconnect property of EventSource instance
   // This ensures that the _reconnect method is always the latest 'connect' function
@@ -230,10 +237,8 @@ export function useProgressSSE(sessionId: string, phase: ProgressPhase): UseProg
 
   // Auto-connect on mount, disconnect on unmount
   useEffect(() => {
-    // The `connect` function itself handles state updates,
-    // and this effect is for initial setup, so `set-state-in-effect` is acceptable here.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    connect();
+    // Disabled auto-connect because we want to control connection timing
+    // connect();
     return () => {
       disconnect();
     };

@@ -94,7 +94,12 @@ def main():
             if p.poll() is None:
                 if os.name == 'nt':
                     try:
-                        subprocess.run(['taskkill', '/F', '/T', '/PID', str(p.pid)], capture_output=True)
+                        subprocess.run(
+                            ['taskkill', '/F', '/T', '/PID', str(p.pid)],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            check=False
+                        )
                     except Exception:
                         p.terminate()
                 else:

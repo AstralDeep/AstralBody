@@ -2,7 +2,7 @@
  * DashboardLayout — Main app shell with sidebar and header.
  * Shows connected agents, their tools, and connection status.
  */
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import {
     LayoutDashboard,
@@ -53,14 +53,19 @@ export default function DashboardLayout({
 }: DashboardLayoutProps) {
     const [expandedAgents, setExpandedAgents] = useState<string[]>([]);
     const [drafts, setDrafts] = useState<{ id: string; name: string }[]>([]);
+    const tokenRef = useRef(accessToken);
+    useEffect(() => {
+        tokenRef.current = accessToken;
+    }, [accessToken]);
 
     useEffect(() => {
         const fetchDrafts = async () => {
             try {
                 const url = `${BFF_URL}/api/agent-creator/drafts`;
                 const headers: HeadersInit = {};
-                if (accessToken) {
-                    headers["Authorization"] = `Bearer ${accessToken}`;
+                const currentToken = tokenRef.current;
+                if (currentToken) {
+                    headers["Authorization"] = `Bearer ${currentToken}`;
                 }
                 const res = await fetch(url, { headers });
                 const data = await res.json();
@@ -72,7 +77,7 @@ export default function DashboardLayout({
         fetchDrafts();
         const interval = setInterval(fetchDrafts, 5000);
         return () => clearInterval(interval);
-    }, [accessToken]);
+    }, []); // Decoupled from accessToken to avoid effect churn
 
     const handleDeleteDraft = async (draftId: string) => {
         if (!confirm("Are you sure you want to delete this draft agent?")) return;

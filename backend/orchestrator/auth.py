@@ -98,13 +98,21 @@ async def get_current_user_payload(request: Request, credentials: HTTPAuthorizat
     if request.method == "OPTIONS":
         return {}
         
-    if not credentials:
+    token = None
+    if credentials:
+        token = credentials.credentials
+    else:
+        # Check for token in query parameter (for SSE endpoints where EventSource can't set headers)
+        token_param = request.query_params.get("token")
+        if token_param:
+            token = token_param
+    
+    if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    token = credentials.credentials
     if os.getenv("VITE_USE_MOCK_AUTH") == "true" and token == "dev-token":
         return {
             "sub": "dev-user-id",
@@ -183,11 +191,11 @@ async def verify_admin(user_data: dict = Depends(get_current_user_payload)):
         logger.warning("verify_admin: user_data is empty")
         return {}
     roles = _extract_roles(user_data)
-    logger.info(f"verify_admin: extracted roles = {roles}")
+    logger.debug(f"verify_admin: extracted roles = {roles}")
     if "admin" not in roles:
         logger.warning(f"verify_admin: admin role missing, roles = {roles}")
         raise HTTPException(status_code=403, detail="Not authorized (Requires 'admin' role)")
-    logger.info("verify_admin: admin role present")
+    logger.debug("verify_admin: admin role present")
     # Add is_admin flag for downstream use
     user_data["is_admin"] = True
     return user_data
@@ -316,11 +324,29 @@ from fastapi.responses import StreamingResponse
 import asyncio
 from shared.progress import ProgressEvent
 
-@app.post("/api/agent-creator/generate-with-progress")
-async def agent_creator_generate_with_progress(req: GenerateCodeRequest, admin=Depends(verify_admin)):
+from fastapi import Query
+
+@app.api_route("/api/agent-creator/generate-with-progress", methods=["GET", "POST"])
+async def agent_creator_generate_with_progress(
+    req: GenerateCodeRequest = None,
+    session_id: str = Query(None, alias="session_id"),
+    admin=Depends(verify_admin)
+):
     """Generate code with Server-Sent Events progress streaming."""
     from orchestrator.agent_generator import agent_generator
     user_id = admin.get('sub', 'legacy')
+    
+    # Determine session_id from request
+    if req is not None:
+        target_session_id = req.session_id
+    else:
+        target_session_id = session_id
+    
+    if not target_session_id:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "session_id is required"}
+        )
     
     async def progress_stream():
         """Generator that yields SSE progress events during code generation."""
@@ -335,18 +361,14 @@ async def agent_creator_generate_with_progress(req: GenerateCodeRequest, admin=D
             try:
                 # Call generate_code with progress callback
                 result = await agent_generator.generate_code(
-                    req.session_id,
+                    target_session_id,
                     progress_callback=progress_callback,
                     user_id=user_id
                 )
                 # Send final result
                 await queue.put(json.dumps({
-                    "type": "progress",
-                    "phase": "generation",
-                    "step": "generation_complete",
-                    "percentage": 100,
-                    "message": "Generation successful",
-                    "data": {"result": result}
+                    "type": "complete",
+                    "result": result
                 }))
             except Exception as e:
                 await queue.put(json.dumps({

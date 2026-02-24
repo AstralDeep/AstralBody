@@ -293,7 +293,7 @@ Greet the user and list out the tools you think are necessary based on their des
         )
         
         # Read template files for reference
-        agents_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'agents'))
+        agents_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'agents', 'general'))
         with open(os.path.join(agents_dir, 'general_agent.py'), 'r', encoding='utf-8') as f:
             agent_template = f.read()
         with open(os.path.join(agents_dir, 'mcp_server.py'), 'r', encoding='utf-8') as f:
@@ -316,19 +316,26 @@ REQUIREMENTS:
    - Embody best coding practices, handle exceptions.
 
 2. {agent_name}_agent.py:
+   - Use the reference template provided below.
    - Class name must be `{class_agent_name}`
-   - Must inherit from a base agent pattern (similar to GeneralAgent)
    - Set `self.agent_id = "{agent_name}-1"`
    - Set `self.service_name = "{session.get('name', agent_name)}"`
-   - Import `{class_server_name}` from `{agent_name}_server`
+   - Import `{class_server_name}` from `{agent_name}_server` instead of `from agents.general.mcp_server import MCPServer`
    - Include WebSocket handling for orchestrator communication
    - Provide A2A agent card endpoint at `/.well-known/agent-card.json`
 
 3. {agent_name}_server.py:
+   - Use the reference template provided below.
    - Class name must be `{class_server_name}`
    - Must handle MCP requests (tools/list, tools/call)
-   - Import `TOOL_REGISTRY` from `{agent_name}_tools`
+   - Import `TOOL_REGISTRY` from `{agent_name}_tools` instead of `from agents.general.mcp_tools import TOOL_REGISTRY`
    - Include error handling and retry logic
+
+--- REFERENCE: general_agent.py ---
+{agent_template}
+
+--- REFERENCE: mcp_server.py ---
+{server_template}
 
 Provide all three files in this exact JSON format:
 {{
@@ -347,7 +354,8 @@ IMPORTANT: Each file content must be a valid Python script. Do NOT include markd
             ProgressStep.LLM_API_CALL,
             percentage=30,
             message="Calling LLM API...",
-            data={"model": self.model, "prompt_length": len(gen_prompt)}
+            data={"model": self.model, "prompt_length": len(gen_prompt)},
+            force=True
         )
         
         resp = await self.client.chat.completions.create(
