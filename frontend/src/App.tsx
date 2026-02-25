@@ -7,15 +7,13 @@ import DashboardLayout from "./components/DashboardLayout";
 import ChatInterface from "./components/ChatInterface";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { AlertCircle } from "lucide-react";
-import { useState } from "react";
-import AgentCreatorPage from "./components/AgentCreatorPage";
 
 import { WS_URL } from "./config";
 
 function App() {
   const auth = useAuth();
 
-  // Pass the token to the WebSocket hook. 
+  // Pass the token to the WebSocket hook.
   // It will only connect when token is available.
   const {
     isConnected,
@@ -38,9 +36,6 @@ function App() {
     WS_URL,
     auth.user?.access_token
   );
-
-  const [activeView, setActiveView] = useState<"chat" | "agent-creator">("chat");
-  const [activeDraftId, setActiveDraftId] = useState<string | null>(null);
 
   if (auth.isLoading) {
     return (
@@ -169,36 +164,26 @@ function App() {
       onLogout={() => void auth.signoutRedirect()}
       chatHistory={chatHistory}
       activeChatId={activeChatId}
-      onLoadChat={(id) => { setActiveView("chat"); loadChat(id); }}
-      onNewChat={() => { setActiveView("chat"); createNewChat(); }}
-      onNewAgent={() => { setActiveDraftId(null); setActiveView("agent-creator"); }}
-      onLoadDraft={(id) => { setActiveDraftId(id); setActiveView("agent-creator"); }}
+      onLoadChat={loadChat}
+      onNewChat={createNewChat}
       isAdmin={isAdmin}
       accessToken={auth.user?.access_token}
     >
-      {activeView === "chat" ? (
-        <ChatInterface
-          messages={messages}
-          chatStatus={chatStatus}
-          onSendMessage={sendMessage}
-          isConnected={isConnected}
-          activeChatId={activeChatId}
-          savedComponents={savedComponents}
-          onSaveComponent={saveComponent}
-          onDeleteSavedComponent={deleteSavedComponent}
-          onCombineComponents={combineComponents}
-          onCondenseComponents={condenseComponents}
-          isCombining={isCombining}
-          combineError={combineError}
-          accessToken={auth.user?.access_token}
-        />
-      ) : (
-        <AgentCreatorPage
-          onBack={() => { setActiveDraftId(null); setActiveView("chat"); }}
-          initialDraftId={activeDraftId}
-          accessToken={auth.user?.access_token}
-        />
-      )}
+      <ChatInterface
+        messages={messages}
+        chatStatus={chatStatus}
+        onSendMessage={sendMessage}
+        isConnected={isConnected}
+        activeChatId={activeChatId}
+        savedComponents={savedComponents}
+        onSaveComponent={saveComponent}
+        onDeleteSavedComponent={deleteSavedComponent}
+        onCombineComponents={combineComponents}
+        onCondenseComponents={condenseComponents}
+        isCombining={isCombining}
+        combineError={combineError}
+        accessToken={auth.user?.access_token}
+      />
     </DashboardLayout>
   );
 }

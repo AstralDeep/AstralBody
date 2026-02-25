@@ -2,7 +2,7 @@
  * DashboardLayout — Main app shell with sidebar and header.
  * Shows connected agents, their tools, and connection status.
  */
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState } from "react";
 import { motion } from "framer-motion";
 import {
     LayoutDashboard,
@@ -17,10 +17,8 @@ import {
     MessageSquare,
     Plus,
     Grid,
-    Trash2,
 } from "lucide-react";
 import type { Agent, ChatSession } from "../hooks/useWebSocket";
-import { BFF_URL } from "../config";
 
 interface DashboardLayoutProps {
     children: React.ReactNode;
@@ -31,8 +29,6 @@ interface DashboardLayoutProps {
     activeChatId?: string | null;
     onLoadChat?: (chatId: string) => void;
     onNewChat?: () => void;
-    onNewAgent?: () => void;
-    onLoadDraft?: (draftId: string) => void;
     isAdmin?: boolean;
     accessToken?: string;
 }
@@ -46,57 +42,10 @@ export default function DashboardLayout({
     activeChatId,
     onLoadChat,
     onNewChat,
-    onNewAgent,
-    onLoadDraft,
     isAdmin = false,
     accessToken,
 }: DashboardLayoutProps) {
     const [expandedAgents, setExpandedAgents] = useState<string[]>([]);
-    const [drafts, setDrafts] = useState<{ id: string; name: string }[]>([]);
-    const tokenRef = useRef(accessToken);
-    useEffect(() => {
-        tokenRef.current = accessToken;
-    }, [accessToken]);
-
-    useEffect(() => {
-        const fetchDrafts = async () => {
-            try {
-                const url = `${BFF_URL}/api/agent-creator/drafts`;
-                const headers: HeadersInit = {};
-                const currentToken = tokenRef.current;
-                if (currentToken) {
-                    headers["Authorization"] = `Bearer ${currentToken}`;
-                }
-                const res = await fetch(url, { headers });
-                const data = await res.json();
-                setDrafts(data.drafts || []);
-            } catch {
-                // Silently ignore fetching errors for drafts
-            }
-        };
-        fetchDrafts();
-        const interval = setInterval(fetchDrafts, 5000);
-        return () => clearInterval(interval);
-    }, []); // Decoupled from accessToken to avoid effect churn
-
-    const handleDeleteDraft = async (draftId: string) => {
-        if (!confirm("Are you sure you want to delete this draft agent?")) return;
-        try {
-            const url = `${BFF_URL}/api/agent-creator/session/${draftId}`;
-            const headers: HeadersInit = {};
-            if (accessToken) {
-                headers["Authorization"] = `Bearer ${accessToken}`;
-            }
-            const res = await fetch(url, { method: "DELETE", headers });
-            if (res.ok) {
-                setDrafts(prev => prev.filter(d => d.id !== draftId));
-            } else {
-                console.error("Failed to delete draft");
-            }
-        } catch (err) {
-            console.error("Error deleting draft", err);
-        }
-    };
 
     const toggleAgent = (id: string) => {
         setExpandedAgents((prev) =>
@@ -155,19 +104,10 @@ export default function DashboardLayout({
 
                     {/* Agents Section */}
                     <div>
-                        <div className="flex items-center justify-between px-2 mb-2">
+                        <div className="px-2 mb-2">
                             <p className="text-[10px] font-semibold uppercase tracking-widest text-astral-muted">
                                 Agents
                             </p>
-                            {isAdmin && (
-                                <button
-                                    onClick={onNewAgent}
-                                    title="Create New Agent"
-                                    className="p-1 rounded bg-astral-primary/10 text-astral-primary hover:bg-astral-primary/20 transition-colors"
-                                >
-                                    <Plus size={12} />
-                                </button>
-                            )}
                         </div>
                         <div className="space-y-4">
                             {/* Connected Section */}
@@ -223,43 +163,6 @@ export default function DashboardLayout({
                                     </div>
                                 ))}
                             </div>
-
-                            {/* Drafts Section */}
-                            {drafts.length > 0 && (
-                                <div className="space-y-1">
-                                    <p className="px-2 text-[10px] text-astral-muted/70 uppercase">Drafts</p>
-                                    {drafts.map((draft) => (
-                                        <div key={draft.id} className="group flex items-center w-full px-2 py-2 rounded-lg hover:bg-white/5 transition-colors">
-                                            <button
-                                                onClick={() => onLoadDraft?.(draft.id)}
-                                                className="flex-1 flex items-center gap-2 text-left min-w-0"
-                                            >
-                                                <div className="w-6 h-6 rounded-md bg-white/5 border border-white/10 border-dashed flex items-center justify-center flex-shrink-0">
-                                                    <Bot size={12} className="text-astral-muted group-hover:text-astral-primary transition-colors" />
-                                                </div>
-                                                <div className="flex-1 min-w-0">
-                                                    <p className="text-xs font-medium text-astral-muted group-hover:text-white truncate transition-colors">
-                                                        {draft.name}
-                                                    </p>
-                                                    <p className="text-[10px] text-astral-muted/50">
-                                                        Pending Setup...
-                                                    </p>
-                                                </div>
-                                            </button>
-                                            <button
-                                                onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    handleDeleteDraft(draft.id);
-                                                }}
-                                                className="opacity-0 group-hover:opacity-100 p-1.5 text-astral-muted hover:text-red-400 hover:bg-white/10 rounded transition-all"
-                                                title="Delete draft"
-                                            >
-                                                <Trash2 size={14} />
-                                            </button>
-                                        </div>
-                                    ))}
-                                </div>
-                            )}
                         </div>
                     </div>
 

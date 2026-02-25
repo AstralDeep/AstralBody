@@ -158,7 +158,7 @@ def test_migration_on_empty_database():
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         
-        tables_to_check = ['chats', 'messages', 'saved_components', 'draft_agents', 'chat_files']
+        tables_to_check = ['chats', 'messages', 'saved_components', 'chat_files']
         for table in tables_to_check:
             cursor.execute(f"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}'")
             if cursor.fetchone()[0] == 1:

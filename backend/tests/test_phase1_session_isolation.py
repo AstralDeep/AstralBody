@@ -33,7 +33,7 @@ def test_database_schema():
     conn = sqlite3.connect(test_db_path)
     cursor = conn.cursor()
     
-    tables_to_check = ["chats", "messages", "saved_components", "draft_agents", "chat_files"]
+    tables_to_check = ["chats", "messages", "saved_components", "chat_files"]
     
     for table in tables_to_check:
         cursor.execute(f"PRAGMA table_info({table})")

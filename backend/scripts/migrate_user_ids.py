@@ -53,7 +53,6 @@ def migrate():
         ("chats", "id TEXT PRIMARY KEY, title TEXT, created_at INTEGER, updated_at INTEGER"),
         ("messages", "id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, timestamp INTEGER, FOREIGN KEY (chat_id) REFERENCES chats (id) ON DELETE CASCADE"),
         ("saved_components", "id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, component_data TEXT NOT NULL, component_type TEXT NOT NULL, title TEXT, created_at INTEGER, FOREIGN KEY (chat_id) REFERENCES chats (id) ON DELETE CASCADE"),
-        ("draft_agents", "session_id TEXT PRIMARY KEY, name TEXT, persona TEXT, model TEXT, api_keys TEXT, tools_desc TEXT, messages TEXT, created_at INTEGER, updated_at INTEGER"),
         ("chat_files", "id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT NOT NULL, original_name TEXT NOT NULL, backend_path TEXT NOT NULL, uploaded_at INTEGER, FOREIGN KEY (chat_id) REFERENCES chats (id) ON DELETE CASCADE"),
     ]
     
@@ -85,7 +84,6 @@ def migrate():
         "CREATE INDEX IF NOT EXISTS idx_chats_user_id ON chats(user_id)",
         "CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id)",
         "CREATE INDEX IF NOT EXISTS idx_saved_components_user_id ON saved_components(user_id)",
-        "CREATE INDEX IF NOT EXISTS idx_draft_agents_user_id ON draft_agents(user_id)",
         "CREATE INDEX IF NOT EXISTS idx_chat_files_user_id ON chat_files(user_id)",
         "CREATE INDEX IF NOT EXISTS idx_chats_user_updated ON chats(user_id, updated_at)",
     ]

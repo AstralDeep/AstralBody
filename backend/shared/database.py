@@ -86,27 +86,11 @@ class Database:
             pass
 
         # Auto-migrate user_id column for all tables
-        for table in ['chats', 'messages', 'saved_components', 'draft_agents', 'chat_files']:
+        for table in ['chats', 'messages', 'saved_components', 'chat_files']:
             try:
                 cursor.execute(f"ALTER TABLE {table} ADD COLUMN user_id TEXT DEFAULT 'legacy'")
             except sqlite3.OperationalError:
                 pass
-
-        # Draft agents table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS draft_agents (
-                session_id TEXT PRIMARY KEY,
-                user_id TEXT,
-                name TEXT,
-                persona TEXT,
-                model TEXT,
-                api_keys TEXT,
-                tools_desc TEXT,
-                messages TEXT,
-                created_at INTEGER,
-                updated_at INTEGER
-            )
-        ''')
 
         # Chat files mapping table
         cursor.execute('''
