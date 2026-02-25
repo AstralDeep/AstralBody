@@ -665,7 +665,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 "container", "text", "button", "card", "table", "list",
                 "alert", "progress", "metric", "code", "image", "grid",
                 "tabs", "divider", "input", "bar_chart", "line_chart",
-                "pie_chart", "plotly_chart", "collapsible"
+                "pie_chart", "plotly_chart", "collapsible", "chart"
             }
             
             # Validate each component
@@ -705,7 +705,14 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         if not isinstance(node, dict):
             return
         
-        node_type = node.get("type", "")
+        raw_type = node.get("type", "")
+        node_type = raw_type.strip().lower()
+        # Map generic 'chart' to 'plotly_chart' regardless of validity
+        if node_type == "chart":
+            logger.info(f"Mapping generic component type 'chart' -> 'plotly_chart'")
+            node["type"] = "plotly_chart"
+            node_type = "plotly_chart"  # update variable for subsequent checks
+        
         if node_type and node_type not in valid_types:
             logger.warning(f"Fixing unknown component type '{node_type}' -> 'container'")
             node["type"] = "container"
