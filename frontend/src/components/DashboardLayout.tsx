@@ -42,8 +42,11 @@ export default function DashboardLayout({
     activeChatId,
     onLoadChat,
     onNewChat,
-    isAdmin = false,
-    accessToken,
+    // isAdmin and accessToken are passed but not used in this component
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    isAdmin: _isAdmin,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    accessToken: _accessToken,
 }: DashboardLayoutProps) {
     const [expandedAgents, setExpandedAgents] = useState<string[]>([]);
 
