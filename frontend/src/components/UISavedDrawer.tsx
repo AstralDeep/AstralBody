@@ -76,6 +76,21 @@ export default function UISavedDrawer({
     }
   };
 
+  // Calculate optimal grid columns based on component count
+  const getGridColsClass = () => {
+    const count = savedComponents.length;
+    
+    // For very few components, reduce maximum columns to fill space better
+    if (count <= 2) {
+      return 'grid-cols-1 md:grid-cols-2 lg:grid-cols-2 xl:grid-cols-2 2xl:grid-cols-3';
+    }
+    if (count <= 4) {
+      return 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-3 2xl:grid-cols-4';
+    }
+    // Default: use original responsive columns
+    return 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5';
+  };
+
   const toggleCollapse = (id: string) => {
     setCollapsedComponents(prev => {
       const next = new Set(prev);
@@ -246,7 +261,7 @@ export default function UISavedDrawer({
       </AnimatePresence>
 
       {/* Components List */}
-      <div className="flex-1 overflow-y-auto px-4 py-3 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4 content-start items-start grid-flow-row-dense">
+      <div className={`flex-1 overflow-y-auto px-4 py-3 grid ${getGridColsClass()} gap-4 content-start items-start grid-flow-row-dense`}>
         {savedComponents.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center py-12 col-span-full">
             <Layers size={32} className="text-astral-muted/30 mb-3" />
