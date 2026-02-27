@@ -31,9 +31,9 @@ description: "Task list for Flutter Frontend 1:1 Replacement"
 
 - [x] T001 Create Flutter project in `flutter/flutter_frontend/`
 - [x] T002 [P] Configure `pubspec.yaml` with dependencies: riverpod, go_router, dio, web_socket_channel, flutter_secure_storage, flutter_dotenv, intl, url_launcher, file_picker, permission_handler, flutter_svg, cached_network_image
-- [ ] T003 [P] Set up project structure (clean architecture) with directories: `lib/core/`, `lib/data/`, `lib/domain/`, `lib/presentation/`, `assets/`, `test/`
-- [ ] T004 [P] Configure linting and formatting tools (analysis_options.yaml)
-- [ ] T005 [P] Set up Git version control and .gitignore
+- [x] T003 [P] Set up project structure (clean architecture) with directories: `lib/core/`, `lib/data/`, `lib/domain/`, `lib/presentation/`, `assets/`, `test/`
+- [x] T004 [P] Configure linting and formatting tools (analysis_options.yaml)
+- [x] T005 [P] Set up Git version control and .gitignore
 
 ---
 
@@ -43,14 +43,14 @@ description: "Task list for Flutter Frontend 1:1 Replacement"
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T006 [P] Extract color palette from Tailwind config (`frontend/tailwind.config.js`) and create Flutter `ThemeData` with Material 3 overrides in `lib/core/theme/app_theme.dart`
-- [ ] T007 [P] Define custom text styles matching Inter font in `lib/core/theme/text_styles.dart`
-- [ ] T008 [P] Create reusable theme extensions for custom colors in `lib/core/theme/color_extensions.dart`
-- [ ] T009 [P] Copy images from `frontend/public/` to `assets/images/`: `AstralDeep.png`, `astra-fav.png`, `vite.svg`
-- [ ] T010 [P] Set up font assets (Inter, JetBrains Mono) in `pubspec.yaml` and `assets/fonts/`
-- [ ] T011 [P] Configure GoRouter with basic routes in `lib/presentation/router/app_router.dart`
-- [ ] T012 [P] Create base error handling and logging infrastructure in `lib/core/errors/`
-- [ ] T013 [P] Set up environment configuration management in `lib/core/config/`
+- [x] T006 [P] Extract color palette from Tailwind config (`frontend/tailwind.config.js`) and create Flutter `ThemeData` with Material 3 overrides in `lib/core/theme/app_theme.dart`
+- [x] T007 [P] Define custom text styles matching Inter font in `lib/core/theme/text_styles.dart`
+- [x] T008 [P] Create reusable theme extensions for custom colors in `lib/core/theme/color_extensions.dart`
+- [x] T009 [P] Copy images from `frontend/public/` to `assets/images/`: `AstralDeep.png`, `astra-fav.png`, `vite.svg`
+- [x] T010 [P] Set up font assets (Inter, JetBrains Mono) in `pubspec.yaml` and `assets/fonts/`
+- [x] T011 [P] Configure GoRouter with basic routes in `lib/presentation/router/app_router.dart`
+- [-] T012 [P] Create base error handling and logging infrastructure in `lib/core/errors/`
+- [-] T013 [P] Set up environment configuration management in `lib/core/config/`
 
 **Checkpoint**: Foundation ready - user story implementation can now begin in parallel
 
@@ -68,13 +68,13 @@ description: "Task list for Flutter Frontend 1:1 Replacement"
 - [ ] T015 [P] [US1] Implement OIDC/Keycloak client in `lib/data/datasources/auth_datasource.dart`
 - [ ] T016 [P] [US1] Implement mock auth fallback (dev mode) in `lib/data/datasources/mock_auth_datasource.dart`
 - [ ] T017 [P] [US1] Set up token storage using flutter_secure_storage in `lib/data/datasources/token_storage.dart`
-- [ ] T018 [US1] Create login screen UI matching React's `LoginScreen.tsx` in `lib/presentation/pages/login_screen.dart`
+- [-] T018 [US1] Create login screen UI matching React's `LoginScreen.tsx` in `lib/presentation/pages/login_screen.dart`
 - [ ] T019 [US1] Implement role-based access control (admin/user) in `lib/core/auth/role_checker.dart`
-- [ ] T020 [US1] Create dashboard layout with sidebar and header in `lib/presentation/pages/dashboard_layout.dart`
+- [-] T020 [US1] Create dashboard layout with sidebar and header in `lib/presentation/pages/dashboard_layout.dart`
 - [ ] T021 [US1] Implement WebSocket connection status display in `lib/presentation/widgets/connection_status.dart`
 - [ ] T022 [US1] Create agent list display in sidebar in `lib/presentation/widgets/agent_list.dart`
 - [ ] T023 [US1] Implement recent chat history display in sidebar in `lib/presentation/widgets/chat_history_list.dart`
-- [ ] T024 [US1] Add route guards for authentication in `lib/presentation/router/auth_guard.dart`
+- [x] T024 [US1] Add route guards for authentication in `lib/presentation/router/auth_guard.dart`
 
 **Checkpoint**: At this point, User Story 1 should be fully functional and testable independently
 
