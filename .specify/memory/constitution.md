@@ -1,106 +1,65 @@
 <!--
-SYNC IMPACT REPORT
+Sync Impact Report
 ==================
-Version Change: 1.0.0 → 1.1.0 (MINOR bump: new principles added)
-
-Modified Principles:
-- None (existing principles unchanged)
-
-Added Sections:
-- VI. Agent Integration Testing (NON-NEGOTIABLE)
-- VII. Agent Architecture Standardization
-
-Removed Sections:
-- None
-
-Templates Requiring Updates:
-- ✅ .specify/templates/plan-template.md (Constitution Check section should reference new agent testing principles)
-- ✅ .specify/templates/spec-template.md (Should include agent integration testing in requirements)
-- ✅ .specify/templates/tasks-template.md (Should include agent creation tasks with three-file pattern)
-- ✅ .specify/templates/checklist-template.md (Should include agent validation checklist)
-- ⚠️ .specify/templates/agent-file-template.md (May need updates for new agent standards)
-
+Version change: (template) → 1.0.0
+Modified principles: None (all newly defined)
+Added sections:
+  - Core Principles: Visual Parity, Logic Mirror, API Integrity, Asset, Execution Protocol
+  - Project Context & Constraints
+  - Architecture & State Management
+Removed sections: None
+Templates requiring updates:
+  - .specify/templates/plan-template.md: Constitution Check references constitution file (✅ aligned)
+  - .specify/templates/spec-template.md: No direct references (✅ aligned)
+  - .specify/templates/tasks-template.md: No direct references (✅ aligned)
 Follow-up TODOs:
-- Update agent creation documentation to reference backend/agents/general as reference
-- Create integration test templates for new agents
-- Add agent validation checklist to development workflow
+  - RATIFICATION_DATE: Original adoption date unknown; set to first commit date of migration effort
 -->
-
-# Astral Constitution
+# AstralBody Migration Constitution
 
 ## Core Principles
 
-### I. Code Quality (NON-NEGOTIABLE)
+### I. Visual Parity Law
 
-All code must adhere to strict quality standards: comprehensive documentation, consistent style, linting, and peer review. Code must be modular, maintainable, and follow the project's architectural patterns. Technical debt must be tracked and addressed before accumulation.
+If a UI element has specific styling (border-radius, colors, spacing, shadows) in the React implementation, the Flutter widget MUST replicate those properties exactly. Use Flutter's BoxDecoration, TextStyle, and Padding/EdgeInsets to match CSS values pixel-perfect.
 
-### II. Testing Standards (NON-NEGOTIABLE)
+### II. Logic Mirror Law
 
-Test-Driven Development (TDD) is mandatory for all features. Tests must be written before implementation, covering unit, integration, and contract tests. Test coverage must meet or exceed 80% for critical paths. All tests must pass before merging.
+Business logic, validation rules, and state transitions MUST be identical between React and Flutter. Copy validation regex patterns, conditional logic, and error handling verbatim from the source React components.
 
-### III. User Experience Consistency
+### III. API Integrity Law
 
-User interfaces and interactions must follow consistent design patterns, provide clear feedback, and maintain accessibility standards. UX must be validated with real users where possible. Error messages must be helpful and actionable.
+API endpoints, request/response schemas, headers, and authentication tokens MUST match exactly what the React app sends. Inspect React network calls or service files; do not assume backend flexibility. Use the same HTTP client configuration (Dio/http) with identical interceptors.
 
-### IV. Performance Requirements
+### IV. Asset Law
 
-Systems must meet defined performance benchmarks: latency under 200ms for interactive features, memory usage within budget, and scalability to handle expected load. Performance testing is required for all new features.
+All static assets (images, icons, fonts) MUST be copied from `frontend/public` or `frontend/src/assets` to `flutter/assets` and registered in `pubspec.yaml`. Preserve directory structure and naming.
 
-### V. Observability & Monitoring
+### V. Execution Protocol
 
-All components must expose metrics, logs, and health checks. Real‑time monitoring must be enabled for production systems. Debuggability through structured logging is required.
+Follow the four‑step migration sequence for every feature: 1. **Analyze** the React component and its CSS/Tailwind. 2. **Map** React elements to equivalent Flutter widgets. 3. **Implement** in `flutter/lib/` with proper separation of concerns (UI, Model, Controller). 4. **Verify** payloads against backend API expectations.
 
-### VI. Agent Integration Testing (NON-NEGOTIABLE)
+## Project Context & Constraints
 
-All new specialist agents MUST include integration tests with the existing system architecture before being considered valid for deployment. Integration tests must verify:
-- WebSocket connection establishment with the orchestrator
-- Proper registration via A2A agent-card endpoint
-- Correct handling of MCP tool requests and responses
-- UI primitive generation and serialization
-- Error handling and retry logic
+- **Source of Truth**: The `frontend/` directory contains the current React implementation, defining expected behavior, styling, and API interactions.
+- **Target Directory**: All new Flutter code MUST be generated within the `flutter/` directory.
+- **Immutable Backend**: The `backend/` directory is strictly READ‑ONLY. Do not modify backend logic, API routes, or database schemas.
+- **Styling Standard**: Replicate CSS styling (Flexbox/Grid layouts, colors, fonts, spacing, shadows) using Flutter Widgets.
 
-Test coverage for agent integration must exceed 90% for connection logic. New agents without passing integration tests MUST NOT be merged into the main branch.
+## Architecture & State Management
 
-### VII. Agent Architecture Standardization
-
-The connection logic and UI generation framework is contained in the `backend/agents/general` directory, which serves as the reference implementation. All new specialist agents MUST:
-
-1. **Follow the three-file pattern**:
-   - `{agent_name}_agent.py` - Main agent class with FastAPI server
-   - `mcp_server.py` - MCP request dispatcher
-   - `mcp_tools.py` - Tool registry with UI primitive functions
-
-2. **Use proper naming conventions**:
-   - Class names must reflect the agent's purpose (e.g., `MedicalAgent`, `ResearchAgent`)
-   - File names must use the agent's name (e.g., `medical_agent.py`, not `general_agent.py`)
-   - Docstrings must accurately describe the agent's specific capabilities
-
-3. **Extend, don't copy**:
-   - Use the general agent as a reference for connection patterns
-   - Customize tool implementations for the agent's domain
-   - Update agent card descriptions to reflect actual capabilities
-   - Never copy documentation verbatim without context
-
-4. **Maintain separation of concerns**:
-   - Connection logic remains in the agent class
-   - Tool dispatch remains in MCP server
-   - UI generation remains in tool functions
-   - Business logic specific to the agent's domain in tool implementations
-
-## Implementation Guidelines
-- **Focus on the Specialist Agent**: DO NOT ATTEMPT TO IMPLEMENT THE ORCHESTRATOR LOGIC or FRONTEND! The specialist agent is a completely backend service that PRODUCES UI definitions that are sent to the Orchestrator for rendering. If you need connection details for the orchestrator to test aspect of the specialist code, YOU MUST ASK THE USER FOR THOSE DETAILS! Do not create a frontend to test. You may only create the backend logic for the specialist agent.
-- **Use of Python Virtual Environments**: You MUST use Python virtual environments before installing or running any Python code using `python -m venv .venv`.
-
-## Development Standards
-
-All development must follow the established workflow: feature specification → implementation plan → task breakdown → code review → automated testing → deployment. Code reviews are mandatory and must include at least one senior engineer. Continuous integration must run all tests and linting before merging.
-
-## Security & Compliance
-
-Security best practices must be integrated into the development lifecycle. All dependencies must be scanned for vulnerabilities. Authentication and authorization must be implemented following the principle of least privilege. Data protection regulations must be respected.
+- **State Management**: Use Riverpod or Provider to replicate React's `useState`/`useContext` or Redux/Zustand logic.
+- **Navigation**: Implement a robust routing solution (GoRouter) that mirrors React Router paths (`/dashboard`, `/login`, `/settings`).
+- **Networking**: Use Dio or `http` for API calls. Create a dedicated API service layer mirroring the structure of React Axios/Fetch services.
+- **Separation of Concerns**: Organize code into `lib/ui/`, `lib/models/`, `lib/services/`, `lib/controllers/` (or equivalent).
 
 ## Governance
 
-Amendments to this constitution require a proposal, discussion, and approval by the project maintainers. Version increments follow semantic versioning: MAJOR for backward‑incompatible changes, MINOR for new principles or sections, PATCH for clarifications and non‑semantic refinements. All projects must undergo a compliance review before each major release.
+This constitution supersedes all other practices for the migration effort. Amendments require:
+1. Documentation of the change rationale.
+2. Approval via the project's designated governance process.
+3. A migration plan for any affected components.
 
-**Version**: 1.1.0 | **Ratified**: 2026-01-06 | **Last Amended**: 2026-02-25
+All PRs and code reviews MUST verify compliance with these principles. Complexity must be justified with reference to the source React implementation. Use `.specify/memory/constitution.md` for runtime development guidance.
+
+**Version**: 1.0.0 | **Ratified**: TODO(RATIFICATION_DATE): Original adoption date unknown; set to first commit date of migration effort | **Last Amended**: 2026-02-27
