@@ -435,10 +435,19 @@ dashboard_router = APIRouter(prefix="/api", tags=["System"])
     summary="Get system dashboard",
     description="Returns system configuration including connected agents and total tool count.",
 )
-async def get_dashboard(request: Request):
+async def get_dashboard(
+    request: Request,
+    user_id: str = Depends(require_user_id),
+):
     orch = _get_orchestrator(request)
     agents = []
+    total_tools = 0
     for agent_id, card in orch.agent_cards.items():
+        available_tools = [s.id for s in card.skills]
+        permissions = orch.tool_permissions.get_effective_permissions(
+            user_id, agent_id, available_tools
+        )
+        total_tools += sum(1 for v in permissions.values() if v)
         agents.append(AgentInfo(
             id=card.agent_id,
             name=card.name,
@@ -450,5 +459,5 @@ async def get_dashboard(request: Request):
         ))
     return DashboardResponse(
         agents=agents,
-        total_tools=sum(len(c) for c in orch.agent_capabilities.values()),
+        total_tools=total_tools,
     )

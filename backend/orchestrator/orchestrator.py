@@ -494,6 +494,14 @@ class Orchestrator:
                         "agent_id": agent_id,
                         "permissions": permissions
                     }))
+                    
+                    # Also broadcast an updated dashboard to all UI clients for this user
+                    # so their total tools count updates immediately
+                    for client in self.ui_clients:
+                        client_user_id = self._get_user_id(client)
+                        if client_user_id == user_id:
+                            asyncio.create_task(self.send_dashboard(client))
+
 
                 elif msg.action == "condense_components":
                     component_ids = msg.payload.get("component_ids", [])
@@ -1274,10 +1282,12 @@ CRITICAL RULES:
         if user_id and agent_id and not self.tool_permissions.is_tool_allowed(user_id, agent_id, tool_name):
             err_msg = f"Tool '{tool_name}' is restricted for this agent. Update permissions in the sidebar to enable it."
             logger.warning(f"Permission denied: user={user_id} agent={agent_id} tool={tool_name}")
-            await self.send_ui_render(websocket, [
-                Alert(message=err_msg, variant="warning").to_json()
-            ])
-            return MCPResponse(error={"message": err_msg, "retryable": False})
+            alert = Alert(message=err_msg, variant="warning")
+            await self.send_ui_render(websocket, [alert.to_json()])
+            return MCPResponse(
+                error={"message": err_msg, "retryable": False},
+                ui_components=[alert.to_json()]
+            )
 
         # Map file paths if chat_id provided
         if chat_id:
@@ -1325,6 +1335,21 @@ CRITICAL RULES:
                     args["user_id"] = user_id
 
             agent_id = tool_to_agent.get(tool_name)
+            
+            # Permission check for parallel tools
+            if user_id and agent_id and not self.tool_permissions.is_tool_allowed(user_id, agent_id, tool_name):
+                err_msg = f"Tool '{tool_name}' is restricted for this agent. Update permissions in the sidebar to enable it."
+                logger.warning(f"Permission denied (parallel): user={user_id} agent={agent_id} tool={tool_name}")
+                async def _dummy_permission_error():
+                    # Return an MCPResponse with error but ALSO a UI component so it's visible in the result
+                    return MCPResponse(
+                        error={"message": err_msg, "retryable": False},
+                        ui_components=[Alert(message=err_msg, variant="error").to_json()]
+                    )
+                tasks.append(_dummy_permission_error())
+                tool_names.append(tool_name)
+                continue
+
             if agent_id and agent_id in self.agents:
                 tasks.append(self._execute_with_retry(websocket, agent_id, tool_name, args))
                 tool_names.append(tool_name)
@@ -1496,11 +1521,19 @@ CRITICAL RULES:
                 "status": "connected"
             })
 
+        # Calculate total available tools for this user based on permissions
+        total_tools = 0
+        for agent in agent_list:
+            if "permissions" in agent:
+                total_tools += sum(1 for v in agent["permissions"].values() if v)
+            else:
+                total_tools += len(agent["tools"])
+
         await self._safe_send(websocket, json.dumps({
             "type": "system_config",
             "config": {
                 "agents": agent_list,
-                "total_tools": sum(len(c) for c in self.agent_capabilities.values())
+                "total_tools": total_tools
             }
         }))
 
