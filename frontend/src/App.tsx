@@ -32,7 +32,10 @@ function App() {
     combineComponents,
     condenseComponents,
     isCombining,
-    combineError
+    combineError,
+    agentPermissions,
+    getAgentPermissions,
+    setAgentPermissions
   } = useWebSocket(
     WS_URL,
     auth.user?.access_token
@@ -170,6 +173,9 @@ function App() {
       onDeleteChat={deleteChat}
       isAdmin={isAdmin}
       accessToken={auth.user?.access_token}
+      agentPermissions={agentPermissions}
+      onGetAgentPermissions={getAgentPermissions}
+      onSetAgentPermissions={setAgentPermissions}
     >
       <ChatInterface
         messages={messages}

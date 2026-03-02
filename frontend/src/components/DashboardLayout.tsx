@@ -18,8 +18,10 @@ import {
     Plus,
     Grid,
     X,
+    Shield,
 } from "lucide-react";
-import type { Agent, ChatSession } from "../hooks/useWebSocket";
+import type { Agent, ChatSession, AgentPermissionsData } from "../hooks/useWebSocket";
+import AgentPermissionsModal from "./AgentPermissionsModal";
 
 interface DashboardLayoutProps {
     children: React.ReactNode;
@@ -33,6 +35,9 @@ interface DashboardLayoutProps {
     onDeleteChat?: (chatId: string) => void;
     isAdmin?: boolean;
     accessToken?: string;
+    agentPermissions?: AgentPermissionsData | null;
+    onGetAgentPermissions?: (agentId: string) => void;
+    onSetAgentPermissions?: (agentId: string, permissions: Record<string, boolean>) => void;
 }
 
 export default function DashboardLayout({
@@ -50,14 +55,23 @@ export default function DashboardLayout({
     isAdmin: _isAdmin,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     accessToken: _accessToken,
+    agentPermissions,
+    onGetAgentPermissions,
+    onSetAgentPermissions,
 }: DashboardLayoutProps) {
     const [expandedAgents, setExpandedAgents] = useState<string[]>([]);
     const [chatToDelete, setChatToDelete] = useState<string | null>(null);
+    const [permModalAgent, setPermModalAgent] = useState<string | null>(null);
 
     const toggleAgent = (id: string) => {
         setExpandedAgents((prev) =>
             prev.includes(id) ? prev.filter((a) => a !== id) : [...prev, id]
         );
+    };
+
+    const openPermissionsModal = (agentId: string) => {
+        setPermModalAgent(agentId);
+        onGetAgentPermissions?.(agentId);
     };
 
     const totalTools = agents.reduce((sum, a) => sum + a.tools.length, 0);
@@ -177,6 +191,28 @@ export default function DashboardLayout({
                                                     {agent.tools.length} tools
                                                 </p>
                                             </div>
+                                            {/* Permission indicator dot */}
+                                            {agent.permissions && (() => {
+                                                const perms = Object.values(agent.permissions);
+                                                const allEnabled = perms.every(Boolean);
+                                                const allDisabled = perms.every(v => !v);
+                                                return (
+                                                    <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${allEnabled ? "bg-green-400" :
+                                                            allDisabled ? "bg-red-400" : "bg-amber-400"
+                                                        }`} title={allEnabled ? "All tools enabled" : allDisabled ? "All tools disabled" : "Some tools restricted"} />
+                                                );
+                                            })()}
+                                            {/* Shield button for permissions */}
+                                            <button
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    openPermissionsModal(agent.id);
+                                                }}
+                                                className="p-1 text-astral-muted/50 hover:text-astral-primary hover:bg-astral-primary/10 rounded transition-colors opacity-0 group-hover:opacity-100"
+                                                title="Manage permissions"
+                                            >
+                                                <Shield size={12} />
+                                            </button>
                                             {expandedAgents.includes(agent.id) ? (
                                                 <ChevronDown size={12} className="text-astral-muted" />
                                             ) : (
@@ -300,6 +336,21 @@ export default function DashboardLayout({
                 {/* Page Content */}
                 <div className="flex-1 overflow-hidden">{children}</div>
             </main>
+
+            {/* Agent Permissions Modal */}
+            {permModalAgent && agentPermissions && agentPermissions.agent_id === permModalAgent && (
+                <AgentPermissionsModal
+                    isOpen={true}
+                    onClose={() => setPermModalAgent(null)}
+                    agentId={agentPermissions.agent_id}
+                    agentName={agentPermissions.agent_name}
+                    permissions={agentPermissions.permissions}
+                    toolDescriptions={agentPermissions.tool_descriptions}
+                    onSave={(agentId, perms) => {
+                        onSetAgentPermissions?.(agentId, perms);
+                    }}
+                />
+            )}
         </div>
     );
 }

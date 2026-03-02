@@ -26,6 +26,7 @@ from orchestrator.models import (
     ComponentListResponse,
     ComponentCombineRequest, ComponentCondenseRequest, ComponentCombineResponse,
     AgentListResponse, AgentInfo, AgentTool,
+    AgentPermissionsRequest, AgentPermissionsResponse,
     DashboardResponse,
     ErrorResponse,
 )
@@ -361,6 +362,64 @@ async def list_agents(request: Request):
             status="connected",
         ))
     return AgentListResponse(agents=agents)
+
+
+@agent_router.get(
+    "/{agent_id}/permissions",
+    response_model=AgentPermissionsResponse,
+    summary="Get agent tool permissions",
+    description="Returns the current user's per-tool permissions for the specified agent.",
+)
+async def get_agent_permissions(
+    request: Request,
+    agent_id: str,
+    user_id: str = Depends(require_user_id),
+):
+    orch = _get_orchestrator(request)
+    card = orch.agent_cards.get(agent_id)
+    if not card:
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+    available_tools = [s.id for s in card.skills]
+    tool_descriptions = {s.id: s.description for s in card.skills}
+    permissions = orch.tool_permissions.get_effective_permissions(
+        user_id, agent_id, available_tools
+    )
+    return AgentPermissionsResponse(
+        agent_id=agent_id,
+        agent_name=card.name,
+        permissions=permissions,
+        tool_descriptions=tool_descriptions,
+    )
+
+
+@agent_router.put(
+    "/{agent_id}/permissions",
+    response_model=AgentPermissionsResponse,
+    summary="Update agent tool permissions",
+    description="Update the current user's per-tool permissions for the specified agent. Set tool_name to true (allowed) or false (blocked).",
+)
+async def set_agent_permissions(
+    request: Request,
+    agent_id: str,
+    body: AgentPermissionsRequest,
+    user_id: str = Depends(require_user_id),
+):
+    orch = _get_orchestrator(request)
+    card = orch.agent_cards.get(agent_id)
+    if not card:
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+    orch.tool_permissions.set_bulk_permissions(user_id, agent_id, body.permissions)
+    available_tools = [s.id for s in card.skills]
+    tool_descriptions = {s.id: s.description for s in card.skills}
+    updated_permissions = orch.tool_permissions.get_effective_permissions(
+        user_id, agent_id, available_tools
+    )
+    return AgentPermissionsResponse(
+        agent_id=agent_id,
+        agent_name=card.name,
+        permissions=updated_permissions,
+        tool_descriptions=tool_descriptions,
+    )
 
 
 # =============================================================================
