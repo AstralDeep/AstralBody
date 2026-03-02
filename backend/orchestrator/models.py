@@ -150,12 +150,28 @@ class AgentInfo(BaseModel):
     name: str
     description: Optional[str] = None
     tools: List[AgentTool] = []
+    permissions: Optional[Dict[str, bool]] = Field(None, description="Per-tool permission map (tool_name: allowed)")
     status: str = "connected"
 
 
 class AgentListResponse(BaseModel):
     """List of connected agents."""
     agents: List[AgentInfo]
+
+
+class AgentPermissionsRequest(BaseModel):
+    """Update tool permissions for an agent."""
+    permissions: Dict[str, bool] = Field(..., description="Map of tool_name to allowed (true/false)")
+
+    model_config = {"json_schema_extra": {"examples": [{"permissions": {"modify_data": False, "get_system_status": True}}]}}
+
+
+class AgentPermissionsResponse(BaseModel):
+    """Current tool permissions for an agent."""
+    agent_id: str
+    agent_name: str
+    permissions: Dict[str, bool] = Field(..., description="Map of tool_name to allowed (true/false)")
+    tool_descriptions: Optional[Dict[str, str]] = Field(None, description="Map of tool_name to description")
 
 
 # =============================================================================

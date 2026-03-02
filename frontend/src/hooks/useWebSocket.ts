@@ -8,6 +8,7 @@ export interface Agent {
     id: string;
     name: string;
     tools: string[];
+    permissions?: Record<string, boolean>;
     status: string;
 }
 
@@ -31,6 +32,13 @@ export interface SavedComponent {
 export interface ChatStatus {
     status: "idle" | "thinking" | "executing" | "done";
     message: string;
+}
+
+export interface AgentPermissionsData {
+    agent_id: string;
+    agent_name: string;
+    permissions: Record<string, boolean>;
+    tool_descriptions: Record<string, string>;
 }
 
 export interface WSMessage {
@@ -91,6 +99,7 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
     const [savedComponents, setSavedComponents] = useState<SavedComponent[]>([]);
     const [isCombining, setIsCombining] = useState(false);
     const [combineError, setCombineError] = useState<string | null>(null);
+    const [agentPermissions, setAgentPermissions] = useState<AgentPermissionsData | null>(null);
     const wsRef = useRef<WebSocket | null>(null);
     const reconnectTimer = useRef<number | null>(null);
     const pendingSaveResolveRef = useRef<((value: boolean) => void) | null>(null);
@@ -258,6 +267,26 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                 console.error("Combine error:", data.error);
                 // Auto-clear error after 5 seconds
                 setTimeout(() => setCombineError(null), 5000);
+                break;
+
+            case "agent_permissions":
+                setAgentPermissions(data as unknown as AgentPermissionsData);
+                break;
+
+            case "agent_permissions_updated":
+                // Update permissions in local state and also update the agent's permissions in the agents array
+                if (data.agent_id && data.permissions) {
+                    setAgents(prev => prev.map(a =>
+                        a.id === data.agent_id
+                            ? { ...a, permissions: data.permissions as Record<string, boolean> }
+                            : a
+                    ));
+                    setAgentPermissions(prev =>
+                        prev && prev.agent_id === data.agent_id
+                            ? { ...prev, permissions: data.permissions as Record<string, boolean> }
+                            : prev
+                    );
+                }
                 break;
 
             default:
@@ -532,6 +561,24 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         }));
     }, []);
 
+    const getAgentPermissions = useCallback((agentId: string) => {
+        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+        wsRef.current.send(JSON.stringify({
+            type: "ui_event",
+            action: "get_agent_permissions",
+            payload: { agent_id: agentId }
+        }));
+    }, []);
+
+    const setAgentPermissionsAction = useCallback((agentId: string, permissions: Record<string, boolean>) => {
+        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+        wsRef.current.send(JSON.stringify({
+            type: "ui_event",
+            action: "set_agent_permissions",
+            payload: { agent_id: agentId, permissions }
+        }));
+    }, []);
+
     useEffect(() => {
         // Only connect in the top-level window (avoids connections in OIDC renew iframes)
         // and delay slightly to allow the environment to stabilize on reload.
@@ -568,6 +615,9 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         combineComponents,
         condenseComponents,
         isCombining,
-        combineError
+        combineError,
+        agentPermissions,
+        getAgentPermissions,
+        setAgentPermissions: setAgentPermissionsAction
     };
 }

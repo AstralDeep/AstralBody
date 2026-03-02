@@ -32,6 +32,8 @@ from httpx import Timeout
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from orchestrator.history import HistoryManager
+from orchestrator.tool_permissions import ToolPermissionManager
+from orchestrator.delegation import DelegationService
 
 from shared.protocol import (
     Message, MCPRequest, MCPResponse, UIEvent, UIRender, UIUpdate,
@@ -93,6 +95,12 @@ class Orchestrator:
         backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
         data_dir = os.path.join(backend_dir, 'data')
         self.history = HistoryManager(data_dir=data_dir)
+
+        # Tool Permission Manager (RFC 8693 delegation)
+        self.tool_permissions = ToolPermissionManager(data_dir=data_dir)
+
+        # Delegation Service (RFC 8693 token exchange)
+        self.delegation = DelegationService()
 
     # =========================================================================
     # AGENT MANAGEMENT
@@ -450,6 +458,42 @@ class Orchestrator:
                             "type": "combine_error",
                             "error": f"Failed to combine components: {str(e)}"
                         }))
+
+                elif msg.action == "get_agent_permissions":
+                    agent_id = msg.payload.get("agent_id")
+                    if not agent_id:
+                        return
+                    # Build available tools list for this agent
+                    card = self.agent_cards.get(agent_id)
+                    if not card:
+                        return
+                    available_tools = [s.id for s in card.skills]
+                    tool_descriptions = {s.id: s.description for s in card.skills}
+                    permissions = self.tool_permissions.get_effective_permissions(
+                        user_id, agent_id, available_tools
+                    )
+                    await self._safe_send(websocket, json.dumps({
+                        "type": "agent_permissions",
+                        "agent_id": agent_id,
+                        "agent_name": card.name,
+                        "permissions": permissions,
+                        "tool_descriptions": tool_descriptions
+                    }))
+
+                elif msg.action == "set_agent_permissions":
+                    agent_id = msg.payload.get("agent_id")
+                    permissions = msg.payload.get("permissions", {})
+                    if not agent_id or not isinstance(permissions, dict):
+                        return
+                    self.tool_permissions.set_bulk_permissions(
+                        user_id, agent_id, permissions
+                    )
+                    logger.info(f"Permissions updated: user={user_id} agent={agent_id}")
+                    await self._safe_send(websocket, json.dumps({
+                        "type": "agent_permissions_updated",
+                        "agent_id": agent_id,
+                        "permissions": permissions
+                    }))
 
                 elif msg.action == "condense_components":
                     component_ids = msg.payload.get("component_ids", [])
@@ -814,6 +858,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             asyncio.create_task(self.summarize_chat_title(chat_id, msg_to_save, user_id=user_id))
 
         # Build tool definitions from registered agents
+        # Filter by user's per-agent tool permissions (RFC 8693 delegation)
         logger.info(f"Building tool definitions from {len(self.agent_cards)} agents...")
         tools_desc = []
         tool_to_agent = {}  # Map tool name → agent_id
@@ -823,6 +868,11 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 continue
 
             for skill in card.skills:
+                # Check if the user has allowed this tool for this agent
+                if not self.tool_permissions.is_tool_allowed(user_id, agent_id, skill.id):
+                    logger.debug(f"Tool '{skill.id}' blocked for user={user_id} agent={agent_id}")
+                    continue
+
                 tool_def = {
                     "type": "function",
                     "function": {
@@ -1219,14 +1269,22 @@ CRITICAL RULES:
         except json.JSONDecodeError:
             args = {}
 
+        # Permission enforcement gate (RFC 8693 delegation)
+        agent_id = tool_to_agent.get(tool_name)
+        if user_id and agent_id and not self.tool_permissions.is_tool_allowed(user_id, agent_id, tool_name):
+            err_msg = f"Tool '{tool_name}' is restricted for this agent. Update permissions in the sidebar to enable it."
+            logger.warning(f"Permission denied: user={user_id} agent={agent_id} tool={tool_name}")
+            await self.send_ui_render(websocket, [
+                Alert(message=err_msg, variant="warning").to_json()
+            ])
+            return MCPResponse(error={"message": err_msg, "retryable": False})
+
         # Map file paths if chat_id provided
         if chat_id:
             args = self._map_file_paths(chat_id, args, user_id=user_id)
             args["session_id"] = chat_id
             if user_id:
                 args["user_id"] = user_id
-
-        agent_id = tool_to_agent.get(tool_name)
         if not agent_id or agent_id not in self.agents:
             err_msg = f"No agent available for tool '{tool_name}'"
             await self.send_ui_render(websocket, [
@@ -1422,12 +1480,19 @@ CRITICAL RULES:
 
     async def send_dashboard(self, websocket):
         """Send the initial dashboard view."""
+        user_id = self._get_user_id(websocket)
         agent_list = []
         for agent_id, card in self.agent_cards.items():
+            available_tools = [s.id for s in card.skills]
+            permissions = self.tool_permissions.get_effective_permissions(
+                user_id, agent_id, available_tools
+            )
             agent_list.append({
                 "id": card.agent_id,
                 "name": card.name,
-                "tools": [s.id for s in card.skills],
+                "tools": available_tools,
+                "tool_descriptions": {s.id: s.description for s in card.skills},
+                "permissions": permissions,
                 "status": "connected"
             })
 
@@ -1441,13 +1506,19 @@ CRITICAL RULES:
 
     async def send_agent_list(self, websocket):
         """Send list of connected agents."""
+        user_id = self._get_user_id(websocket)
         agents = []
         for agent_id, card in self.agent_cards.items():
+            available_tools = [s.id for s in card.skills]
+            permissions = self.tool_permissions.get_effective_permissions(
+                user_id, agent_id, available_tools
+            )
             agents.append({
                 "id": card.agent_id,
                 "name": card.name,
                 "description": card.description,
                 "tools": [{"name": s.id, "description": s.description} for s in card.skills],
+                "permissions": permissions,
                 "status": "connected"
             })
 
