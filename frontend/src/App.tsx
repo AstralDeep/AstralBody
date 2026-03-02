@@ -25,6 +25,7 @@ function App() {
     chatHistory,
     loadChat,
     createNewChat,
+    deleteChat,
     savedComponents,
     saveComponent,
     deleteSavedComponent,
@@ -97,18 +98,18 @@ function App() {
 
   // For mock auth, always return admin and user roles
   const useMockAuth = import.meta.env.VITE_USE_MOCK_AUTH === 'true';
-  
+
   // Debug: log environment variable value
   console.log('Environment debug:', {
     VITE_USE_MOCK_AUTH: import.meta.env.VITE_USE_MOCK_AUTH,
     VITE_KEYCLOAK_CLIENT_ID: import.meta.env.VITE_KEYCLOAK_CLIENT_ID,
     useMockAuth
   });
-  
+
   let roles: string[] = [];
   let isUser = false;
   let isAdmin = false;
-  
+
   if (useMockAuth) {
     // Mock auth always has admin and user roles
     console.log('Using mock auth - bypassing role checks');
@@ -121,7 +122,7 @@ function App() {
     const realmRoles = tokenPayload?.realm_access?.roles || [];
     const accountRoles = tokenPayload?.resource_access?.account?.roles || [];
     const clientRoles = tokenPayload?.resource_access?.[clientId]?.roles || [];
-    
+
     roles = [...realmRoles, ...accountRoles, ...clientRoles];
     isUser = roles.includes("user");
     isAdmin = roles.includes("admin");
@@ -137,7 +138,7 @@ function App() {
     isAdmin,
     hasToken: !!auth.user?.access_token
   });
-  
+
   if (!useMockAuth && !isUser && !isAdmin) {
     return (
       <div className="min-h-screen bg-astral-bg flex flex-col items-center justify-center text-white p-6 text-center">
@@ -166,6 +167,7 @@ function App() {
       activeChatId={activeChatId}
       onLoadChat={loadChat}
       onNewChat={createNewChat}
+      onDeleteChat={deleteChat}
       isAdmin={isAdmin}
       accessToken={auth.user?.access_token}
     >

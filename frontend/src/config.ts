@@ -14,3 +14,10 @@ export const WS_URL = (window.location.protocol === 'https:' ? 'wss:' : 'ws:') +
         ? `${window.location.hostname}:${import.meta.env.ORCHESTRATOR_PORT}`
         : window.location.host
 ) + '/ws';
+
+/**
+ * REST API base URL for non-streaming operations.
+ * Points to the same server as BFF_URL.
+ * Example usage: `fetch(`${API_URL}/api/chats`)`
+ */
+export const API_URL = BFF_URL;

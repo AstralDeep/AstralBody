@@ -10,9 +10,14 @@ import shutil
 # Add backend to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from orchestrator.auth import app
+from orchestrator.auth import auth_router
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from unittest.mock import patch, Mock
+
+# Create a test app with auth_router included
+_test_app = FastAPI()
+_test_app.include_router(auth_router)
 
 
 def test_path_traversal_protection():
@@ -20,7 +25,7 @@ def test_path_traversal_protection():
     print("=== Testing Path Traversal Protection ===")
     
     # Create a test client
-    client = TestClient(app)
+    client = TestClient(_test_app)
     
     # Mock authentication to return a user_id
     with patch('orchestrator.auth.require_user_id') as mock_require:

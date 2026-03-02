@@ -14,24 +14,20 @@ import json
 from typing import Optional
 
 import aiohttp
-from fastapi import FastAPI, Request, UploadFile, File, Form
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import APIRouter, Request, UploadFile, File, Form
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import JSONResponse, FileResponse
+from jose import jwt as jose_jwt
 import shutil
-import uuid
 
 logger = logging.getLogger("AuthProxy")
 
-app = FastAPI(title="AstralBody Auth Proxy")
+# =============================================================================
+# APIRouter for Auth & File endpoints (included in main app for OpenAPI docs)
+# =============================================================================
 
-# CORS — allow the frontend origin to make token exchange requests
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+auth_router = APIRouter()
 
 
 def _get_keycloak_config():
@@ -42,7 +38,16 @@ def _get_keycloak_config():
     return authority, client_id, client_secret
 
 
-@app.post("/auth/token")
+@auth_router.post(
+    "/auth/token",
+    tags=["Auth"],
+    summary="Proxy token request to Keycloak",
+    description=(
+        "Proxies OIDC token exchange requests to Keycloak's token endpoint, "
+        "injecting the client_secret server-side so it never reaches the browser. "
+        "Supports authorization_code and refresh_token grant types."
+    ),
+)
 async def proxy_token(request: Request):
     """
     Proxy token requests to Keycloak's token endpoint.
@@ -88,9 +93,10 @@ async def proxy_token(request: Request):
             logger.info(f"Token request successful ({grant_type})")
             return JSONResponse(content=body)
 
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from jose import jwt as jose_jwt
+
+# =============================================================================
+# Auth Dependencies (used by REST API and file endpoints)
+# =============================================================================
 
 security = HTTPBearer(auto_error=False)
 
@@ -230,7 +236,17 @@ async def verify_admin(user_data: dict = Depends(get_current_user_payload)):
     user_data["is_admin"] = True
     return user_data
 
-@app.post("/api/upload")
+
+# =============================================================================
+# File Upload/Download Endpoints
+# =============================================================================
+
+@auth_router.post(
+    "/api/upload",
+    tags=["Files"],
+    summary="Upload a file",
+    description="Upload a file to the backend, associated with a session ID. Returns the file path.",
+)
 async def upload_file(file: UploadFile = File(...), session_id: str = Form("default"), user_id: str = Depends(require_user_id)):
     """
     Handle file uploads and save them to a temporary directory under the session id.
@@ -262,7 +278,12 @@ async def upload_file(file: UploadFile = File(...), session_id: str = Form("defa
         logger.error(f"Upload failed for user {user_id}: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-@app.get("/api/download/{session_id}/{filename}")
+@auth_router.get(
+    "/api/download/{session_id}/{filename}",
+    tags=["Files"],
+    summary="Download a file",
+    description="Download a previously uploaded or generated file by session ID and filename.",
+)
 async def download_file(session_id: str, filename: str, user_id: str = Depends(require_user_id)):
     """
     Serve files from the downloads directory for a specific session.
@@ -291,3 +312,23 @@ async def download_file(session_id: str, filename: str, user_id: str = Depends(r
         logger.error(f"Download failed for user {user_id}: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
+
+# =============================================================================
+# A2A Agent Authentication
+# =============================================================================
+
+def validate_agent_api_key(api_key: str) -> bool:
+    """
+    Validate an API key for Agent-to-Agent (A2A) communication.
+    
+    Remote agents connecting to the orchestrator can authenticate
+    using an API key configured in the AGENT_API_KEY environment variable.
+    This is used for server-to-server communication between the
+    orchestrator and agents running on remote servers.
+    """
+    configured_key = os.getenv("AGENT_API_KEY", "")
+    if not configured_key:
+        # No key configured — allow unauthenticated agent connections
+        # (backwards-compatible with local dev)
+        return True
+    return api_key == configured_key
