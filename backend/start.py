@@ -50,12 +50,13 @@ def main():
         env = os.environ.copy()
         env["MAX_AGENTS"] = str(max_agents)
 
-        print(f"Starting Orchestrator on port 8001 (expecting {max_agents} agents)...")
+        orch_port = int(os.environ.get("ORCHESTRATOR_PORT", 8001))
+        print(f"Starting Orchestrator on port {orch_port} (expecting {max_agents} agents)...")
         p_orch = subprocess.Popen([python_exe, orchestrator_script], env=env)
         processes.append(p_orch)
         time.sleep(2)
 
-        next_port = 8003
+        next_port = int(os.environ.get("AGENT_PORT", 8003))
         for item in os.listdir(agents_dir):
             item_path = os.path.join(agents_dir, item)
             if os.path.isdir(item_path) and not item.startswith("__"):
@@ -74,8 +75,9 @@ def main():
         print()
         print("-" * 60)
         print(" System started!")
-        print("  Orchestrator WS: ws://localhost:8001")
-        print("  Agent APIs start at: http://localhost:8003")
+        print(f"  Orchestrator WS: ws://localhost:{orch_port}")
+        agent_start_port = int(os.environ.get("AGENT_PORT", 8003))
+        print(f"  Agent APIs start at: http://localhost:{agent_start_port}")
         print("-" * 60)
         print()
         print("Press Ctrl+C to stop.")

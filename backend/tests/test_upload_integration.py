@@ -4,6 +4,9 @@ import websockets
 import json
 import uuid
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 async def test_workflow():
     chat_id = str(uuid.uuid4())
@@ -24,10 +27,10 @@ async def test_workflow():
     file_path = os.path.join(backend_dir, "tmp", chat_id, "test_data.csv")
     print(f"Checking if file exists at {file_path}: {os.path.exists(file_path)}")
     
-    # 3. Simulate frontend sending a message with this chat_id to the orchestrator (ws://localhost:8001)
+    # 3. Simulate frontend sending a message with this chat_id to the orchestrator (ws://localhost:{os.getenv('ORCHESTRATOR_PORT')})
     # The orchestrator should create the chat because it doesn't exist yet
     print("Sending message to Orchestrator...")
-    async with websockets.connect("ws://localhost:8001") as ws:
+    async with websockets.connect(f"ws://localhost:{os.getenv('ORCHESTRATOR_PORT')}") as ws:
         # We don't necessarily need to register_ui to test chat message
         msg = {
             "type": "ui_event",

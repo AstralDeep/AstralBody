@@ -2,10 +2,13 @@ import asyncio
 import json
 import websockets
 import sys
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Define the complex query
 QUERY = "search all the patients, graph their age, then do an arxiv search about the main disease in this patient population, then give me the system stats (cpu, memory, storage, all of it)"
-URI = "ws://localhost:8001"
+URI = f"ws://localhost:{os.getenv('ORCHESTRATOR_PORT')}"
 
 # Helper to print to both stdout and file
 log_file = open("verification_log.txt", "w", encoding="utf-8")

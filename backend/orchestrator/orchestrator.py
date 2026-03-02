@@ -1523,7 +1523,7 @@ CRITICAL RULES:
             await self.handle_ui_connection_fastapi(websocket)
 
         # Mount Auth sub-app directly into the Orchestrator's FastAPI app.
-        # This allows port 8001 to handle both WS and all API/Auth requests.
+        # This allows port Orchestrator port to handle both WS and all API/Auth requests.
         from orchestrator.auth import app as auth_app
         app.mount("/", auth_app)
 

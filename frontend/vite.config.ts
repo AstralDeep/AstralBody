@@ -6,6 +6,7 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   envDir: '../',
+  envPrefix: ['VITE_', 'ORCHESTRATOR_PORT'],
   test: {
     globals: true,
     environment: 'jsdom',

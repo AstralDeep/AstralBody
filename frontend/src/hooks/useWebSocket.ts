@@ -37,7 +37,7 @@ export interface WSMessage {
     [key: string]: unknown;
 }
 
-export function useWebSocket(url: string = "ws://localhost:8001", token?: string) {
+export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORCHESTRATOR_PORT}`, token?: string) {
     const [isConnected, setIsConnected] = useState(false);
     const [agents, setAgents] = useState<Agent[]>([]);
     const [chatStatus, setChatStatus] = useState<ChatStatus>({ status: "idle", message: "" });
