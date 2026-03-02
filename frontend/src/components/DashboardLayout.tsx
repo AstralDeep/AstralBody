@@ -74,7 +74,12 @@ export default function DashboardLayout({
         onGetAgentPermissions?.(agentId);
     };
 
-    const totalTools = agents.reduce((sum, a) => sum + a.tools.length, 0);
+    const totalTools = agents.reduce((sum, a) => {
+        if (a.permissions) {
+            return sum + Object.values(a.permissions).filter(Boolean).length;
+        }
+        return sum + a.tools.length;
+    }, 0);
 
     return (
         <div className="h-screen flex overflow-hidden bg-astral-bg relative">
@@ -188,7 +193,7 @@ export default function DashboardLayout({
                                                     {agent.name}
                                                 </p>
                                                 <p className="text-[10px] text-astral-muted">
-                                                    {agent.tools.length} tools
+                                                    {agent.permissions ? Object.values(agent.permissions).filter(Boolean).length : agent.tools.length} active tools
                                                 </p>
                                             </div>
                                             {/* Permission indicator dot */}
@@ -198,7 +203,7 @@ export default function DashboardLayout({
                                                 const allDisabled = perms.every(v => !v);
                                                 return (
                                                     <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${allEnabled ? "bg-green-400" :
-                                                            allDisabled ? "bg-red-400" : "bg-amber-400"
+                                                        allDisabled ? "bg-red-400" : "bg-amber-400"
                                                         }`} title={allEnabled ? "All tools enabled" : allDisabled ? "All tools disabled" : "Some tools restricted"} />
                                                 );
                                             })()}
@@ -226,15 +231,20 @@ export default function DashboardLayout({
                                                 animate={{ opacity: 1, height: "auto" }}
                                                 className="ml-8 mt-1 space-y-0.5"
                                             >
-                                                {agent.tools.map((tool) => (
-                                                    <div
-                                                        key={tool}
-                                                        className="flex items-center gap-2 px-2 py-1.5 text-[11px] text-astral-muted rounded hover:bg-white/5"
-                                                    >
-                                                        <span className="w-1 h-1 rounded-full bg-astral-accent" />
-                                                        <span className="truncate">{tool}</span>
-                                                    </div>
-                                                ))}
+                                                {agent.tools.map((tool) => {
+                                                    const isEnabled = !agent.permissions || agent.permissions[tool] !== false;
+                                                    return (
+                                                        <div
+                                                            key={tool}
+                                                            className={`flex items-center gap-2 px-2 py-1.5 text-[11px] rounded transition-colors ${isEnabled ? "text-astral-muted hover:bg-white/5" : "text-astral-muted/40 line-through"
+                                                                }`}
+                                                            title={isEnabled ? "Tool enabled" : "Tool disabled by permissions"}
+                                                        >
+                                                            <span className={`w-1 h-1 rounded-full ${isEnabled ? "bg-astral-accent" : "bg-astral-muted/30"}`} />
+                                                            <span className="truncate">{tool}</span>
+                                                        </div>
+                                                    );
+                                                })}
                                             </motion.div>
                                         )}
                                     </div>
