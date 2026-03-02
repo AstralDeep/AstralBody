@@ -2,6 +2,7 @@
  * WebSocket hook for real-time communication with the orchestrator.
  */
 import { useState, useEffect, useRef, useCallback } from "react";
+import { API_URL } from "../config";
 
 export interface Agent {
     id: string;
@@ -395,6 +396,38 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         }));
     }, []);
 
+    const deleteChat = useCallback(async (chatId: string) => {
+        try {
+            const currentToken = tokenRef.current;
+            const headers: Record<string, string> = {};
+            if (currentToken) {
+                headers["Authorization"] = `Bearer ${currentToken}`;
+            }
+
+            const response = await fetch(`${API_URL}/api/chats/${chatId}`, {
+                method: "DELETE",
+                headers
+            });
+
+            if (response.ok) {
+                if (chatId === activeChatIdRef.current) {
+                    createNewChat();
+                }
+                if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                    wsRef.current.send(JSON.stringify({
+                        type: "ui_event",
+                        action: "get_history",
+                        payload: {}
+                    }));
+                }
+            } else {
+                console.error("Failed to delete chat", await response.text());
+            }
+        } catch (e) {
+            console.error("Error deleting chat", e);
+        }
+    }, [createNewChat]);
+
     const discoverAgents = useCallback(() => {
         if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
         wsRef.current.send(JSON.stringify({
@@ -527,6 +560,7 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         chatHistory,
         loadChat,
         createNewChat,
+        deleteChat,
         savedComponents,
         saveComponent,
         deleteSavedComponent,

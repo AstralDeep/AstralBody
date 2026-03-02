@@ -17,6 +17,7 @@ import {
     MessageSquare,
     Plus,
     Grid,
+    X,
 } from "lucide-react";
 import type { Agent, ChatSession } from "../hooks/useWebSocket";
 
@@ -29,6 +30,7 @@ interface DashboardLayoutProps {
     activeChatId?: string | null;
     onLoadChat?: (chatId: string) => void;
     onNewChat?: () => void;
+    onDeleteChat?: (chatId: string) => void;
     isAdmin?: boolean;
     accessToken?: string;
 }
@@ -42,6 +44,7 @@ export default function DashboardLayout({
     activeChatId,
     onLoadChat,
     onNewChat,
+    onDeleteChat,
     // isAdmin and accessToken are passed but not used in this component
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     isAdmin: _isAdmin,
@@ -49,6 +52,7 @@ export default function DashboardLayout({
     accessToken: _accessToken,
 }: DashboardLayoutProps) {
     const [expandedAgents, setExpandedAgents] = useState<string[]>([]);
+    const [chatToDelete, setChatToDelete] = useState<string | null>(null);
 
     const toggleAgent = (id: string) => {
         setExpandedAgents((prev) =>
@@ -59,7 +63,41 @@ export default function DashboardLayout({
     const totalTools = agents.reduce((sum, a) => sum + a.tools.length, 0);
 
     return (
-        <div className="h-screen flex overflow-hidden bg-astral-bg">
+        <div className="h-screen flex overflow-hidden bg-astral-bg relative">
+
+            {/* Delete Confirmation Modal */}
+            {chatToDelete && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+                    <motion.div
+                        initial={{ opacity: 0, scale: 0.95 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        className="bg-astral-surface border border-white/10 rounded-xl p-6 shadow-2xl max-w-sm w-full mx-4"
+                    >
+                        <h3 className="text-lg font-medium text-white mb-2">Delete Chat?</h3>
+                        <p className="text-sm text-astral-muted mb-6">
+                            Are you sure you want to delete this chat? This action cannot be undone.
+                        </p>
+                        <div className="flex justify-end gap-3">
+                            <button
+                                onClick={() => setChatToDelete(null)}
+                                className="px-4 py-2 text-sm font-medium text-astral-muted hover:text-white hover:bg-white/5 rounded-lg transition-colors"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={() => {
+                                    if (onDeleteChat) onDeleteChat(chatToDelete);
+                                    setChatToDelete(null);
+                                }}
+                                className="px-4 py-2 text-sm font-medium text-white bg-red-500 hover:bg-red-600 rounded-lg transition-colors"
+                            >
+                                Delete
+                            </button>
+                        </div>
+                    </motion.div>
+                </div>
+            )}
+
             {/* Sidebar */}
             <aside className="w-64 flex flex-col border-r border-white/5 bg-astral-surface/30 backdrop-blur-xl">
                 {/* Logo / Brand */}
@@ -183,32 +221,43 @@ export default function DashboardLayout({
                                 </p>
                             )}
                             {chatHistory.map((chat) => (
-                                <button
-                                    key={chat.id}
-                                    onClick={() => onLoadChat?.(chat.id)}
-                                    className={`w-full flex items-center gap-2 px-2 py-2 rounded-lg transition-colors text-left
-                                    ${activeChatId === chat.id ? "bg-white/10 text-white" : "hover:bg-white/5 text-astral-muted hover:text-white"}`}
-                                >
-                                    <MessageSquare size={14} className="flex-shrink-0" />
-                                    <div className="flex-1 min-w-0">
-                                        <div className="flex items-center gap-1">
-                                            <p className="text-xs font-medium truncate">
-                                                {chat.title || "Untitled Chat"}
-                                            </p>
-                                            {chat.has_saved_components && (
-                                                <div className="relative group">
-                                                    <Grid size={10} className="text-astral-primary flex-shrink-0" />
-                                                    <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-1 px-2 py-1 text-xs bg-astral-surface border border-white/10 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-10">
-                                                        Contains saved UI components
+                                <div key={chat.id} className="relative group">
+                                    <button
+                                        onClick={() => onLoadChat?.(chat.id)}
+                                        className={`w-full flex items-center gap-2 px-2 py-2 rounded-lg transition-colors text-left pr-8
+                                        ${activeChatId === chat.id ? "bg-white/10 text-white" : "hover:bg-white/5 text-astral-muted hover:text-white"}`}
+                                    >
+                                        <MessageSquare size={14} className="flex-shrink-0" />
+                                        <div className="flex-1 min-w-0">
+                                            <div className="flex items-center gap-1">
+                                                <p className="text-xs font-medium truncate">
+                                                    {chat.title || "Untitled Chat"}
+                                                </p>
+                                                {chat.has_saved_components && (
+                                                    <div className="relative group/grid" onClick={(e) => e.stopPropagation()}>
+                                                        <Grid size={10} className="text-astral-primary flex-shrink-0" />
+                                                        <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-1 px-2 py-1 text-xs bg-astral-surface border border-white/10 rounded opacity-0 group-hover/grid:opacity-100 transition-opacity whitespace-nowrap z-10 pointer-events-none">
+                                                            Contains saved UI components
+                                                        </div>
                                                     </div>
-                                                </div>
-                                            )}
+                                                )}
+                                            </div>
+                                            <p className="text-[10px] text-astral-muted/70 truncate">
+                                                {new Date(chat.updated_at).toLocaleDateString()}
+                                            </p>
                                         </div>
-                                        <p className="text-[10px] text-astral-muted/70 truncate">
-                                            {new Date(chat.updated_at).toLocaleDateString()}
-                                        </p>
-                                    </div>
-                                </button>
+                                    </button>
+                                    <button
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            setChatToDelete(chat.id);
+                                        }}
+                                        className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-astral-muted/50 hover:text-red-400 hover:bg-red-400/20 rounded opacity-0 group-hover:opacity-100 transition-all z-10"
+                                        title="Delete chat"
+                                    >
+                                        <X size={14} />
+                                    </button>
+                                </div>
                             ))}
                         </div>
                     </div>

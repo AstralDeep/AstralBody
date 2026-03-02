@@ -1506,9 +1506,38 @@ CRITICAL RULES:
         max_agents = int(os.getenv("MAX_AGENTS", 10))
         asyncio.create_task(self._monitor_agents(agent_port, max_agents))
 
-        # Create FastAPI app to consolidate everything
-        app = FastAPI(title="AstralBody Orchestrator")
-        
+        # Import WebSocket protocol docs for OpenAPI description
+        from orchestrator.models import WS_PROTOCOL_DOCS
+
+        # OpenAPI tag metadata for grouping endpoints in /docs
+        tags_metadata = [
+            {"name": "Chat", "description": "Chat session management — create, list, load, delete chats and send messages."},
+            {"name": "Components", "description": "Saved UI component management — save, list, delete, combine, and condense components."},
+            {"name": "Agents", "description": "Connected agent discovery and information."},
+            {"name": "System", "description": "System dashboard and configuration."},
+            {"name": "Auth", "description": "Authentication token proxy (Keycloak BFF)."},
+            {"name": "Files", "description": "File upload and download."},
+        ]
+
+        # Create FastAPI app with rich OpenAPI documentation
+        app = FastAPI(
+            title="AstralBody Orchestrator API",
+            description=(
+                "REST API and WebSocket gateway for the AstralBody multi-agent system.\n\n"
+                "## Overview\n\n"
+                "The orchestrator provides two communication channels:\n\n"
+                "1. **REST API** (documented below) — Request/response endpoints for CRUD operations\n"
+                "2. **WebSocket** (`ws://<host>:<port>/ws`) — Real-time streaming for chat responses and live updates\n\n"
+                "Both channels share the same authentication (Keycloak JWT Bearer tokens).\n\n"
+                "---\n"
+                + WS_PROTOCOL_DOCS
+            ),
+            version="1.0.0",
+            openapi_tags=tags_metadata,
+            docs_url="/docs",
+            redoc_url="/redoc",
+        )
+
         # CORS
         app.add_middleware(
             CORSMiddleware,
@@ -1518,19 +1547,27 @@ CRITICAL RULES:
             allow_headers=["*"],
         )
 
+        # Store Orchestrator instance on app.state so REST API routes can access it
+        app.state.orchestrator = self
+
         @app.websocket("/ws")
         async def websocket_endpoint(websocket: WebSocket):
             await self.handle_ui_connection_fastapi(websocket)
 
-        # Mount Auth sub-app directly into the Orchestrator's FastAPI app.
-        # This allows port Orchestrator port to handle both WS and all API/Auth requests.
-        from orchestrator.auth import app as auth_app
-        app.mount("/", auth_app)
+        # Mount REST API routers
+        from orchestrator.api import chat_router, component_router, agent_router, dashboard_router
+        from orchestrator.auth import auth_router
+        app.include_router(chat_router)
+        app.include_router(component_router)
+        app.include_router(agent_router)
+        app.include_router(dashboard_router)
+        app.include_router(auth_router)
 
         # Start combined server
         config = uvicorn.Config(app, host="0.0.0.0", port=PORT, log_level="info")
         server = uvicorn.Server(config)
         logger.info(f"Consolidated server (Gateway) listening on http://0.0.0.0:{PORT}")
+        logger.info(f"API docs available at http://localhost:{PORT}/docs")
         await server.serve()
 
     async def _monitor_agents(self, start_port: int, max_ports: int = 10):
