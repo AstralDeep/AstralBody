@@ -19,6 +19,9 @@ import {
     Download,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import "katex/dist/katex.min.css";
 import { useSmartAuth } from "../hooks/useSmartAuth";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -298,9 +301,23 @@ function RenderText({ content, variant = "body" }: AnyProps) {
     };
 
     if (variant === "markdown") {
+        // Pre-process content correctly for remark-math by replacing \[ \] and \( \)
+        // with $$ and $ which remark-math natively understands.
+        const processedContent = typeof content === "string"
+            ? content
+                .replace(/\\\[/g, "$$")
+                .replace(/\\\]/g, "$$")
+                .replace(/\\\(/g, "$")
+                .replace(/\\\)/g, "$")
+            : content;
         return (
             <div className={`${classes.markdown}`}>
-                <ReactMarkdown>{content}</ReactMarkdown>
+                <ReactMarkdown
+                    remarkPlugins={[remarkMath]}
+                    rehypePlugins={[rehypeKatex]}
+                >
+                    {processedContent}
+                </ReactMarkdown>
             </div>
         );
     }
