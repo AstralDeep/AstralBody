@@ -47,7 +47,7 @@ export interface WSMessage {
 }
 
 // ---------------------------------------------------------------------------
-// ROTE: Device capability detection (runs once per WebSocket connection)
+// ROTE: Device capability detection
 // ---------------------------------------------------------------------------
 
 function detectDeviceType(): string {
@@ -162,6 +162,7 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                         id: data.agent_id as string,
                         name: data.name as string,
                         tools: (data.tools as string[]) || [],
+                        permissions: (data.permissions as Record<string, boolean>) || undefined,
                         status: "connected"
                     } as Agent];
                 });
@@ -641,6 +642,46 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
             wsRef.current?.close();
         };
     }, [connect]);
+
+    // ROTE: Send updated device capabilities on viewport resize
+    useEffect(() => {
+        let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+        let lastDeviceType = detectDeviceType();
+        let lastViewportWidth = window.innerWidth;
+
+        const onResize = () => {
+            if (debounceTimer) clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => {
+                const ws = wsRef.current;
+                if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+                const caps = detectDeviceCapabilities();
+                const newDeviceType = caps.device_type as string;
+                const newWidth = caps.viewport_width as number;
+
+                // Send when device type changes or viewport width shifts
+                // meaningfully (>50px) to avoid spamming on tiny adjustments.
+                if (
+                    newDeviceType !== lastDeviceType ||
+                    Math.abs(newWidth - lastViewportWidth) > 50
+                ) {
+                    lastDeviceType = newDeviceType;
+                    lastViewportWidth = newWidth;
+                    ws.send(JSON.stringify({
+                        type: "ui_event",
+                        action: "update_device",
+                        payload: { device: caps },
+                    }));
+                }
+            }, 500);
+        };
+
+        window.addEventListener("resize", onResize);
+        return () => {
+            window.removeEventListener("resize", onResize);
+            if (debounceTimer) clearTimeout(debounceTimer);
+        };
+    }, []);
 
     return {
         isConnected,

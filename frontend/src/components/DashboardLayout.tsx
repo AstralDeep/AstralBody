@@ -218,7 +218,10 @@ export default function DashboardLayout({
                                                 </p>
                                             </div>
                                             {/* Permission indicator dot */}
-                                            {agent.permissions && (() => {
+                                            {(() => {
+                                                if (!agent.permissions) {
+                                                    return <span className="w-1.5 h-1.5 rounded-full flex-shrink-0 bg-green-400" title="All tools enabled" />;
+                                                }
                                                 const perms = Object.values(agent.permissions);
                                                 const allEnabled = perms.every(Boolean);
                                                 const allDisabled = perms.every(v => !v);
@@ -234,7 +237,7 @@ export default function DashboardLayout({
                                                     e.stopPropagation();
                                                     openPermissionsModal(agent.id);
                                                 }}
-                                                className="p-1 text-astral-muted/50 hover:text-astral-primary hover:bg-astral-primary/10 rounded transition-colors opacity-0 group-hover:opacity-100"
+                                                className="p-1 text-astral-muted/50 hover:text-astral-primary hover:bg-astral-primary/10 rounded transition-colors"
                                                 title="Manage permissions"
                                             >
                                                 <Shield size={12} />
