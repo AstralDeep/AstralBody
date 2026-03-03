@@ -12,6 +12,17 @@ export interface SecurityFlag {
     blocked: boolean;
 }
 
+export interface RequiredCredential {
+    key: string;
+    label: string;
+    required: boolean;
+}
+
+export interface AgentMetadata {
+    required_credentials?: RequiredCredential[];
+    [key: string]: unknown;
+}
+
 export interface Agent {
     id: string;
     name: string;
@@ -20,6 +31,7 @@ export interface Agent {
     tool_descriptions?: Record<string, string>;
     permissions?: Record<string, boolean>;
     security_flags?: Record<string, SecurityFlag>;
+    metadata?: AgentMetadata;
     status: string;
 }
 
@@ -184,6 +196,7 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                         tool_descriptions: (data.tool_descriptions as Record<string, string>) || undefined,
                         permissions: (data.permissions as Record<string, boolean>) || undefined,
                         security_flags: (data.security_flags as Record<string, SecurityFlag>) || undefined,
+                        metadata: (data.metadata as AgentMetadata) || undefined,
                         status: "connected"
                     } as Agent];
                 });
@@ -690,6 +703,134 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         }));
     }, []);
 
+    // ── Credential Management (REST) ────────────────────────────────────
+    const [agentCredentialKeys, setAgentCredentialKeys] = useState<Record<string, string[]>>({});
+
+    const fetchAgentCredentials = useCallback(async (agentId: string) => {
+        try {
+            const headers: Record<string, string> = {};
+            if (tokenRef.current) headers["Authorization"] = `Bearer ${tokenRef.current}`;
+            const resp = await fetch(`${API_URL}/api/agents/${agentId}/credentials`, { headers });
+            if (resp.ok) {
+                const data = await resp.json();
+                setAgentCredentialKeys(prev => ({ ...prev, [agentId]: data.credential_keys || [] }));
+                return data;
+            }
+        } catch (e) {
+            console.error("Failed to fetch credentials for", agentId, e);
+        }
+        return null;
+    }, []);
+
+    const saveAgentCredentials = useCallback(async (agentId: string, credentials: Record<string, string>): Promise<boolean> => {
+        try {
+            const headers: Record<string, string> = { "Content-Type": "application/json" };
+            if (tokenRef.current) headers["Authorization"] = `Bearer ${tokenRef.current}`;
+            const resp = await fetch(`${API_URL}/api/agents/${agentId}/credentials`, {
+                method: "PUT",
+                headers,
+                body: JSON.stringify({ credentials }),
+            });
+            if (resp.ok) {
+                const data = await resp.json();
+                setAgentCredentialKeys(prev => ({ ...prev, [agentId]: data.credential_keys || [] }));
+                toast.success("Credentials saved");
+                return true;
+            } else {
+                toast.error("Failed to save credentials");
+            }
+        } catch (e) {
+            console.error("Failed to save credentials for", agentId, e);
+            toast.error("Failed to save credentials");
+        }
+        return false;
+    }, []);
+
+    const deleteAgentCredential = useCallback(async (agentId: string, key: string): Promise<boolean> => {
+        try {
+            const headers: Record<string, string> = {};
+            if (tokenRef.current) headers["Authorization"] = `Bearer ${tokenRef.current}`;
+            const resp = await fetch(`${API_URL}/api/agents/${agentId}/credentials/${key}`, {
+                method: "DELETE",
+                headers,
+            });
+            if (resp.ok) {
+                setAgentCredentialKeys(prev => ({
+                    ...prev,
+                    [agentId]: (prev[agentId] || []).filter(k => k !== key),
+                }));
+                toast.success("Credential removed");
+                return true;
+            }
+        } catch (e) {
+            console.error("Failed to delete credential", key, "for", agentId, e);
+        }
+        return false;
+    }, []);
+
+    const startOAuthFlow = useCallback(async (agentId: string): Promise<boolean> => {
+        try {
+            const headers: Record<string, string> = {};
+            if (tokenRef.current) headers["Authorization"] = `Bearer ${tokenRef.current}`;
+            const resp = await fetch(`${API_URL}/api/agents/${agentId}/oauth/authorize`, { headers });
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({ detail: "Failed to start OAuth flow" }));
+                toast.error(err.detail || "Failed to start OAuth flow");
+                return false;
+            }
+            const data = await resp.json();
+            const authUrl = data.authorization_url;
+            if (!authUrl) {
+                toast.error("No authorization URL returned");
+                return false;
+            }
+
+            // Open authorization in a popup
+            const popup = window.open(authUrl, "linkedin_oauth", "width=600,height=700,scrollbars=yes");
+
+            // Listen for the callback postMessage
+            return new Promise<boolean>((resolve) => {
+                const timeout = setTimeout(() => {
+                    window.removeEventListener("message", handler);
+                    resolve(false);
+                }, 300000); // 5 minute timeout
+
+                const handler = (event: MessageEvent) => {
+                    if (event.data?.type === "linkedin_oauth_complete") {
+                        clearTimeout(timeout);
+                        window.removeEventListener("message", handler);
+                        if (event.data.success) {
+                            toast.success("LinkedIn authorized successfully");
+                            // Refresh credential keys to reflect new tokens
+                            fetchAgentCredentials(agentId);
+                            resolve(true);
+                        } else {
+                            toast.error("LinkedIn authorization failed");
+                            resolve(false);
+                        }
+                    }
+                };
+                window.addEventListener("message", handler);
+
+                // Also poll for popup close (user may close without completing)
+                const pollClose = setInterval(() => {
+                    if (popup?.closed) {
+                        clearInterval(pollClose);
+                        clearTimeout(timeout);
+                        window.removeEventListener("message", handler);
+                        // Refresh credentials in case it completed before close
+                        fetchAgentCredentials(agentId);
+                        resolve(false);
+                    }
+                }, 1000);
+            });
+        } catch (e) {
+            console.error("OAuth flow error for", agentId, e);
+            toast.error("Failed to start OAuth flow");
+            return false;
+        }
+    }, [fetchAgentCredentials]);
+
     useEffect(() => {
         // Only connect in the top-level window (avoids connections in OIDC renew iframes)
         // and delay slightly to allow the environment to stabilize on reload.
@@ -771,6 +912,11 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         combineError,
         agentPermissions,
         getAgentPermissions,
-        setAgentPermissions: setAgentPermissionsAction
+        setAgentPermissions: setAgentPermissionsAction,
+        agentCredentialKeys,
+        fetchAgentCredentials,
+        saveAgentCredentials,
+        deleteAgentCredential,
+        startOAuthFlow,
     };
 }

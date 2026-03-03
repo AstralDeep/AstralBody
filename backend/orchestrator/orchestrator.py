@@ -33,6 +33,7 @@ from httpx import Timeout
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from orchestrator.history import HistoryManager
 from orchestrator.tool_permissions import ToolPermissionManager
+from orchestrator.credential_manager import CredentialManager
 from orchestrator.delegation import DelegationService
 from orchestrator.tool_security import ToolSecurityAnalyzer
 
@@ -102,6 +103,9 @@ class Orchestrator:
         # Tool Permission Manager (RFC 8693 delegation) — backed by same SQLite DB
         self.tool_permissions = ToolPermissionManager(db=self.history.db, data_dir=data_dir)
 
+        # Per-user credential storage (encrypted API keys for agents)
+        self.credential_manager = CredentialManager(db=self.history.db, data_dir=data_dir)
+
         # Delegation Service (RFC 8693 token exchange)
         self.delegation = DelegationService()
 
@@ -159,15 +163,18 @@ class Orchestrator:
                 permissions = self.tool_permissions.get_effective_permissions(
                     user_id, card.agent_id, tool_names
                 )
-                await self._safe_send(ui, json.dumps({
+                msg = {
                     "type": "agent_registered",
                     "agent_id": card.agent_id,
                     "name": card.name,
                     "description": card.description,
                     "tools": tool_names,
                     "permissions": permissions,
-                    "security_flags": self.security_flags.get(card.agent_id, {})
-                }))
+                    "security_flags": self.security_flags.get(card.agent_id, {}),
+                }
+                if getattr(card, 'metadata', None):
+                    msg["metadata"] = card.metadata
+                await self._safe_send(ui, json.dumps(msg))
             except Exception:
                 pass
 
@@ -1213,7 +1220,17 @@ CRITICAL RULES:
                                         raise
                             
                             if isinstance(data, dict):
-                                data = [data]
+                                # Unwrap common LLM wrapper patterns:
+                                # {"components": [...]}, {"ui_components": [...]}, {"content": [...]}
+                                for wrapper_key in ("components", "ui_components", "content"):
+                                    if wrapper_key in data and isinstance(data[wrapper_key], list):
+                                        inner = data[wrapper_key]
+                                        # Verify at least one inner item looks like a component
+                                        if any(isinstance(x, dict) and "type" in x for x in inner):
+                                            data = inner
+                                            break
+                                else:
+                                    data = [data]
                             
                             valid_components = []
                             if isinstance(data, list):
@@ -1407,6 +1424,13 @@ CRITICAL RULES:
             args["session_id"] = chat_id
             if user_id:
                 args["user_id"] = user_id
+
+        # Inject per-user credentials for this agent
+        if user_id and agent_id:
+            creds = self.credential_manager.get_agent_credentials(user_id, agent_id)
+            if creds:
+                args["_credentials"] = creds
+
         if not agent_id or agent_id not in self.agents:
             err_msg = f"No agent available for tool '{tool_name}'"
             await self.send_ui_render(websocket, [
@@ -1454,6 +1478,12 @@ CRITICAL RULES:
                     args["user_id"] = user_id
 
             agent_id = tool_to_agent.get(tool_name)
+
+            # Inject per-user credentials for this agent
+            if user_id and agent_id:
+                creds = self.credential_manager.get_agent_credentials(user_id, agent_id)
+                if creds:
+                    args["_credentials"] = creds
 
             # System-level security block for parallel tools
             agent_flags = self.security_flags.get(agent_id, {}) if agent_id else {}
@@ -1710,7 +1740,7 @@ CRITICAL RULES:
             permissions = self.tool_permissions.get_effective_permissions(
                 user_id, agent_id, available_tools
             )
-            agent_list.append({
+            entry = {
                 "id": card.agent_id,
                 "name": card.name,
                 "description": card.description,
@@ -1718,8 +1748,11 @@ CRITICAL RULES:
                 "tool_descriptions": {s.id: s.description for s in card.skills},
                 "permissions": permissions,
                 "security_flags": self.security_flags.get(agent_id, {}),
-                "status": "connected"
-            })
+                "status": "connected",
+            }
+            if getattr(card, 'metadata', None):
+                entry["metadata"] = card.metadata
+            agent_list.append(entry)
 
         # Calculate total available tools for this user based on permissions
         total_tools = 0
@@ -1746,15 +1779,18 @@ CRITICAL RULES:
             permissions = self.tool_permissions.get_effective_permissions(
                 user_id, agent_id, available_tools
             )
-            agents.append({
+            entry = {
                 "id": card.agent_id,
                 "name": card.name,
                 "description": card.description,
                 "tools": [{"name": s.id, "description": s.description} for s in card.skills],
                 "permissions": permissions,
                 "security_flags": self.security_flags.get(agent_id, {}),
-                "status": "connected"
-            })
+                "status": "connected",
+            }
+            if getattr(card, 'metadata', None):
+                entry["metadata"] = card.metadata
+            agents.append(entry)
 
         await self._safe_send(websocket, json.dumps({
             "type": "agent_list",
@@ -1845,10 +1881,11 @@ CRITICAL RULES:
             redoc_url="/redoc",
         )
 
-        # CORS
+        # CORS — configurable via CORS_ORIGINS env var (comma-separated)
+        cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
         app.add_middleware(
             CORSMiddleware,
-            allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+            allow_origins=[o.strip() for o in cors_origins],
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],

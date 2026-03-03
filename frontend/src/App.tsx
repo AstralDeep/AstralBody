@@ -38,7 +38,12 @@ function App() {
     combineError,
     agentPermissions,
     getAgentPermissions,
-    setAgentPermissions
+    setAgentPermissions,
+    agentCredentialKeys,
+    fetchAgentCredentials,
+    saveAgentCredentials,
+    deleteAgentCredential,
+    startOAuthFlow,
   } = useWebSocket(
     WS_URL,
     auth.user?.access_token
@@ -193,6 +198,11 @@ function App() {
       agentPermissions={agentPermissions}
       onGetAgentPermissions={getAgentPermissions}
       onSetAgentPermissions={setAgentPermissions}
+      agentCredentialKeys={agentCredentialKeys}
+      onFetchAgentCredentials={fetchAgentCredentials}
+      onSaveAgentCredentials={saveAgentCredentials}
+      onDeleteAgentCredential={deleteAgentCredential}
+      onStartOAuthFlow={startOAuthFlow}
     >
       <ChatInterface
         messages={messages}

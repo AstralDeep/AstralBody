@@ -118,6 +118,20 @@ class Database:
             )
         ''')
 
+        # Per-user credentials for agents requiring external API keys
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_credentials (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                credential_key TEXT NOT NULL,
+                encrypted_value TEXT NOT NULL,
+                created_at INTEGER,
+                updated_at INTEGER,
+                UNIQUE(user_id, agent_id, credential_key)
+            )
+        ''')
+
         conn.commit()
         conn.close()
 

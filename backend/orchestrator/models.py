@@ -176,6 +176,27 @@ class AgentPermissionsResponse(BaseModel):
     security_flags: Optional[Dict[str, Any]] = Field(None, description="System-level security flags per tool from proactive review")
 
 
+class CredentialSetRequest(BaseModel):
+    """Set one or more credentials for an agent."""
+    credentials: Dict[str, str] = Field(..., description="Map of credential_key to value (e.g. LINKEDIN_ACCESS_TOKEN: abc123)")
+
+    model_config = {"json_schema_extra": {"examples": [{"credentials": {"LINKEDIN_ACCESS_TOKEN": "abc123", "LINKEDIN_ORG_ID": "12345"}}]}}
+
+
+class CredentialListResponse(BaseModel):
+    """List of stored credential keys for an agent (values are never returned)."""
+    agent_id: str
+    agent_name: str
+    credential_keys: List[str] = Field(default_factory=list, description="Stored credential key names (no values)")
+    required_credentials: List[Dict[str, Any]] = Field(default_factory=list, description="Credentials the agent declares it needs")
+
+
+class CredentialDeleteResponse(BaseModel):
+    """Confirmation of credential deletion."""
+    success: bool = True
+    message: str = "Credential deleted successfully"
+
+
 # =============================================================================
 # Dashboard / System Models
 # =============================================================================
