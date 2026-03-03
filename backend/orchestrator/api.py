@@ -649,6 +649,29 @@ async def oauth_callback(
 
     orch.credential_manager.set_bulk_credentials(user_id, agent_id, creds_to_store)
 
+    # Fetch and store LinkedIn profile name for display purposes
+    try:
+        import requests as _requests
+        profile_resp = _requests.get(
+            "https://api.linkedin.com/v2/userinfo",
+            headers={"Authorization": f"Bearer {token_data['access_token']}"},
+            timeout=10,
+        )
+        if profile_resp.ok:
+            profile = profile_resp.json()
+            profile_meta = {}
+            if profile.get("name"):
+                profile_meta["LINKEDIN_PROFILE_NAME"] = profile["name"]
+            if profile.get("email"):
+                profile_meta["LINKEDIN_PROFILE_EMAIL"] = profile["email"]
+            if profile.get("sub"):
+                profile_meta["LINKEDIN_PROFILE_ID"] = profile["sub"]
+            if profile_meta:
+                orch.credential_manager.set_bulk_credentials(user_id, agent_id, profile_meta)
+                logger.info(f"Stored LinkedIn profile info: {profile.get('name')}")
+    except Exception as e:
+        logger.warning(f"Failed to fetch LinkedIn profile after OAuth: {e}")
+
     # Clean up state
     orch.credential_manager.delete_credential(user_id, agent_id, "_oauth_state")
 
@@ -658,6 +681,46 @@ async def oauth_callback(
         content=_oauth_result_page(True, "LinkedIn authorization successful! You can close this window."),
         status_code=200,
     )
+
+
+@agent_router.get(
+    "/{agent_id}/oauth/status",
+    summary="Check OAuth connection status",
+    description="Returns whether the agent has a valid OAuth token and the connected profile info.",
+)
+async def oauth_status(
+    request: Request,
+    agent_id: str,
+    user_id: str = Depends(require_user_id),
+):
+    orch = _get_orchestrator(request)
+    cm = orch.credential_manager
+
+    access_token = cm.get_credential(user_id, agent_id, "LINKEDIN_ACCESS_TOKEN")
+    if not access_token:
+        return {"connected": False}
+
+    import time as _time
+    expires_at_str = cm.get_credential(user_id, agent_id, "LINKEDIN_TOKEN_EXPIRES_AT")
+    expired = False
+    expires_at = None
+    if expires_at_str:
+        try:
+            expires_at = float(expires_at_str)
+            expired = _time.time() > expires_at
+        except (ValueError, TypeError):
+            pass
+
+    profile_name = cm.get_credential(user_id, agent_id, "LINKEDIN_PROFILE_NAME")
+    profile_email = cm.get_credential(user_id, agent_id, "LINKEDIN_PROFILE_EMAIL")
+
+    return {
+        "connected": True,
+        "expired": expired,
+        "profile_name": profile_name,
+        "profile_email": profile_email,
+        "expires_at": expires_at,
+    }
 
 
 def _oauth_result_page(success: bool, message: str) -> str:

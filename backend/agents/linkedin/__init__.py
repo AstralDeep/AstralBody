@@ -1,17 +1,19 @@
 """
-LinkedIn Engagement Driver agent for AstralBody system.
+LinkedIn agent for AstralBody system.
 
-Analyzes and drives engagement on the UKy CAAI LinkedIn page.
+Manages LinkedIn presence for the UKy Center for Applied AI —
+publishing posts, engaging with content, and content strategy.
 """
 
 from agents.linkedin.linkedin_agent import LinkedInAgent
 from agents.linkedin.mcp_server import MCPServer
 from agents.linkedin.mcp_tools import (
-    analyze_linkedin_posts,
-    get_page_metrics,
-    get_content_suggestions,
+    get_my_profile,
+    publish_post,
+    react_to_post,
+    comment_on_post,
     draft_linkedin_post,
-    generate_weekly_digest,
+    get_content_suggestions,
     suggest_engagement_actions,
     TOOL_REGISTRY
 )
@@ -19,13 +21,14 @@ from agents.linkedin.mcp_tools import (
 __all__ = [
     'LinkedInAgent',
     'MCPServer',
-    'analyze_linkedin_posts',
-    'get_page_metrics',
-    'get_content_suggestions',
+    'get_my_profile',
+    'publish_post',
+    'react_to_post',
+    'comment_on_post',
     'draft_linkedin_post',
-    'generate_weekly_digest',
+    'get_content_suggestions',
     'suggest_engagement_actions',
     'TOOL_REGISTRY'
 ]
 
-__version__ = '1.0.0'
+__version__ = '2.0.0'

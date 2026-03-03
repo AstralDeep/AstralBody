@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-LinkedIn Engagement Driver Agent — A2A-compliant specialist agent for
-analyzing and driving engagement on the UKy CAAI LinkedIn page.
+LinkedIn Agent — A2A-compliant specialist agent for managing LinkedIn
+presence for the UKy Center for Applied AI.
 
 Provides tools for:
-- Analyzing LinkedIn post performance by content frame
-- Reporting page metrics against industry benchmarks
-- Generating templated content suggestions
-- Drafting LinkedIn posts using brand voice guidelines
-- Weekly engagement digests with gap analysis
+- Publishing posts as the authenticated LinkedIn user
+- Reacting to and commenting on LinkedIn posts
+- Drafting posts using CAAI content frames and brand voice
+- Generating content suggestions across 6 content frames
 - Actionable engagement growth recommendations
+- Viewing authenticated user profile info
 """
 import asyncio
 import json
@@ -98,10 +98,10 @@ class LinkedInAgent:
         return AgentCard(
             name=self.service_name,
             description=(
-                "Specialist agent for analyzing and driving engagement on the "
-                "UKy Center for Applied AI LinkedIn page. Provides content strategy "
-                "using Melissa's templated content frames, post drafting with brand voice, "
-                "metrics reporting, weekly digests, and engagement recommendations."
+                "Specialist agent for managing LinkedIn presence for CAAI. "
+                "Publishes posts, reacts to and comments on content, drafts posts "
+                "using content frames and brand voice, generates content ideas, "
+                "and provides engagement growth recommendations."
             ),
             agent_id=self.agent_id,
             version="1.0.0",

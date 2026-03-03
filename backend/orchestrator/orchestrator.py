@@ -1295,12 +1295,30 @@ CRITICAL RULES:
                     }))
                     return
 
-            # If loop exits without final response
+            # If loop exits without final response — generate LLM summary
             if turn_count >= MAX_TURNS:
-                logger.warning("Max turns reached. Stopping.")
-                await self.send_ui_render(websocket, [
-                    Alert(message=f"I stopped after {turn_count} steps to avoid getting stuck. Please refine your request if more is needed. Review the tool outputs above for partial analysis.", variant="warning").to_json()
-                ])
+                logger.info(f"Max turns ({turn_count}) reached. Generating summary of tool outputs.")
+                await self._safe_send(websocket, json.dumps({
+                    "type": "chat_status",
+                    "status": "thinking",
+                    "message": "Generating summary..."
+                }))
+
+                summary_components = await self._generate_tool_summary(
+                    websocket, messages, chat_id, user_id=user_id
+                )
+                if summary_components:
+                    await self.send_ui_render(websocket, summary_components)
+                    if chat_id:
+                        self.history.add_message(chat_id, "assistant", summary_components, user_id=user_id)
+                else:
+                    # Fallback if LLM summary fails
+                    await self.send_ui_render(websocket, [
+                        Card(title="Summary", content=[
+                            Text(content="Multiple tool operations were completed. Review the results above for details.", variant="body")
+                        ]).to_json()
+                    ])
+
                 await self._safe_send(websocket, json.dumps({
                     "type": "chat_status",
                     "status": "done",
@@ -1376,6 +1394,69 @@ CRITICAL RULES:
                 if is_transient:
                     logger.info(f"Transient error detected, retrying in {backoff}s...")
                 await asyncio.sleep(backoff)
+        return None
+
+    async def _generate_tool_summary(self, websocket, messages, chat_id=None, user_id=None):
+        """
+        Generate an LLM summary/analysis of accumulated tool results.
+        Called when the Re-Act loop ends (max turns or completion) to ensure
+        the user always gets a meaningful summary rather than a 'stopped' message.
+        """
+        if not self.llm_client:
+            return None
+
+        try:
+            # Build a summary-focused prompt from the conversation so far
+            summary_messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are summarizing the results of tool operations that were just performed. "
+                        "Provide a concise, insightful analysis of what was accomplished and the key findings. "
+                        "Focus on actionable insights, important numbers, and recommendations. "
+                        "Do NOT mention internal details like tool names, turn counts, or system mechanics. "
+                        "Write as if you are presenting results to the user directly. "
+                        "Keep it to 2-4 sentences."
+                    ),
+                },
+            ]
+
+            # Include relevant parts of the conversation (last several messages)
+            for msg in messages[-8:]:
+                if isinstance(msg, dict):
+                    role = msg.get("role", "")
+                    content = msg.get("content", "")
+                    if role in ("user", "tool", "assistant") and content:
+                        # Truncate long tool outputs
+                        if len(str(content)) > 1500:
+                            content = str(content)[:1500] + "..."
+                        summary_messages.append({"role": role if role != "tool" else "user", "content": str(content)})
+
+            summary_messages.append({
+                "role": "user",
+                "content": "Based on the tool results above, provide a brief summary and analysis."
+            })
+
+            response = await asyncio.to_thread(
+                self.llm_client.chat.completions.create,
+                model=self.llm_model,
+                messages=summary_messages,
+                max_tokens=300,
+            )
+
+            summary_text = response.choices[0].message.content or ""
+            summary_text = summary_text.strip()
+
+            if summary_text:
+                return [
+                    Card(title="Summary", content=[
+                        Text(content=summary_text, variant="body")
+                    ]).to_json()
+                ]
+
+        except Exception as e:
+            logger.warning(f"Failed to generate tool summary: {e}")
+
         return None
 
     # =========================================================================
