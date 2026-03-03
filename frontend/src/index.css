@@ -5,6 +5,10 @@
 @tailwind utilities;
 
 @layer base {
+  html, body, #root {
+    @apply h-dvh overflow-hidden;
+  }
+
   body {
     @apply bg-astral-bg text-astral-text;
     font-family: 'Inter', sans-serif;
@@ -70,6 +74,10 @@
 }
 
 /* Safe area padding for notched devices (iPhone, etc.) */
+.safe-top {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
 .safe-bottom {
   padding-bottom: max(env(safe-area-inset-bottom, 0px), 0.5rem);
 }

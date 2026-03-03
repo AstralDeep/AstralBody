@@ -84,7 +84,7 @@ export default function DashboardLayout({
     }, 0);
 
     return (
-        <div className="h-screen flex overflow-hidden bg-astral-bg relative">
+        <div className="h-dvh flex overflow-hidden bg-astral-bg relative">
 
             {/* Delete Confirmation Modal */}
             {chatToDelete && (
@@ -135,7 +135,7 @@ export default function DashboardLayout({
                 md:static md:translate-x-0
             `}>
                 {/* Logo / Brand */}
-                <div className="h-14 md:h-16 flex items-center justify-between px-5 border-b border-white/5">
+                <div className="h-14 md:h-16 flex items-center justify-between px-5 border-b border-white/5 safe-top">
                     <div className="flex items-center gap-3">
                         <div className="flex items-center">
                             <img
@@ -349,7 +349,7 @@ export default function DashboardLayout({
             {/* Main Content */}
             <main className="flex-1 flex flex-col min-w-0">
                 {/* Header */}
-                <header className="h-14 flex items-center justify-between px-3 sm:px-6 border-b border-white/5 bg-astral-bg/80 backdrop-blur-md flex-shrink-0">
+                <header className="h-14 flex items-center justify-between px-3 sm:px-6 border-b border-white/5 bg-astral-bg/80 backdrop-blur-md flex-shrink-0 safe-top">
                     <div className="flex items-center gap-2 sm:gap-3">
                         <button
                             onClick={() => setSidebarOpen(true)}
