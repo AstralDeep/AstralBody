@@ -7,7 +7,7 @@
  * - "Condense" button to merge all compatible components
  * - Loading & error states for combine operations
  */
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { X, ChevronDown, ChevronUp, Trash2, Loader2, Layers, GripVertical, AlertCircle, Maximize2, Minimize2 } from "lucide-react";
 import DynamicRenderer from "./DynamicRenderer";
@@ -51,6 +51,33 @@ export default function UISavedDrawer({
   const [dragOverId, setDragOverId] = useState<string | null>(null);
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const dragCounterRef = useRef<Map<string, number>>(new Map());
+
+  // ── Touch drag-and-drop state ──
+  const touchDragRef = useRef<{
+    componentId: string;
+    isDragging: boolean;
+    offsetX: number;
+    offsetY: number;
+    clone: HTMLElement | null;
+  }>({ componentId: '', isDragging: false, offsetX: 0, offsetY: 0, clone: null });
+  const touchTargetRef = useRef<string | null>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+
+  // Non-passive touchmove listener to prevent scrolling during touch drag
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const onTouchMove = (e: TouchEvent) => {
+      if (touchDragRef.current.isDragging) e.preventDefault();
+    };
+    container.addEventListener('touchmove', onTouchMove, { passive: false });
+    return () => {
+      container.removeEventListener('touchmove', onTouchMove);
+      if (touchDragRef.current.clone) {
+        touchDragRef.current.clone.remove();
+      }
+    };
+  }, []);
 
   const getComponentSpan = (type: string) => {
     const count = savedComponents.length;
@@ -207,6 +234,108 @@ export default function UISavedDrawer({
     onCondenseComponents(ids);
   };
 
+  // ── Touch drag-and-drop handlers (mobile / touch devices) ──
+  // Initiated from the grip handle (6-dot icon) so it doesn't conflict with scrolling.
+  // Creates a floating DOM clone that follows the finger, mimicking native DnD.
+  const handleTouchStart = (e: React.TouchEvent, componentId: string) => {
+    if (isCombining) return;
+    e.stopPropagation();
+    const ref = touchDragRef.current;
+    ref.componentId = componentId;
+    ref.isDragging = true;
+    setDraggedId(componentId);
+    if (navigator.vibrate) navigator.vibrate(30);
+
+    // Create a floating clone of the card that follows the finger
+    const touch = e.touches[0];
+    const card = (e.currentTarget as HTMLElement).closest('[data-component-id]') as HTMLElement | null;
+    if (card) {
+      const rect = card.getBoundingClientRect();
+      const clone = card.cloneNode(true) as HTMLElement;
+      Object.assign(clone.style, {
+        position: 'fixed',
+        width: `${rect.width}px`,
+        left: `${touch.clientX - rect.width / 2}px`,
+        top: `${touch.clientY - 24}px`,
+        opacity: '0.85',
+        pointerEvents: 'none',
+        zIndex: '9999',
+        transform: 'scale(0.92)',
+        boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
+        borderRadius: '12px',
+        transition: 'none',
+        overflow: 'hidden',
+        maxHeight: `${rect.height}px`,
+      });
+      document.body.appendChild(clone);
+      ref.clone = clone;
+      ref.offsetX = rect.width / 2;
+      ref.offsetY = 24;
+    }
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    const ref = touchDragRef.current;
+    if (!ref.isDragging) return;
+    const touch = e.touches[0];
+
+    // Move the floating clone to follow the finger
+    if (ref.clone) {
+      ref.clone.style.left = `${touch.clientX - ref.offsetX}px`;
+      ref.clone.style.top = `${touch.clientY - ref.offsetY}px`;
+    }
+
+    // Hide clone so elementFromPoint finds the card underneath, not the clone
+    if (ref.clone) ref.clone.style.visibility = 'hidden';
+    const el = document.elementFromPoint(touch.clientX, touch.clientY);
+    if (ref.clone) ref.clone.style.visibility = 'visible';
+
+    if (el) {
+      const card = el.closest<HTMLElement>('[data-component-id]');
+      if (card) {
+        const targetId = card.dataset.componentId ?? null;
+        if (targetId && targetId !== ref.componentId) {
+          touchTargetRef.current = targetId;
+          setDragOverId(targetId);
+          return;
+        }
+      }
+    }
+    touchTargetRef.current = null;
+    setDragOverId(null);
+  };
+
+  const removeTouchClone = () => {
+    const ref = touchDragRef.current;
+    if (ref.clone) {
+      ref.clone.remove();
+      ref.clone = null;
+    }
+  };
+
+  const handleTouchEnd = () => {
+    const ref = touchDragRef.current;
+    const targetId = touchTargetRef.current;
+    removeTouchClone();
+    if (ref.isDragging && targetId && targetId !== ref.componentId && !isCombining) {
+      onCombineComponents(ref.componentId, targetId);
+    }
+    ref.isDragging = false;
+    ref.componentId = '';
+    touchTargetRef.current = null;
+    setDraggedId(null);
+    setDragOverId(null);
+  };
+
+  const handleTouchCancel = () => {
+    removeTouchClone();
+    touchDragRef.current.isDragging = false;
+    touchDragRef.current.componentId = '';
+    touchTargetRef.current = null;
+    setDraggedId(null);
+    setDragOverId(null);
+  };
+
   return (
     <AnimatePresence>
       {isOpen && (
@@ -315,7 +444,7 @@ export default function UISavedDrawer({
       </AnimatePresence>
 
       {/* Components List */}
-      <div className={`flex-1 overflow-y-auto px-4 py-3 grid ${getGridColsClass()} gap-4 content-start items-start grid-flow-row-dense`}>
+      <div ref={scrollContainerRef} className={`flex-1 overflow-y-auto px-4 py-3 grid ${getGridColsClass()} gap-4 content-start items-start grid-flow-row-dense`}>
         {savedComponents.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center py-12 col-span-full">
             <Layers size={32} className="text-astral-muted/30 mb-3" />
@@ -333,6 +462,7 @@ export default function UISavedDrawer({
             return (
               <motion.div
                 key={component.id}
+                data-component-id={component.id}
                 layout
                 initial={{ opacity: 0, y: 10 }}
                 animate={{
@@ -361,7 +491,15 @@ export default function UISavedDrawer({
               >
                 {/* Card Header */}
                 <div className="flex items-center gap-2 px-3 py-2.5">
-                  <GripVertical size={14} className="text-astral-muted/40 flex-shrink-0" />
+                  <div
+                    className="touch-none flex-shrink-0 p-1 -m-1 cursor-grab active:cursor-grabbing"
+                    onTouchStart={(e) => handleTouchStart(e, component.id)}
+                    onTouchMove={handleTouchMove}
+                    onTouchEnd={handleTouchEnd}
+                    onTouchCancel={handleTouchCancel}
+                  >
+                    <GripVertical size={14} className="text-astral-muted/40" />
+                  </div>
                   <div className="flex-1 min-w-0">
                     <h4 className="text-sm font-medium text-white truncate">
                       {component.title}
@@ -431,7 +569,7 @@ export default function UISavedDrawer({
       {savedComponents.length >= 2 && !isCombining && (
         <div className="px-5 py-2.5 border-t border-white/5 text-center">
           <p className="text-[10px] text-astral-muted/50">
-            Drag a component onto another to combine them
+            Drag onto another to combine · use grip handle on touch devices
           </p>
         </div>
       )}
