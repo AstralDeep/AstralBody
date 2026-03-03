@@ -43,6 +43,7 @@ from shared.primitives import (
     Container, Text, Card, Grid, Alert, MetricCard, ProgressBar,
     Collapsible, create_ui_response
 )
+from rote.rote import ROTE
 
 load_dotenv(override=True)
 
@@ -101,6 +102,9 @@ class Orchestrator:
 
         # Delegation Service (RFC 8693 token exchange)
         self.delegation = DelegationService()
+
+        # ROTE — Response Output Translation Engine
+        self.rote = ROTE()
 
     # =========================================================================
     # AGENT MANAGEMENT
@@ -230,7 +234,15 @@ class Orchestrator:
                 if user_data:
                     logger.info(f"UI registered: {user_data.get('preferred_username', 'unknown')}")
                     self.ui_sessions[websocket] = user_data
-                    
+
+                    # ROTE: register device capabilities and send profile back
+                    device_info = msg.device or {}
+                    rote_profile = self.rote.register_device(websocket, device_info)
+                    await self._safe_send(websocket, json.dumps({
+                        "type": "rote_config",
+                        "device_profile": rote_profile.to_dict(),
+                    }))
+
                     # Notify UI of success (optional, or just send dashboard)
                     await self.send_dashboard(websocket)
                 else:
@@ -1503,8 +1515,9 @@ CRITICAL RULES:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def send_ui_render(self, websocket, components: List):
-        """Send a UIRender message to a UI client."""
-        msg = UIRender(components=components)
+        """Send a UIRender message to a UI client, adapted via ROTE."""
+        adapted = self.rote.adapt(websocket, components)
+        msg = UIRender(components=adapted)
         await self._safe_send(websocket, msg.to_json())
 
     async def send_dashboard(self, websocket):
@@ -1588,6 +1601,7 @@ CRITICAL RULES:
                 self.ui_clients.remove(websocket)
             if websocket in self.ui_sessions:
                 del self.ui_sessions[websocket]
+            self.rote.cleanup(websocket)
             logger.info(f"UI client session cleaned up (total: {len(self.ui_clients)})")
 
     async def handle_ui_connection(self, websocket, path=None):
@@ -1604,6 +1618,7 @@ CRITICAL RULES:
                 self.ui_clients.remove(websocket)
             if websocket in self.ui_sessions:
                 del self.ui_sessions[websocket]
+            self.rote.cleanup(websocket)
             logger.info(f"UI client session cleaned up (total: {len(self.ui_clients)})")
 
     async def start(self):

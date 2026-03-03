@@ -19,6 +19,7 @@ import {
     Grid,
     X,
     Shield,
+    Menu,
 } from "lucide-react";
 import type { Agent, ChatSession, AgentPermissionsData } from "../hooks/useWebSocket";
 import AgentPermissionsModal from "./AgentPermissionsModal";
@@ -62,6 +63,7 @@ export default function DashboardLayout({
     const [expandedAgents, setExpandedAgents] = useState<string[]>([]);
     const [chatToDelete, setChatToDelete] = useState<string | null>(null);
     const [permModalAgent, setPermModalAgent] = useState<string | null>(null);
+    const [sidebarOpen, setSidebarOpen] = useState(false);
 
     const toggleAgent = (id: string) => {
         setExpandedAgents((prev) =>
@@ -117,10 +119,23 @@ export default function DashboardLayout({
                 </div>
             )}
 
+            {/* Mobile sidebar backdrop */}
+            {sidebarOpen && (
+                <div
+                    className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm md:hidden"
+                    onClick={() => setSidebarOpen(false)}
+                />
+            )}
+
             {/* Sidebar */}
-            <aside className="w-64 flex flex-col border-r border-white/5 bg-astral-surface/30 backdrop-blur-xl">
+            <aside className={`
+                fixed inset-y-0 left-0 z-50 w-64 flex flex-col border-r border-white/5 bg-astral-surface/30 backdrop-blur-xl
+                transform transition-transform duration-200 ease-in-out
+                ${sidebarOpen ? "translate-x-0" : "-translate-x-full"}
+                md:static md:translate-x-0
+            `}>
                 {/* Logo / Brand */}
-                <div className="h-16 flex items-center px-5 border-b border-white/5">
+                <div className="h-14 md:h-16 flex items-center justify-between px-5 border-b border-white/5">
                     <div className="flex items-center gap-3">
                         <div className="flex items-center">
                             <img
@@ -130,6 +145,12 @@ export default function DashboardLayout({
                             />
                         </div>
                     </div>
+                    <button
+                        onClick={() => setSidebarOpen(false)}
+                        className="p-1.5 rounded-lg hover:bg-white/10 transition-colors md:hidden"
+                    >
+                        <X size={18} className="text-astral-muted" />
+                    </button>
                 </div>
 
                 {/* Navigation */}
@@ -269,7 +290,7 @@ export default function DashboardLayout({
                             {chatHistory.map((chat) => (
                                 <div key={chat.id} className="relative group">
                                     <button
-                                        onClick={() => onLoadChat?.(chat.id)}
+                                        onClick={() => { onLoadChat?.(chat.id); setSidebarOpen(false); }}
                                         className={`w-full flex items-center gap-2 px-2 py-2 rounded-lg transition-colors text-left pr-8
                                         ${activeChatId === chat.id ? "bg-white/10 text-white" : "hover:bg-white/5 text-astral-muted hover:text-white"}`}
                                     >
@@ -325,20 +346,26 @@ export default function DashboardLayout({
             {/* Main Content */}
             <main className="flex-1 flex flex-col min-w-0">
                 {/* Header */}
-                <header className="h-14 flex items-center justify-between px-6 border-b border-white/5 bg-astral-bg/80 backdrop-blur-md flex-shrink-0">
-                    <div className="flex items-center gap-3">
-                        <LayoutDashboard size={16} className="text-astral-muted" />
-                        <span className="text-sm font-medium text-white">Dashboard</span>
+                <header className="h-14 flex items-center justify-between px-3 sm:px-6 border-b border-white/5 bg-astral-bg/80 backdrop-blur-md flex-shrink-0">
+                    <div className="flex items-center gap-2 sm:gap-3">
+                        <button
+                            onClick={() => setSidebarOpen(true)}
+                            className="p-2 rounded-lg hover:bg-white/10 transition-colors md:hidden"
+                        >
+                            <Menu size={20} className="text-astral-muted" />
+                        </button>
+                        <LayoutDashboard size={16} className="text-astral-muted hidden sm:block" />
+                        <span className="text-sm font-medium text-white hidden sm:block">Dashboard</span>
                     </div>
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-2 sm:gap-3">
                         <button
                             onClick={onNewChat}
-                            className="flex items-center gap-2 px-3 py-1.5 bg-astral-primary/10 
-                                     border border-astral-primary/20 rounded-md text-xs font-medium 
+                            className="flex items-center gap-2 px-3 py-1.5 bg-astral-primary/10
+                                     border border-astral-primary/20 rounded-md text-xs font-medium
                                      text-astral-primary hover:bg-astral-primary/20 transition-colors"
                         >
                             <Plus size={14} />
-                            <span>New Chat</span>
+                            <span className="hidden sm:inline">New Chat</span>
                         </button>
                     </div>
                 </header>
