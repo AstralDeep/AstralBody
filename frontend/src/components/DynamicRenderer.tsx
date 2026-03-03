@@ -360,6 +360,8 @@ function renderCellValue(cell: AnyProps) {
         return <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-500/20 text-yellow-400">{cell}</span>;
     if (typeof cell === "string" && ["Mild", "Stable"].includes(cell))
         return <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-green-500/20 text-green-400">{cell}</span>;
+    if (typeof cell === "string" && (cell.startsWith("https://") || cell.startsWith("http://")))
+        return <a href={cell} target="_blank" rel="noopener noreferrer" className="text-astral-primary hover:underline inline-flex items-center gap-1">View <ExternalLink size={12} /></a>;
     return String(cell);
 }
 
