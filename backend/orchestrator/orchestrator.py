@@ -132,14 +132,20 @@ class Orchestrator:
 
         logger.info(f"Agent registered: {card.agent_id} ({card.name}) with {len(caps)} tools")
 
-        # Notify all UI clients
+        # Notify all UI clients (include per-user permissions so the dot renders)
+        tool_names = [c["name"] for c in caps]
         for ui in self.ui_clients:
             try:
+                user_id = self._get_user_id(ui)
+                permissions = self.tool_permissions.get_effective_permissions(
+                    user_id, card.agent_id, tool_names
+                )
                 await self._safe_send(ui, json.dumps({
                     "type": "agent_registered",
                     "agent_id": card.agent_id,
                     "name": card.name,
-                    "tools": [c["name"] for c in caps]
+                    "tools": tool_names,
+                    "permissions": permissions
                 }))
             except Exception:
                 pass
@@ -494,6 +500,19 @@ class Orchestrator:
                         if client_user_id == user_id:
                             asyncio.create_task(self.send_dashboard(client))
 
+
+                elif msg.action == "update_device":
+                    # ROTE: viewport / capability change from the frontend
+                    device_info = msg.payload.get("device") or {}
+                    new_profile, re_adapted = self.rote.update_device(websocket, device_info)
+                    await self._safe_send(websocket, json.dumps({
+                        "type": "rote_config",
+                        "device_profile": new_profile.to_dict(),
+                    }))
+                    # If the profile changed and we have cached components, re-send them
+                    if re_adapted is not None:
+                        msg_out = UIRender(components=re_adapted)
+                        await self._safe_send(websocket, msg_out.to_json())
 
                 elif msg.action == "condense_components":
                     component_ids = msg.payload.get("component_ids", [])

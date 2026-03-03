@@ -53,6 +53,47 @@ export default function UISavedDrawer({
   const dragCounterRef = useRef<Map<string, number>>(new Map());
 
   const getComponentSpan = (type: string) => {
+    const count = savedComponents.length;
+
+    // Few components: fill full width for anything larger than a small widget
+    if (count <= 2) {
+      switch (type.toLowerCase()) {
+        case 'metric':
+        case 'alert':
+        case 'progress':
+        case 'button':
+          return 'col-span-1';
+        default:
+          return 'col-span-full';
+      }
+    }
+
+    // Medium count: charts/tables fill row, cards take half, small items single
+    if (count <= 4) {
+      switch (type.toLowerCase()) {
+        case 'bar_chart':
+        case 'line_chart':
+        case 'pie_chart':
+        case 'plotly_chart':
+        case 'table':
+          return 'col-span-full';
+        case 'card':
+        case 'grid':
+        case 'list':
+        case 'text':
+        case 'code':
+        case 'collapsible':
+          return 'col-span-1 md:col-span-1 lg:col-span-2 xl:col-span-2 2xl:col-span-2';
+        case 'metric':
+        case 'alert':
+        case 'progress':
+        case 'button':
+        default:
+          return 'col-span-1';
+      }
+    }
+
+    // Many components: original spanning
     switch (type.toLowerCase()) {
       case 'bar_chart':
       case 'line_chart':
@@ -79,13 +120,13 @@ export default function UISavedDrawer({
   // Calculate optimal grid columns based on component count
   const getGridColsClass = () => {
     const count = savedComponents.length;
-    
-    // For very few components, reduce maximum columns to fill space better
+
+    // Few components: cap at 2 columns so col-span-full fills cleanly
     if (count <= 2) {
-      return 'grid-cols-1 md:grid-cols-2 lg:grid-cols-2 xl:grid-cols-2 2xl:grid-cols-3';
+      return 'grid-cols-1 md:grid-cols-2';
     }
     if (count <= 4) {
-      return 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-3 2xl:grid-cols-4';
+      return 'grid-cols-1 md:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4';
     }
     // Default: use original responsive columns
     return 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5';
@@ -166,16 +207,29 @@ export default function UISavedDrawer({
     onCondenseComponents(ids);
   };
 
-  if (!isOpen) return null;
-
   return (
-    <motion.div
-      initial={{ x: "100%" }}
-      animate={{ x: 0 }}
-      exit={{ x: "100%" }}
-      transition={{ type: "spring", damping: 25, stiffness: 250 }}
-      className={`fixed right-0 top-0 h-full z-50 bg-astral-bg/95 backdrop-blur-xl border-l border-white/10 shadow-2xl flex flex-col transition-all duration-300 ${isFullScreen ? "w-screen" : "w-[75vw]"}`}
-    >
+    <AnimatePresence>
+      {isOpen && (
+        <>
+          {/* Backdrop overlay */}
+          <motion.div
+            key="drawer-backdrop"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="fixed inset-0 z-40 bg-black/40 backdrop-blur-sm"
+            onClick={onClose}
+          />
+          {/* Drawer panel */}
+          <motion.div
+            key="drawer-panel"
+            initial={{ x: "100%" }}
+            animate={{ x: 0 }}
+            exit={{ x: "100%" }}
+            transition={{ type: "spring", damping: 30, stiffness: 300 }}
+            className={`fixed right-0 top-0 h-full z-50 bg-astral-bg/95 backdrop-blur-xl border-l border-white/10 shadow-2xl flex flex-col transition-[width] duration-300 ${isFullScreen ? "w-screen" : "w-full sm:w-[75vw]"}`}
+          >
       {/* Header */}
       <div className="flex items-center justify-between px-5 py-4 border-b border-white/10">
         <div className="flex items-center gap-3">
@@ -381,6 +435,9 @@ export default function UISavedDrawer({
           </p>
         </div>
       )}
-    </motion.div>
+          </motion.div>
+        </>
+      )}
+    </AnimatePresence>
   );
 }

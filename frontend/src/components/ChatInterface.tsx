@@ -628,18 +628,25 @@ export default function ChatInterface({
             </AnimatePresence>
 
             {/* Drawer Toggle Button */}
-            {!isDrawerOpen && savedComponents.length > 0 && (
-                <button
-                    onClick={() => setIsDrawerOpen(true)}
-                    className="fixed right-0 top-1/2 -translate-y-1/2 z-30 bg-astral-surface/80 hover:bg-astral-surface border border-white/10 border-r-0 p-2 rounded-l-xl shadow-lg transition-all duration-200 flex flex-col items-center justify-center group"
-                    aria-label="Open saved components drawer"
-                >
-                    <ChevronLeft size={24} className="text-astral-muted group-hover:text-white transition-colors" />
-                    <div className="absolute -top-2 -left-2 bg-astral-primary text-white text-[10px] w-5 h-5 rounded-full flex items-center justify-center shadow-sm">
-                        {savedComponents.length}
-                    </div>
-                </button>
-            )}
+            <AnimatePresence>
+                {!isDrawerOpen && savedComponents.length > 0 && (
+                    <motion.button
+                        key="drawer-toggle"
+                        initial={{ x: 60, opacity: 0 }}
+                        animate={{ x: 0, opacity: 1 }}
+                        exit={{ x: 60, opacity: 0 }}
+                        transition={{ type: "spring", damping: 25, stiffness: 300 }}
+                        onClick={() => setIsDrawerOpen(true)}
+                        className="fixed right-0 top-1/2 -translate-y-1/2 z-30 bg-astral-surface/80 hover:bg-astral-surface border border-white/10 border-r-0 p-2 rounded-l-xl shadow-lg transition-colors duration-200 flex flex-col items-center justify-center group"
+                        aria-label="Open saved components drawer"
+                    >
+                        <ChevronLeft size={24} className="text-astral-muted group-hover:text-white transition-colors" />
+                        <div className="absolute -top-2 -left-2 bg-astral-primary text-white text-[10px] w-5 h-5 rounded-full flex items-center justify-center shadow-sm">
+                            {savedComponents.length}
+                        </div>
+                    </motion.button>
+                )}
+            </AnimatePresence>
         </div>
     );
 }
