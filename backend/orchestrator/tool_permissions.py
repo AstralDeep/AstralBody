@@ -2,24 +2,23 @@
 Tool Permission Manager — Per-user, per-agent tool authorization.
 
 Provides fine-grained control over which MCP tools each agent can
-execute on behalf of a specific user. Persists permissions to a
-JSON file alongside chat history.
+execute on behalf of a specific user. Persists permissions to SQLite.
 
 Part of the RFC 8693 Delegated Authorization framework.
 """
 import os
 import json
+import time
 import logging
-import threading
-from typing import Dict, Optional
+from typing import Dict
 
 logger = logging.getLogger("ToolPermissions")
 
 
 class ToolPermissionManager:
-    """Manages per-user, per-agent tool permissions.
+    """Manages per-user, per-agent tool permissions backed by SQLite.
 
-    Structure:
+    Structure (logical):
         {
             "<user_id>": {
                 "<agent_id>": {
@@ -32,34 +31,45 @@ class ToolPermissionManager:
     Default: all tools enabled for new agents (user must explicitly revoke).
     """
 
-    def __init__(self, data_dir: str):
-        self.data_dir = data_dir
-        self.permissions_file = os.path.join(data_dir, "tool_permissions.json")
-        self._lock = threading.Lock()
-        self._permissions: Dict[str, Dict[str, Dict[str, bool]]] = {}
-        self._load()
-
-    def _load(self):
-        """Load permissions from disk."""
-        if os.path.exists(self.permissions_file):
-            try:
-                with open(self.permissions_file, "r", encoding="utf-8") as f:
-                    self._permissions = json.load(f)
-                logger.info(f"Loaded tool permissions for {len(self._permissions)} users")
-            except Exception as e:
-                logger.error(f"Failed to load tool permissions: {e}")
-                self._permissions = {}
+    def __init__(self, db=None, data_dir: str = None):
+        if db is not None:
+            self.db = db
+        elif data_dir is not None:
+            import sys
+            sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+            from shared.database import Database
+            db_path = os.path.join(data_dir, "chats.db")
+            self.db = Database(db_path)
         else:
-            self._permissions = {}
+            raise ValueError("Either db or data_dir must be provided")
 
-    def _save(self):
-        """Persist permissions to disk."""
+        self.data_dir = data_dir
+        self._migrate_from_json()
+
+    def _migrate_from_json(self):
+        """One-time migration from legacy JSON file to SQLite."""
+        if not self.data_dir:
+            return
+        json_path = os.path.join(self.data_dir, "tool_permissions.json")
+        if not os.path.exists(json_path):
+            return
         try:
-            os.makedirs(self.data_dir, exist_ok=True)
-            with open(self.permissions_file, "w", encoding="utf-8") as f:
-                json.dump(self._permissions, f, indent=2)
+            with open(json_path, "r", encoding="utf-8") as f:
+                permissions = json.load(f)
+            now = int(time.time() * 1000)
+            for user_id, agents in permissions.items():
+                for agent_id, tools in agents.items():
+                    for tool_name, allowed in tools.items():
+                        self.db.execute(
+                            """INSERT OR REPLACE INTO tool_permissions
+                               (user_id, agent_id, tool_name, allowed, updated_at)
+                               VALUES (?, ?, ?, ?, ?)""",
+                            (user_id, agent_id, tool_name, 1 if allowed else 0, now)
+                        )
+            os.rename(json_path, json_path + ".bak")
+            logger.info("Migrated tool permissions from JSON to SQLite")
         except Exception as e:
-            logger.error(f"Failed to save tool permissions: {e}")
+            logger.error(f"Failed to migrate tool permissions from JSON: {e}")
 
     def get_permissions(self, user_id: str, agent_id: str) -> Dict[str, bool]:
         """Get tool permissions for a specific user and agent.
@@ -67,9 +77,11 @@ class ToolPermissionManager:
         Returns a dict of {tool_name: allowed}. If no permissions are stored
         yet, returns an empty dict (meaning 'use defaults').
         """
-        with self._lock:
-            user_perms = self._permissions.get(user_id, {})
-            return dict(user_perms.get(agent_id, {}))
+        rows = self.db.fetch_all(
+            "SELECT tool_name, allowed FROM tool_permissions WHERE user_id = ? AND agent_id = ?",
+            (user_id, agent_id)
+        )
+        return {row['tool_name']: bool(row['allowed']) for row in rows}
 
     def get_effective_permissions(
         self, user_id: str, agent_id: str, available_tools: list
@@ -85,23 +97,19 @@ class ToolPermissionManager:
             Dict of {tool_name: allowed} for every available tool.
         """
         stored = self.get_permissions(user_id, agent_id)
-        result = {}
-        for tool in available_tools:
-            # Default to True (allowed) if not explicitly set
-            result[tool] = stored.get(tool, True)
-        return result
+        return {tool: stored.get(tool, True) for tool in available_tools}
 
     def set_permission(
         self, user_id: str, agent_id: str, tool_name: str, allowed: bool
     ):
         """Set permission for a single tool."""
-        with self._lock:
-            if user_id not in self._permissions:
-                self._permissions[user_id] = {}
-            if agent_id not in self._permissions[user_id]:
-                self._permissions[user_id][agent_id] = {}
-            self._permissions[user_id][agent_id][tool_name] = allowed
-            self._save()
+        now = int(time.time() * 1000)
+        self.db.execute(
+            """INSERT OR REPLACE INTO tool_permissions
+               (user_id, agent_id, tool_name, allowed, updated_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (user_id, agent_id, tool_name, 1 if allowed else 0, now)
+        )
         logger.info(
             f"Permission set: user={user_id} agent={agent_id} "
             f"tool={tool_name} allowed={allowed}"
@@ -111,13 +119,14 @@ class ToolPermissionManager:
         self, user_id: str, agent_id: str, permissions: Dict[str, bool]
     ):
         """Set permissions for multiple tools at once."""
-        with self._lock:
-            if user_id not in self._permissions:
-                self._permissions[user_id] = {}
-            if agent_id not in self._permissions[user_id]:
-                self._permissions[user_id][agent_id] = {}
-            self._permissions[user_id][agent_id].update(permissions)
-            self._save()
+        now = int(time.time() * 1000)
+        for tool_name, allowed in permissions.items():
+            self.db.execute(
+                """INSERT OR REPLACE INTO tool_permissions
+                   (user_id, agent_id, tool_name, allowed, updated_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (user_id, agent_id, tool_name, 1 if allowed else 0, now)
+            )
         logger.info(
             f"Bulk permissions set: user={user_id} agent={agent_id} "
             f"count={len(permissions)}"
@@ -128,11 +137,13 @@ class ToolPermissionManager:
 
         Returns True if no permissions are stored (default = all allowed).
         """
-        with self._lock:
-            user_perms = self._permissions.get(user_id, {})
-            agent_perms = user_perms.get(agent_id, {})
-            # Default to True (allowed) if not explicitly set
-            return agent_perms.get(tool_name, True)
+        row = self.db.fetch_one(
+            "SELECT allowed FROM tool_permissions WHERE user_id = ? AND agent_id = ? AND tool_name = ?",
+            (user_id, agent_id, tool_name)
+        )
+        if row is None:
+            return True
+        return bool(row['allowed'])
 
     def get_allowed_tools(
         self, user_id: str, agent_id: str, available_tools: list
@@ -158,19 +169,28 @@ class ToolPermissionManager:
         Returns:
             Dict of {agent_id: {tool_name: allowed}}
         """
-        with self._lock:
-            return dict(self._permissions.get(user_id, {}))
+        rows = self.db.fetch_all(
+            "SELECT agent_id, tool_name, allowed FROM tool_permissions WHERE user_id = ?",
+            (user_id,)
+        )
+        result: Dict[str, Dict[str, bool]] = {}
+        for row in rows:
+            agent_id = row['agent_id']
+            if agent_id not in result:
+                result[agent_id] = {}
+            result[agent_id][row['tool_name']] = bool(row['allowed'])
+        return result
 
     def remove_user_permissions(self, user_id: str):
         """Remove all permissions for a user."""
-        with self._lock:
-            if user_id in self._permissions:
-                del self._permissions[user_id]
-                self._save()
+        self.db.execute(
+            "DELETE FROM tool_permissions WHERE user_id = ?",
+            (user_id,)
+        )
 
     def remove_agent_permissions(self, user_id: str, agent_id: str):
         """Remove all permissions for a specific agent under a user."""
-        with self._lock:
-            if user_id in self._permissions and agent_id in self._permissions[user_id]:
-                del self._permissions[user_id][agent_id]
-                self._save()
+        self.db.execute(
+            "DELETE FROM tool_permissions WHERE user_id = ? AND agent_id = ?",
+            (user_id, agent_id)
+        )

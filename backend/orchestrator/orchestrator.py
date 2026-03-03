@@ -96,8 +96,8 @@ class Orchestrator:
         data_dir = os.path.join(backend_dir, 'data')
         self.history = HistoryManager(data_dir=data_dir)
 
-        # Tool Permission Manager (RFC 8693 delegation)
-        self.tool_permissions = ToolPermissionManager(data_dir=data_dir)
+        # Tool Permission Manager (RFC 8693 delegation) — backed by same SQLite DB
+        self.tool_permissions = ToolPermissionManager(db=self.history.db, data_dir=data_dir)
 
         # Delegation Service (RFC 8693 token exchange)
         self.delegation = DelegationService()
@@ -339,19 +339,9 @@ class Orchestrator:
                             }
                         }))
                         
-                        # Broadcast updated chat history to all UI clients
-                        if self.ui_clients:
-                            history_list = self.history.get_recent_chats(user_id=user_id)
-                            msg_history = json.dumps({
-                                "type": "history_list",
-                                "chats": history_list
-                            })
-                            # Create tasks for sending to avoid blocking
-                            await asyncio.gather(
-                                *[self._safe_send(client, msg_history) for client in self.ui_clients],
-                                return_exceptions=True
-                            )
-                            
+                        # Broadcast updated chat history (each user gets their own)
+                        await self._broadcast_user_history()
+
                     except Exception as e:
                         logger.error(f"Failed to save component: {e}")
                         await self._safe_send(websocket, json.dumps({
@@ -382,18 +372,8 @@ class Orchestrator:
                             "component_id": component_id
                         }))
                         
-                        # Broadcast updated chat history to all UI clients
-                        if self.ui_clients:
-                            history_list = self.history.get_recent_chats(user_id=user_id)
-                            msg_history = json.dumps({
-                                "type": "history_list",
-                                "chats": history_list
-                            })
-                            # Create tasks for sending to avoid blocking
-                            await asyncio.gather(
-                                *[client.send(msg_history) for client in self.ui_clients],
-                                return_exceptions=True
-                            )
+                        # Broadcast updated chat history (each user gets their own)
+                        await self._broadcast_user_history()
                     else:
                         await self._safe_send(websocket, json.dumps({
                             "type": "component_save_error",
@@ -1498,6 +1478,30 @@ CRITICAL RULES:
             logger.debug(f"Failed to send message (connection likely closed): {e}")
             return False
 
+    async def _broadcast_user_history(self):
+        """Send each connected UI client their own user's recent chat history.
+
+        Groups clients by user_id to avoid redundant DB queries when the
+        same user has multiple tabs open.
+        """
+        if not self.ui_clients:
+            return
+
+        clients_by_user: Dict[str, list] = {}
+        for client in self.ui_clients:
+            uid = self._get_user_id(client)
+            clients_by_user.setdefault(uid, []).append(client)
+
+        tasks = []
+        for uid, clients in clients_by_user.items():
+            history_list = self.history.get_recent_chats(user_id=uid)
+            msg = json.dumps({"type": "history_list", "chats": history_list})
+            for c in clients:
+                tasks.append(self._safe_send(c, msg))
+
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     async def send_ui_render(self, websocket, components: List):
         """Send a UIRender message to a UI client."""
         msg = UIRender(components=components)
@@ -1709,18 +1713,8 @@ CRITICAL RULES:
             # Update history and notify UI
             self.history.update_chat_title(chat_id, title, user_id=user_id)
             
-            # Broadcast update to all connected UIs
-            if self.ui_clients:
-                history_list = self.history.get_recent_chats(user_id=user_id)
-                msg = json.dumps({
-                    "type": "history_list",
-                    "chats": history_list
-                })
-                # Create tasks for sending to avoid blocking
-                await asyncio.gather(
-                    *[self._safe_send(client, msg) for client in self.ui_clients],
-                    return_exceptions=True
-                )
+            # Broadcast update (each user gets their own history)
+            await self._broadcast_user_history()
                 
         except Exception as e:
             logger.error(f"Failed to summarize chat title: {e}")

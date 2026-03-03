@@ -27,10 +27,11 @@ def tmp_dir():
     d = tempfile.mkdtemp()
     yield d
     # Cleanup
-    perm_file = os.path.join(d, "tool_permissions.json")
-    if os.path.exists(perm_file):
-        os.remove(perm_file)
-    os.rmdir(d)
+    import glob
+    for f in glob.glob(os.path.join(d, "*")):
+        os.remove(f)
+    if os.path.exists(d):
+        os.rmdir(d)
 
 
 @pytest.fixture
@@ -134,10 +135,10 @@ class TestPersistence:
         assert m2.is_tool_allowed("user1", "agent1", "search_arxiv") is True
         assert m2.is_tool_allowed("user1", "agent1", "get_system_status") is True
 
-    def test_file_created(self, tmp_dir):
+    def test_db_created(self, tmp_dir):
         m = ToolPermissionManager(data_dir=tmp_dir)
         m.set_permission("user1", "agent1", "modify_data", False)
-        assert os.path.exists(os.path.join(tmp_dir, "tool_permissions.json"))
+        assert os.path.exists(os.path.join(tmp_dir, "chats.db"))
 
 
 class TestCleanup:

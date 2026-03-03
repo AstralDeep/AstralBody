@@ -89,8 +89,8 @@ class HistoryManager:
         if not isinstance(content, str):
             content_str = json.dumps(content)
 
-        # Check if chat exists
-        chat = self.db.fetch_one("SELECT id FROM chats WHERE id = ?", (chat_id,))
+        # Check if chat exists (scoped by user)
+        chat = self.db.fetch_one("SELECT id FROM chats WHERE id = ? AND user_id = ?", (chat_id, user_id))
         if not chat:
             logger.warning(f"Attempted to add message to non-existent chat {chat_id}")
             return
@@ -98,12 +98,12 @@ class HistoryManager:
         # Auto-update title logic
         if role == "user":
             # Check message count
-            count_row = self.db.fetch_one("SELECT COUNT(*) as count FROM messages WHERE chat_id = ?", (chat_id,))
+            count_row = self.db.fetch_one("SELECT COUNT(*) as count FROM messages WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
             if count_row['count'] == 0:
                 # First message, update title
                 display_content = str(content)
                 title = display_content[:30] + "..." if len(display_content) > 30 else display_content
-                self.db.execute("UPDATE chats SET title = ? WHERE id = ?", (title, chat_id))
+                self.db.execute("UPDATE chats SET title = ? WHERE id = ? AND user_id = ?", (title, chat_id, user_id))
 
         self.db.execute(
             "INSERT INTO messages (chat_id, user_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",

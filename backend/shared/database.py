@@ -105,6 +105,19 @@ class Database:
             )
         ''')
 
+        # Tool permissions table (per-user, per-agent, per-tool)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS tool_permissions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                allowed BOOLEAN NOT NULL DEFAULT 1,
+                updated_at INTEGER,
+                UNIQUE(user_id, agent_id, tool_name)
+            )
+        ''')
+
         conn.commit()
         conn.close()
 
