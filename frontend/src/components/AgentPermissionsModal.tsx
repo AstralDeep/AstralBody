@@ -9,7 +9,7 @@
  * shows a credentials section. Tools are locked until all required
  * credentials are provided.
  */
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
     X,
@@ -30,7 +30,11 @@ import {
     Check,
     Trash2,
     ExternalLink,
+    RefreshCw,
+    Unlink,
+    Linkedin,
 } from "lucide-react";
+import { API_URL } from "../config";
 import type { RequiredCredential } from "../hooks/useWebSocket";
 
 /**
@@ -129,7 +133,36 @@ export default function AgentPermissionsModal({
     const hasClientIdStored = storedCredentialKeys.includes("LINKEDIN_CLIENT_ID");
     const hasClientSecretStored = storedCredentialKeys.includes("LINKEDIN_CLIENT_SECRET");
     const hasAccessToken = storedCredentialKeys.includes("LINKEDIN_ACCESS_TOKEN");
-    const canAuthorize = hasClientIdStored && hasClientSecretStored && !hasAccessToken && onStartOAuth;
+    const canAuthorize = hasClientIdStored && hasClientSecretStored && onStartOAuth;
+
+    // OAuth connection status
+    const [oauthStatus, setOauthStatus] = useState<{
+        connected: boolean;
+        expired?: boolean;
+        profile_name?: string;
+        profile_email?: string;
+    } | null>(null);
+    const [loadingOAuthStatus, setLoadingOAuthStatus] = useState(false);
+
+    const fetchOAuthStatus = useCallback(async () => {
+        if (!hasAccessToken) {
+            setOauthStatus(null);
+            return;
+        }
+        setLoadingOAuthStatus(true);
+        try {
+            const resp = await fetch(`${API_URL}/api/agents/${agentId}/oauth/status`, {
+                headers: { "Authorization": "Bearer mock" },
+            });
+            if (resp.ok) {
+                setOauthStatus(await resp.json());
+            }
+        } catch {
+            // ignore
+        } finally {
+            setLoadingOAuthStatus(false);
+        }
+    }, [agentId, hasAccessToken]);
 
     // Sync local state when modal opens or permissions change
     useEffect(() => {
@@ -140,10 +173,13 @@ export default function AgentPermissionsModal({
             setCredentialValues({});
             setSavingCredentials(false);
             setDeletingKey(null);
+            setOauthStatus(null);
             // Auto-show credential form if credentials are missing
             setShowCredentialForm(!credentialsComplete && !!hasRequiredCredentials);
+            // Fetch OAuth status if token exists
+            fetchOAuthStatus();
         }
-    }, [isOpen, initialPermissions, credentialsComplete, hasRequiredCredentials]);
+    }, [isOpen, initialPermissions, credentialsComplete, hasRequiredCredentials, fetchOAuthStatus]);
 
     // Close on Escape key
     useEffect(() => {
@@ -206,6 +242,8 @@ export default function AgentPermissionsModal({
         setAuthorizing(true);
         await onStartOAuth(agentId);
         setAuthorizing(false);
+        // Refresh OAuth status after authorization attempt
+        setTimeout(() => fetchOAuthStatus(), 500);
     };
 
     const systemBlockedCount = Object.keys(securityFlags || {}).filter(
@@ -400,26 +438,107 @@ export default function AgentPermissionsModal({
                                 </div>
                             )}
 
-                            {/* ── OAuth Authorize Button ────────────────────── */}
+                            {/* ── LinkedIn Connection Status ────────────────── */}
                             {canAuthorize && (
-                                <div className="px-1">
-                                    <button
-                                        onClick={handleStartOAuth}
-                                        disabled={authorizing}
-                                        className="w-full flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-medium rounded-lg
-                                            bg-[#0077B5]/20 text-[#0077B5] hover:bg-[#0077B5]/30 border border-[#0077B5]/25
-                                            transition-all"
-                                    >
-                                        {authorizing ? (
-                                            <Loader2 size={14} className="animate-spin" />
-                                        ) : (
-                                            <ExternalLink size={14} />
-                                        )}
-                                        <span>{authorizing ? "Waiting for authorization..." : "Authorize with LinkedIn"}</span>
-                                    </button>
-                                    <p className="text-[10px] text-astral-muted/60 text-center mt-1.5">
-                                        Opens LinkedIn in a new window to grant access
+                                <div>
+                                    <p className="text-[10px] font-semibold uppercase tracking-widest text-astral-muted flex items-center gap-1.5 mb-2">
+                                        <Linkedin size={10} />
+                                        LinkedIn Connection
                                     </p>
+
+                                    {/* Connected state */}
+                                    {oauthStatus?.connected && !oauthStatus?.expired ? (
+                                        <div className="space-y-2">
+                                            <div className="flex items-center gap-3 px-3 py-3 rounded-lg bg-[#0077B5]/[0.08] border border-[#0077B5]/15">
+                                                <div className="w-8 h-8 rounded-full bg-[#0077B5]/20 flex items-center justify-center flex-shrink-0">
+                                                    <Linkedin size={16} className="text-[#0077B5]" />
+                                                </div>
+                                                <div className="flex-1 min-w-0">
+                                                    <div className="flex items-center gap-2">
+                                                        <p className="text-xs font-medium text-white truncate">
+                                                            {oauthStatus.profile_name || "LinkedIn Account"}
+                                                        </p>
+                                                        <span className="text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded-full bg-green-500/15 text-green-400">
+                                                            Connected
+                                                        </span>
+                                                    </div>
+                                                    {oauthStatus.profile_email && (
+                                                        <p className="text-[10px] text-astral-muted truncate mt-0.5">
+                                                            {oauthStatus.profile_email}
+                                                        </p>
+                                                    )}
+                                                </div>
+                                                <button
+                                                    onClick={handleStartOAuth}
+                                                    disabled={authorizing}
+                                                    className="p-1.5 text-astral-muted/60 hover:text-[#0077B5] transition-colors"
+                                                    title="Re-authorize with LinkedIn"
+                                                >
+                                                    {authorizing ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ) : oauthStatus?.connected && oauthStatus?.expired ? (
+                                        /* Expired token state */
+                                        <div className="space-y-2">
+                                            <div className="flex items-center gap-3 px-3 py-3 rounded-lg bg-amber-500/[0.06] border border-amber-500/15">
+                                                <div className="w-8 h-8 rounded-full bg-amber-500/15 flex items-center justify-center flex-shrink-0">
+                                                    <Linkedin size={16} className="text-amber-400" />
+                                                </div>
+                                                <div className="flex-1 min-w-0">
+                                                    <div className="flex items-center gap-2">
+                                                        <p className="text-xs font-medium text-white truncate">
+                                                            {oauthStatus.profile_name || "LinkedIn Account"}
+                                                        </p>
+                                                        <span className="text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-400">
+                                                            Expired
+                                                        </span>
+                                                    </div>
+                                                    <p className="text-[10px] text-amber-400/80 mt-0.5">
+                                                        Token expired — re-authorize to reconnect
+                                                    </p>
+                                                </div>
+                                            </div>
+                                            <button
+                                                onClick={handleStartOAuth}
+                                                disabled={authorizing}
+                                                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-medium rounded-lg
+                                                    bg-[#0077B5]/20 text-[#0077B5] hover:bg-[#0077B5]/30 border border-[#0077B5]/25
+                                                    transition-all"
+                                            >
+                                                {authorizing ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                                                <span>{authorizing ? "Waiting for authorization..." : "Re-authorize with LinkedIn"}</span>
+                                            </button>
+                                        </div>
+                                    ) : (
+                                        /* Not connected state */
+                                        <div>
+                                            <button
+                                                onClick={handleStartOAuth}
+                                                disabled={authorizing}
+                                                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-medium rounded-lg
+                                                    bg-[#0077B5]/20 text-[#0077B5] hover:bg-[#0077B5]/30 border border-[#0077B5]/25
+                                                    transition-all"
+                                            >
+                                                {authorizing ? (
+                                                    <Loader2 size={14} className="animate-spin" />
+                                                ) : (
+                                                    <ExternalLink size={14} />
+                                                )}
+                                                <span>{authorizing ? "Waiting for authorization..." : "Authorize with LinkedIn"}</span>
+                                            </button>
+                                            <p className="text-[10px] text-astral-muted/60 text-center mt-1.5">
+                                                Opens LinkedIn in a new window to grant access
+                                            </p>
+                                        </div>
+                                    )}
+
+                                    {loadingOAuthStatus && (
+                                        <div className="flex items-center justify-center gap-2 py-2">
+                                            <Loader2 size={12} className="animate-spin text-astral-muted" />
+                                            <span className="text-[10px] text-astral-muted">Checking connection...</span>
+                                        </div>
+                                    )}
                                 </div>
                             )}
 
