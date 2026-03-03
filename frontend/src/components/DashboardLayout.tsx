@@ -270,7 +270,7 @@ export default function DashboardLayout({
                                             const storedKeys = agentCredentialKeys[agent.id] || [];
                                             const hasMissingCreds = reqCreds.some(c => c.required && !storedKeys.includes(c.key));
                                             if (hasMissingCreds) {
-                                                return <KeyRound size={12} className="text-amber-400 flex-shrink-0 animate-pulse" title="Credentials required" />;
+                                                return <span title="Credentials required"><KeyRound size={12} className="text-amber-400 flex-shrink-0 animate-pulse" /></span>;
                                             }
 
                                             const hasSecurityFlags = agent.security_flags &&
