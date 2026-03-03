@@ -2,13 +2,24 @@
  * WebSocket hook for real-time communication with the orchestrator.
  */
 import { useState, useEffect, useRef, useCallback } from "react";
+import { toast } from "sonner";
 import { API_URL } from "../config";
+
+export interface SecurityFlag {
+    tool_name: string;
+    category: string;  // DATA_EGRESS | CODE_EXECUTION | CREDENTIAL_ACCESS | DESTRUCTIVE | PRIVILEGE_ESCALATION | NETWORK_MANIPULATION
+    reason: string;
+    blocked: boolean;
+}
 
 export interface Agent {
     id: string;
     name: string;
+    description?: string;
     tools: string[];
+    tool_descriptions?: Record<string, string>;
     permissions?: Record<string, boolean>;
+    security_flags?: Record<string, SecurityFlag>;
     status: string;
 }
 
@@ -39,6 +50,7 @@ export interface AgentPermissionsData {
     agent_name: string;
     permissions: Record<string, boolean>;
     tool_descriptions: Record<string, string>;
+    security_flags?: Record<string, SecurityFlag>;
 }
 
 export interface WSMessage {
@@ -87,8 +99,14 @@ function detectDeviceCapabilities(): Record<string, unknown> {
 
 // ---------------------------------------------------------------------------
 
+export type ConnectionState = "disconnected" | "connecting" | "connected" | "reconnecting";
+
+const MAX_RECONNECT_ATTEMPTS = 10;
+
 export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORCHESTRATOR_PORT}`, token?: string) {
     const [isConnected, setIsConnected] = useState(false);
+    const [connectionState, setConnectionState] = useState<ConnectionState>("disconnected");
+    const reconnectAttemptsRef = useRef(0);
     const [agents, setAgents] = useState<Agent[]>([]);
     const [chatStatus, setChatStatus] = useState<ChatStatus>({ status: "idle", message: "" });
     const [uiComponents, setUiComponents] = useState<Record<string, unknown>[]>([]);
@@ -161,8 +179,11 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                     return [...prev, {
                         id: data.agent_id as string,
                         name: data.name as string,
+                        description: (data.description as string) || undefined,
                         tools: (data.tools as string[]) || [],
+                        tool_descriptions: (data.tool_descriptions as Record<string, string>) || undefined,
                         permissions: (data.permissions as Record<string, boolean>) || undefined,
+                        security_flags: (data.security_flags as Record<string, SecurityFlag>) || undefined,
                         status: "connected"
                     } as Agent];
                 });
@@ -307,6 +328,7 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                 setIsCombining(false);
                 setCombineError((data.error as string) || "Failed to combine components");
                 console.error("Combine error:", data.error);
+                toast.error("Failed to combine components");
                 // Auto-clear error after 5 seconds
                 setTimeout(() => setCombineError(null), 5000);
                 break;
@@ -336,6 +358,11 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                 // The backend will adapt all future ui_render payloads automatically.
                 break;
 
+            case "heartbeat":
+                // Server is still processing — no UI action needed.
+                // This prevents WebSocket timeout during long operations.
+                break;
+
             default:
             // console.log("Unknown message type:", data.type, data);
         }
@@ -345,14 +372,23 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         const currentToken = tokenRef.current;
         if (!currentToken) return; // Don't connect without token
 
+        const isReconnect = reconnectAttemptsRef.current > 0;
+        setConnectionState(isReconnect ? "reconnecting" : "connecting");
+
         try {
             const ws = new WebSocket(url);
             wsRef.current = ws;
 
             ws.onopen = () => {
                 const currentChatId = activeChatIdRef.current;
-                // console.log('WebSocket connection opened - readyState:', ws.readyState, 'activeChatId:', currentChatId, 'timestamp:', new Date().toISOString());
                 setIsConnected(true);
+                setConnectionState("connected");
+
+                if (isReconnect) {
+                    toast.success("Reconnected to server");
+                }
+                reconnectAttemptsRef.current = 0;
+
                 setChatStatus({ status: "idle", message: "" });
                 // Send RegisterUI with token and ROTE device capabilities
                 ws.send(JSON.stringify({
@@ -394,18 +430,27 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                     handleMessage(data);
                 } catch (e) {
                     console.error("Failed to parse WS message:", e);
+                    toast.error("Received malformed message from server");
                 }
             };
 
             ws.onclose = () => {
-                // console.log('WebSocket connection closed:', event.code, event.reason);
                 setIsConnected(false);
-                // Auto-reconnect after 3s
-                reconnectTimer.current = window.setTimeout(() => {
-                    // Safe reference check for connect, implemented below
-                    const c = wsRef.current as WebSocket & { _reconnect?: () => void };
-                    if (c && c._reconnect) c._reconnect();
-                }, 3000);
+                reconnectAttemptsRef.current += 1;
+
+                if (reconnectAttemptsRef.current <= MAX_RECONNECT_ATTEMPTS) {
+                    setConnectionState("reconnecting");
+                    if (reconnectAttemptsRef.current === 1) {
+                        toast.error("Connection lost. Reconnecting...");
+                    }
+                    reconnectTimer.current = window.setTimeout(() => {
+                        const c = wsRef.current as WebSocket & { _reconnect?: () => void };
+                        if (c && c._reconnect) c._reconnect();
+                    }, 3000);
+                } else {
+                    setConnectionState("disconnected");
+                    toast.error("Unable to reconnect. Please refresh the page.");
+                }
             };
 
             ws.onerror = (error) => {
@@ -416,13 +461,19 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
             // Circular reconnect is handled by the useEffect below
         } catch (e) {
             console.error("WebSocket connection failed:", e);
-            reconnectTimer.current = window.setTimeout(() => {
-                // Use the _reconnect function assigned by the useEffect below
-                const c = wsRef.current as WebSocket & { _reconnect?: () => void };
-                if (c && c._reconnect) c._reconnect();
-            }, 3000);
+            reconnectAttemptsRef.current += 1;
+            if (reconnectAttemptsRef.current <= MAX_RECONNECT_ATTEMPTS) {
+                setConnectionState("reconnecting");
+                reconnectTimer.current = window.setTimeout(() => {
+                    const c = wsRef.current as WebSocket & { _reconnect?: () => void };
+                    if (c && c._reconnect) c._reconnect();
+                }, 3000);
+            } else {
+                setConnectionState("disconnected");
+                toast.error("Unable to connect. Please refresh the page.");
+            }
         }
-    }, [url, handleMessage, userId]); // Added handleMessage dependency, removed token
+    }, [url, handleMessage, userId]);
 
     // Also update previously bound reconnect loop
     useEffect(() => {
@@ -454,6 +505,16 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
             }
         }));
     }, [activeChatId]);
+
+    const cancelTask = useCallback(() => {
+        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+        wsRef.current.send(JSON.stringify({
+            type: "ui_event",
+            action: "cancel_task",
+            payload: {}
+        }));
+        setChatStatus({ status: "idle", message: "" });
+    }, []);
 
     const loadChat = useCallback((chatId: string) => {
         if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
@@ -499,9 +560,11 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                 }
             } else {
                 console.error("Failed to delete chat", await response.text());
+                toast.error("Failed to delete chat");
             }
         } catch (e) {
             console.error("Error deleting chat", e);
+            toast.error("Failed to delete chat");
         }
     }, [createNewChat]);
 
@@ -685,11 +748,13 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
 
     return {
         isConnected,
+        connectionState,
         agents,
         chatStatus,
         uiComponents,
         messages,
         sendMessage,
+        cancelTask,
         discoverAgents,
         activeChatId,
         chatHistory,

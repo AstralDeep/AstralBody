@@ -359,6 +359,7 @@ async def list_agents(request: Request):
                 AgentTool(name=s.id, description=s.description, input_schema=s.input_schema)
                 for s in card.skills
             ],
+            security_flags=orch.security_flags.get(agent_id, {}),
             status="connected",
         ))
     return AgentListResponse(agents=agents)
@@ -389,6 +390,7 @@ async def get_agent_permissions(
         agent_name=card.name,
         permissions=permissions,
         tool_descriptions=tool_descriptions,
+        security_flags=orch.security_flags.get(agent_id, {}),
     )
 
 
@@ -408,7 +410,15 @@ async def set_agent_permissions(
     card = orch.agent_cards.get(agent_id)
     if not card:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
-    orch.tool_permissions.set_bulk_permissions(user_id, agent_id, body.permissions)
+    # Prevent re-enabling system-blocked tools via REST API
+    agent_flags = orch.security_flags.get(agent_id, {})
+    filtered_perms = {}
+    for tool_name, allowed in body.permissions.items():
+        if allowed and tool_name in agent_flags and agent_flags[tool_name].get("blocked"):
+            filtered_perms[tool_name] = False
+        else:
+            filtered_perms[tool_name] = allowed
+    orch.tool_permissions.set_bulk_permissions(user_id, agent_id, filtered_perms)
     available_tools = [s.id for s in card.skills]
     tool_descriptions = {s.id: s.description for s in card.skills}
     updated_permissions = orch.tool_permissions.get_effective_permissions(
@@ -419,6 +429,7 @@ async def set_agent_permissions(
         agent_name=card.name,
         permissions=updated_permissions,
         tool_descriptions=tool_descriptions,
+        security_flags=orch.security_flags.get(agent_id, {}),
     )
 
 

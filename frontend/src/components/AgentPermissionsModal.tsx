@@ -12,6 +12,8 @@ import {
     Shield,
     ShieldCheck,
     ShieldX,
+    ShieldAlert,
+    AlertTriangle,
     Eye,
     Pencil,
     Search,
@@ -45,13 +47,31 @@ function formatToolName(name: string): string {
         .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+interface SecurityFlagInfo {
+    category: string;
+    reason: string;
+    blocked: boolean;
+}
+
+/** Human-readable descriptions for security threat categories */
+const SECURITY_CATEGORY_LABELS: Record<string, string> = {
+    DATA_EGRESS: "Data Export Risk",
+    CODE_EXECUTION: "Code Execution Risk",
+    CREDENTIAL_ACCESS: "Credential Access Risk",
+    DESTRUCTIVE: "Destructive Operation",
+    PRIVILEGE_ESCALATION: "Privilege Escalation Risk",
+    NETWORK_MANIPULATION: "Network Access Risk",
+};
+
 interface AgentPermissionsModalProps {
     isOpen: boolean;
     onClose: () => void;
     agentId: string;
     agentName: string;
+    agentDescription?: string;
     permissions: Record<string, boolean>;
     toolDescriptions: Record<string, string>;
+    securityFlags?: Record<string, SecurityFlagInfo>;
     onSave: (agentId: string, permissions: Record<string, boolean>) => void;
 }
 
@@ -60,8 +80,10 @@ export default function AgentPermissionsModal({
     onClose,
     agentId,
     agentName,
+    agentDescription,
     permissions: initialPermissions,
     toolDescriptions,
+    securityFlags,
     onSave,
 }: AgentPermissionsModalProps) {
     const [localPermissions, setLocalPermissions] = useState<Record<string, boolean>>({});
@@ -76,6 +98,16 @@ export default function AgentPermissionsModal({
             setSaving(false);
         }
     }, [isOpen, initialPermissions]);
+
+    // Close on Escape key
+    useEffect(() => {
+        if (!isOpen) return;
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (e.key === "Escape") onClose();
+        };
+        document.addEventListener("keydown", handleKeyDown);
+        return () => document.removeEventListener("keydown", handleKeyDown);
+    }, [isOpen, onClose]);
 
     const toggleTool = (toolName: string) => {
         setLocalPermissions((prev) => {
@@ -99,7 +131,12 @@ export default function AgentPermissionsModal({
         }, 300);
     };
 
-    const enabledCount = Object.values(localPermissions).filter(Boolean).length;
+    const systemBlockedCount = Object.keys(securityFlags || {}).filter(
+        t => securityFlags?.[t]?.blocked
+    ).length;
+    const enabledCount = Object.entries(localPermissions).filter(
+        ([name, v]) => v && !(securityFlags?.[name]?.blocked)
+    ).length;
     const totalCount = Object.keys(localPermissions).length;
 
     // Group tools by category
@@ -120,13 +157,17 @@ export default function AgentPermissionsModal({
     return (
         <AnimatePresence>
             {isOpen && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
                     <motion.div
                         initial={{ opacity: 0, scale: 0.95, y: 10 }}
                         animate={{ opacity: 1, scale: 1, y: 0 }}
                         exit={{ opacity: 0, scale: 0.95, y: 10 }}
                         transition={{ duration: 0.2 }}
                         className="bg-astral-surface border border-white/10 rounded-xl shadow-2xl w-full max-w-lg mx-4 overflow-hidden"
+                        role="dialog"
+                        aria-modal="true"
+                        aria-label={`${agentName} permissions`}
+                        onClick={(e) => e.stopPropagation()}
                     >
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-white/5">
@@ -136,10 +177,13 @@ export default function AgentPermissionsModal({
                                 </div>
                                 <div>
                                     <h2 className="text-sm font-semibold text-white">
-                                        Agent Permissions
+                                        {agentName}
                                     </h2>
                                     <p className="text-[11px] text-astral-muted">
-                                        {agentName} &middot; {enabledCount}/{totalCount} tools enabled
+                                        {enabledCount}/{totalCount - systemBlockedCount} tools enabled
+                                        {systemBlockedCount > 0 && (
+                                            <span className="text-red-400"> &middot; {systemBlockedCount} blocked</span>
+                                        )}
                                     </p>
                                 </div>
                             </div>
@@ -150,6 +194,15 @@ export default function AgentPermissionsModal({
                                 <X size={16} />
                             </button>
                         </div>
+
+                        {/* Agent Description */}
+                        {agentDescription && (
+                            <div className="px-6 pt-4 pb-0">
+                                <p className="text-xs text-astral-muted/80 leading-relaxed">
+                                    {agentDescription}
+                                </p>
+                            </div>
+                        )}
 
                         {/* Tool List */}
                         <div className="px-6 py-4 max-h-[60vh] overflow-y-auto space-y-5">
@@ -162,46 +215,74 @@ export default function AgentPermissionsModal({
                                         {grouped[category].map((tool) => {
                                             const meta = getToolMeta(tool);
                                             const enabled = localPermissions[tool];
+                                            const flag = securityFlags?.[tool];
+                                            const isSystemBlocked = flag?.blocked === true;
                                             return (
                                                 <div
                                                     key={tool}
-                                                    className={`flex items-center gap-3 px-3 py-2.5 rounded-lg transition-colors cursor-pointer group
-                                                        ${enabled ? "bg-white/[0.03] hover:bg-white/[0.06]" : "bg-white/[0.01] hover:bg-white/[0.03] opacity-60"}`}
-                                                    onClick={() => toggleTool(tool)}
+                                                    className={`flex items-center gap-3 px-3 py-2.5 rounded-lg transition-colors group
+                                                        ${isSystemBlocked
+                                                            ? "bg-red-500/[0.08] border border-red-500/20 cursor-not-allowed opacity-80"
+                                                            : enabled
+                                                                ? "bg-white/[0.03] hover:bg-white/[0.06] cursor-pointer"
+                                                                : "bg-white/[0.01] hover:bg-white/[0.03] opacity-60 cursor-pointer"}`}
+                                                    onClick={() => !isSystemBlocked && toggleTool(tool)}
                                                 >
                                                     {/* Icon */}
                                                     <div className={`w-7 h-7 rounded-md flex items-center justify-center flex-shrink-0
-                                                        ${enabled ? "bg-astral-primary/15 text-astral-primary" : "bg-white/5 text-astral-muted"}`}>
-                                                        {meta.icon}
+                                                        ${isSystemBlocked
+                                                            ? "bg-red-500/20 text-red-400"
+                                                            : enabled
+                                                                ? "bg-astral-primary/15 text-astral-primary"
+                                                                : "bg-white/5 text-astral-muted"}`}>
+                                                        {isSystemBlocked ? <ShieldAlert size={14} /> : meta.icon}
                                                     </div>
 
                                                     {/* Info */}
                                                     <div className="flex-1 min-w-0">
                                                         <div className="flex items-center gap-2">
-                                                            <p className="text-xs font-medium text-white truncate">
+                                                            <p className={`text-xs font-medium truncate ${isSystemBlocked ? "text-red-300" : "text-white"}`}>
                                                                 {formatToolName(tool)}
                                                             </p>
-                                                            {/* Risk Badge */}
-                                                            <span className={`text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded-full
-                                                                ${meta.risk === "write"
-                                                                    ? "bg-amber-500/15 text-amber-400"
-                                                                    : "bg-green-500/15 text-green-400"}`}>
-                                                                {meta.risk === "write" ? "Write" : "Read"}
-                                                            </span>
+                                                            {isSystemBlocked ? (
+                                                                <span className="text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded-full bg-red-500/20 text-red-400">
+                                                                    Blocked
+                                                                </span>
+                                                            ) : (
+                                                                <span className={`text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded-full
+                                                                    ${meta.risk === "write"
+                                                                        ? "bg-amber-500/15 text-amber-400"
+                                                                        : "bg-green-500/15 text-green-400"}`}>
+                                                                    {meta.risk === "write" ? "Write" : "Read"}
+                                                                </span>
+                                                            )}
                                                         </div>
                                                         <p className="text-[10px] text-astral-muted truncate mt-0.5">
                                                             {toolDescriptions[tool] || "No description available"}
                                                         </p>
+                                                        {isSystemBlocked && flag && (
+                                                            <div className="flex items-center gap-1 mt-1">
+                                                                <AlertTriangle size={10} className="text-red-400 flex-shrink-0" />
+                                                                <p className="text-[9px] text-red-400/80">
+                                                                    <span className="font-medium">{SECURITY_CATEGORY_LABELS[flag.category] || flag.category}</span>
+                                                                    {" — "}{flag.reason}
+                                                                </p>
+                                                            </div>
+                                                        )}
                                                     </div>
 
-                                                    {/* Toggle Switch */}
+                                                    {/* Toggle Switch — disabled if system-blocked */}
                                                     <div
                                                         className={`relative w-9 h-5 rounded-full flex-shrink-0 transition-colors duration-200
-                                                            ${enabled ? "bg-astral-primary" : "bg-white/10"}`}
+                                                            ${isSystemBlocked
+                                                                ? "bg-red-500/20"
+                                                                : enabled
+                                                                    ? "bg-astral-primary"
+                                                                    : "bg-white/10"}`}
                                                     >
                                                         <motion.div
-                                                            className="absolute top-0.5 w-4 h-4 rounded-full bg-white shadow-sm"
-                                                            animate={{ left: enabled ? "18px" : "2px" }}
+                                                            className={`absolute top-0.5 w-4 h-4 rounded-full shadow-sm ${isSystemBlocked ? "bg-red-400/50" : "bg-white"}`}
+                                                            animate={{ left: (enabled && !isSystemBlocked) ? "18px" : "2px" }}
                                                             transition={{ type: "spring", stiffness: 500, damping: 30 }}
                                                         />
                                                     </div>
@@ -223,7 +304,15 @@ export default function AgentPermissionsModal({
                         {/* Footer */}
                         <div className="flex items-center justify-between px-6 py-4 border-t border-white/5 bg-white/[0.02]">
                             <div className="flex items-center gap-2 text-[11px] text-astral-muted">
-                                {enabledCount === totalCount ? (
+                                {systemBlockedCount > 0 ? (
+                                    <>
+                                        <ShieldAlert size={14} className="text-red-400" />
+                                        <span>{systemBlockedCount} tool{systemBlockedCount > 1 ? "s" : ""} system-blocked</span>
+                                        {enabledCount > 0 && (
+                                            <span className="text-astral-muted/50">&middot; {enabledCount} enabled</span>
+                                        )}
+                                    </>
+                                ) : enabledCount === totalCount ? (
                                     <>
                                         <ShieldCheck size={14} className="text-green-400" />
                                         <span>All tools enabled</span>

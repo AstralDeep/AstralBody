@@ -151,6 +151,7 @@ class AgentInfo(BaseModel):
     description: Optional[str] = None
     tools: List[AgentTool] = []
     permissions: Optional[Dict[str, bool]] = Field(None, description="Per-tool permission map (tool_name: allowed)")
+    security_flags: Optional[Dict[str, Any]] = Field(None, description="System-level security flags per tool from proactive review")
     status: str = "connected"
 
 
@@ -172,6 +173,7 @@ class AgentPermissionsResponse(BaseModel):
     agent_name: str
     permissions: Dict[str, bool] = Field(..., description="Map of tool_name to allowed (true/false)")
     tool_descriptions: Optional[Dict[str, str]] = Field(None, description="Map of tool_name to description")
+    security_flags: Optional[Dict[str, Any]] = Field(None, description="System-level security flags per tool from proactive review")
 
 
 # =============================================================================
