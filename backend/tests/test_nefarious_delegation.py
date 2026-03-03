@@ -40,10 +40,11 @@ def service():
 def tmp_dir():
     d = tempfile.mkdtemp()
     yield d
-    perm_file = os.path.join(d, "tool_permissions.json")
-    if os.path.exists(perm_file):
-        os.remove(perm_file)
-    os.rmdir(d)
+    import glob
+    for f in glob.glob(os.path.join(d, "*")):
+        os.remove(f)
+    if os.path.exists(d):
+        os.rmdir(d)
 
 
 @pytest.fixture
