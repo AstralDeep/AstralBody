@@ -100,16 +100,17 @@ class AgentCard:
     agent_id: str
     version: str = "0.1.0"
     skills: List[AgentSkill] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     @staticmethod
     def from_dict(data: Dict[str, Any]) -> 'AgentCard':
         skills_data = data.get('skills', [])
         skills = [AgentSkill(**s) if isinstance(s, dict) else s for s in skills_data]
-        card_data = {k: v for k, v in data.items() if k != 'skills'}
+        card_data = {k: v for k, v in data.items() if k not in ('skills',)}
         return AgentCard(skills=skills, **card_data)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        result = {
             "name": self.name,
             "description": self.description,
             "agent_id": self.agent_id,
@@ -120,6 +121,9 @@ class AgentCard:
                 for s in self.skills
             ] if self.skills else []
         }
+        if self.metadata:
+            result["metadata"] = self.metadata
+        return result
 
 @dataclass
 class RegisterAgent(Message):

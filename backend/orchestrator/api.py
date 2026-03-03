@@ -9,12 +9,13 @@ WebSocket remains the primary channel for real-time features (streaming
 chat responses, live status updates). These REST endpoints provide
 request/response access for CRUD operations.
 """
+import os
 import time
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
+from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
 
 from orchestrator.models import (
     ChatMessageRequest, ChatMessageResponse,
@@ -27,6 +28,7 @@ from orchestrator.models import (
     ComponentCombineRequest, ComponentCondenseRequest, ComponentCombineResponse,
     AgentListResponse, AgentInfo, AgentTool,
     AgentPermissionsRequest, AgentPermissionsResponse,
+    CredentialSetRequest, CredentialListResponse, CredentialDeleteResponse,
     DashboardResponse,
     ErrorResponse,
 )
@@ -431,6 +433,260 @@ async def set_agent_permissions(
         tool_descriptions=tool_descriptions,
         security_flags=orch.security_flags.get(agent_id, {}),
     )
+
+
+# ── Agent Credentials ──────────────────────────────────────────────────
+
+
+@agent_router.get(
+    "/{agent_id}/credentials",
+    response_model=CredentialListResponse,
+    summary="List stored credential keys for an agent",
+    description="Returns the names of stored credentials (never the values) and the agent's declared credential requirements.",
+)
+async def get_agent_credentials(
+    request: Request,
+    agent_id: str,
+    user_id: str = Depends(require_user_id),
+):
+    orch = _get_orchestrator(request)
+    card = orch.agent_cards.get(agent_id)
+    if not card:
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+    keys = orch.credential_manager.list_credential_keys(user_id, agent_id)
+    required = getattr(card, 'metadata', {}).get("required_credentials", []) if hasattr(card, 'metadata') else []
+    return CredentialListResponse(
+        agent_id=agent_id,
+        agent_name=card.name,
+        credential_keys=keys,
+        required_credentials=required,
+    )
+
+
+@agent_router.put(
+    "/{agent_id}/credentials",
+    response_model=CredentialListResponse,
+    summary="Set credentials for an agent",
+    description="Store one or more encrypted credentials for the specified agent. Values are encrypted at rest.",
+)
+async def set_agent_credentials(
+    request: Request,
+    agent_id: str,
+    body: CredentialSetRequest,
+    user_id: str = Depends(require_user_id),
+):
+    orch = _get_orchestrator(request)
+    card = orch.agent_cards.get(agent_id)
+    if not card:
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+    orch.credential_manager.set_bulk_credentials(user_id, agent_id, body.credentials)
+    keys = orch.credential_manager.list_credential_keys(user_id, agent_id)
+    required = getattr(card, 'metadata', {}).get("required_credentials", []) if hasattr(card, 'metadata') else []
+    return CredentialListResponse(
+        agent_id=agent_id,
+        agent_name=card.name,
+        credential_keys=keys,
+        required_credentials=required,
+    )
+
+
+@agent_router.delete(
+    "/{agent_id}/credentials/{credential_key}",
+    response_model=CredentialDeleteResponse,
+    summary="Delete a credential",
+    description="Remove a single stored credential for the specified agent.",
+)
+async def delete_agent_credential(
+    request: Request,
+    agent_id: str,
+    credential_key: str,
+    user_id: str = Depends(require_user_id),
+):
+    orch = _get_orchestrator(request)
+    card = orch.agent_cards.get(agent_id)
+    if not card:
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+    orch.credential_manager.delete_credential(user_id, agent_id, credential_key)
+    return CredentialDeleteResponse(message=f"Credential '{credential_key}' deleted for agent '{agent_id}'")
+
+
+# ── LinkedIn OAuth Flow ──────────────────────────────────────────────────
+
+def _get_public_base_url(request: Request) -> str:
+    """Determine the public-facing base URL, respecting reverse proxy headers."""
+    # Check for explicit env var override first
+    override = os.environ.get("PUBLIC_BASE_URL")
+    if override:
+        return override.rstrip("/")
+
+    # Check X-Forwarded-* headers (set by reverse proxies like nginx)
+    forwarded_proto = request.headers.get("x-forwarded-proto")
+    forwarded_host = request.headers.get("x-forwarded-host") or request.headers.get("host")
+
+    if forwarded_host:
+        scheme = forwarded_proto or request.url.scheme
+        return f"{scheme}://{forwarded_host}"
+
+    # Fallback to request base URL
+    return str(request.base_url).rstrip("/")
+
+
+@agent_router.get(
+    "/{agent_id}/oauth/authorize",
+    summary="Start OAuth authorization flow",
+    description="Returns the OAuth authorization URL. The frontend opens this in a popup/tab for user consent.",
+)
+async def oauth_authorize(
+    request: Request,
+    agent_id: str,
+    user_id: str = Depends(require_user_id),
+):
+    orch = _get_orchestrator(request)
+    card = orch.agent_cards.get(agent_id)
+    if not card:
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+
+    # Get stored client credentials
+    client_id = orch.credential_manager.get_credential(user_id, agent_id, "LINKEDIN_CLIENT_ID")
+    if not client_id:
+        raise HTTPException(status_code=400, detail="LINKEDIN_CLIENT_ID not configured. Save it in credentials first.")
+
+    # Build the redirect URI using the public-facing URL
+    base_url = _get_public_base_url(request)
+    redirect_uri = f"{base_url}/api/agents/{agent_id}/oauth/callback"
+
+    # State encodes user_id for the callback
+    import secrets
+    import json as _json
+    state_token = secrets.token_urlsafe(16)
+    state_data = _json.dumps({"user_id": user_id, "agent_id": agent_id, "nonce": state_token})
+
+    # Store state temporarily for validation
+    orch.credential_manager.set_credential(user_id, agent_id, "_oauth_state", state_data)
+
+    from agents.linkedin.linkedin_api import build_authorization_url
+    auth_url = build_authorization_url(client_id, redirect_uri, state=state_data)
+
+    return {"authorization_url": auth_url, "redirect_uri": redirect_uri}
+
+
+@agent_router.get(
+    "/{agent_id}/oauth/callback",
+    response_class=HTMLResponse,
+    summary="OAuth callback handler",
+    description="Handles the redirect from LinkedIn after user consent. Exchanges the auth code for tokens.",
+)
+async def oauth_callback(
+    request: Request,
+    agent_id: str,
+    code: str = Query(default=None),
+    state: str = Query(default=None),
+    error: str = Query(default=None),
+    error_description: str = Query(default=None),
+):
+    # Error from LinkedIn
+    if error:
+        return HTMLResponse(
+            content=_oauth_result_page(False, f"LinkedIn authorization failed: {error_description or error}"),
+            status_code=200,
+        )
+
+    if not code:
+        return HTMLResponse(
+            content=_oauth_result_page(False, "No authorization code received from LinkedIn."),
+            status_code=200,
+        )
+
+    # Parse state to find user_id
+    import json as _json
+    try:
+        state_data = _json.loads(state) if state else {}
+    except (ValueError, TypeError):
+        state_data = {}
+
+    user_id = state_data.get("user_id")
+    if not user_id:
+        return HTMLResponse(
+            content=_oauth_result_page(False, "Invalid OAuth state — missing user context."),
+            status_code=200,
+        )
+
+    orch = _get_orchestrator(request)
+
+    # Get client credentials
+    client_id = orch.credential_manager.get_credential(user_id, agent_id, "LINKEDIN_CLIENT_ID")
+    client_secret = orch.credential_manager.get_credential(user_id, agent_id, "LINKEDIN_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        return HTMLResponse(
+            content=_oauth_result_page(False, "Client ID or Secret not found in stored credentials."),
+            status_code=200,
+        )
+
+    # Build redirect_uri (must match what was sent in the authorize request)
+    base_url = _get_public_base_url(request)
+    redirect_uri = f"{base_url}/api/agents/{agent_id}/oauth/callback"
+
+    # Exchange code for token
+    from agents.linkedin.linkedin_api import exchange_code_for_token
+    import time as _time
+
+    token_data = exchange_code_for_token(client_id, client_secret, code, redirect_uri)
+    if not token_data or "access_token" not in token_data:
+        return HTMLResponse(
+            content=_oauth_result_page(False, "Failed to exchange authorization code for access token."),
+            status_code=200,
+        )
+
+    # Store the token(s) as credentials
+    creds_to_store = {
+        "LINKEDIN_ACCESS_TOKEN": token_data["access_token"],
+    }
+    expires_in = token_data.get("expires_in")
+    if expires_in:
+        creds_to_store["LINKEDIN_TOKEN_EXPIRES_AT"] = str(int(_time.time()) + int(expires_in))
+    if token_data.get("refresh_token"):
+        creds_to_store["LINKEDIN_REFRESH_TOKEN"] = token_data["refresh_token"]
+
+    orch.credential_manager.set_bulk_credentials(user_id, agent_id, creds_to_store)
+
+    # Clean up state
+    orch.credential_manager.delete_credential(user_id, agent_id, "_oauth_state")
+
+    logger.info(f"LinkedIn OAuth complete for user={user_id} agent={agent_id}, token expires_in={expires_in}")
+
+    return HTMLResponse(
+        content=_oauth_result_page(True, "LinkedIn authorization successful! You can close this window."),
+        status_code=200,
+    )
+
+
+def _oauth_result_page(success: bool, message: str) -> str:
+    """Generate a simple HTML page for the OAuth callback result."""
+    color = "#22c55e" if success else "#ef4444"
+    icon = "&#10003;" if success else "&#10007;"
+    return f"""<!DOCTYPE html>
+<html><head><title>LinkedIn Authorization</title>
+<style>
+body {{ font-family: -apple-system, system-ui, sans-serif; background: #0f1219; color: #e2e8f0;
+       display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }}
+.card {{ background: #1a1f2e; border: 1px solid rgba(255,255,255,0.1); border-radius: 12px;
+         padding: 2rem; text-align: center; max-width: 400px; }}
+.icon {{ font-size: 3rem; color: {color}; margin-bottom: 1rem; }}
+p {{ font-size: 0.9rem; opacity: 0.8; }}
+</style></head>
+<body><div class="card">
+<div class="icon">{icon}</div>
+<h2>{message}</h2>
+<p>This window will close automatically.</p>
+</div>
+<script>
+// Notify the parent window and close after a delay
+if (window.opener) {{
+    window.opener.postMessage({{ type: "linkedin_oauth_complete", success: {"true" if success else "false"} }}, "*");
+}}
+setTimeout(() => window.close(), 2000);
+</script>
+</body></html>"""
 
 
 # =============================================================================

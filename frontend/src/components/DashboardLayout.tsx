@@ -19,6 +19,7 @@ import {
     Shield,
     Menu,
     Search,
+    KeyRound,
 } from "lucide-react";
 import type { Agent, ChatSession, AgentPermissionsData, ConnectionState } from "../hooks/useWebSocket";
 import AgentPermissionsModal from "./AgentPermissionsModal";
@@ -39,6 +40,12 @@ interface DashboardLayoutProps {
     agentPermissions?: AgentPermissionsData | null;
     onGetAgentPermissions?: (agentId: string) => void;
     onSetAgentPermissions?: (agentId: string, permissions: Record<string, boolean>) => void;
+    // Credential management
+    agentCredentialKeys?: Record<string, string[]>;
+    onFetchAgentCredentials?: (agentId: string) => Promise<unknown>;
+    onSaveAgentCredentials?: (agentId: string, credentials: Record<string, string>) => Promise<boolean>;
+    onDeleteAgentCredential?: (agentId: string, key: string) => Promise<boolean>;
+    onStartOAuthFlow?: (agentId: string) => Promise<boolean>;
 }
 
 export default function DashboardLayout({
@@ -60,6 +67,11 @@ export default function DashboardLayout({
     agentPermissions,
     onGetAgentPermissions,
     onSetAgentPermissions,
+    agentCredentialKeys = {},
+    onFetchAgentCredentials,
+    onSaveAgentCredentials,
+    onDeleteAgentCredential,
+    onStartOAuthFlow,
 }: DashboardLayoutProps) {
     const [chatToDelete, setChatToDelete] = useState<string | null>(null);
     const [permModalAgent, setPermModalAgent] = useState<string | null>(null);
@@ -79,6 +91,11 @@ export default function DashboardLayout({
     const openPermissionsModal = (agentId: string) => {
         setPermModalAgent(agentId);
         onGetAgentPermissions?.(agentId);
+        // Fetch stored credential keys for agents that need them
+        const agent = agents.find(a => a.id === agentId);
+        if (agent?.metadata?.required_credentials?.length) {
+            onFetchAgentCredentials?.(agentId);
+        }
     };
 
     const totalTools = agents.reduce((sum, a) => {
@@ -246,8 +263,16 @@ export default function DashboardLayout({
                                                 })()}
                                             </p>
                                         </div>
-                                        {/* Permission indicator dot */}
+                                        {/* Credential / permission indicator */}
                                         {(() => {
+                                            // Check if agent needs credentials
+                                            const reqCreds = agent.metadata?.required_credentials || [];
+                                            const storedKeys = agentCredentialKeys[agent.id] || [];
+                                            const hasMissingCreds = reqCreds.some(c => c.required && !storedKeys.includes(c.key));
+                                            if (hasMissingCreds) {
+                                                return <KeyRound size={12} className="text-amber-400 flex-shrink-0 animate-pulse" title="Credentials required" />;
+                                            }
+
                                             const hasSecurityFlags = agent.security_flags &&
                                                 Object.values(agent.security_flags).some((f: unknown) => (f as { blocked?: boolean }).blocked);
                                             if (hasSecurityFlags) {
@@ -403,21 +428,29 @@ export default function DashboardLayout({
             </main>
 
             {/* Agent Permissions Modal */}
-            {permModalAgent && agentPermissions && agentPermissions.agent_id === permModalAgent && (
-                <AgentPermissionsModal
-                    isOpen={true}
-                    onClose={() => setPermModalAgent(null)}
-                    agentId={agentPermissions.agent_id}
-                    agentName={agentPermissions.agent_name}
-                    agentDescription={agents.find(a => a.id === permModalAgent)?.description}
-                    permissions={agentPermissions.permissions}
-                    toolDescriptions={agentPermissions.tool_descriptions}
-                    securityFlags={agentPermissions.security_flags}
-                    onSave={(agentId, perms) => {
-                        onSetAgentPermissions?.(agentId, perms);
-                    }}
-                />
-            )}
+            {permModalAgent && agentPermissions && agentPermissions.agent_id === permModalAgent && (() => {
+                const modalAgent = agents.find(a => a.id === permModalAgent);
+                return (
+                    <AgentPermissionsModal
+                        isOpen={true}
+                        onClose={() => setPermModalAgent(null)}
+                        agentId={agentPermissions.agent_id}
+                        agentName={agentPermissions.agent_name}
+                        agentDescription={modalAgent?.description}
+                        permissions={agentPermissions.permissions}
+                        toolDescriptions={agentPermissions.tool_descriptions}
+                        securityFlags={agentPermissions.security_flags}
+                        onSave={(agentId, perms) => {
+                            onSetAgentPermissions?.(agentId, perms);
+                        }}
+                        requiredCredentials={modalAgent?.metadata?.required_credentials}
+                        storedCredentialKeys={agentCredentialKeys[permModalAgent] || []}
+                        onSaveCredentials={onSaveAgentCredentials}
+                        onDeleteCredential={onDeleteAgentCredential}
+                        onStartOAuth={onStartOAuthFlow}
+                    />
+                );
+            })()}
         </div>
     );
 }

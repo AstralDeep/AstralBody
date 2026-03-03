@@ -711,11 +711,12 @@ def search_wikipedia(query: str, language: str = "en", session_id: str = "defaul
 # ACADEMIC SEARCH TOOLS
 # =============================================================================
 
-def extract_search_terms(query: str) -> str:
+def extract_search_terms(query: str, **kwargs) -> str:
     """Extract relevant search terms from a natural language query using LLM."""
     logger.debug(f"Extracting search terms for: {query}")
-    api_key = os.getenv("OPENAI_API_KEY")
-    base_url = os.getenv("OPENAI_BASE_URL")
+    creds = kwargs.get("_credentials", {})
+    api_key = creds.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+    base_url = creds.get("OPENAI_BASE_URL") or os.getenv("OPENAI_BASE_URL")
     model = os.getenv("LLM_MODEL", "gpt-4o")
     
     if not api_key:
@@ -750,7 +751,7 @@ def search_arxiv(query: str, max_results: int = 10, session_id: str = "default",
     """
     logger.debug(f"search_arxiv called with query: {query}")
     # Use LLM to extract clean search terms
-    clean_query = extract_search_terms(query)
+    clean_query = extract_search_terms(query, **kwargs)
     logger.debug(f"Original query: '{query}' -> Cleaned query: '{clean_query}'")
     
     try:
