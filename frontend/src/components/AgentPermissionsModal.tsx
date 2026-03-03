@@ -31,7 +31,6 @@ import {
     Trash2,
     ExternalLink,
     RefreshCw,
-    Unlink,
     Linkedin,
 } from "lucide-react";
 import { API_URL } from "../config";
