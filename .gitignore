@@ -3,6 +3,8 @@ plans/
 tmp_uploads/
 backend/tmp/
 
+.claude/
+
 # General
 .DS_Store
 Thumbs.db
