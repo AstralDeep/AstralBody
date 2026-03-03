@@ -368,7 +368,7 @@ export default function ChatInterface({
             </AnimatePresence>
 
             {/* Messages Area */}
-            <div className="flex-1 overflow-y-auto px-6 py-4 space-y-6">
+            <div className="flex-1 overflow-y-auto px-3 sm:px-6 py-3 sm:py-4 space-y-4 sm:space-y-6">
                 {messages.length === 0 && (
                     <div className="flex flex-col items-center justify-center h-full text-center">
                         <motion.div
@@ -389,7 +389,7 @@ export default function ChatInterface({
                                     Results are dynamically rendered as rich UI components.
                                 </p>
                             </div>
-                            <div className="grid grid-cols-2 gap-3 max-w-lg">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-3 max-w-lg">
                                 {SUGGESTIONS.map((s, i) => (
                                     <button
                                         key={i}
@@ -421,8 +421,8 @@ export default function ChatInterface({
                         )}
                         <div
                             className={`${msg.role === "user"
-                                ? "max-w-md bg-astral-primary/20 border border-astral-primary/30 rounded-2xl rounded-tr-sm px-4 py-3"
-                                : "flex-1 max-w-4xl"
+                                ? "max-w-[85%] sm:max-w-md bg-astral-primary/20 border border-astral-primary/30 rounded-2xl rounded-tr-sm px-3 sm:px-4 py-2.5 sm:py-3"
+                                : "flex-1 max-w-full sm:max-w-4xl min-w-0"
                                 }`}
                         >
                             {msg.role === "user" ? (
@@ -472,8 +472,8 @@ export default function ChatInterface({
             </div>
 
             {/* Input Area */}
-            <div className="border-t border-white/5 p-4 bg-astral-bg/80 backdrop-blur-md">
-                <form onSubmit={handleSubmit} className="flex flex-col gap-3 max-w-4xl mx-auto">
+            <div className="border-t border-white/5 p-2 sm:p-4 bg-astral-bg/80 backdrop-blur-md safe-bottom">
+                <form onSubmit={handleSubmit} className="flex flex-col gap-2 sm:gap-3 max-w-4xl mx-auto">
 
                     {/* Staged File View */}
                     <AnimatePresence>
@@ -506,8 +506,8 @@ export default function ChatInterface({
                         )}
                     </AnimatePresence>
 
-                    <div className="flex gap-3">
-                        <div className="flex-1 relative flex items-center gap-2 bg-astral-surface/60 border border-white/10 rounded-xl px-2 transition-all focus-within:border-astral-primary/50 focus-within:ring-1 focus-within:ring-astral-primary/20">
+                    <div className="flex gap-2 sm:gap-3">
+                        <div className="flex-1 relative flex items-center gap-1 sm:gap-2 bg-astral-surface/60 border border-white/10 rounded-xl px-1.5 sm:px-2 transition-all focus-within:border-astral-primary/50 focus-within:ring-1 focus-within:ring-astral-primary/20">
 
                             {/* File Upload Button inside input wrapper */}
                             <button
@@ -545,9 +545,9 @@ export default function ChatInterface({
                         <button
                             type="submit"
                             disabled={(!input.trim() && !attachedFile) || !isConnected || (chatStatus.status !== "idle" && chatStatus.status !== "done")}
-                            className="px-4 py-3 rounded-xl bg-astral-primary hover:bg-astral-primary/80
+                            className="px-3 sm:px-4 py-2.5 sm:py-3 rounded-xl bg-astral-primary hover:bg-astral-primary/80
                            disabled:opacity-30 disabled:cursor-not-allowed
-                           transition-colors flex items-center gap-2"
+                           transition-colors flex items-center gap-2 flex-shrink-0"
                             id="chat-submit"
                         >
                             <Send size={16} className="text-white" />

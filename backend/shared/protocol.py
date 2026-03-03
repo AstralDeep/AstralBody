@@ -145,6 +145,7 @@ class RegisterUI(Message):
     capabilities: List[str] = field(default_factory=list)
     session_id: Optional[str] = None
     token: Optional[str] = None
+    device: Optional[Dict[str, Any]] = None  # ROTE: frontend device capabilities
 
     def to_json(self) -> str:
         return json.dumps(asdict(self))

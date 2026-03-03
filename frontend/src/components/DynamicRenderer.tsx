@@ -336,7 +336,7 @@ function RenderCard({ title, children, content, onSaveComponent, onSendMessage }
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.3 }}
-            className="glass-card p-5 relative"
+            className="glass-card p-3 sm:p-5 relative"
         >
             {title && (
                 <div className="mb-3">
@@ -366,7 +366,7 @@ function RenderTable({ headers, rows, title: compTitle, label }: AnyProps) {
                 <thead>
                     <tr className="bg-astral-primary/10 border-b border-white/5">
                         {headers.map((h: string, i: number) => (
-                            <th key={i} className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-astral-muted">{h}</th>
+                            <th key={i} className="px-2 sm:px-4 py-2 sm:py-3 text-left text-xs font-semibold uppercase tracking-wider text-astral-muted whitespace-nowrap">{h}</th>
                         ))}
                     </tr>
                 </thead>
@@ -374,7 +374,7 @@ function RenderTable({ headers, rows, title: compTitle, label }: AnyProps) {
                     {rows.map((row: AnyProps[], ri: number) => (
                         <tr key={ri} className="border-b border-white/5 hover:bg-white/5 transition-colors">
                             {row.map((cell: AnyProps, ci: number) => (
-                                <td key={ci} className="px-4 py-3 text-astral-text">
+                                <td key={ci} className="px-2 sm:px-4 py-2 sm:py-3 text-astral-text">
                                     {typeof cell === "string" && ["Critical", "Severe"].includes(cell)
                                         ? <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-red-500/20 text-red-400">{cell}</span>
                                         : typeof cell === "string" && ["Moderate"].includes(cell)
@@ -473,11 +473,20 @@ function RenderProgress({ value, label, show_percentage }: AnyProps) {
 function RenderGrid({ columns = 2, gap = 16, children, content, onSaveComponent, onSendMessage }: AnyProps) {
     const kids = children || content || [];
 
+    // Responsive: use Tailwind classes instead of hardcoded columns so grids
+    // collapse on small viewports regardless of the backend-specified column count.
+    const colsClass: Record<number, string> = {
+        1: "grid-cols-1",
+        2: "grid-cols-1 sm:grid-cols-2",
+        3: "grid-cols-1 sm:grid-cols-2 lg:grid-cols-3",
+        4: "grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4",
+        5: "grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5",
+        6: "grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6",
+    };
+    const cls = colsClass[columns] || `grid-cols-1 sm:grid-cols-2 lg:grid-cols-${Math.min(columns, 6)}`;
+
     return (
-        <div
-            className="grid"
-            style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`, gap: `${gap}px` }}
-        >
+        <div className={`grid ${cls}`} style={{ gap: `${gap}px` }}>
             {renderChildren(kids, onSaveComponent, onSendMessage)}
         </div>
     );
@@ -575,7 +584,7 @@ function RenderBarChart({ title, labels, datasets }: AnyProps) {
                 ]}
                 layout={{
                     autosize: true,
-                    height: 320,
+                    height: window.innerWidth < 640 ? 240 : 320,
                     margin: { l: 40, r: 20, t: 20, b: 40 },
                     paper_bgcolor: 'rgba(0,0,0,0)',
                     plot_bgcolor: 'rgba(0,0,0,0)',
@@ -621,7 +630,7 @@ function RenderLineChart({ title, labels, datasets }: AnyProps) {
                 ]}
                 layout={{
                     autosize: true,
-                    height: 320,
+                    height: window.innerWidth < 640 ? 240 : 320,
                     margin: { l: 40, r: 20, t: 20, b: 40 },
                     paper_bgcolor: 'rgba(0,0,0,0)',
                     plot_bgcolor: 'rgba(0,0,0,0)',
@@ -668,7 +677,7 @@ function RenderPieChart({ title, labels, data: pieData, colors }: AnyProps) {
                 ]}
                 layout={{
                     autosize: true,
-                    height: 320,
+                    height: window.innerWidth < 640 ? 240 : 320,
                     margin: { l: 20, r: 20, t: 20, b: 20 },
                     paper_bgcolor: 'rgba(0,0,0,0)',
                     plot_bgcolor: 'rgba(0,0,0,0)',

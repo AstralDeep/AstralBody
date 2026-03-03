@@ -68,3 +68,17 @@
 .pulse-glow {
   animation: pulse-glow 2s ease-in-out infinite;
 }
+
+/* Safe area padding for notched devices (iPhone, etc.) */
+.safe-bottom {
+  padding-bottom: max(env(safe-area-inset-bottom, 0px), 0.5rem);
+}
+
+/* Prevent text selection on touch targets, allow on content */
+@media (pointer: coarse) {
+  button, [role="button"] {
+    -webkit-tap-highlight-color: transparent;
+    min-height: 36px;
+    min-width: 36px;
+  }
+}

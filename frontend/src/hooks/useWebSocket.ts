@@ -46,6 +46,47 @@ export interface WSMessage {
     [key: string]: unknown;
 }
 
+// ---------------------------------------------------------------------------
+// ROTE: Device capability detection (runs once per WebSocket connection)
+// ---------------------------------------------------------------------------
+
+function detectDeviceType(): string {
+    const ua = navigator.userAgent.toLowerCase();
+    const vw = window.innerWidth;
+
+    if (/watch|watchos/.test(ua)) return "watch";
+    if (/smart-?tv|hbbtv|netcast|viera|nettv|roku|web0s/.test(ua)) return "tv";
+    if (vw <= 200) return "watch";
+    if (/ipad|tablet|playbook|silk/.test(ua) || (vw > 480 && vw <= 1024 && /android/.test(ua))) return "tablet";
+    if (/android|iphone|ipod|blackberry|iemobile|opera mini/.test(ua) || vw <= 480) return "mobile";
+    if (vw <= 1024) return "tablet";
+    return "browser";
+}
+
+function detectDeviceCapabilities(): Record<string, unknown> {
+    const nav = navigator as Navigator & {
+        connection?: { effectiveType?: string };
+        maxTouchPoints?: number;
+    };
+    return {
+        device_type: detectDeviceType(),
+        screen_width: window.screen.width,
+        screen_height: window.screen.height,
+        viewport_width: window.innerWidth,
+        viewport_height: window.innerHeight,
+        pixel_ratio: window.devicePixelRatio ?? 1,
+        has_touch: (nav.maxTouchPoints ?? 0) > 0,
+        has_geolocation: "geolocation" in navigator,
+        has_microphone: !!navigator.mediaDevices,
+        has_camera: !!navigator.mediaDevices,
+        has_file_system: true,
+        connection_type: nav.connection?.effectiveType ?? "unknown",
+        user_agent: navigator.userAgent,
+    };
+}
+
+// ---------------------------------------------------------------------------
+
 export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORCHESTRATOR_PORT}`, token?: string) {
     const [isConnected, setIsConnected] = useState(false);
     const [agents, setAgents] = useState<Agent[]>([]);
@@ -289,6 +330,11 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                 }
                 break;
 
+            case "rote_config":
+                // ROTE has confirmed the device profile — no UI action needed.
+                // The backend will adapt all future ui_render payloads automatically.
+                break;
+
             default:
             // console.log("Unknown message type:", data.type, data);
         }
@@ -307,12 +353,13 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                 // console.log('WebSocket connection opened - readyState:', ws.readyState, 'activeChatId:', currentChatId, 'timestamp:', new Date().toISOString());
                 setIsConnected(true);
                 setChatStatus({ status: "idle", message: "" });
-                // Send RegisterUI with token
+                // Send RegisterUI with token and ROTE device capabilities
                 ws.send(JSON.stringify({
                     type: "register_ui",
                     token: currentToken,
                     capabilities: ["render", "stream"],
-                    session_id: `ui-${Date.now()}`
+                    session_id: `ui-${Date.now()}`,
+                    device: detectDeviceCapabilities(),
                 }));
                 // Fetch history
                 ws.send(JSON.stringify({
