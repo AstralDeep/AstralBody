@@ -23,6 +23,7 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import { useSmartAuth } from "../hooks/useSmartAuth";
+import { toast } from "sonner";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyProps = any;
@@ -352,42 +353,62 @@ function RenderCard({ title, children, content, onSaveComponent, onSendMessage }
 }
 
 // ── Table ──────────────────────────────────────────────────────────
+function renderCellValue(cell: AnyProps) {
+    if (typeof cell === "string" && ["Critical", "Severe"].includes(cell))
+        return <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-red-500/20 text-red-400">{cell}</span>;
+    if (typeof cell === "string" && ["Moderate"].includes(cell))
+        return <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-500/20 text-yellow-400">{cell}</span>;
+    if (typeof cell === "string" && ["Mild", "Stable"].includes(cell))
+        return <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-green-500/20 text-green-400">{cell}</span>;
+    return String(cell);
+}
+
 function RenderTable({ headers, rows, title: compTitle, label }: AnyProps) {
     if (!headers || !rows) return null;
 
     const title = compTitle || label || "Table";
 
     return (
-        <div className="overflow-x-auto rounded-lg border border-white/5">
+        <div className="rounded-lg border border-white/5">
             <div className="p-3 border-b border-white/5 bg-astral-primary/5">
                 <div className="text-sm font-medium text-white">{title}</div>
             </div>
-            <table className="w-full text-sm">
-                <thead>
-                    <tr className="bg-astral-primary/10 border-b border-white/5">
-                        {headers.map((h: string, i: number) => (
-                            <th key={i} className="px-2 sm:px-4 py-2 sm:py-3 text-left text-xs font-semibold uppercase tracking-wider text-astral-muted whitespace-nowrap">{h}</th>
-                        ))}
-                    </tr>
-                </thead>
-                <tbody>
-                    {rows.map((row: AnyProps[], ri: number) => (
-                        <tr key={ri} className="border-b border-white/5 hover:bg-white/5 transition-colors">
-                            {row.map((cell: AnyProps, ci: number) => (
-                                <td key={ci} className="px-2 sm:px-4 py-2 sm:py-3 text-astral-text">
-                                    {typeof cell === "string" && ["Critical", "Severe"].includes(cell)
-                                        ? <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-red-500/20 text-red-400">{cell}</span>
-                                        : typeof cell === "string" && ["Moderate"].includes(cell)
-                                            ? <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-500/20 text-yellow-400">{cell}</span>
-                                            : typeof cell === "string" && ["Mild", "Stable"].includes(cell)
-                                                ? <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-green-500/20 text-green-400">{cell}</span>
-                                                : String(cell)}
-                                </td>
+            {/* Desktop: standard table */}
+            <div className="hidden sm:block overflow-x-auto">
+                <table className="w-full text-sm">
+                    <thead>
+                        <tr className="bg-astral-primary/10 border-b border-white/5">
+                            {headers.map((h: string, i: number) => (
+                                <th key={i} className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-astral-muted whitespace-nowrap">{h}</th>
                             ))}
                         </tr>
-                    ))}
-                </tbody>
-            </table>
+                    </thead>
+                    <tbody>
+                        {rows.map((row: AnyProps[], ri: number) => (
+                            <tr key={ri} className="border-b border-white/5 hover:bg-white/5 transition-colors">
+                                {row.map((cell: AnyProps, ci: number) => (
+                                    <td key={ci} className="px-4 py-3 text-astral-text">
+                                        {renderCellValue(cell)}
+                                    </td>
+                                ))}
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
+            {/* Mobile: stacked card layout */}
+            <div className="sm:hidden divide-y divide-white/5">
+                {rows.map((row: AnyProps[], ri: number) => (
+                    <div key={ri} className="p-3 space-y-1.5 hover:bg-white/5 transition-colors">
+                        {row.map((cell: AnyProps, ci: number) => (
+                            <div key={ci} className="flex justify-between items-baseline gap-2">
+                                <span className="text-[10px] font-medium uppercase tracking-wider text-astral-muted flex-shrink-0">{headers[ci]}</span>
+                                <span className="text-xs text-astral-text text-right">{renderCellValue(cell)}</span>
+                            </div>
+                        ))}
+                    </div>
+                ))}
+            </div>
         </div>
     );
 }
@@ -823,7 +844,7 @@ function RenderFileUpload({ label, accept, onSendMessage }: AnyProps) {
                         `[Uploaded File: ${file.name} for analysis]`
                     );
                 } else {
-                    alert(`CSV file uploaded: ${file.name}`);
+                    toast.success(`File uploaded: ${file.name}`);
                 }
             } catch (err: AnyProps) {
                 if (onSendMessage) {
@@ -908,8 +929,7 @@ function RenderFileDownload({ label, url, filename }: AnyProps) {
             setTimeout(() => document.body.removeChild(a), 0);
         } catch (error) {
             console.error("Error downloading file:", error);
-            // Ideally use a more integrated toast or alert
-            alert("Failed to download file. Please check your connection or permissions.");
+            toast.error("Failed to download file. Check your connection or permissions.");
         } finally {
             setIsDownloading(false);
         }

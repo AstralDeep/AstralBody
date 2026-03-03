@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from orchestrator.history import HistoryManager
 from orchestrator.tool_permissions import ToolPermissionManager
 from orchestrator.delegation import DelegationService
+from orchestrator.tool_security import ToolSecurityAnalyzer
 
 from shared.protocol import (
     Message, MCPRequest, MCPResponse, UIEvent, UIRender, UIUpdate,
@@ -75,6 +76,7 @@ class Orchestrator:
         self.agent_cards: Dict[str, AgentCard] = {}
         self.agent_capabilities: Dict[str, List[Dict]] = {}
         self.pending_requests: Dict[str, asyncio.Future] = {}
+        self.cancelled_sessions: Dict[str, bool] = {}  # websocket id -> cancelled flag
 
         # LLM Client
         api_key = os.getenv("OPENAI_API_KEY")
@@ -102,6 +104,10 @@ class Orchestrator:
 
         # Delegation Service (RFC 8693 token exchange)
         self.delegation = DelegationService()
+
+        # Tool Security Analyzer — proactive security review of agent tools
+        self.security_analyzer = ToolSecurityAnalyzer()
+        self.security_flags: Dict[str, Dict[str, Any]] = {}  # agent_id -> {tool_name: flag_dict}
 
         # ROTE — Response Output Translation Engine
         self.rote = ROTE()
@@ -132,7 +138,20 @@ class Orchestrator:
 
         logger.info(f"Agent registered: {card.agent_id} ({card.name}) with {len(caps)} tools")
 
-        # Notify all UI clients (include per-user permissions so the dot renders)
+        # Proactive security review: analyze all tools for threats
+        raw_flags = self.security_analyzer.analyze_agent(card)
+        if raw_flags:
+            self.security_flags[card.agent_id] = {
+                name: flag.to_dict() for name, flag in raw_flags.items()
+            }
+            logger.warning(
+                f"Security review flagged {len(raw_flags)} tool(s) for agent "
+                f"'{card.agent_id}': {list(raw_flags.keys())}"
+            )
+        else:
+            self.security_flags[card.agent_id] = {}
+
+        # Notify all UI clients (include per-user permissions and security flags)
         tool_names = [c["name"] for c in caps]
         for ui in self.ui_clients:
             try:
@@ -144,8 +163,10 @@ class Orchestrator:
                     "type": "agent_registered",
                     "agent_id": card.agent_id,
                     "name": card.name,
+                    "description": card.description,
                     "tools": tool_names,
-                    "permissions": permissions
+                    "permissions": permissions,
+                    "security_flags": self.security_flags.get(card.agent_id, {})
                 }))
             except Exception:
                 pass
@@ -201,6 +222,8 @@ class Orchestrator:
             if agent_id in self.agent_cards:
                 del self.agent_cards[agent_id]
                 logger.info(f"Agent {agent_id} deregistered")
+            if agent_id in self.security_flags:
+                del self.security_flags[agent_id]
 
     # =========================================================================
     # MESSAGE HANDLING
@@ -239,6 +262,7 @@ class Orchestrator:
                 
                 if user_data:
                     logger.info(f"UI registered: {user_data.get('preferred_username', 'unknown')}")
+                    user_data["_raw_token"] = token  # Store raw token for RFC 8693 delegation
                     self.ui_sessions[websocket] = user_data
 
                     # ROTE: register device capabilities and send profile back
@@ -291,7 +315,16 @@ class Orchestrator:
                             }))
 
                     display_message = msg.payload.get("display_message")
+                    self.cancelled_sessions[id(websocket)] = False
                     await self.handle_chat_message(websocket, user_message, chat_id, display_message, user_id=user_id)
+
+                elif msg.action == "cancel_task":
+                    self.cancelled_sessions[id(websocket)] = True
+                    await self._safe_send(websocket, json.dumps({
+                        "type": "chat_status",
+                        "status": "done",
+                        "message": "Cancelled"
+                    }))
 
                 elif msg.action == "get_dashboard":
                     await self.send_dashboard(websocket)
@@ -475,7 +508,8 @@ class Orchestrator:
                         "agent_id": agent_id,
                         "agent_name": card.name,
                         "permissions": permissions,
-                        "tool_descriptions": tool_descriptions
+                        "tool_descriptions": tool_descriptions,
+                        "security_flags": self.security_flags.get(agent_id, {})
                     }))
 
                 elif msg.action == "set_agent_permissions":
@@ -483,6 +517,12 @@ class Orchestrator:
                     permissions = msg.payload.get("permissions", {})
                     if not agent_id or not isinstance(permissions, dict):
                         return
+                    # Prevent re-enabling system-blocked tools
+                    agent_flags = self.security_flags.get(agent_id, {})
+                    for tool_name in permissions:
+                        if permissions[tool_name] and tool_name in agent_flags and agent_flags[tool_name].get("blocked"):
+                            logger.warning(f"Prevented re-enable of system-blocked tool '{tool_name}' for user={user_id} agent={agent_id}")
+                            permissions[tool_name] = False
                     self.tool_permissions.set_bulk_permissions(
                         user_id, agent_id, permissions
                     )
@@ -837,6 +877,20 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
     # LLM-POWERED TOOL ROUTING
     # =========================================================================
 
+    async def _start_heartbeat(self, websocket) -> asyncio.Task:
+        """Start sending heartbeat messages every 5s to keep UI informed during long operations."""
+        async def _heartbeat_loop():
+            while True:
+                await asyncio.sleep(5)
+                try:
+                    await self._safe_send(websocket, json.dumps({
+                        "type": "heartbeat",
+                        "timestamp": time.time()
+                    }))
+                except Exception:
+                    break
+        return asyncio.create_task(_heartbeat_loop())
+
     async def handle_chat_message(self, websocket, message: str, chat_id: str, display_message: str = None, user_id: str = None):
         """Process a chat message: LLM determines which tools to call (Multi-Turn Re-Act Loop)."""
         logger.info(f"Processing chat message: '{message}' for chat_id {chat_id}")
@@ -887,6 +941,12 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 continue
 
             for skill in card.skills:
+                # System-level security block (overrides user permissions)
+                agent_flags = self.security_flags.get(agent_id, {})
+                if skill.id in agent_flags and agent_flags[skill.id].get("blocked"):
+                    logger.debug(f"Tool '{skill.id}' system-blocked (security) for agent={agent_id}")
+                    continue
+
                 # Check if the user has allowed this tool for this agent
                 if not self.tool_permissions.is_tool_allowed(user_id, agent_id, skill.id):
                     logger.debug(f"Tool '{skill.id}' blocked for user={user_id} agent={agent_id}")
@@ -978,8 +1038,25 @@ CRITICAL RULES:
 
             MAX_TURNS = 10
             turn_count = 0
+            heartbeat_task = await self._start_heartbeat(websocket)
 
             while turn_count < MAX_TURNS:
+                # Check for cancellation
+                if self.cancelled_sessions.get(id(websocket)):
+                    logger.info(f"Processing cancelled by user for chat_id {chat_id}")
+                    await self.send_ui_render(websocket, [
+                        Alert(message="Processing was cancelled.", variant="info").to_json()
+                    ])
+                    self.history.add_message(chat_id, "assistant", [
+                        Alert(message="Processing was cancelled.", variant="info").to_json()
+                    ], user_id=user_id)
+                    await self._safe_send(websocket, json.dumps({
+                        "type": "chat_status",
+                        "status": "done",
+                        "message": ""
+                    }))
+                    return
+
                 turn_count += 1
                 logger.info(f"--- Turn {turn_count}/{MAX_TURNS} ---")
 
@@ -1041,7 +1118,16 @@ CRITICAL RULES:
                             tool_ui_components.extend(res.ui_components)
 
                     if tool_ui_components:
-                        tool_label = ', '.join(tn.replace('_', ' ').title() for tn in tool_names)
+                        # Build label with agent attribution
+                        tool_labels = []
+                        for tn in tool_names:
+                            agent_id = tool_to_agent.get(tn, "")
+                            agent_name = self.agent_cards[agent_id].name if agent_id in self.agent_cards else ""
+                            label = tn.replace('_', ' ').title()
+                            if agent_name:
+                                label = f"{agent_name}: {label}"
+                            tool_labels.append(label)
+                        tool_label = ', '.join(tool_labels)
                         collapsible = Collapsible(
                             title=f"Tool Results — {tool_label}",
                             content=[
@@ -1227,6 +1313,8 @@ CRITICAL RULES:
             await self.send_ui_render(websocket, [
                 Alert(message=error_text, variant="error", title="Error").to_json()
             ])
+        finally:
+            heartbeat_task.cancel()
 
     async def _call_llm(self, websocket, messages, tools_desc=None, temperature=None):
         """Helper to call LLM with retries and exponential backoff.
@@ -1288,8 +1376,21 @@ CRITICAL RULES:
         except json.JSONDecodeError:
             args = {}
 
-        # Permission enforcement gate (RFC 8693 delegation)
+        # System-level security block (proactive security review)
         agent_id = tool_to_agent.get(tool_name)
+        agent_flags = self.security_flags.get(agent_id, {}) if agent_id else {}
+        if agent_id and tool_name in agent_flags and agent_flags[tool_name].get("blocked"):
+            reason = agent_flags[tool_name].get("reason", "Security threat detected")
+            err_msg = f"Tool '{tool_name}' is system-blocked: {reason}"
+            logger.warning(f"Security block: agent={agent_id} tool={tool_name}")
+            alert = Alert(message=err_msg, variant="error")
+            await self.send_ui_render(websocket, [alert.to_json()])
+            return MCPResponse(
+                error={"message": err_msg, "retryable": False},
+                ui_components=[alert.to_json()]
+            )
+
+        # Permission enforcement gate (RFC 8693 delegation)
         if user_id and agent_id and not self.tool_permissions.is_tool_allowed(user_id, agent_id, tool_name):
             err_msg = f"Tool '{tool_name}' is restricted for this agent. Update permissions in the sidebar to enable it."
             logger.warning(f"Permission denied: user={user_id} agent={agent_id} tool={tool_name}")
@@ -1312,6 +1413,13 @@ CRITICAL RULES:
                 Alert(message=err_msg, variant="error").to_json()
             ])
             return MCPResponse(error={"message": err_msg})
+
+        # RFC 8693 delegation: generate a scoped token excluding system-blocked tools
+        # The delegation token constrains what the agent can do even if it's compromised
+        if user_id and agent_id:
+            delegation_token = await self._get_delegation_token(websocket, agent_id, user_id)
+            if delegation_token:
+                args["_delegation_token"] = delegation_token
 
         result = await self._execute_with_retry(websocket, agent_id, tool_name, args)
 
@@ -1346,7 +1454,22 @@ CRITICAL RULES:
                     args["user_id"] = user_id
 
             agent_id = tool_to_agent.get(tool_name)
-            
+
+            # System-level security block for parallel tools
+            agent_flags = self.security_flags.get(agent_id, {}) if agent_id else {}
+            if agent_id and tool_name in agent_flags and agent_flags[tool_name].get("blocked"):
+                reason = agent_flags[tool_name].get("reason", "Security threat detected")
+                err_msg = f"Tool '{tool_name}' is system-blocked: {reason}"
+                logger.warning(f"Security block (parallel): agent={agent_id} tool={tool_name}")
+                async def _dummy_security_error(msg=err_msg):
+                    return MCPResponse(
+                        error={"message": msg, "retryable": False},
+                        ui_components=[Alert(message=msg, variant="error").to_json()]
+                    )
+                tasks.append(_dummy_security_error())
+                tool_names.append(tool_name)
+                continue
+
             # Permission check for parallel tools
             if user_id and agent_id and not self.tool_permissions.is_tool_allowed(user_id, agent_id, tool_name):
                 err_msg = f"Tool '{tool_name}' is restricted for this agent. Update permissions in the sidebar to enable it."
@@ -1491,6 +1614,45 @@ CRITICAL RULES:
         finally:
             self.pending_requests.pop(request_id, None)
 
+    async def _get_delegation_token(self, websocket, agent_id: str, user_id: str) -> Optional[str]:
+        """Generate an RFC 8693 delegation token scoped to safe, allowed tools.
+
+        The scope excludes system-blocked tools (from security review) and
+        user-disabled tools (from permission manager), so the agent can only
+        act within the constrained tool set.
+        """
+        try:
+            card = self.agent_cards.get(agent_id)
+            if not card:
+                return None
+            session = self.ui_sessions.get(websocket, {})
+            raw_token = session.get("_raw_token")
+            if not raw_token:
+                return None
+
+            # Build the effective scope: only tools that pass BOTH checks
+            agent_flags = self.security_flags.get(agent_id, {})
+            allowed_tools = []
+            for skill in card.skills:
+                # Exclude system-blocked
+                if skill.id in agent_flags and agent_flags[skill.id].get("blocked"):
+                    continue
+                # Exclude user-disabled
+                if not self.tool_permissions.is_tool_allowed(user_id, agent_id, skill.id):
+                    continue
+                allowed_tools.append(skill.id)
+
+            result = await self.delegation.exchange_token_for_agent(
+                raw_token, agent_id, allowed_tools, user_id
+            )
+            if "error" in result:
+                logger.warning(f"Delegation token exchange failed for agent={agent_id}: {result}")
+                return None
+            return result.get("access_token")
+        except Exception as e:
+            logger.warning(f"Delegation token generation failed: {e}")
+            return None
+
     # =========================================================================
     # UI HELPERS
     # =========================================================================
@@ -1551,9 +1713,11 @@ CRITICAL RULES:
             agent_list.append({
                 "id": card.agent_id,
                 "name": card.name,
+                "description": card.description,
                 "tools": available_tools,
                 "tool_descriptions": {s.id: s.description for s in card.skills},
                 "permissions": permissions,
+                "security_flags": self.security_flags.get(agent_id, {}),
                 "status": "connected"
             })
 
@@ -1588,6 +1752,7 @@ CRITICAL RULES:
                 "description": card.description,
                 "tools": [{"name": s.id, "description": s.description} for s in card.skills],
                 "permissions": permissions,
+                "security_flags": self.security_flags.get(agent_id, {}),
                 "status": "connected"
             })
 

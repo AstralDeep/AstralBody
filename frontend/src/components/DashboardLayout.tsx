@@ -2,7 +2,7 @@
  * DashboardLayout — Main app shell with sidebar and header.
  * Shows connected agents, their tools, and connection status.
  */
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { motion } from "framer-motion";
 import {
     LayoutDashboard,
@@ -10,8 +10,6 @@ import {
     Wrench,
     Wifi,
     WifiOff,
-    ChevronDown,
-    ChevronRight,
     LogOut,
     Activity,
     MessageSquare,
@@ -20,14 +18,16 @@ import {
     X,
     Shield,
     Menu,
+    Search,
 } from "lucide-react";
-import type { Agent, ChatSession, AgentPermissionsData } from "../hooks/useWebSocket";
+import type { Agent, ChatSession, AgentPermissionsData, ConnectionState } from "../hooks/useWebSocket";
 import AgentPermissionsModal from "./AgentPermissionsModal";
 
 interface DashboardLayoutProps {
     children: React.ReactNode;
     agents: Agent[];
     isConnected: boolean;
+    connectionState?: ConnectionState;
     onLogout: () => void;
     chatHistory?: ChatSession[];
     activeChatId?: string | null;
@@ -45,6 +45,7 @@ export default function DashboardLayout({
     children,
     agents,
     isConnected,
+    connectionState = "disconnected",
     onLogout,
     chatHistory = [],
     activeChatId,
@@ -60,16 +61,20 @@ export default function DashboardLayout({
     onGetAgentPermissions,
     onSetAgentPermissions,
 }: DashboardLayoutProps) {
-    const [expandedAgents, setExpandedAgents] = useState<string[]>([]);
     const [chatToDelete, setChatToDelete] = useState<string | null>(null);
     const [permModalAgent, setPermModalAgent] = useState<string | null>(null);
     const [sidebarOpen, setSidebarOpen] = useState(false);
+    const [chatSearch, setChatSearch] = useState("");
 
-    const toggleAgent = (id: string) => {
-        setExpandedAgents((prev) =>
-            prev.includes(id) ? prev.filter((a) => a !== id) : [...prev, id]
-        );
-    };
+    // Close delete modal on Escape
+    useEffect(() => {
+        if (!chatToDelete) return;
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (e.key === "Escape") setChatToDelete(null);
+        };
+        document.addEventListener("keydown", handleKeyDown);
+        return () => document.removeEventListener("keydown", handleKeyDown);
+    }, [chatToDelete]);
 
     const openPermissionsModal = (agentId: string) => {
         setPermModalAgent(agentId);
@@ -77,10 +82,15 @@ export default function DashboardLayout({
     };
 
     const totalTools = agents.reduce((sum, a) => {
+        const blockedSet = new Set(
+            Object.entries(a.security_flags || {})
+                .filter(([, f]) => (f as { blocked?: boolean }).blocked)
+                .map(([name]) => name)
+        );
         if (a.permissions) {
-            return sum + Object.values(a.permissions).filter(Boolean).length;
+            return sum + Object.entries(a.permissions).filter(([name, allowed]) => allowed && !blockedSet.has(name)).length;
         }
-        return sum + a.tools.length;
+        return sum + a.tools.filter(t => !blockedSet.has(t)).length;
     }, 0);
 
     return (
@@ -88,11 +98,15 @@ export default function DashboardLayout({
 
             {/* Delete Confirmation Modal */}
             {chatToDelete && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setChatToDelete(null)}>
                     <motion.div
                         initial={{ opacity: 0, scale: 0.95 }}
                         animate={{ opacity: 1, scale: 1 }}
                         className="bg-astral-surface border border-white/10 rounded-xl p-6 shadow-2xl max-w-sm w-full mx-4"
+                        role="dialog"
+                        aria-modal="true"
+                        aria-label="Delete chat confirmation"
+                        onClick={(e) => e.stopPropagation()}
                     >
                         <h3 className="text-lg font-medium text-white mb-2">Delete Chat?</h3>
                         <p className="text-sm text-astral-muted mb-6">
@@ -165,8 +179,17 @@ export default function DashboardLayout({
                             <StatusItem
                                 icon={isConnected ? <Wifi size={14} /> : <WifiOff size={14} />}
                                 label="Orchestrator"
-                                value={isConnected ? "Connected" : "Disconnected"}
-                                color={isConnected ? "text-green-400" : "text-red-400"}
+                                value={
+                                    connectionState === "reconnecting" ? "Reconnecting..." :
+                                    connectionState === "connecting" ? "Connecting..." :
+                                    isConnected ? "Connected" : "Disconnected"
+                                }
+                                color={
+                                    connectionState === "reconnecting" ? "text-yellow-400" :
+                                    connectionState === "connecting" ? "text-yellow-400" :
+                                    isConnected ? "text-green-400" : "text-red-400"
+                                }
+                                pulse={connectionState === "reconnecting" || connectionState === "connecting"}
                             />
                             <StatusItem
                                 icon={<Bot size={14} />}
@@ -200,78 +223,51 @@ export default function DashboardLayout({
                                     </p>
                                 )}
                                 {agents.map((agent) => (
-                                    <div key={agent.id}>
-                                        <button
-                                            onClick={() => toggleAgent(agent.id)}
-                                            className="w-full flex items-center gap-2 px-2 py-2 rounded-lg
+                                    <button
+                                        key={agent.id}
+                                        onClick={() => openPermissionsModal(agent.id)}
+                                        className="w-full flex items-center gap-2 px-2 py-2 rounded-lg
                                    hover:bg-white/5 transition-colors group text-left"
-                                        >
-                                            <div className="w-6 h-6 rounded-md bg-astral-primary/20 flex items-center justify-center flex-shrink-0">
-                                                <Activity size={12} className="text-astral-primary" />
-                                            </div>
-                                            <div className="flex-1 min-w-0">
-                                                <p className="text-xs font-medium text-white truncate">
-                                                    {agent.name}
-                                                </p>
-                                                <p className="text-[10px] text-astral-muted">
-                                                    {agent.permissions ? Object.values(agent.permissions).filter(Boolean).length : agent.tools.length} active tools
-                                                </p>
-                                            </div>
-                                            {/* Permission indicator dot */}
-                                            {(() => {
-                                                if (!agent.permissions) {
-                                                    return <span className="w-1.5 h-1.5 rounded-full flex-shrink-0 bg-green-400" title="All tools enabled" />;
-                                                }
-                                                const perms = Object.values(agent.permissions);
-                                                const allEnabled = perms.every(Boolean);
-                                                const allDisabled = perms.every(v => !v);
-                                                return (
-                                                    <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${allEnabled ? "bg-green-400" :
-                                                        allDisabled ? "bg-red-400" : "bg-amber-400"
-                                                        }`} title={allEnabled ? "All tools enabled" : allDisabled ? "All tools disabled" : "Some tools restricted"} />
-                                                );
-                                            })()}
-                                            {/* Shield button for permissions */}
-                                            <button
-                                                onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    openPermissionsModal(agent.id);
-                                                }}
-                                                className="p-1 text-astral-muted/50 hover:text-astral-primary hover:bg-astral-primary/10 rounded transition-colors"
-                                                title="Manage permissions"
-                                            >
-                                                <Shield size={12} />
-                                            </button>
-                                            {expandedAgents.includes(agent.id) ? (
-                                                <ChevronDown size={12} className="text-astral-muted" />
-                                            ) : (
-                                                <ChevronRight size={12} className="text-astral-muted" />
-                                            )}
-                                        </button>
-
-                                        {expandedAgents.includes(agent.id) && (
-                                            <motion.div
-                                                initial={{ opacity: 0, height: 0 }}
-                                                animate={{ opacity: 1, height: "auto" }}
-                                                className="ml-8 mt-1 space-y-0.5"
-                                            >
-                                                {agent.tools.map((tool) => {
-                                                    const isEnabled = !agent.permissions || agent.permissions[tool] !== false;
-                                                    return (
-                                                        <div
-                                                            key={tool}
-                                                            className={`flex items-center gap-2 px-2 py-1.5 text-[11px] rounded transition-colors ${isEnabled ? "text-astral-muted hover:bg-white/5" : "text-astral-muted/40 line-through"
-                                                                }`}
-                                                            title={isEnabled ? "Tool enabled" : "Tool disabled by permissions"}
-                                                        >
-                                                            <span className={`w-1 h-1 rounded-full ${isEnabled ? "bg-astral-accent" : "bg-astral-muted/30"}`} />
-                                                            <span className="truncate">{tool}</span>
-                                                        </div>
-                                                    );
-                                                })}
-                                            </motion.div>
-                                        )}
-                                    </div>
+                                    >
+                                        <div className="w-6 h-6 rounded-md bg-astral-primary/20 flex items-center justify-center flex-shrink-0">
+                                            <Activity size={12} className="text-astral-primary" />
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                            <p className="text-xs font-medium text-white truncate">
+                                                {agent.name}
+                                            </p>
+                                            <p className="text-[10px] text-astral-muted truncate">
+                                                {(() => {
+                                                    const blocked = new Set(Object.entries(agent.security_flags || {}).filter(([, f]) => (f as { blocked?: boolean }).blocked).map(([n]) => n));
+                                                    const active = agent.permissions
+                                                        ? Object.entries(agent.permissions).filter(([n, v]) => v && !blocked.has(n)).length
+                                                        : agent.tools.filter(t => !blocked.has(t)).length;
+                                                    return `${active} active tools`;
+                                                })()}
+                                            </p>
+                                        </div>
+                                        {/* Permission indicator dot */}
+                                        {(() => {
+                                            const hasSecurityFlags = agent.security_flags &&
+                                                Object.values(agent.security_flags).some((f: unknown) => (f as { blocked?: boolean }).blocked);
+                                            if (hasSecurityFlags) {
+                                                const flagCount = Object.values(agent.security_flags!).filter((f: unknown) => (f as { blocked?: boolean }).blocked).length;
+                                                return <span className="w-1.5 h-1.5 rounded-full flex-shrink-0 bg-red-500 animate-pulse" title={`Security review flagged ${flagCount} tool${flagCount > 1 ? "s" : ""}`} />;
+                                            }
+                                            if (!agent.permissions) {
+                                                return <span className="w-1.5 h-1.5 rounded-full flex-shrink-0 bg-green-400" title="All tools enabled" />;
+                                            }
+                                            const perms = Object.values(agent.permissions);
+                                            const allEnabled = perms.every(Boolean);
+                                            const allDisabled = perms.every(v => !v);
+                                            return (
+                                                <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${allEnabled ? "bg-green-400" :
+                                                    allDisabled ? "bg-red-400" : "bg-amber-400"
+                                                    }`} title={allEnabled ? "All tools enabled" : allDisabled ? "All tools disabled" : "Some tools restricted"} />
+                                            );
+                                        })()}
+                                        <Shield size={12} className="text-astral-muted/50 group-hover:text-astral-primary transition-colors flex-shrink-0" />
+                                    </button>
                                 ))}
                             </div>
                         </div>
@@ -284,13 +280,34 @@ export default function DashboardLayout({
                         <p className="px-2 text-[10px] font-semibold uppercase tracking-widest text-astral-muted mb-2">
                             Recent Chats
                         </p>
+                        {chatHistory.length > 3 && (
+                            <div className="px-1 mb-2">
+                                <div className="flex items-center gap-1.5 bg-white/5 border border-white/5 rounded-lg px-2 py-1.5 focus-within:border-astral-primary/30">
+                                    <Search size={12} className="text-astral-muted/50 flex-shrink-0" />
+                                    <input
+                                        type="text"
+                                        placeholder="Search chats..."
+                                        value={chatSearch}
+                                        onChange={(e) => setChatSearch(e.target.value)}
+                                        className="bg-transparent text-xs text-white placeholder:text-astral-muted/40 focus:outline-none w-full"
+                                    />
+                                    {chatSearch && (
+                                        <button onClick={() => setChatSearch("")} className="text-astral-muted/50 hover:text-white">
+                                            <X size={10} />
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                        )}
                         <div className="space-y-1">
                             {chatHistory.length === 0 && (
                                 <p className="px-2 text-xs text-astral-muted/50 italic">
                                     No history yet...
                                 </p>
                             )}
-                            {chatHistory.map((chat) => (
+                            {chatHistory.filter(chat =>
+                                !chatSearch || (chat.title || "").toLowerCase().includes(chatSearch.toLowerCase())
+                            ).map((chat) => (
                                 <div key={chat.id} className="relative group">
                                     <button
                                         onClick={() => { onLoadChat?.(chat.id); setSidebarOpen(false); }}
@@ -370,7 +387,7 @@ export default function DashboardLayout({
                     </div>
                     <div className="flex items-center gap-2 sm:gap-3">
                         <button
-                            onClick={onNewChat}
+                            onClick={() => { onNewChat?.(); setSidebarOpen(false); }}
                             className="flex items-center gap-2 px-3 py-1.5 bg-astral-primary/10
                                      border border-astral-primary/20 rounded-md text-xs font-medium
                                      text-astral-primary hover:bg-astral-primary/20 transition-colors"
@@ -392,8 +409,10 @@ export default function DashboardLayout({
                     onClose={() => setPermModalAgent(null)}
                     agentId={agentPermissions.agent_id}
                     agentName={agentPermissions.agent_name}
+                    agentDescription={agents.find(a => a.id === permModalAgent)?.description}
                     permissions={agentPermissions.permissions}
                     toolDescriptions={agentPermissions.tool_descriptions}
+                    securityFlags={agentPermissions.security_flags}
                     onSave={(agentId, perms) => {
                         onSetAgentPermissions?.(agentId, perms);
                     }}
@@ -408,15 +427,17 @@ function StatusItem({
     label,
     value,
     color,
+    pulse,
 }: {
     icon: React.ReactNode;
     label: string;
     value: string;
     color: string;
+    pulse?: boolean;
 }) {
     return (
         <div className="flex items-center gap-2 px-2 py-1.5 rounded-lg">
-            <span className={`${color}`}>{icon}</span>
+            <span className={`${color} ${pulse ? "animate-pulse" : ""}`}>{icon}</span>
             <div className="flex-1">
                 <p className="text-[11px] text-astral-muted">{label}</p>
             </div>

@@ -9,7 +9,8 @@
  */
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Send, Bot, User, Sparkles, Loader2, ChevronLeft, Paperclip, UploadCloud, X, FileMinus, FileText } from "lucide-react";
+import { Send, Bot, User, Sparkles, Loader2, ChevronLeft, Paperclip, UploadCloud, X, FileMinus, FileText, Square } from "lucide-react";
+import { toast } from "sonner";
 import DynamicRenderer from "./DynamicRenderer";
 import UISavedDrawer from "./UISavedDrawer";
 import { BFF_URL } from "../config";
@@ -19,6 +20,7 @@ interface ChatInterfaceProps {
     messages: { role: string; content: unknown }[];
     chatStatus: ChatStatus;
     onSendMessage: (message: string, displayMessage?: string, explicitChatId?: string) => void;
+    onCancelTask: () => void;
     isConnected: boolean;
     activeChatId: string | null;
     savedComponents: Array<{ id: string; chat_id: string; component_data: Record<string, unknown>; component_type: string; title: string; created_at: number }>;
@@ -42,6 +44,7 @@ export default function ChatInterface({
     messages,
     chatStatus,
     onSendMessage,
+    onCancelTask,
     isConnected,
     activeChatId,
     savedComponents,
@@ -53,7 +56,9 @@ export default function ChatInterface({
     combineError,
     accessToken,
 }: ChatInterfaceProps) {
-    const [input, setInput] = useState("");
+    const [input, setInput] = useState(() => {
+        try { return localStorage.getItem("astral-draft") || ""; } catch { return ""; }
+    });
     const [isDrawerOpen, setIsDrawerOpen] = useState(false);
     const [isDragging, setIsDragging] = useState(false);
     const [isProcessingFile, setIsProcessingFile] = useState(false);
@@ -67,12 +72,24 @@ export default function ChatInterface({
     const bottomRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
+    // Auto-scroll to bottom on new messages
     useEffect(() => {
         const frameId = requestAnimationFrame(() => {
             bottomRef.current?.scrollIntoView({ behavior: "smooth" });
         });
         return () => cancelAnimationFrame(frameId);
     }, [messages, chatStatus]);
+
+    // Draft auto-save
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            try {
+                if (input) localStorage.setItem("astral-draft", input);
+                else localStorage.removeItem("astral-draft");
+            } catch { /* quota exceeded or private mode */ }
+        }, 300);
+        return () => clearTimeout(timer);
+    }, [input]);
 
     const clearAttachment = () => {
         setAttachedFile(null);
@@ -143,6 +160,7 @@ export default function ChatInterface({
                     } catch (err: unknown) {
                         const errorMessage = err instanceof Error ? err.message : String(err);
                         console.error("Upload error:", err);
+                        toast.error(`File upload failed: ${errorMessage}`);
                         onSendMessage(`System Note: Failed to upload large file ${attachedFile.name}: ${errorMessage}. The model might fail if the full file is sent instead.`, undefined, targetChatId);
                     } finally {
                         setIsProcessingFile(false);
@@ -166,6 +184,7 @@ export default function ChatInterface({
         }
 
         setInput("");
+        try { localStorage.removeItem("astral-draft"); } catch { /* ignore */ }
         clearAttachment();
     };
 
@@ -383,10 +402,8 @@ export default function ChatInterface({
                                 <h2 className="text-xl font-semibold text-white mb-2">
                                     AstralDeep
                                 </h2>
-                                <p className="text-sm text-astral-muted">
-                                    Ask anything!
-                                    <br />
-                                    Results are dynamically rendered as rich UI components.
+                                <p className="text-sm text-astral-muted max-w-md">
+                                    Ask anything — your connected agents will search, analyze, and visualize results as interactive UI components. You can attach files, manage agent permissions in the sidebar, and save components for later.
                                 </p>
                             </div>
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-3 max-w-lg">
@@ -463,6 +480,13 @@ export default function ChatInterface({
                                 <span className="text-sm text-astral-muted">
                                     {chatStatus.message || "Processing..."}
                                 </span>
+                                <button
+                                    onClick={onCancelTask}
+                                    className="ml-2 p-1.5 rounded-lg bg-white/5 hover:bg-red-500/20 text-astral-muted hover:text-red-400 transition-colors"
+                                    title="Stop processing"
+                                >
+                                    <Square size={12} />
+                                </button>
                             </div>
                         </motion.div>
                     )}
@@ -540,6 +564,7 @@ export default function ChatInterface({
                                 className="w-full py-3 bg-transparent text-sm text-white placeholder:text-astral-muted/50
                              focus:outline-none disabled:opacity-50"
                                 id="chat-input"
+                                aria-label="Chat message input"
                             />
                         </div>
                         <button

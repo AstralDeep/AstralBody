@@ -7,6 +7,7 @@ import DashboardLayout from "./components/DashboardLayout";
 import ChatInterface from "./components/ChatInterface";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { AlertCircle } from "lucide-react";
+import { Toaster } from "sonner";
 
 import { WS_URL } from "./config";
 
@@ -17,10 +18,12 @@ function App() {
   // It will only connect when token is available.
   const {
     isConnected,
+    connectionState,
     agents,
     chatStatus,
     messages,
     sendMessage,
+    cancelTask,
     activeChatId,
     chatHistory,
     loadChat,
@@ -162,9 +165,23 @@ function App() {
   }
 
   return (
+    <>
+    <Toaster
+      theme="dark"
+      position="top-right"
+      toastOptions={{
+        style: {
+          background: 'rgba(15, 18, 25, 0.95)',
+          border: '1px solid rgba(255, 255, 255, 0.1)',
+          color: '#e2e8f0',
+          backdropFilter: 'blur(12px)',
+        },
+      }}
+    />
     <DashboardLayout
       agents={agents}
       isConnected={isConnected}
+      connectionState={connectionState}
       onLogout={() => void auth.signoutRedirect()}
       chatHistory={chatHistory}
       activeChatId={activeChatId}
@@ -181,6 +198,7 @@ function App() {
         messages={messages}
         chatStatus={chatStatus}
         onSendMessage={sendMessage}
+        onCancelTask={cancelTask}
         isConnected={isConnected}
         activeChatId={activeChatId}
         savedComponents={savedComponents}
@@ -193,6 +211,7 @@ function App() {
         accessToken={auth.user?.access_token}
       />
     </DashboardLayout>
+    </>
   );
 }
 
