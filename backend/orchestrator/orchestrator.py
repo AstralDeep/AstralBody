@@ -658,6 +658,7 @@ class Orchestrator:
                     permissions = self.tool_permissions.get_effective_permissions(
                         user_id, agent_id, available_tools
                     )
+                    tool_overrides = self.tool_permissions.get_tool_overrides(user_id, agent_id)
                     await self._safe_send(websocket, json.dumps({
                         "type": "agent_permissions",
                         "agent_id": agent_id,
@@ -665,6 +666,7 @@ class Orchestrator:
                         "scopes": scopes,
                         "tool_scope_map": tool_scope_map,
                         "permissions": permissions,
+                        "tool_overrides": tool_overrides,
                         "tool_descriptions": tool_descriptions,
                         "security_flags": self.security_flags.get(agent_id, {})
                     }))
@@ -672,23 +674,30 @@ class Orchestrator:
                 elif msg.action == "set_agent_permissions":
                     agent_id = msg.payload.get("agent_id")
                     scopes = msg.payload.get("scopes", {})
+                    tool_overrides_payload = msg.payload.get("tool_overrides")
                     if not agent_id or not isinstance(scopes, dict):
                         return
                     self.tool_permissions.set_agent_scopes(
                         user_id, agent_id, scopes
                     )
+                    if isinstance(tool_overrides_payload, dict):
+                        self.tool_permissions.set_tool_overrides(
+                            user_id, agent_id, tool_overrides_payload
+                        )
                     logger.info(f"Scopes updated: user={user_id} agent={agent_id} scopes={scopes}")
-                    # Compute effective per-tool permissions from new scopes
+                    # Compute effective per-tool permissions from new scopes + overrides
                     card = self.agent_cards.get(agent_id)
                     available_tools = [s.id for s in card.skills] if card else []
                     permissions = self.tool_permissions.get_effective_permissions(
                         user_id, agent_id, available_tools
                     )
+                    tool_overrides = self.tool_permissions.get_tool_overrides(user_id, agent_id)
                     await self._safe_send(websocket, json.dumps({
                         "type": "agent_permissions_updated",
                         "agent_id": agent_id,
                         "scopes": scopes,
-                        "permissions": permissions
+                        "permissions": permissions,
+                        "tool_overrides": tool_overrides
                     }))
 
                     # Also broadcast an updated dashboard to all UI clients for this user

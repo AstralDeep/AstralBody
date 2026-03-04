@@ -167,8 +167,9 @@ class AgentListResponse(BaseModel):
 class AgentPermissionsRequest(BaseModel):
     """Update scope-based permissions for an agent."""
     scopes: Dict[str, bool] = Field(..., description="Map of scope to enabled (true/false): tools:read, tools:write, tools:search, tools:system")
+    tool_overrides: Optional[Dict[str, bool]] = Field(None, description="Per-tool enable/disable overrides within enabled scopes")
 
-    model_config = {"json_schema_extra": {"examples": [{"scopes": {"tools:read": True, "tools:write": False, "tools:search": True, "tools:system": False}}]}}
+    model_config = {"json_schema_extra": {"examples": [{"scopes": {"tools:read": True, "tools:write": False, "tools:search": True, "tools:system": False}, "tool_overrides": {"some_tool": False}}]}}
 
 
 class AgentPermissionsResponse(BaseModel):
@@ -177,7 +178,8 @@ class AgentPermissionsResponse(BaseModel):
     agent_name: str
     scopes: Dict[str, bool] = Field(default_factory=dict, description="Scope-level permissions (tools:read, tools:write, tools:search, tools:system)")
     tool_scope_map: Optional[Dict[str, str]] = Field(None, description="Map of tool_name to required scope")
-    permissions: Dict[str, bool] = Field(default_factory=dict, description="Per-tool permission map derived from scopes (tool_name: allowed)")
+    permissions: Dict[str, bool] = Field(default_factory=dict, description="Per-tool permission map derived from scopes + overrides (tool_name: allowed)")
+    tool_overrides: Dict[str, bool] = Field(default_factory=dict, description="Per-tool disable overrides (only disabled tools listed)")
     tool_descriptions: Optional[Dict[str, str]] = Field(None, description="Map of tool_name to description")
     security_flags: Optional[Dict[str, Any]] = Field(None, description="System-level security flags per tool from proactive review")
 

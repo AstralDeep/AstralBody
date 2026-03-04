@@ -158,6 +158,20 @@ class Database:
             )
         ''')
 
+        # Tool overrides — per-user, per-agent, per-tool disable overrides
+        # When a scope is enabled but a specific tool should be disabled
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS tool_overrides (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                enabled BOOLEAN NOT NULL DEFAULT 1,
+                updated_at INTEGER,
+                UNIQUE(user_id, agent_id, tool_name)
+            )
+        ''')
+
         # Users table — persists user profiles from Keycloak/OIDC
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
@@ -178,6 +192,7 @@ class Database:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_saved_components_user_id ON saved_components(user_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_chat_files_user_id ON chat_files(user_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_agent_scopes_user_id ON agent_scopes(user_id, agent_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_tool_overrides_user_agent ON tool_overrides(user_id, agent_id)')
 
         conn.commit()
         conn.close()

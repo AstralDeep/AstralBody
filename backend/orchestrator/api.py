@@ -395,12 +395,14 @@ async def get_agent_permissions(
     permissions = orch.tool_permissions.get_effective_permissions(
         user_id, agent_id, available_tools
     )
+    tool_overrides = orch.tool_permissions.get_tool_overrides(user_id, agent_id)
     return AgentPermissionsResponse(
         agent_id=agent_id,
         agent_name=card.name,
         scopes=scopes,
         tool_scope_map=tool_scope_map,
         permissions=permissions,
+        tool_overrides=tool_overrides,
         tool_descriptions=tool_descriptions,
         security_flags=orch.security_flags.get(agent_id, {}),
     )
@@ -423,6 +425,8 @@ async def set_agent_permissions(
     if not card:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
     orch.tool_permissions.set_agent_scopes(user_id, agent_id, body.scopes)
+    if body.tool_overrides is not None:
+        orch.tool_permissions.set_tool_overrides(user_id, agent_id, body.tool_overrides)
     available_tools = [s.id for s in card.skills]
     tool_descriptions = {s.id: s.description for s in card.skills}
     scopes = orch.tool_permissions.get_agent_scopes(user_id, agent_id)
@@ -430,12 +434,14 @@ async def set_agent_permissions(
     permissions = orch.tool_permissions.get_effective_permissions(
         user_id, agent_id, available_tools
     )
+    tool_overrides = orch.tool_permissions.get_tool_overrides(user_id, agent_id)
     return AgentPermissionsResponse(
         agent_id=agent_id,
         agent_name=card.name,
         scopes=scopes,
         tool_scope_map=tool_scope_map,
         permissions=permissions,
+        tool_overrides=tool_overrides,
         tool_descriptions=tool_descriptions,
         security_flags=orch.security_flags.get(agent_id, {}),
     )
