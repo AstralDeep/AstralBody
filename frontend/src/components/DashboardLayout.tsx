@@ -3,7 +3,7 @@
  * Shows connected agents, their tools, and connection status.
  */
 import React, { useState, useEffect } from "react";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import {
     LayoutDashboard,
     Bot,
@@ -20,6 +20,10 @@ import {
     Menu,
     Search,
     KeyRound,
+    ChevronRight,
+    Globe,
+    Lock,
+    User,
 } from "lucide-react";
 import type { Agent, ChatSession, AgentPermissionsData, ConnectionState } from "../hooks/useWebSocket";
 import AgentPermissionsModal from "./AgentPermissionsModal";
@@ -37,6 +41,7 @@ interface DashboardLayoutProps {
     onDeleteChat?: (chatId: string) => void;
     isAdmin?: boolean;
     accessToken?: string;
+    userEmail?: string;
     agentPermissions?: AgentPermissionsData | null;
     onGetAgentPermissions?: (agentId: string) => void;
     onSetAgentPermissions?: (agentId: string, permissions: Record<string, boolean>) => void;
@@ -46,6 +51,7 @@ interface DashboardLayoutProps {
     onSaveAgentCredentials?: (agentId: string, credentials: Record<string, string>) => Promise<boolean>;
     onDeleteAgentCredential?: (agentId: string, key: string) => Promise<boolean>;
     onStartOAuthFlow?: (agentId: string) => Promise<boolean>;
+    onSetAgentVisibility?: (agentId: string, isPublic: boolean) => Promise<boolean>;
 }
 
 export default function DashboardLayout({
@@ -59,11 +65,11 @@ export default function DashboardLayout({
     onLoadChat,
     onNewChat,
     onDeleteChat,
-    // isAdmin and accessToken are passed but not used in this component
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     isAdmin: _isAdmin,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     accessToken: _accessToken,
+    userEmail,
     agentPermissions,
     onGetAgentPermissions,
     onSetAgentPermissions,
@@ -72,11 +78,14 @@ export default function DashboardLayout({
     onSaveAgentCredentials,
     onDeleteAgentCredential,
     onStartOAuthFlow,
+    onSetAgentVisibility,
 }: DashboardLayoutProps) {
     const [chatToDelete, setChatToDelete] = useState<string | null>(null);
     const [permModalAgent, setPermModalAgent] = useState<string | null>(null);
     const [sidebarOpen, setSidebarOpen] = useState(false);
     const [chatSearch, setChatSearch] = useState("");
+    const [agentsModalOpen, setAgentsModalOpen] = useState(false);
+    const [agentsTab, setAgentsTab] = useState<"my" | "all">("my");
 
     // Close delete modal on Escape
     useEffect(() => {
@@ -88,7 +97,18 @@ export default function DashboardLayout({
         return () => document.removeEventListener("keydown", handleKeyDown);
     }, [chatToDelete]);
 
+    // Close agents modal on Escape
+    useEffect(() => {
+        if (!agentsModalOpen) return;
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (e.key === "Escape") setAgentsModalOpen(false);
+        };
+        document.addEventListener("keydown", handleKeyDown);
+        return () => document.removeEventListener("keydown", handleKeyDown);
+    }, [agentsModalOpen]);
+
     const openPermissionsModal = (agentId: string) => {
+        setAgentsModalOpen(false);
         setPermModalAgent(agentId);
         onGetAgentPermissions?.(agentId);
         // Fetch stored credential keys for agents that need them
@@ -109,6 +129,43 @@ export default function DashboardLayout({
         }
         return sum + a.tools.filter(t => !blockedSet.has(t)).length;
     }, 0);
+
+    /** Helper: get status info for an agent */
+    const getAgentStatus = (agent: Agent) => {
+        const reqCreds = agent.metadata?.required_credentials || [];
+        const storedKeys = agentCredentialKeys[agent.id] || [];
+        const hasMissingCreds = reqCreds.some(c => c.required && !storedKeys.includes(c.key));
+
+        const blocked = new Set(
+            Object.entries(agent.security_flags || {})
+                .filter(([, f]) => (f as { blocked?: boolean }).blocked)
+                .map(([n]) => n)
+        );
+        const activeTools = agent.permissions
+            ? Object.entries(agent.permissions).filter(([n, v]) => v && !blocked.has(n)).length
+            : agent.tools.filter(t => !blocked.has(t)).length;
+
+        const hasSecurityFlags = agent.security_flags &&
+            Object.values(agent.security_flags).some((f: unknown) => (f as { blocked?: boolean }).blocked);
+
+        let statusColor = "bg-green-400";
+        let statusLabel = "All tools enabled";
+        if (hasMissingCreds) {
+            statusColor = "bg-amber-400";
+            statusLabel = "Credentials required";
+        } else if (hasSecurityFlags) {
+            statusColor = "bg-red-500";
+            statusLabel = "Security flags";
+        } else if (agent.permissions) {
+            const perms = Object.values(agent.permissions);
+            const allEnabled = perms.every(Boolean);
+            const allDisabled = perms.every(v => !v);
+            if (allDisabled) { statusColor = "bg-red-400"; statusLabel = "All tools disabled"; }
+            else if (!allEnabled) { statusColor = "bg-amber-400"; statusLabel = "Some tools restricted"; }
+        }
+
+        return { hasMissingCreds, activeTools, statusColor, statusLabel };
+    };
 
     return (
         <div className="h-dvh flex overflow-hidden bg-astral-bg relative">
@@ -149,6 +206,147 @@ export default function DashboardLayout({
                     </motion.div>
                 </div>
             )}
+
+            {/* Agents Grid Modal */}
+            <AnimatePresence>
+                {agentsModalOpen && (() => {
+                    const myAgents = agents.filter(a => a.owner_email === userEmail || !a.owner_email);
+                    const publicAgents = agents.filter(a => a.is_public);
+                    const filteredAgents = agentsTab === "my" ? myAgents : publicAgents;
+
+                    return (
+                    <div
+                        className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+                        onClick={() => setAgentsModalOpen(false)}
+                    >
+                        <motion.div
+                            initial={{ opacity: 0, scale: 0.95 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.95 }}
+                            transition={{ duration: 0.15 }}
+                            className="bg-astral-surface border border-white/10 rounded-xl shadow-2xl max-w-2xl w-full mx-4 max-h-[80vh] flex flex-col"
+                            role="dialog"
+                            aria-modal="true"
+                            aria-label="Connected agents"
+                            onClick={(e) => e.stopPropagation()}
+                        >
+                            {/* Header */}
+                            <div className="flex items-center justify-between px-6 py-4 border-b border-white/5">
+                                <div className="flex items-center gap-3">
+                                    <div className="w-8 h-8 rounded-lg bg-astral-primary/20 flex items-center justify-center">
+                                        <Bot size={16} className="text-astral-primary" />
+                                    </div>
+                                    <div>
+                                        <h2 className="text-base font-semibold text-white">Agents</h2>
+                                        <p className="text-xs text-astral-muted">{agents.length} agent{agents.length !== 1 ? "s" : ""} connected &middot; {totalTools} tools available</p>
+                                    </div>
+                                </div>
+                                <button
+                                    onClick={() => setAgentsModalOpen(false)}
+                                    className="p-1.5 rounded-lg hover:bg-white/10 transition-colors"
+                                >
+                                    <X size={16} className="text-astral-muted" />
+                                </button>
+                            </div>
+
+                            {/* Tabs */}
+                            <div className="flex items-center gap-1 px-6 pt-3 pb-0">
+                                <button
+                                    onClick={() => setAgentsTab("my")}
+                                    className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors
+                                        ${agentsTab === "my"
+                                            ? "bg-astral-primary/15 text-astral-primary border border-astral-primary/20"
+                                            : "text-astral-muted hover:text-white hover:bg-white/5 border border-transparent"}`}
+                                >
+                                    <User size={12} />
+                                    My Agents
+                                    <span className="text-[10px] opacity-60">({myAgents.length})</span>
+                                </button>
+                                <button
+                                    onClick={() => setAgentsTab("all")}
+                                    className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors
+                                        ${agentsTab === "all"
+                                            ? "bg-astral-primary/15 text-astral-primary border border-astral-primary/20"
+                                            : "text-astral-muted hover:text-white hover:bg-white/5 border border-transparent"}`}
+                                >
+                                    <Globe size={12} />
+                                    Public Agents
+                                    <span className="text-[10px] opacity-60">({publicAgents.length})</span>
+                                </button>
+                            </div>
+
+                            {/* Grid */}
+                            <div className="flex-1 overflow-y-auto p-4">
+                                {filteredAgents.length === 0 ? (
+                                    <div className="flex flex-col items-center justify-center py-12 text-astral-muted">
+                                        <Bot size={32} className="mb-3 opacity-30" />
+                                        <p className="text-sm">
+                                            {agentsTab === "my" ? "No agents owned by you" : "No public agents available"}
+                                        </p>
+                                        <p className="text-xs opacity-60 mt-1">
+                                            {agentsTab === "my"
+                                                ? "Agents you create or are assigned to you will appear here."
+                                                : "When other users make their agents public, they'll appear here."}
+                                        </p>
+                                    </div>
+                                ) : (
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                        {filteredAgents.map((agent) => {
+                                            const { hasMissingCreds, activeTools, statusColor, statusLabel } = getAgentStatus(agent);
+                                            const isOwner = agent.owner_email === userEmail;
+                                            return (
+                                                <button
+                                                    key={agent.id}
+                                                    onClick={() => openPermissionsModal(agent.id)}
+                                                    className="flex items-start gap-3 p-4 rounded-xl border border-white/5 bg-white/[0.02]
+                                                               hover:bg-white/5 hover:border-astral-primary/20 transition-all text-left group"
+                                                >
+                                                    <div className="w-9 h-9 rounded-lg bg-astral-primary/20 flex items-center justify-center flex-shrink-0 mt-0.5">
+                                                        <Activity size={16} className="text-astral-primary" />
+                                                    </div>
+                                                    <div className="flex-1 min-w-0">
+                                                        <div className="flex items-center gap-2">
+                                                            <p className="text-sm font-medium text-white truncate">{agent.name}</p>
+                                                            <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${statusColor} ${hasMissingCreds ? "animate-pulse" : ""}`} title={statusLabel} />
+                                                            {hasMissingCreds && (
+                                                                <KeyRound size={10} className="text-amber-400 flex-shrink-0 animate-pulse" />
+                                                            )}
+                                                            <span title={agent.is_public ? "Public" : "Private"}>
+                                                                {agent.is_public ? (
+                                                                    <Globe size={10} className="text-green-400/60 flex-shrink-0" />
+                                                                ) : (
+                                                                    <Lock size={10} className="text-astral-muted/40 flex-shrink-0" />
+                                                                )}
+                                                            </span>
+                                                        </div>
+                                                        {agent.description && (
+                                                            <p className="text-[11px] text-astral-muted mt-0.5 line-clamp-2">{agent.description}</p>
+                                                        )}
+                                                        <div className="flex items-center gap-2 mt-1.5">
+                                                            <span className="text-[10px] text-astral-muted/70 flex items-center gap-1">
+                                                                <Wrench size={9} />
+                                                                {activeTools} tool{activeTools !== 1 ? "s" : ""} active
+                                                            </span>
+                                                            {!isOwner && agent.owner_email && (
+                                                                <span className="text-[10px] text-astral-muted/50 truncate">
+                                                                    by {agent.owner_email}
+                                                                </span>
+                                                            )}
+                                                            <Shield size={10} className="text-astral-muted/30 group-hover:text-astral-primary transition-colors" />
+                                                        </div>
+                                                    </div>
+                                                    <ChevronRight size={14} className="text-astral-muted/30 group-hover:text-astral-primary transition-colors mt-1 flex-shrink-0" />
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                            </div>
+                        </motion.div>
+                    </div>
+                    );
+                })()}
+            </AnimatePresence>
 
             {/* Mobile sidebar backdrop */}
             {sidebarOpen && (
@@ -223,82 +421,21 @@ export default function DashboardLayout({
                         </div>
                     </div>
 
-                    {/* Agents Section */}
+                    {/* Agents Button */}
                     <div>
-                        <div className="px-2 mb-2">
-                            <p className="text-[10px] font-semibold uppercase tracking-widest text-astral-muted">
-                                Agents
-                            </p>
-                        </div>
-                        <div className="space-y-4">
-                            {/* Connected Section */}
-                            <div className="space-y-1">
-                                <p className="px-2 text-[10px] text-astral-muted/70 uppercase">Connected</p>
-                                {agents.length === 0 && (
-                                    <p className="px-2 text-xs text-astral-muted/50 italic">
-                                        Waiting for agents...
-                                    </p>
-                                )}
-                                {agents.map((agent) => (
-                                    <button
-                                        key={agent.id}
-                                        onClick={() => openPermissionsModal(agent.id)}
-                                        className="w-full flex items-center gap-2 px-2 py-2 rounded-lg
-                                   hover:bg-white/5 transition-colors group text-left"
-                                    >
-                                        <div className="w-6 h-6 rounded-md bg-astral-primary/20 flex items-center justify-center flex-shrink-0">
-                                            <Activity size={12} className="text-astral-primary" />
-                                        </div>
-                                        <div className="flex-1 min-w-0">
-                                            <p className="text-xs font-medium text-white truncate">
-                                                {agent.name}
-                                            </p>
-                                            <p className="text-[10px] text-astral-muted truncate">
-                                                {(() => {
-                                                    const blocked = new Set(Object.entries(agent.security_flags || {}).filter(([, f]) => (f as { blocked?: boolean }).blocked).map(([n]) => n));
-                                                    const active = agent.permissions
-                                                        ? Object.entries(agent.permissions).filter(([n, v]) => v && !blocked.has(n)).length
-                                                        : agent.tools.filter(t => !blocked.has(t)).length;
-                                                    return `${active} active tools`;
-                                                })()}
-                                            </p>
-                                        </div>
-                                        {/* Credential / permission indicator */}
-                                        {(() => {
-                                            // Check if agent needs credentials
-                                            const reqCreds = agent.metadata?.required_credentials || [];
-                                            const storedKeys = agentCredentialKeys[agent.id] || [];
-                                            const hasMissingCreds = reqCreds.some(c => c.required && !storedKeys.includes(c.key));
-                                            if (hasMissingCreds) {
-                                                return <span title="Credentials required"><KeyRound size={12} className="text-amber-400 flex-shrink-0 animate-pulse" /></span>;
-                                            }
-
-                                            const hasSecurityFlags = agent.security_flags &&
-                                                Object.values(agent.security_flags).some((f: unknown) => (f as { blocked?: boolean }).blocked);
-                                            if (hasSecurityFlags) {
-                                                const flagCount = Object.values(agent.security_flags!).filter((f: unknown) => (f as { blocked?: boolean }).blocked).length;
-                                                return <span className="w-1.5 h-1.5 rounded-full flex-shrink-0 bg-red-500 animate-pulse" title={`Security review flagged ${flagCount} tool${flagCount > 1 ? "s" : ""}`} />;
-                                            }
-                                            if (!agent.permissions) {
-                                                return <span className="w-1.5 h-1.5 rounded-full flex-shrink-0 bg-green-400" title="All tools enabled" />;
-                                            }
-                                            const perms = Object.values(agent.permissions);
-                                            const allEnabled = perms.every(Boolean);
-                                            const allDisabled = perms.every(v => !v);
-                                            return (
-                                                <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${allEnabled ? "bg-green-400" :
-                                                    allDisabled ? "bg-red-400" : "bg-amber-400"
-                                                    }`} title={allEnabled ? "All tools enabled" : allDisabled ? "All tools disabled" : "Some tools restricted"} />
-                                            );
-                                        })()}
-                                        <Shield size={12} className="text-astral-muted/50 group-hover:text-astral-primary transition-colors flex-shrink-0" />
-                                    </button>
-                                ))}
+                        <button
+                            onClick={() => setAgentsModalOpen(true)}
+                            className="w-full flex items-center gap-2 px-2 py-2 rounded-lg
+                                       hover:bg-white/5 transition-colors group text-left"
+                        >
+                            <div className="w-6 h-6 rounded-md bg-astral-primary/20 flex items-center justify-center flex-shrink-0">
+                                <Bot size={12} className="text-astral-primary" />
                             </div>
-                        </div>
+                            <span className="text-xs font-medium text-white flex-1">Agents</span>
+                            <span className="text-[10px] text-astral-muted">{agents.length} connected</span>
+                            <ChevronRight size={12} className="text-astral-muted/50 group-hover:text-astral-primary transition-colors flex-shrink-0" />
+                        </button>
                     </div>
-
-
 
                     {/* Recent Chats */}
                     <div>
@@ -311,9 +448,11 @@ export default function DashboardLayout({
                                     <Search size={12} className="text-astral-muted/50 flex-shrink-0" />
                                     <input
                                         type="text"
+                                        name="chat-search-filter"
                                         placeholder="Search chats..."
                                         value={chatSearch}
                                         onChange={(e) => setChatSearch(e.target.value)}
+                                        autoComplete="new-password"
                                         className="bg-transparent text-xs text-white placeholder:text-astral-muted/40 focus:outline-none w-full"
                                     />
                                     {chatSearch && (
@@ -430,10 +569,12 @@ export default function DashboardLayout({
             {/* Agent Permissions Modal */}
             {permModalAgent && agentPermissions && agentPermissions.agent_id === permModalAgent && (() => {
                 const modalAgent = agents.find(a => a.id === permModalAgent);
+                const isAgentOwner = modalAgent?.owner_email === userEmail || !modalAgent?.owner_email;
                 return (
                     <AgentPermissionsModal
                         isOpen={true}
                         onClose={() => setPermModalAgent(null)}
+                        onBack={() => { setPermModalAgent(null); setAgentsModalOpen(true); }}
                         agentId={agentPermissions.agent_id}
                         agentName={agentPermissions.agent_name}
                         agentDescription={modalAgent?.description}
@@ -448,6 +589,9 @@ export default function DashboardLayout({
                         onSaveCredentials={onSaveAgentCredentials}
                         onDeleteCredential={onDeleteAgentCredential}
                         onStartOAuth={onStartOAuthFlow}
+                        isOwner={isAgentOwner}
+                        isPublic={modalAgent?.is_public}
+                        onSetVisibility={onSetAgentVisibility}
                     />
                 );
             })()}

@@ -32,6 +32,8 @@ import {
     ExternalLink,
     RefreshCw,
     Linkedin,
+    Globe,
+    ArrowLeft,
 } from "lucide-react";
 import { API_URL } from "../config";
 import type { RequiredCredential } from "../hooks/useWebSocket";
@@ -92,6 +94,12 @@ interface AgentPermissionsModalProps {
     onSaveCredentials?: (agentId: string, credentials: Record<string, string>) => Promise<boolean>;
     onDeleteCredential?: (agentId: string, key: string) => Promise<boolean>;
     onStartOAuth?: (agentId: string) => Promise<boolean>;
+    // Ownership / visibility
+    isOwner?: boolean;
+    isPublic?: boolean;
+    onSetVisibility?: (agentId: string, isPublic: boolean) => Promise<boolean>;
+    // Navigation
+    onBack?: () => void;
 }
 
 export default function AgentPermissionsModal({
@@ -109,6 +117,10 @@ export default function AgentPermissionsModal({
     onSaveCredentials,
     onDeleteCredential,
     onStartOAuth,
+    isOwner = false,
+    isPublic: initialIsPublic = false,
+    onSetVisibility,
+    onBack,
 }: AgentPermissionsModalProps) {
     const [localPermissions, setLocalPermissions] = useState<Record<string, boolean>>({});
     const [saving, setSaving] = useState(false);
@@ -120,6 +132,11 @@ export default function AgentPermissionsModal({
     const [savingCredentials, setSavingCredentials] = useState(false);
     const [deletingKey, setDeletingKey] = useState<string | null>(null);
     const [authorizing, setAuthorizing] = useState(false);
+
+    // Visibility state
+    const [localIsPublic, setLocalIsPublic] = useState(initialIsPublic);
+    const [showPublicWarning, setShowPublicWarning] = useState(false);
+    const [togglingVisibility, setTogglingVisibility] = useState(false);
 
     const hasRequiredCredentials = requiredCredentials && requiredCredentials.length > 0;
     const missingCredentials = hasRequiredCredentials
@@ -173,12 +190,14 @@ export default function AgentPermissionsModal({
             setSavingCredentials(false);
             setDeletingKey(null);
             setOauthStatus(null);
+            setLocalIsPublic(initialIsPublic);
+            setShowPublicWarning(false);
             // Auto-show credential form if credentials are missing
             setShowCredentialForm(!credentialsComplete && !!hasRequiredCredentials);
             // Fetch OAuth status if token exists
             fetchOAuthStatus();
         }
-    }, [isOpen, initialPermissions, credentialsComplete, hasRequiredCredentials, fetchOAuthStatus]);
+    }, [isOpen, initialPermissions, initialIsPublic, credentialsComplete, hasRequiredCredentials, fetchOAuthStatus]);
 
     // Close on Escape key
     useEffect(() => {
@@ -245,6 +264,27 @@ export default function AgentPermissionsModal({
         setTimeout(() => fetchOAuthStatus(), 500);
     };
 
+    const handleVisibilityToggle = () => {
+        if (localIsPublic) {
+            // Making private — no warning needed
+            confirmVisibilityChange(false);
+        } else {
+            // Making public — show warning
+            setShowPublicWarning(true);
+        }
+    };
+
+    const confirmVisibilityChange = async (makePublic: boolean) => {
+        if (!onSetVisibility) return;
+        setTogglingVisibility(true);
+        const ok = await onSetVisibility(agentId, makePublic);
+        setTogglingVisibility(false);
+        setShowPublicWarning(false);
+        if (ok) {
+            setLocalIsPublic(makePublic);
+        }
+    };
+
     const systemBlockedCount = Object.keys(securityFlags || {}).filter(
         t => securityFlags?.[t]?.blocked
     ).length;
@@ -287,6 +327,15 @@ export default function AgentPermissionsModal({
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-white/5">
                             <div className="flex items-center gap-3">
+                                {onBack && (
+                                    <button
+                                        onClick={onBack}
+                                        className="p-1.5 text-astral-muted hover:text-white hover:bg-white/5 rounded-lg transition-colors"
+                                        title="Back to agents"
+                                    >
+                                        <ArrowLeft size={16} />
+                                    </button>
+                                )}
                                 <div className="w-8 h-8 rounded-lg bg-astral-primary/20 flex items-center justify-center">
                                     <Shield size={16} className="text-astral-primary" />
                                 </div>
@@ -322,8 +371,118 @@ export default function AgentPermissionsModal({
                             </div>
                         )}
 
+                        {/* Public Warning Confirmation Modal */}
+                        <AnimatePresence>
+                            {showPublicWarning && (
+                                <motion.div
+                                    initial={{ opacity: 0 }}
+                                    animate={{ opacity: 1 }}
+                                    exit={{ opacity: 0 }}
+                                    className="absolute inset-0 z-10 flex items-center justify-center bg-black/70 backdrop-blur-sm rounded-xl"
+                                    onClick={() => setShowPublicWarning(false)}
+                                >
+                                    <motion.div
+                                        initial={{ opacity: 0, scale: 0.95 }}
+                                        animate={{ opacity: 1, scale: 1 }}
+                                        exit={{ opacity: 0, scale: 0.95 }}
+                                        className="bg-astral-surface border border-amber-500/20 rounded-xl p-6 shadow-2xl max-w-sm mx-4"
+                                        onClick={(e) => e.stopPropagation()}
+                                    >
+                                        <div className="flex items-center gap-3 mb-3">
+                                            <div className="w-10 h-10 rounded-lg bg-amber-500/15 flex items-center justify-center flex-shrink-0">
+                                                <AlertTriangle size={20} className="text-amber-400" />
+                                            </div>
+                                            <h3 className="text-sm font-semibold text-white">Make Agent Public?</h3>
+                                        </div>
+                                        <div className="space-y-2 mb-5">
+                                            <p className="text-xs text-astral-muted leading-relaxed">
+                                                Making this agent <span className="text-white font-medium">publicly available</span> means:
+                                            </p>
+                                            <ul className="text-xs text-astral-muted space-y-1.5 ml-1">
+                                                <li className="flex items-start gap-2">
+                                                    <span className="text-amber-400 mt-0.5">&#8226;</span>
+                                                    <span>All users in the system will be able to see and use this agent</span>
+                                                </li>
+                                                <li className="flex items-start gap-2">
+                                                    <span className="text-amber-400 mt-0.5">&#8226;</span>
+                                                    <span>Other users will have access to the agent's tools and capabilities</span>
+                                                </li>
+                                                <li className="flex items-start gap-2">
+                                                    <span className="text-amber-400 mt-0.5">&#8226;</span>
+                                                    <span>You retain ownership and can make it private again at any time</span>
+                                                </li>
+                                            </ul>
+                                        </div>
+                                        <div className="flex justify-end gap-2">
+                                            <button
+                                                onClick={() => setShowPublicWarning(false)}
+                                                className="px-4 py-2 text-xs font-medium text-astral-muted hover:text-white hover:bg-white/5 rounded-lg transition-colors"
+                                            >
+                                                Cancel
+                                            </button>
+                                            <button
+                                                onClick={() => confirmVisibilityChange(true)}
+                                                disabled={togglingVisibility}
+                                                className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-amber-300 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/20 rounded-lg transition-colors"
+                                            >
+                                                {togglingVisibility ? (
+                                                    <Loader2 size={12} className="animate-spin" />
+                                                ) : (
+                                                    <Globe size={12} />
+                                                )}
+                                                <span>Confirm &mdash; Make Public</span>
+                                            </button>
+                                        </div>
+                                    </motion.div>
+                                </motion.div>
+                            )}
+                        </AnimatePresence>
+
                         {/* Scrollable Content */}
                         <div className="px-6 py-4 max-h-[60vh] overflow-y-auto space-y-5">
+
+                            {/* ── Visibility Toggle (owner only) ─────────────── */}
+                            {isOwner && onSetVisibility && (
+                                <div>
+                                    <p className="text-[10px] font-semibold uppercase tracking-widest text-astral-muted flex items-center gap-1.5 mb-2">
+                                        {localIsPublic ? <Globe size={10} /> : <Lock size={10} />}
+                                        Visibility
+                                    </p>
+                                    <div
+                                        className={`flex items-center gap-3 px-3 py-2.5 rounded-lg cursor-pointer transition-colors
+                                            ${localIsPublic
+                                                ? "bg-green-500/[0.06] border border-green-500/10"
+                                                : "bg-white/[0.03] border border-white/5"}`}
+                                        onClick={handleVisibilityToggle}
+                                    >
+                                        <div className={`w-7 h-7 rounded-md flex items-center justify-center flex-shrink-0
+                                            ${localIsPublic ? "bg-green-500/15 text-green-400" : "bg-white/5 text-astral-muted"}`}>
+                                            {localIsPublic ? <Globe size={14} /> : <Lock size={14} />}
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                            <p className="text-xs font-medium text-white">
+                                                {localIsPublic ? "Public Agent" : "Private Agent"}
+                                            </p>
+                                            <p className="text-[10px] text-astral-muted mt-0.5">
+                                                {localIsPublic
+                                                    ? "Visible to all users in the system"
+                                                    : "Only visible to you"}
+                                            </p>
+                                        </div>
+                                        {/* Toggle Switch */}
+                                        <div
+                                            className={`relative w-9 h-5 rounded-full flex-shrink-0 transition-colors duration-200
+                                                ${localIsPublic ? "bg-green-500" : "bg-white/10"}`}
+                                        >
+                                            <motion.div
+                                                className="absolute top-0.5 w-4 h-4 rounded-full shadow-sm bg-white"
+                                                animate={{ left: localIsPublic ? "18px" : "2px" }}
+                                                transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                                            />
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
 
                             {/* ── Credentials Section ────────────────────────── */}
                             {hasRequiredCredentials && (

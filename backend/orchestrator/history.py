@@ -15,7 +15,7 @@ logger = logging.getLogger('HistoryManager')
 class HistoryManager:
     def __init__(self, data_dir: str = "data"):
         self.data_dir = data_dir
-        self.db_path = os.path.join(data_dir, "chats.db")
+        self.db_path = os.path.join(data_dir, "astral.db")
         self.json_file = os.path.join(data_dir, "chats.json")
         self.db = Database(self.db_path)
         self._ensure_data_dir()

@@ -138,7 +138,7 @@ class TestPersistence:
     def test_db_created(self, tmp_dir):
         m = ToolPermissionManager(data_dir=tmp_dir)
         m.set_permission("user1", "agent1", "modify_data", False)
-        assert os.path.exists(os.path.join(tmp_dir, "chats.db"))
+        assert os.path.exists(os.path.join(tmp_dir, "astral.db"))
 
 
 class TestCleanup:

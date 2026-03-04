@@ -155,8 +155,19 @@ class Orchestrator:
         else:
             self.security_flags[card.agent_id] = {}
 
-        # Notify all UI clients (include per-user permissions and security flags)
+        # Auto-assign ownership if this agent has no owner yet
         tool_names = [c["name"] for c in caps]
+        ownership = self.history.db.get_agent_ownership(card.agent_id)
+        if not ownership:
+            default_owner = os.environ.get("DEFAULT_AGENT_OWNER", "")
+            if default_owner:
+                self.history.db.set_agent_ownership(card.agent_id, default_owner, is_public=False)
+                ownership = self.history.db.get_agent_ownership(card.agent_id) or {}
+                logger.info(f"Auto-assigned agent '{card.agent_id}' to {default_owner}")
+            else:
+                ownership = {}
+
+        # Notify all UI clients (include per-user permissions and security flags)
         for ui in self.ui_clients:
             try:
                 user_id = self._get_user_id(ui)
@@ -171,6 +182,8 @@ class Orchestrator:
                     "tools": tool_names,
                     "permissions": permissions,
                     "security_flags": self.security_flags.get(card.agent_id, {}),
+                    "owner_email": ownership.get("owner_email"),
+                    "is_public": bool(ownership.get("is_public", False)),
                 }
                 if getattr(card, 'metadata', None):
                     msg["metadata"] = card.metadata
@@ -271,6 +284,9 @@ class Orchestrator:
                     logger.info(f"UI registered: {user_data.get('preferred_username', 'unknown')}")
                     user_data["_raw_token"] = token  # Store raw token for RFC 8693 delegation
                     self.ui_sessions[websocket] = user_data
+
+                    # Persist user profile to database
+                    self._save_user_profile(user_data)
 
                     # ROTE: register device capabilities and send profile back
                     device_info = msg.device or {}
@@ -1815,12 +1831,14 @@ CRITICAL RULES:
     async def send_dashboard(self, websocket):
         """Send the initial dashboard view."""
         user_id = self._get_user_id(websocket)
+        ownership_map = {o["agent_id"]: o for o in self.history.db.get_all_agent_ownership()}
         agent_list = []
         for agent_id, card in self.agent_cards.items():
             available_tools = [s.id for s in card.skills]
             permissions = self.tool_permissions.get_effective_permissions(
                 user_id, agent_id, available_tools
             )
+            ownership = ownership_map.get(agent_id, {})
             entry = {
                 "id": card.agent_id,
                 "name": card.name,
@@ -1830,6 +1848,8 @@ CRITICAL RULES:
                 "permissions": permissions,
                 "security_flags": self.security_flags.get(agent_id, {}),
                 "status": "connected",
+                "owner_email": ownership.get("owner_email"),
+                "is_public": bool(ownership.get("is_public", False)),
             }
             if getattr(card, 'metadata', None):
                 entry["metadata"] = card.metadata
@@ -1854,12 +1874,14 @@ CRITICAL RULES:
     async def send_agent_list(self, websocket):
         """Send list of connected agents."""
         user_id = self._get_user_id(websocket)
+        ownership_map = {o["agent_id"]: o for o in self.history.db.get_all_agent_ownership()}
         agents = []
         for agent_id, card in self.agent_cards.items():
             available_tools = [s.id for s in card.skills]
             permissions = self.tool_permissions.get_effective_permissions(
                 user_id, agent_id, available_tools
             )
+            ownership = ownership_map.get(agent_id, {})
             entry = {
                 "id": card.agent_id,
                 "name": card.name,
@@ -1868,6 +1890,8 @@ CRITICAL RULES:
                 "permissions": permissions,
                 "security_flags": self.security_flags.get(agent_id, {}),
                 "status": "connected",
+                "owner_email": ownership.get("owner_email"),
+                "is_public": bool(ownership.get("is_public", False)),
             }
             if getattr(card, 'metadata', None):
                 entry["metadata"] = card.metadata
@@ -2142,6 +2166,29 @@ CRITICAL RULES:
         user_data = self.ui_sessions[websocket]
         # user_data is the JWT payload, sub is the subject (user ID)
         return user_data.get('sub', 'legacy')
+
+    def _save_user_profile(self, user_data: Dict) -> None:
+        """Persist user profile from JWT claims to the database."""
+        user_id = user_data.get("sub")
+        if not user_id or user_id == "legacy":
+            return
+        try:
+            # Extract roles from JWT claims
+            roles = list(set(
+                user_data.get("realm_access", {}).get("roles", []) +
+                user_data.get("resource_access", {}).get(
+                    os.getenv("VITE_KEYCLOAK_CLIENT_ID", "astral-frontend"), {}
+                ).get("roles", [])
+            ))
+            self.history.db.upsert_user(
+                user_id=user_id,
+                email=user_data.get("email"),
+                username=user_data.get("preferred_username"),
+                display_name=user_data.get("name") or user_data.get("preferred_username"),
+                roles=roles,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to save user profile for {user_id}: {e}")
 
 
 if __name__ == "__main__":

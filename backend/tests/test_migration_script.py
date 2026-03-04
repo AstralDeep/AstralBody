@@ -20,7 +20,7 @@ def test_migration_on_legacy_database():
     
     # Create a temporary directory for test database
     temp_dir = tempfile.mkdtemp()
-    db_path = os.path.join(temp_dir, 'chats.db')
+    db_path = os.path.join(temp_dir, 'astral.db')
     
     try:
         # Create database with OLD schema (without user_id columns)
@@ -136,7 +136,7 @@ def test_migration_on_empty_database():
     print("=== Testing Migration on Empty Database ===")
     
     temp_dir = tempfile.mkdtemp()
-    db_path = os.path.join(temp_dir, 'chats.db')
+    db_path = os.path.join(temp_dir, 'astral.db')
     
     try:
         # Patch get_db_path

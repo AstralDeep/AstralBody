@@ -13,4 +13,19 @@ export ORCHESTRATOR_PORT=8001
 export PYTHONIOENCODING=utf-8
 
 cd /app/backend
+
+# Run agent ownership migration in the background after services start
+# Waits for the orchestrator API to be reachable, then assigns unowned agents
+(
+    echo "Waiting for orchestrator to start before running migrations..."
+    for i in $(seq 1 30); do
+        if curl -sf http://localhost:8001/api/agents -H "Authorization: Bearer mock" > /dev/null 2>&1; then
+            echo "Running agent ownership migration..."
+            python3 -m scripts.migrate_agent_ownership || true
+            break
+        fi
+        sleep 2
+    done
+) &
+
 exec python start.py

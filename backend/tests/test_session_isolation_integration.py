@@ -24,7 +24,7 @@ def test_user_context_propagation():
     
     # Create a temporary directory for test database
     temp_dir = tempfile.mkdtemp()
-    db_path = os.path.join(temp_dir, 'chats.db')
+    db_path = os.path.join(temp_dir, 'astral.db')
     
     try:
         # Create database
@@ -149,7 +149,7 @@ def test_backward_compatibility():
     
     # Create a temporary directory for test database
     temp_dir = tempfile.mkdtemp()
-    db_path = os.path.join(temp_dir, 'chats.db')
+    db_path = os.path.join(temp_dir, 'astral.db')
     
     try:
         # Create database with legacy data (user_id='legacy')
