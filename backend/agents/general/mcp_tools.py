@@ -38,7 +38,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
 from shared.primitives import (
     Text, Card, Table, Container, MetricCard, ProgressBar,
     Alert, Grid, BarChart, LineChart, PieChart, PlotlyChart, List_,
-    FileDownload, create_ui_response
+    FileDownload, create_ui_response, ColorPicker, Button, Divider
 )
 
 
@@ -858,6 +858,100 @@ def search_arxiv(query: str, max_results: int = 10, session_id: str = "default",
 
 
 # =============================================================================
+# THEME CUSTOMIZATION
+# =============================================================================
+
+THEME_PRESETS = {
+    "midnight": {
+        "bg": "#0F1221", "surface": "#1A1E2E", "primary": "#6366F1",
+        "secondary": "#8B5CF6", "text": "#F3F4F6", "muted": "#9CA3AF", "accent": "#06B6D4",
+    },
+    "daylight": {
+        "bg": "#F8FAFC", "surface": "#FFFFFF", "primary": "#4F46E5",
+        "secondary": "#7C3AED", "text": "#1E293B", "muted": "#64748B", "accent": "#0891B2",
+    },
+    "ocean": {
+        "bg": "#0C1222", "surface": "#132038", "primary": "#0EA5E9",
+        "secondary": "#06B6D4", "text": "#E2E8F0", "muted": "#94A3B8", "accent": "#2DD4BF",
+    },
+    "sunset": {
+        "bg": "#1C1017", "surface": "#2D1B24", "primary": "#F97316",
+        "secondary": "#EF4444", "text": "#FEF2F2", "muted": "#A8A29E", "accent": "#FBBF24",
+    },
+    "forest": {
+        "bg": "#0F1A14", "surface": "#1A2E22", "primary": "#22C55E",
+        "secondary": "#10B981", "text": "#ECFDF5", "muted": "#86EFAC", "accent": "#A3E635",
+    },
+}
+
+THEME_COLOR_LABELS = {
+    "bg": "Background",
+    "surface": "Surface",
+    "primary": "Primary",
+    "secondary": "Secondary",
+    "text": "Text",
+    "muted": "Muted Text",
+    "accent": "Accent",
+}
+
+
+def change_theme(preset: str = None, **kwargs) -> Dict[str, Any]:
+    """Show theme customization interface with presets and color pickers."""
+
+    # Build preset buttons
+    preset_buttons = []
+    for name, colors in THEME_PRESETS.items():
+        preset_buttons.append(
+            Button(
+                label=name.title(),
+                action="theme_preset",
+                payload={"name": name, "colors": colors},
+                variant="secondary",
+                id=f"theme-preset-{name}",
+            )
+        )
+
+    # Build color pickers for each aspect
+    default_colors = THEME_PRESETS.get(preset, THEME_PRESETS["midnight"])
+    color_pickers = []
+    for key, label in THEME_COLOR_LABELS.items():
+        color_pickers.append(
+            ColorPicker(
+                label=label,
+                color_key=key,
+                value=default_colors[key],
+                id=f"theme-color-{key}",
+            )
+        )
+
+    components = [
+        Card(
+            title="Theme Customization",
+            id="theme-card",
+            content=[
+                Text(content="Choose a preset theme:", variant="body"),
+                Grid(
+                    columns=5,
+                    children=preset_buttons,
+                    gap=8,
+                ),
+                Divider(),
+                Text(content="Or customize individual colors:", variant="body"),
+                Container(children=color_pickers),
+            ],
+        )
+    ]
+
+    return {
+        "_ui_components": [c.to_json() for c in components],
+        "_data": {
+            "message": "Theme customization panel rendered. Use the preset buttons or color pickers to change colors.",
+            "presets": list(THEME_PRESETS.keys()),
+        },
+    }
+
+
+# =============================================================================
 # TOOL REGISTRY
 # =============================================================================
 
@@ -989,6 +1083,20 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
                 "output_format": {"type": "string", "description": "Output file format: 'csv' or 'excel' (defaults to input format)"}
             },
             "required": ["modifications"]
+        }
+    },
+    "change_theme": {
+        "function": change_theme,
+        "scope": "tools:read",
+        "description": "Show theme customization interface. Presents preset themes (Midnight, Daylight, Ocean, Sunset, Forest) and color pickers to customize the UI appearance in real time. Use this when the user asks to change colors, theme, appearance, or look of the site.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "preset": {
+                    "type": "string",
+                    "description": "Optional preset name to show as default: midnight, daylight, ocean, sunset, forest"
+                }
+            }
         }
     },
 }

@@ -396,6 +396,18 @@ class Orchestrator:
                         "device_profile": rote_profile.to_dict(),
                     }))
 
+                    # Send stored user preferences (theme, etc.)
+                    user_id = user_data.get("sub", "legacy")
+                    try:
+                        prefs = self.history.db.get_user_preferences(user_id)
+                        if prefs:
+                            await self._safe_send(websocket, json.dumps({
+                                "type": "user_preferences",
+                                "preferences": prefs,
+                            }))
+                    except Exception as e:
+                        logger.warning(f"Failed to load user preferences: {e}")
+
                     # Notify UI of success (optional, or just send dashboard)
                     await self.send_dashboard(websocket)
                 else:
@@ -720,6 +732,15 @@ class Orchestrator:
                     if re_adapted is not None:
                         msg_out = UIRender(components=re_adapted)
                         await self._safe_send(websocket, msg_out.to_json())
+
+                elif msg.action == "save_theme":
+                    # Persist theme colors to user preferences
+                    theme_data = msg.payload.get("theme")
+                    if theme_data:
+                        try:
+                            self.history.db.set_user_preferences(user_id, {"theme": theme_data})
+                        except Exception as e:
+                            logger.warning(f"Failed to save theme for {user_id}: {e}")
 
                 elif msg.action == "condense_components":
                     component_ids = msg.payload.get("component_ids", [])

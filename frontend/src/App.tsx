@@ -8,6 +8,7 @@ import ChatInterface from "./components/ChatInterface";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { AlertCircle } from "lucide-react";
 import { Toaster } from "sonner";
+import { ThemeProvider } from "./contexts/ThemeContext";
 
 import { WS_URL } from "./config";
 
@@ -173,7 +174,7 @@ function App() {
   }
 
   return (
-    <>
+    <ThemeProvider>
     <Toaster
       theme="dark"
       position="top-right"
@@ -227,7 +228,7 @@ function App() {
         accessToken={auth.user?.access_token}
       />
     </DashboardLayout>
-    </>
+    </ThemeProvider>
   );
 }
 

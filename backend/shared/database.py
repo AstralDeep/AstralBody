@@ -186,6 +186,39 @@ class Database:
             )
         ''')
 
+        # User preferences table — stores per-user settings (e.g. theme)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_preferences (
+                user_id TEXT PRIMARY KEY,
+                preferences TEXT NOT NULL DEFAULT '{}',
+                updated_at INTEGER
+            )
+        ''')
+
+        # Draft agents table — user-created agents in draft/testing/live states
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS draft_agents (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                agent_name TEXT NOT NULL,
+                agent_slug TEXT NOT NULL,
+                description TEXT NOT NULL,
+                tools_spec TEXT,
+                skill_tags TEXT,
+                packages TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                generation_log TEXT,
+                security_report TEXT,
+                error_message TEXT,
+                port INTEGER,
+                review_notes TEXT,
+                reviewed_by TEXT,
+                refinement_history TEXT,
+                created_at INTEGER,
+                updated_at INTEGER
+            )
+        ''')
+
         # Indexes on user_id for query performance
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_chats_user_id ON chats(user_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id)')
@@ -193,6 +226,8 @@ class Database:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_chat_files_user_id ON chat_files(user_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_agent_scopes_user_id ON agent_scopes(user_id, agent_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_tool_overrides_user_agent ON tool_overrides(user_id, agent_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_draft_agents_user_id ON draft_agents(user_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_draft_agents_status ON draft_agents(status)')
 
         conn.commit()
         conn.close()
@@ -324,6 +359,88 @@ class Database:
                     pass
             results.append(r)
         return results
+
+    # ── User Preferences ─────────────────────────────────────────────────
+
+    def get_user_preferences(self, user_id: str) -> Dict:
+        """Get user preferences (returns empty dict if none stored)."""
+        row = self.fetch_one(
+            "SELECT preferences FROM user_preferences WHERE user_id = ?",
+            (user_id,)
+        )
+        if row:
+            try:
+                return json.loads(row["preferences"])
+            except (json.JSONDecodeError, TypeError):
+                return {}
+        return {}
+
+    def set_user_preferences(self, user_id: str, preferences: Dict) -> None:
+        """Set or update user preferences (merges with existing)."""
+        import time
+        now = int(time.time() * 1000)
+        existing = self.get_user_preferences(user_id)
+        merged = {**existing, **preferences}
+        prefs_json = json.dumps(merged)
+        self.execute(
+            """INSERT INTO user_preferences (user_id, preferences, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET preferences = ?, updated_at = ?""",
+            (user_id, prefs_json, now, prefs_json, now)
+        )
+
+    # ── Draft Agents ────────────────────────────────────────────────────
+
+    def create_draft_agent(self, draft_id: str, user_id: str, agent_name: str,
+                           agent_slug: str, description: str, tools_spec: str = None,
+                           skill_tags: str = None, packages: str = None) -> None:
+        """Create a new draft agent record."""
+        import time
+        now = int(time.time() * 1000)
+        self.execute(
+            """INSERT INTO draft_agents (id, user_id, agent_name, agent_slug, description,
+               tools_spec, skill_tags, packages, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)""",
+            (draft_id, user_id, agent_name, agent_slug, description,
+             tools_spec, skill_tags, packages, now, now)
+        )
+
+    def get_draft_agent(self, draft_id: str) -> Optional[Dict]:
+        """Get a draft agent by ID."""
+        row = self.fetch_one("SELECT * FROM draft_agents WHERE id = ?", (draft_id,))
+        return dict(row) if row else None
+
+    def get_user_draft_agents(self, user_id: str) -> List[Dict]:
+        """Get all draft agents for a user."""
+        rows = self.fetch_all(
+            "SELECT * FROM draft_agents WHERE user_id = ? ORDER BY created_at DESC",
+            (user_id,)
+        )
+        return [dict(r) for r in rows]
+
+    def get_pending_review_drafts(self) -> List[Dict]:
+        """Get all draft agents awaiting admin review."""
+        rows = self.fetch_all(
+            "SELECT * FROM draft_agents WHERE status = 'pending_review' ORDER BY updated_at ASC"
+        )
+        return [dict(r) for r in rows]
+
+    def update_draft_agent(self, draft_id: str, **kwargs) -> bool:
+        """Update draft agent fields. Pass any column as keyword argument."""
+        import time
+        kwargs['updated_at'] = int(time.time() * 1000)
+        set_clauses = ", ".join(f"{k} = ?" for k in kwargs.keys())
+        values = list(kwargs.values()) + [draft_id]
+        cursor = self.execute(
+            f"UPDATE draft_agents SET {set_clauses} WHERE id = ?",
+            tuple(values)
+        )
+        return cursor.rowcount > 0
+
+    def delete_draft_agent(self, draft_id: str) -> bool:
+        """Delete a draft agent record."""
+        cursor = self.execute("DELETE FROM draft_agents WHERE id = ?", (draft_id,))
+        return cursor.rowcount > 0
 
     def close(self):
         """Close connection (not strictly needed as we open/close per request for thread safety in simple sqlite usage)."""

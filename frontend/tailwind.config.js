@@ -8,13 +8,13 @@ export default {
     extend: {
       colors: {
         astral: {
-          bg: '#0F1221',
-          surface: '#1A1E2E',
-          primary: '#6366F1',
-          secondary: '#8B5CF6',
-          text: '#F3F4F6',
-          muted: '#9CA3AF',
-          accent: '#06B6D4',
+          bg: 'rgb(var(--astral-bg) / <alpha-value>)',
+          surface: 'rgb(var(--astral-surface) / <alpha-value>)',
+          primary: 'rgb(var(--astral-primary) / <alpha-value>)',
+          secondary: 'rgb(var(--astral-secondary) / <alpha-value>)',
+          text: 'rgb(var(--astral-text) / <alpha-value>)',
+          muted: 'rgb(var(--astral-muted) / <alpha-value>)',
+          accent: 'rgb(var(--astral-accent) / <alpha-value>)',
         }
       },
       fontFamily: {

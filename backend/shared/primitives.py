@@ -29,6 +29,7 @@ class Component:
             'tabs': Tabs, 'divider': Divider, 'input': Input,
             'bar_chart': BarChart, 'line_chart': LineChart, 'pie_chart': PieChart,
             'plotly_chart': PlotlyChart, 'collapsible': Collapsible,
+            'color_picker': ColorPicker,
             'file_upload': FileUpload, 'file_download': FileDownload,
         }
         cls = type_map.get(comp_type, Component)
@@ -260,6 +261,14 @@ class PlotlyChart(Component):
     data: List[Dict[str, Any]] = field(default_factory=list)
     layout: Dict[str, Any] = field(default_factory=dict)
     config: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class ColorPicker(Component):
+    type: str = "color_picker"
+    label: str = ""
+    color_key: str = ""
+    value: str = "#000000"
+
 
 @dataclass
 class FileUpload(Component):

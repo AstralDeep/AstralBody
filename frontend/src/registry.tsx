@@ -397,5 +397,20 @@ export const { registry } = defineRegistry(catalog, {
                 </button>
             );
         },
+
+        // ── Color Picker ─────────────────────────────────────────
+        color_picker: ({ props }) => (
+            <div className="flex items-center gap-3 py-1">
+                <label className="text-sm text-astral-text font-medium min-w-[100px]">
+                    {props.label}
+                </label>
+                <input
+                    type="color"
+                    defaultValue={props.value || "#000000"}
+                    className="w-10 h-10 rounded-lg cursor-pointer border-2 border-white/10 bg-transparent"
+                />
+                <span className="text-xs text-astral-muted font-mono">{props.value}</span>
+            </div>
+        ),
     },
 });

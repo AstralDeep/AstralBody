@@ -4,6 +4,16 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --astral-bg: 15 18 33;
+  --astral-surface: 26 30 46;
+  --astral-primary: 99 102 241;
+  --astral-secondary: 139 92 246;
+  --astral-text: 243 244 246;
+  --astral-muted: 156 163 175;
+  --astral-accent: 6 182 212;
+}
+
 @layer base {
   html, body, #root {
     @apply h-dvh overflow-hidden;
@@ -16,7 +26,7 @@
 
   * {
     scrollbar-width: thin;
-    scrollbar-color: rgba(99, 102, 241, 0.3) transparent;
+    scrollbar-color: rgb(var(--astral-primary) / 0.3) transparent;
   }
 
   *::-webkit-scrollbar {
@@ -24,7 +34,7 @@
   }
 
   *::-webkit-scrollbar-thumb {
-    background: rgba(99, 102, 241, 0.3);
+    background: rgb(var(--astral-primary) / 0.3);
     border-radius: 999px;
   }
 }
@@ -51,7 +61,7 @@
 }
 
 .shimmer {
-  background: linear-gradient(90deg, transparent, rgba(99, 102, 241, 0.1), transparent);
+  background: linear-gradient(90deg, transparent, rgb(var(--astral-primary) / 0.1), transparent);
   background-size: 200% 100%;
   animation: shimmer 1.5s ease-in-out infinite;
 }
@@ -61,11 +71,11 @@
 
   0%,
   100% {
-    box-shadow: 0 0 8px rgba(99, 102, 241, 0.2);
+    box-shadow: 0 0 8px rgb(var(--astral-primary) / 0.2);
   }
 
   50% {
-    box-shadow: 0 0 20px rgba(99, 102, 241, 0.5);
+    box-shadow: 0 0 20px rgb(var(--astral-primary) / 0.5);
   }
 }
 
