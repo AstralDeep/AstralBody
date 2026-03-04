@@ -157,38 +157,83 @@ class ToolPermissionManager:
             f"scopes={scopes}"
         )
 
+    # ── Per-Tool Overrides ──────────────────────────────────────────────
+
+    def get_tool_overrides(self, user_id: str, agent_id: str) -> Dict[str, bool]:
+        """Get per-tool enable/disable overrides for a user/agent.
+
+        Returns a dict of {tool_name: enabled} only for tools that have
+        an explicit override. Tools not in this dict follow scope default.
+        """
+        rows = self.db.fetch_all(
+            "SELECT tool_name, enabled FROM tool_overrides WHERE user_id = ? AND agent_id = ?",
+            (user_id, agent_id)
+        )
+        return {row['tool_name']: bool(row['enabled']) for row in rows}
+
+    def set_tool_overrides(self, user_id: str, agent_id: str, overrides: Dict[str, bool]):
+        """Set per-tool enable/disable overrides.
+
+        Args:
+            overrides: Dict of {tool_name: enabled}. Only tools explicitly
+                       toggled off need entries — scope-enabled tools default to on.
+        """
+        now = int(time.time() * 1000)
+        for tool_name, enabled in overrides.items():
+            if enabled:
+                # Remove override — tool follows scope default (enabled)
+                self.db.execute(
+                    "DELETE FROM tool_overrides WHERE user_id = ? AND agent_id = ? AND tool_name = ?",
+                    (user_id, agent_id, tool_name)
+                )
+            else:
+                # Store disable override
+                self.db.execute(
+                    """INSERT OR REPLACE INTO tool_overrides
+                       (user_id, agent_id, tool_name, enabled, updated_at)
+                       VALUES (?, ?, ?, 0, ?)""",
+                    (user_id, agent_id, tool_name, now)
+                )
+        logger.info(
+            f"Tool overrides updated: user={user_id} agent={agent_id} "
+            f"overrides={overrides}"
+        )
+
     # ── Tool-Level Authorization (used by orchestrator) ─────────────────
 
     def is_tool_allowed(self, user_id: str, agent_id: str, tool_name: str) -> bool:
-        """Check if a specific tool is allowed based on scope authorization.
+        """Check if a specific tool is allowed based on scope + per-tool override.
 
-        Looks up the tool's required scope, then checks if the user has
-        enabled that scope for the agent.
-
-        Returns False if the required scope is not enabled (default = denied).
+        A tool is allowed if:
+          1. Its scope is enabled, AND
+          2. It has no per-tool disable override.
         """
         required_scope = self.get_tool_scope(agent_id, tool_name)
-        return self.is_scope_enabled(user_id, agent_id, required_scope)
+        if not self.is_scope_enabled(user_id, agent_id, required_scope):
+            return False
+        # Check for per-tool disable override
+        row = self.db.fetch_one(
+            "SELECT enabled FROM tool_overrides WHERE user_id = ? AND agent_id = ? AND tool_name = ?",
+            (user_id, agent_id, tool_name)
+        )
+        if row is not None and not bool(row['enabled']):
+            return False
+        return True
 
     def get_allowed_tools(
         self, user_id: str, agent_id: str, available_tools: list
     ) -> list:
-        """Return the subset of available tools that the user has allowed via scopes.
+        """Return the subset of available tools that the user has allowed.
 
-        Args:
-            user_id: The user's ID.
-            agent_id: The agent's ID.
-            available_tools: Full list of tool names the agent provides.
-
-        Returns:
-            List of tool names whose required scope is enabled.
+        A tool is allowed if its scope is enabled AND it has no disable override.
         """
-        # Get enabled scopes once (1 query) instead of per-tool
         enabled_scopes = self.get_agent_scopes(user_id, agent_id)
         agent_map = self._tool_scope_map.get(agent_id, {})
+        overrides = self.get_tool_overrides(user_id, agent_id)
         return [
             tool for tool in available_tools
             if enabled_scopes.get(agent_map.get(tool, "tools:read"), False)
+            and overrides.get(tool, True)  # default True = no override = allowed
         ]
 
     def get_enabled_scope_names(self, user_id: str, agent_id: str) -> List[str]:
@@ -204,15 +249,19 @@ class ToolPermissionManager:
     def get_effective_permissions(
         self, user_id: str, agent_id: str, available_tools: list
     ) -> Dict[str, bool]:
-        """Get effective permissions for all tools based on scope model.
+        """Get effective permissions for all tools based on scope + overrides.
 
         Returns a dict of {tool_name: allowed} for every available tool.
-        A tool is allowed if its required scope is enabled.
+        A tool is allowed if its scope is enabled AND it has no disable override.
         """
         enabled_scopes = self.get_agent_scopes(user_id, agent_id)
         agent_map = self._tool_scope_map.get(agent_id, {})
+        overrides = self.get_tool_overrides(user_id, agent_id)
         return {
-            tool: enabled_scopes.get(agent_map.get(tool, "tools:read"), False)
+            tool: (
+                enabled_scopes.get(agent_map.get(tool, "tools:read"), False)
+                and overrides.get(tool, True)
+            )
             for tool in available_tools
         }
 
@@ -237,15 +286,23 @@ class ToolPermissionManager:
         return result
 
     def remove_user_permissions(self, user_id: str):
-        """Remove all scope permissions for a user."""
+        """Remove all scope permissions and tool overrides for a user."""
         self.db.execute(
             "DELETE FROM agent_scopes WHERE user_id = ?",
             (user_id,)
         )
+        self.db.execute(
+            "DELETE FROM tool_overrides WHERE user_id = ?",
+            (user_id,)
+        )
 
     def remove_agent_permissions(self, user_id: str, agent_id: str):
-        """Remove all scope permissions for a specific agent under a user."""
+        """Remove all scope permissions and tool overrides for a specific agent under a user."""
         self.db.execute(
             "DELETE FROM agent_scopes WHERE user_id = ? AND agent_id = ?",
+            (user_id, agent_id)
+        )
+        self.db.execute(
+            "DELETE FROM tool_overrides WHERE user_id = ? AND agent_id = ?",
             (user_id, agent_id)
         )

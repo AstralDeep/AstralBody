@@ -44,7 +44,7 @@ interface DashboardLayoutProps {
     userEmail?: string;
     agentPermissions?: AgentPermissionsData | null;
     onGetAgentPermissions?: (agentId: string) => void;
-    onSetAgentPermissions?: (agentId: string, permissions: Record<string, boolean>) => void;
+    onSetAgentPermissions?: (agentId: string, scopes: Record<string, boolean>, toolOverrides?: Record<string, boolean>) => void;
     onRegisterExternalAgent?: (url: string) => void;
     // Credential management
     agentCredentialKeys?: Record<string, string[]>;
@@ -621,8 +621,9 @@ export default function DashboardLayout({
                         permissions={agentPermissions.permissions}
                         toolDescriptions={agentPermissions.tool_descriptions}
                         securityFlags={agentPermissions.security_flags}
-                        onSave={(agentId, scopes) => {
-                            onSetAgentPermissions?.(agentId, scopes);
+                        toolOverrides={agentPermissions.tool_overrides}
+                        onSave={(agentId, scopes, toolOverrides) => {
+                            onSetAgentPermissions?.(agentId, scopes, toolOverrides);
                         }}
                         requiredCredentials={modalAgent?.metadata?.required_credentials}
                         storedCredentialKeys={agentCredentialKeys[permModalAgent] || []}

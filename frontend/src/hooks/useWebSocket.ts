@@ -67,6 +67,7 @@ export interface AgentPermissionsData {
     scopes: Record<string, boolean>;
     tool_scope_map: Record<string, string>;
     permissions: Record<string, boolean>;
+    tool_overrides?: Record<string, boolean>;
     tool_descriptions: Record<string, string>;
     security_flags?: Record<string, SecurityFlag>;
 }
@@ -721,12 +722,12 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         }));
     }, []);
 
-    const setAgentPermissionsAction = useCallback((agentId: string, scopes: Record<string, boolean>) => {
+    const setAgentPermissionsAction = useCallback((agentId: string, scopes: Record<string, boolean>, toolOverrides?: Record<string, boolean>) => {
         if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
         wsRef.current.send(JSON.stringify({
             type: "ui_event",
             action: "set_agent_permissions",
-            payload: { agent_id: agentId, scopes }
+            payload: { agent_id: agentId, scopes, ...(toolOverrides ? { tool_overrides: toolOverrides } : {}) }
         }));
     }, []);
 

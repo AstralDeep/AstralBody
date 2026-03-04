@@ -37,6 +37,7 @@ import {
     Globe,
     ArrowLeft,
     ChevronDown,
+    Info,
 } from "lucide-react";
 import { API_URL } from "../config";
 import type { RequiredCredential } from "../hooks/useWebSocket";
@@ -147,9 +148,10 @@ interface AgentPermissionsModalProps {
     scopes?: Record<string, boolean>;
     toolScopeMap?: Record<string, string>;
     permissions: Record<string, boolean>;
+    toolOverrides?: Record<string, boolean>;
     toolDescriptions: Record<string, string>;
     securityFlags?: Record<string, SecurityFlagInfo>;
-    onSave: (agentId: string, scopes: Record<string, boolean>) => void;
+    onSave: (agentId: string, scopes: Record<string, boolean>, toolOverrides?: Record<string, boolean>) => void;
     // Credential management
     requiredCredentials?: RequiredCredential[];
     storedCredentialKeys?: string[];
@@ -177,6 +179,7 @@ export default function AgentPermissionsModal({
     scopes: initialScopes,
     toolScopeMap = {},
     permissions,
+    toolOverrides: initialToolOverrides,
     toolDescriptions,
     securityFlags,
     onSave,
@@ -212,6 +215,7 @@ export default function AgentPermissionsModal({
     /* ---------- State ---------- */
 
     const [localScopes, setLocalScopes] = useState<Record<string, boolean>>({});
+    const [localToolOverrides, setLocalToolOverrides] = useState<Record<string, boolean>>({});
     const [saving, setSaving] = useState(false);
     const [hasChanges, setHasChanges] = useState(false);
 
@@ -281,6 +285,7 @@ export default function AgentPermissionsModal({
     useEffect(() => {
         if (isOpen) {
             setLocalScopes(deriveScopes());
+            setLocalToolOverrides(initialToolOverrides ? { ...initialToolOverrides } : {});
             setHasChanges(false);
             setSaving(false);
             setExpandedScopes({});
@@ -333,12 +338,32 @@ export default function AgentPermissionsModal({
         }
     };
 
+    const baselineOverrides = initialToolOverrides || {};
+
+    const detectChanges = (scopes: Record<string, boolean>, overrides: Record<string, boolean>) => {
+        const baseline = deriveScopes();
+        const scopeChanged = Object.keys(scopes).some(k => scopes[k] !== baseline[k]);
+        const overrideChanged =
+            Object.keys(overrides).some(k => overrides[k] !== (baselineOverrides[k] ?? true)) ||
+            Object.keys(baselineOverrides).some(k => (overrides[k] ?? true) !== (baselineOverrides[k] ?? true));
+        setHasChanges(scopeChanged || overrideChanged);
+    };
+
     const applyScopeToggle = (scopeKey: string, value: boolean) => {
         setLocalScopes(prev => {
             const updated = { ...prev, [scopeKey]: value };
-            const baseline = deriveScopes();
-            const changed = Object.keys(updated).some(k => updated[k] !== baseline[k]);
-            setHasChanges(changed);
+            detectChanges(updated, localToolOverrides);
+            return updated;
+        });
+    };
+
+    const toggleToolOverride = (toolName: string) => {
+        setLocalToolOverrides(prev => {
+            const currentlyEnabled = prev[toolName] ?? true; // default = enabled (follows scope)
+            const updated = { ...prev, [toolName]: !currentlyEnabled };
+            // Clean up: remove entries that are true (= no override, follows scope default)
+            if (updated[toolName]) delete updated[toolName];
+            detectChanges(localScopes, updated);
             return updated;
         });
     };
@@ -358,7 +383,9 @@ export default function AgentPermissionsModal({
 
     const handleSave = () => {
         setSaving(true);
-        onSave(agentId, localScopes);
+        // Build tool overrides to send: only include explicitly disabled tools
+        const overridesToSend = Object.keys(localToolOverrides).length > 0 ? localToolOverrides : undefined;
+        onSave(agentId, localScopes, overridesToSend);
         setTimeout(() => {
             setSaving(false);
             onClose();
@@ -883,6 +910,17 @@ export default function AgentPermissionsModal({
                                     Permission Scopes
                                 </p>
 
+                                {/* General info banner */}
+                                <div className="flex items-start gap-2.5 px-3 py-2.5 rounded-lg bg-blue-500/[0.06] border border-blue-500/10 mb-3">
+                                    <Info size={14} className="text-blue-400 flex-shrink-0 mt-0.5" />
+                                    <p className="text-[10.5px] text-blue-300/80 leading-relaxed">
+                                        Permission scopes control what this agent's own tools can do.
+                                        Agents can also delegate tasks to other agents — when that happens,
+                                        the called agent's tools operate under <span className="text-blue-300 font-medium">its own</span> scope
+                                        permissions, not the caller's.
+                                    </p>
+                                </div>
+
                                 <div className="space-y-2">
                                     {SCOPE_DEFINITIONS.map((scopeDef) => {
                                         const enabled = !!localScopes[scopeDef.key];
@@ -958,6 +996,21 @@ export default function AgentPermissionsModal({
                                                     </div>
                                                 </div>
 
+                                                {/* Empty scope info */}
+                                                {tools.length === 0 && (
+                                                    <div className="px-3 pb-3 pt-0">
+                                                        <div className="border-t border-white/5 pt-2">
+                                                            <div className="flex items-start gap-2 px-2 py-1.5 rounded-md bg-white/[0.02]">
+                                                                <Info size={11} className="text-astral-muted/60 mt-0.5 flex-shrink-0" />
+                                                                <p className="text-[10px] text-astral-muted/70 leading-relaxed">
+                                                                    This agent has no tools that require <span className="text-astral-muted font-medium">{scopeDef.label.toLowerCase()}</span> access.
+                                                                    If it delegates to another agent that has {scopeDef.label.toLowerCase()} tools, those will use that agent's own scope permissions.
+                                                                </p>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                )}
+
                                                 {/* Expandable tool list */}
                                                 <AnimatePresence>
                                                     {expanded && tools.length > 0 && (
@@ -973,6 +1026,7 @@ export default function AgentPermissionsModal({
                                                                     {tools.map((tool) => {
                                                                         const flag = securityFlags?.[tool];
                                                                         const isBlocked = flag?.blocked === true;
+                                                                        const toolEnabled = enabled && (localToolOverrides[tool] ?? true);
                                                                         return (
                                                                             <div
                                                                                 key={tool}
@@ -984,7 +1038,20 @@ export default function AgentPermissionsModal({
                                                                                 {isBlocked ? (
                                                                                     <ShieldAlert size={12} className="text-red-400 mt-0.5 flex-shrink-0" />
                                                                                 ) : (
-                                                                                    <div className={`w-3 h-3 mt-0.5 flex-shrink-0 rounded-sm ${enabled ? `${scopeDef.bgClass}/20` : "bg-white/5"}`} />
+                                                                                    <button
+                                                                                        type="button"
+                                                                                        onClick={(e) => { e.stopPropagation(); if (enabled) toggleToolOverride(tool); }}
+                                                                                        disabled={!enabled}
+                                                                                        className={`w-3.5 h-3.5 mt-0.5 flex-shrink-0 rounded border flex items-center justify-center transition-colors
+                                                                                            ${toolEnabled
+                                                                                                ? `${scopeDef.bgClass}/30 border-${scopeDef.color}-500/40 hover:${scopeDef.bgClass}/50`
+                                                                                                : enabled
+                                                                                                    ? "bg-white/5 border-white/15 hover:border-white/25"
+                                                                                                    : "bg-white/5 border-white/10 cursor-not-allowed"}`}
+                                                                                        title={enabled ? (toolEnabled ? "Disable this tool" : "Enable this tool") : "Enable the scope first"}
+                                                                                    >
+                                                                                        {toolEnabled && <Check size={9} className={scopeDef.colorClass} />}
+                                                                                    </button>
                                                                                 )}
                                                                                 <div className="min-w-0">
                                                                                     <p className={`font-medium ${isBlocked ? "text-red-300" : "text-white/80"}`}>
