@@ -24,6 +24,7 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import { useSmartAuth } from "../hooks/useSmartAuth";
 import { toast } from "sonner";
+import { useTheme, type ThemeColors } from "../contexts/ThemeContext";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyProps = any;
@@ -269,6 +270,8 @@ function renderComponent(comp: AnyProps, index: number, onSaveComponent?: (compo
             return <RenderFileUpload key={index} {...baseProps} />;
         case "file_download":
             return <RenderFileDownload key={index} {...baseProps} />;
+        case "color_picker":
+            return <RenderColorPicker key={index} {...baseProps} />;
         default:
             console.warn(`Unknown component type: ${type}`);
             return null;
@@ -293,12 +296,12 @@ function RenderContainer({ children, content, onSaveComponent, onSendMessage }: 
 // ── Text ───────────────────────────────────────────────────────────
 function RenderText({ content, variant = "body" }: AnyProps) {
     const classes: Record<string, string> = {
-        h1: "text-2xl font-bold text-white",
-        h2: "text-xl font-semibold text-white",
-        h3: "text-lg font-medium text-white",
+        h1: "text-2xl font-bold text-astral-text",
+        h2: "text-xl font-semibold text-astral-text",
+        h3: "text-lg font-medium text-astral-text",
         body: "text-sm text-astral-text leading-relaxed",
         caption: "text-xs text-astral-muted",
-        markdown: "prose prose-invert max-w-none text-sm text-astral-text leading-relaxed prose-headings:text-white prose-a:text-astral-primary hover:prose-a:text-astral-secondary prose-strong:text-white prose-code:text-astral-accent prose-code:bg-white/5 prose-code:px-1 prose-code:rounded prose-pre:bg-black/40 prose-pre:border prose-pre:border-white/5",
+        markdown: "prose prose-invert max-w-none text-sm text-astral-text leading-relaxed prose-headings:text-astral-text prose-a:text-astral-primary hover:prose-a:text-astral-secondary prose-strong:text-astral-text prose-code:text-astral-accent prose-code:bg-white/5 prose-code:px-1 prose-code:rounded prose-pre:bg-black/40 prose-pre:border prose-pre:border-white/5",
     };
 
     if (variant === "markdown") {
@@ -341,7 +344,7 @@ function RenderCard({ title, children, content, onSaveComponent, onSendMessage }
         >
             {title && (
                 <div className="mb-3">
-                    <h3 className="text-base font-semibold text-white flex items-center gap-2">
+                    <h3 className="text-base font-semibold text-astral-text flex items-center gap-2">
                         <span className="w-1 h-4 rounded-full bg-astral-primary inline-block" />
                         {title}
                     </h3>
@@ -373,7 +376,7 @@ function RenderTable({ headers, rows, title: compTitle, label }: AnyProps) {
     return (
         <div className="rounded-lg border border-white/5">
             <div className="p-3 border-b border-white/5 bg-astral-primary/5">
-                <div className="text-sm font-medium text-white">{title}</div>
+                <div className="text-sm font-medium text-astral-text">{title}</div>
             </div>
             {/* Desktop: standard table */}
             <div className="hidden sm:block overflow-x-auto">
@@ -432,7 +435,7 @@ function RenderMetric({ title, value, subtitle, progress, variant = "default" }:
         >
             <p className="text-xs text-astral-muted font-medium uppercase tracking-wider mb-1">{title}</p>
             <div className="flex-1">
-                <p className="text-2xl font-bold text-white">{value}</p>
+                <p className="text-2xl font-bold text-astral-text">{value}</p>
                 {subtitle && <p className="text-xs text-astral-muted mt-1">{subtitle}</p>}
             </div>
             {progress != null && (
@@ -526,7 +529,7 @@ function RenderList({ items, ordered, variant = "default" }: AnyProps) {
                     <div key={i} className="p-3 bg-white/5 rounded-lg border border-white/5 hover:bg-white/10 transition-colors">
                         <div className="flex justify-between items-start gap-4">
                             <div className="space-y-1 w-full">
-                                <h4 className="text-sm font-semibold text-white flex items-center justify-between">
+                                <h4 className="text-sm font-semibold text-astral-text flex items-center justify-between">
                                     {item.url ? (
                                         <a href={item.url} target="_blank" rel="noopener noreferrer" className="hover:text-astral-primary hover:underline flex items-center gap-2">
                                             {item.title}
@@ -556,7 +559,7 @@ function RenderList({ items, ordered, variant = "default" }: AnyProps) {
             {items.map((item: AnyProps, i: number) => (
                 <li key={i} className="leading-relaxed">
                     {typeof item === "string" ? (
-                        <span dangerouslySetInnerHTML={{ __html: item.replace(/\*\*(.*?)\*\*/g, '<strong class="text-white font-medium">$1</strong>') }} />
+                        <span dangerouslySetInnerHTML={{ __html: item.replace(/\*\*(.*?)\*\*/g, '<strong class="text-astral-text font-medium">$1</strong>') }} />
                     ) : JSON.stringify(item)}
                 </li>
             ))}
@@ -594,7 +597,7 @@ function RenderBarChart({ title, labels, datasets }: AnyProps) {
     return (
         <div className="w-full">
             {title && (
-                <p className="text-sm font-medium text-white mb-3">{title}</p>
+                <p className="text-sm font-medium text-astral-text mb-3">{title}</p>
             )}
             <Plot
                 data={[
@@ -638,7 +641,7 @@ function RenderLineChart({ title, labels, datasets }: AnyProps) {
     return (
         <div className="w-full">
             {title && (
-                <p className="text-sm font-medium text-white mb-3">{title}</p>
+                <p className="text-sm font-medium text-astral-text mb-3">{title}</p>
             )}
             <Plot
                 data={[
@@ -684,7 +687,7 @@ function RenderPieChart({ title, labels, data: pieData, colors }: AnyProps) {
     return (
         <div className="w-full">
             {title && (
-                <p className="text-sm font-medium text-white mb-3">{title}</p>
+                <p className="text-sm font-medium text-astral-text mb-3">{title}</p>
             )}
             <Plot
                 data={[
@@ -742,7 +745,7 @@ function RenderGenericPlotly({ title, data, layout, config }: AnyProps) {
     return (
         <div className="w-full">
             {title && (
-                <p className="text-sm font-medium text-white mb-3">{title}</p>
+                <p className="text-sm font-medium text-astral-text mb-3">{title}</p>
             )}
             <Plot
                 data={data}
@@ -756,16 +759,52 @@ function RenderGenericPlotly({ title, data, layout, config }: AnyProps) {
 }
 
 // ── Button ─────────────────────────────────────────────────────────
-function RenderButton({ label, variant = "primary" }: AnyProps) {
+function RenderButton({ label, variant = "primary", action, payload, onSendMessage }: AnyProps) {
+    const theme = useTheme();
     const variants: Record<string, string> = {
         primary: "bg-astral-primary hover:bg-astral-primary/80 text-white",
         secondary: "bg-white/10 hover:bg-white/20 text-astral-text",
         danger: "bg-red-500/20 hover:bg-red-500/30 text-red-400",
     };
+
+    const handleClick = () => {
+        if (action === "theme_preset" && payload?.colors) {
+            theme.setColors(payload.colors as ThemeColors);
+        } else if (action === "chat_message" && payload?.message && onSendMessage) {
+            onSendMessage(payload.message);
+        }
+    };
+
     return (
-        <button className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${variants[variant] || variants.primary}`}>
+        <button
+            onClick={handleClick}
+            className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${variants[variant] || variants.primary}`}
+        >
             {label}
         </button>
+    );
+}
+
+// ── ColorPicker ────────────────────────────────────────────────────
+function RenderColorPicker({ label, color_key, value }: AnyProps) {
+    const { colors, setColor } = useTheme();
+    const currentValue = colors[color_key as keyof ThemeColors] || value || "#000000";
+
+    return (
+        <div className="flex items-center gap-3 py-1">
+            <label className="text-sm text-astral-text font-medium min-w-[100px]">
+                {label}
+            </label>
+            <div className="relative">
+                <input
+                    type="color"
+                    value={currentValue}
+                    onChange={(e) => setColor(color_key as keyof ThemeColors, e.target.value)}
+                    className="w-10 h-10 rounded-lg cursor-pointer border-2 border-white/10 bg-transparent [&::-webkit-color-swatch-wrapper]:p-0.5 [&::-webkit-color-swatch]:rounded-md [&::-webkit-color-swatch]:border-none"
+                />
+            </div>
+            <span className="text-xs text-astral-muted font-mono">{currentValue}</span>
+        </div>
     );
 }
 

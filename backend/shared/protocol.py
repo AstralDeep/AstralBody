@@ -145,6 +145,17 @@ class RegisterAgent(Message):
             data['agent_card'] = AgentCard.from_dict(data['agent_card'])
         return RegisterAgent(**data)
 
+# --- Agent Creation Protocol ---
+@dataclass
+class AgentCreationProgress(Message):
+    """Progress update during agent creation/refinement/approval."""
+    type: str = "agent_creation_progress"
+    draft_id: str = ""
+    step: str = ""          # e.g., "generating_template", "generating_tools", "security_scan", "writing_files"
+    message: str = ""       # human-readable progress message
+    status: str = ""        # pending | generating | generated | testing | analyzing | approved | rejected | live | error
+    detail: Optional[Dict[str, Any]] = None  # optional extra data (e.g., security report)
+
 @dataclass
 class RegisterUI(Message):
     type: str = "register_ui"

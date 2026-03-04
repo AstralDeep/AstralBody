@@ -155,6 +155,16 @@ export const catalog = defineCatalog(schema, {
             }),
             description: "Clickable button",
         },
+        color_picker: {
+            props: z.object({
+                label: z.string(),
+                color_key: z.string(),
+                value: z.string().optional(),
+                id: z.string().nullable().optional(),
+                style: z.record(z.string(), z.string()).optional(),
+            }),
+            description: "Color picker for theme customization",
+        },
     },
     actions: {
         chat_message: { description: "Send a chat message" },

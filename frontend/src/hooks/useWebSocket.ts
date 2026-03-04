@@ -390,6 +390,14 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                 // The backend will adapt all future ui_render payloads automatically.
                 break;
 
+            case "user_preferences":
+                // Server sent stored user preferences (theme, etc.)
+                // Dispatch to ThemeContext via CustomEvent
+                window.dispatchEvent(new CustomEvent("astral-server-preferences", {
+                    detail: (data as Record<string, unknown>).preferences,
+                }));
+                break;
+
             case "heartbeat":
                 // Server is still processing — no UI action needed.
                 // This prevents WebSocket timeout during long operations.
@@ -913,6 +921,22 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
             window.removeEventListener("resize", onResize);
             if (debounceTimer) clearTimeout(debounceTimer);
         };
+    }, []);
+
+    // Listen for theme save requests from ThemeContext
+    useEffect(() => {
+        const onSaveTheme = (e: Event) => {
+            const detail = (e as CustomEvent).detail;
+            const ws = wsRef.current;
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            ws.send(JSON.stringify({
+                type: "ui_event",
+                action: "save_theme",
+                payload: { theme: detail },
+            }));
+        };
+        window.addEventListener("astral-save-theme", onSaveTheme);
+        return () => window.removeEventListener("astral-save-theme", onSaveTheme);
     }, []);
 
     // ── Agent Visibility ──────────────────────────────────────────────
