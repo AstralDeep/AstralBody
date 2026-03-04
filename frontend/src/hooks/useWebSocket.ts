@@ -205,7 +205,9 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                         permissions: (data.permissions as Record<string, boolean>) || undefined,
                         security_flags: (data.security_flags as Record<string, SecurityFlag>) || undefined,
                         metadata: (data.metadata as AgentMetadata) || undefined,
-                        status: "connected"
+                        status: "connected",
+                        owner_email: (data.owner_email as string) || undefined,
+                        is_public: (data.is_public as boolean) || false,
                     } as Agent];
                 });
                 break;
