@@ -153,6 +153,8 @@ class AgentInfo(BaseModel):
     permissions: Optional[Dict[str, bool]] = Field(None, description="Per-tool permission map (tool_name: allowed)")
     security_flags: Optional[Dict[str, Any]] = Field(None, description="System-level security flags per tool from proactive review")
     status: str = "connected"
+    owner_email: Optional[str] = Field(None, description="Email of the agent owner")
+    is_public: bool = Field(False, description="Whether the agent is publicly available to all users")
 
 
 class AgentListResponse(BaseModel):
@@ -174,6 +176,11 @@ class AgentPermissionsResponse(BaseModel):
     permissions: Dict[str, bool] = Field(..., description="Map of tool_name to allowed (true/false)")
     tool_descriptions: Optional[Dict[str, str]] = Field(None, description="Map of tool_name to description")
     security_flags: Optional[Dict[str, Any]] = Field(None, description="System-level security flags per tool from proactive review")
+
+
+class AgentVisibilityRequest(BaseModel):
+    """Toggle agent public/private visibility."""
+    is_public: bool = Field(..., description="Whether the agent should be publicly available")
 
 
 class CredentialSetRequest(BaseModel):

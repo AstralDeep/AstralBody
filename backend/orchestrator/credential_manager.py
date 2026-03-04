@@ -38,7 +38,7 @@ class CredentialManager:
             import sys
             sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
             from shared.database import Database
-            db_path = os.path.join(data_dir, "chats.db")
+            db_path = os.path.join(data_dir, "astral.db")
             self.db = Database(db_path)
         else:
             raise ValueError("Either db or data_dir must be provided")

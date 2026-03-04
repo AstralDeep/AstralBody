@@ -28,11 +28,12 @@ from orchestrator.models import (
     ComponentCombineRequest, ComponentCondenseRequest, ComponentCombineResponse,
     AgentListResponse, AgentInfo, AgentTool,
     AgentPermissionsRequest, AgentPermissionsResponse,
+    AgentVisibilityRequest,
     CredentialSetRequest, CredentialListResponse, CredentialDeleteResponse,
     DashboardResponse,
     ErrorResponse,
 )
-from orchestrator.auth import get_current_user_id, require_user_id
+from orchestrator.auth import get_current_user_id, require_user_id, get_current_user_payload
 
 logger = logging.getLogger("API")
 
@@ -347,12 +348,15 @@ agent_router = APIRouter(prefix="/api/agents", tags=["Agents"])
     "",
     response_model=AgentListResponse,
     summary="List connected agents",
-    description="Returns all agents currently connected to the orchestrator, including their tools and capabilities.",
+    description="Returns all agents currently connected to the orchestrator, including their tools, capabilities, and ownership info.",
 )
 async def list_agents(request: Request):
     orch = _get_orchestrator(request)
+    db = orch.history.db
+    ownership_map = {o["agent_id"]: o for o in db.get_all_agent_ownership()}
     agents = []
     for agent_id, card in orch.agent_cards.items():
+        ownership = ownership_map.get(agent_id, {})
         agents.append(AgentInfo(
             id=card.agent_id,
             name=card.name,
@@ -363,6 +367,8 @@ async def list_agents(request: Request):
             ],
             security_flags=orch.security_flags.get(agent_id, {}),
             status="connected",
+            owner_email=ownership.get("owner_email"),
+            is_public=bool(ownership.get("is_public", False)),
         ))
     return AgentListResponse(agents=agents)
 
@@ -433,6 +439,34 @@ async def set_agent_permissions(
         tool_descriptions=tool_descriptions,
         security_flags=orch.security_flags.get(agent_id, {}),
     )
+
+
+# ── Agent Visibility ──────────────────────────────────────────────────
+
+
+@agent_router.put(
+    "/{agent_id}/visibility",
+    summary="Toggle agent public/private visibility",
+    description="Set whether an agent is publicly available or private. Only the agent owner can change visibility.",
+)
+async def set_agent_visibility(
+    request: Request,
+    agent_id: str,
+    body: AgentVisibilityRequest,
+    payload: dict = Depends(get_current_user_payload),
+    user_id: str = Depends(require_user_id),
+):
+    orch = _get_orchestrator(request)
+    db = orch.history.db
+    ownership = db.get_agent_ownership(agent_id)
+    if not ownership:
+        raise HTTPException(status_code=404, detail=f"No ownership record for agent '{agent_id}'")
+    # Only the owner can change visibility
+    user_email = payload.get("email", "")
+    if ownership["owner_email"] != user_email:
+        raise HTTPException(status_code=403, detail="Only the agent owner can change visibility")
+    db.set_agent_visibility(agent_id, body.is_public)
+    return {"agent_id": agent_id, "is_public": body.is_public}
 
 
 # ── Agent Credentials ──────────────────────────────────────────────────

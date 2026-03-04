@@ -44,6 +44,7 @@ function App() {
     saveAgentCredentials,
     deleteAgentCredential,
     startOAuthFlow,
+    setAgentVisibility,
   } = useWebSocket(
     WS_URL,
     auth.user?.access_token
@@ -105,6 +106,7 @@ function App() {
   // We extract roles from the Access Token instead, where Keycloak guarantees they exist.
   const tokenPayload = auth.user?.access_token ? decodeJwt(auth.user.access_token) : null;
 
+  const userEmail = tokenPayload?.email || auth.user?.profile?.email || "";
   const clientId = import.meta.env.VITE_KEYCLOAK_CLIENT_ID || "astral-frontend";
 
   // For mock auth, always return admin and user roles
@@ -203,6 +205,8 @@ function App() {
       onSaveAgentCredentials={saveAgentCredentials}
       onDeleteAgentCredential={deleteAgentCredential}
       onStartOAuthFlow={startOAuthFlow}
+      userEmail={userEmail}
+      onSetAgentVisibility={setAgentVisibility}
     >
       <ChatInterface
         messages={messages}

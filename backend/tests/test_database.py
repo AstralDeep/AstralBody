@@ -23,7 +23,7 @@ class TestHistoryManagerSQLite(unittest.TestCase):
 
     def test_init_creates_db(self):
         hm = HistoryManager(data_dir=self.test_dir)
-        self.assertTrue(os.path.exists(os.path.join(self.test_dir, "chats.db")))
+        self.assertTrue(os.path.exists(os.path.join(self.test_dir, "astral.db")))
         
     def test_create_chat(self):
         hm = HistoryManager(data_dir=self.test_dir)
@@ -31,7 +31,7 @@ class TestHistoryManagerSQLite(unittest.TestCase):
         self.assertIsNotNone(chat_id)
         
         # Verify in DB
-        db = Database(os.path.join(self.test_dir, "chats.db"))
+        db = Database(os.path.join(self.test_dir, "astral.db"))
         row = db.fetch_one("SELECT * FROM chats WHERE id = ?", (chat_id,))
         self.assertIsNotNone(row)
         self.assertEqual(row['title'], "New Chat")

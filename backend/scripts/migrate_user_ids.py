@@ -20,7 +20,7 @@ from shared.database import Database
 def get_db_path() -> str:
     """Get the database path from Database class."""
     # Default path used by Database class
-    return "data/chats.db"
+    return "data/astral.db"
 
 def ensure_data_dir():
     """Ensure the data directory exists."""

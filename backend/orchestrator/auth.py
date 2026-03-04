@@ -186,13 +186,27 @@ async def get_current_user_id(payload: dict = Depends(get_current_user_payload))
     return payload.get("sub")  # Keycloak sub claim
 
 
-async def require_user_id(user_id: str = Depends(get_current_user_id)) -> str:
-    """Require a valid user_id or raise 401."""
+async def require_user_id(
+    request: Request,
+    payload: dict = Depends(get_current_user_payload),
+) -> str:
+    """Require a valid user_id or raise 401. Also persists user profile to DB."""
+    user_id = payload.get("sub") if payload else None
     if not user_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated"
         )
+    # Persist user profile on each authenticated request (upsert is cheap)
+    try:
+        orch = getattr(request.app.state, "orchestrator", None)
+        if not orch:
+            root_app = getattr(request.app, "_root_app", None) or request.app
+            orch = getattr(root_app.state, "orchestrator", None)
+        if orch:
+            orch._save_user_profile(payload)
+    except Exception:
+        pass  # Never block a request for profile persistence
     return user_id
 
 

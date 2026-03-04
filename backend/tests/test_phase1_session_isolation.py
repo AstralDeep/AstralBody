@@ -23,7 +23,7 @@ def test_database_schema():
     print("=== Testing Database Schema ===")
     
     # Create a test database
-    test_db_path = "data/test_chats.db"
+    test_db_path = "data/test_astral.db"
     if os.path.exists(test_db_path):
         os.remove(test_db_path)
     

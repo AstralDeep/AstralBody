@@ -21,7 +21,7 @@ def test_index_usage():
     print("=== Testing Index Usage ===")
     
     temp_dir = tempfile.mkdtemp()
-    db_path = os.path.join(temp_dir, 'chats.db')
+    db_path = os.path.join(temp_dir, 'astral.db')
     
     try:
         # Create database
@@ -92,7 +92,7 @@ def test_backward_compatibility():
     
     # Check that all tables have user_id column
     temp_dir = tempfile.mkdtemp()
-    db_path = os.path.join(temp_dir, 'chats.db')
+    db_path = os.path.join(temp_dir, 'astral.db')
     
     try:
         db = Database(db_path)

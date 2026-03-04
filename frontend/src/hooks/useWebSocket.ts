@@ -33,6 +33,8 @@ export interface Agent {
     security_flags?: Record<string, SecurityFlag>;
     metadata?: AgentMetadata;
     status: string;
+    owner_email?: string;
+    is_public?: boolean;
 }
 
 export interface ChatSession {
@@ -887,6 +889,34 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         };
     }, []);
 
+    // ── Agent Visibility ──────────────────────────────────────────────
+    const setAgentVisibility = useCallback(async (agentId: string, isPublic: boolean): Promise<boolean> => {
+        try {
+            const headers: Record<string, string> = { "Content-Type": "application/json" };
+            if (tokenRef.current) headers["Authorization"] = `Bearer ${tokenRef.current}`;
+            const resp = await fetch(`${API_URL}/api/agents/${agentId}/visibility`, {
+                method: "PUT",
+                headers,
+                body: JSON.stringify({ is_public: isPublic }),
+            });
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                toast.error(err.detail || "Failed to update agent visibility");
+                return false;
+            }
+            // Update local agents state
+            setAgents(prev => prev.map(a =>
+                a.id === agentId ? { ...a, is_public: isPublic } : a
+            ));
+            toast.success(isPublic ? "Agent is now public" : "Agent is now private");
+            return true;
+        } catch (e) {
+            console.error("Failed to set agent visibility:", e);
+            toast.error("Failed to update agent visibility");
+            return false;
+        }
+    }, []);
+
     return {
         isConnected,
         connectionState,
@@ -918,5 +948,6 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         saveAgentCredentials,
         deleteAgentCredential,
         startOAuthFlow,
+        setAgentVisibility,
     };
 }
