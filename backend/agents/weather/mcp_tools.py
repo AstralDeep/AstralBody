@@ -1620,6 +1620,7 @@ def get_weekly_forecast(
 TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     "geocode_location": {
         "function": geocode_location,
+        "scope": "tools:read",
         "description": "Convert city and state names to latitude/longitude coordinates using Open-Meteo's geocoding API.",
         "input_schema": {
             "type": "object",
@@ -1643,6 +1644,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "get_current_weather": {
         "function": get_current_weather,
+        "scope": "tools:read",
         "description": "Get current weather conditions for a location, including temperature, humidity, wind, and conditions.",
         "input_schema": {
             "type": "object",
@@ -1673,6 +1675,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "get_hourly_forecast": {
         "function": get_hourly_forecast,
+        "scope": "tools:read",
         "description": "Get hourly forecast for a location, including temperature trends and precipitation probability.",
         "input_schema": {
             "type": "object",
@@ -1708,6 +1711,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "get_daily_forecast": {
         "function": get_daily_forecast,
+        "scope": "tools:read",
         "description": "Get daily forecast for a location, including high/low temperatures and precipitation totals.",
         "input_schema": {
             "type": "object",
@@ -1743,6 +1747,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "get_weekly_forecast": {
         "function": get_weekly_forecast,
+        "scope": "tools:read",
         "description": "Get weekly forecast summary for a location, including averages, totals, and trends.",
         "input_schema": {
             "type": "object",
@@ -1773,6 +1778,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "get_extended_weather": {
         "function": get_extended_weather,
+        "scope": "tools:read",
         "description": "Get extended weather data including UV index, air quality, and sunrise/sunset times.",
         "input_schema": {
             "type": "object",
@@ -1803,6 +1809,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "get_historical_weather": {
         "function": get_historical_weather,
+        "scope": "tools:read",
         "description": "Get historical weather data for a location and date range, including temperature, precipitation, and weather conditions.",
         "input_schema": {
             "type": "object",
@@ -1847,6 +1854,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "get_weather_alerts": {
         "function": get_weather_alerts,
+        "scope": "tools:read",
         "description": "Get severe weather alerts for a location (US only) using National Weather Service API.",
         "input_schema": {
             "type": "object",
@@ -1877,6 +1885,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "compare_locations": {
         "function": compare_locations,
+        "scope": "tools:read",
         "description": "Compare current weather across multiple locations (up to 3) with parallel API calls and visual comparison.",
         "input_schema": {
             "type": "object",

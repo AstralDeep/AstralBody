@@ -63,6 +63,7 @@ class DelegationService:
         agent_id: str,
         allowed_tools: List[str],
         user_id: Optional[str] = None,
+        enabled_scopes: Optional[List[str]] = None,
     ) -> Dict:
         """Exchange a user's access token for a scoped delegation token.
 
@@ -70,13 +71,14 @@ class DelegationService:
         - grant_type = urn:ietf:params:oauth:grant-type:token-exchange
         - subject_token = user's access token
         - audience = agent service client
-        - scope = tools the user has enabled for this agent
+        - scope = scope-level claims (tools:read, etc.) + tool-level claims
 
         Args:
             user_token: The user's access token (subject_token).
             agent_id: The agent identifier (becomes the actor).
             allowed_tools: List of tool names the user has allowed.
             user_id: Optional user ID for mock mode.
+            enabled_scopes: List of enabled scope names (e.g. ["tools:read", "tools:search"]).
 
         Returns:
             Dict with 'access_token', 'token_type', 'expires_in',
@@ -85,11 +87,11 @@ class DelegationService:
         """
         if self.mock_auth:
             return self._create_mock_delegation_token(
-                agent_id, allowed_tools, user_id
+                agent_id, allowed_tools, user_id, enabled_scopes
             )
 
         return await self._exchange_via_keycloak(
-            user_token, agent_id, allowed_tools
+            user_token, agent_id, allowed_tools, enabled_scopes
         )
 
     async def _exchange_via_keycloak(
@@ -97,6 +99,7 @@ class DelegationService:
         user_token: str,
         agent_id: str,
         allowed_tools: List[str],
+        enabled_scopes: Optional[List[str]] = None,
     ) -> Dict:
         """Perform the actual RFC 8693 token exchange with Keycloak."""
         if not self.authority or not self.client_id or not self.client_secret:
@@ -107,8 +110,10 @@ class DelegationService:
 
         token_url = f"{self.authority}/protocol/openid-connect/token"
 
-        # Build tool scopes from allowed tools
-        tool_scopes = " ".join(f"tool:{t}" for t in allowed_tools)
+        # Build scope string: scope-level claims + tool-level claims
+        scope_parts = list(enabled_scopes or [])
+        scope_parts.extend(f"tool:{t}" for t in allowed_tools)
+        combined_scopes = " ".join(scope_parts)
 
         # RFC 8693 §2.1 — Token Exchange Request parameters
         form_data = {
@@ -119,7 +124,7 @@ class DelegationService:
             "subject_token_type": TOKEN_TYPE_ACCESS,
             "requested_token_type": TOKEN_TYPE_ACCESS,
             "audience": self.agent_service_client_id,
-            "scope": tool_scopes,
+            "scope": combined_scopes,
         }
 
         logger.info(
@@ -150,7 +155,7 @@ class DelegationService:
                         "access_token": body["access_token"],
                         "token_type": body.get("token_type", "Bearer"),
                         "expires_in": body.get("expires_in", 300),
-                        "scope": body.get("scope", tool_scopes),
+                        "scope": body.get("scope", combined_scopes),
                         "issued_token_type": body.get(
                             "issued_token_type", TOKEN_TYPE_ACCESS
                         ),
@@ -168,6 +173,7 @@ class DelegationService:
         agent_id: str,
         allowed_tools: List[str],
         user_id: Optional[str] = None,
+        enabled_scopes: Optional[List[str]] = None,
     ) -> Dict:
         """Create a mock delegation token for development/testing.
 
@@ -175,14 +181,17 @@ class DelegationService:
         identifying the agent as the actor.
         """
         now = int(time.time())
-        tool_scopes = " ".join(f"tool:{t}" for t in allowed_tools)
+        # Build scope string: scope-level claims + tool-level claims
+        scope_parts = list(enabled_scopes or [])
+        scope_parts.extend(f"tool:{t}" for t in allowed_tools)
+        combined_scopes = " ".join(scope_parts)
 
         # Build the JWT payload per RFC 8693 §4.1
         payload = {
             "sub": user_id or "dev-user-id",
             "preferred_username": "DevUser",
             "act": {"sub": f"agent:{agent_id}"},  # RFC 8693 §4.1 Actor Claim
-            "scope": tool_scopes,
+            "scope": combined_scopes,
             "iss": "mock-astral-delegation",
             "aud": self.agent_service_client_id,
             "iat": now,
@@ -220,7 +229,7 @@ class DelegationService:
             "access_token": mock_token,
             "token_type": "Bearer",
             "expires_in": 300,
-            "scope": tool_scopes,
+            "scope": combined_scopes,
             "issued_token_type": TOKEN_TYPE_ACCESS,
             "agent_id": agent_id,
         }
@@ -250,18 +259,30 @@ class DelegationService:
         }
 
     @staticmethod
-    def is_tool_in_scope(tool_name: str, scopes: List[str]) -> bool:
+    def is_tool_in_scope(tool_name: str, scopes: List[str], required_scope: str = "") -> bool:
         """Check if a tool is allowed by the delegation token's scopes.
+
+        Checks both scope-level claims (tools:read, tools:write, etc.)
+        and tool-level claims (tool:<name>).
 
         Args:
             tool_name: The MCP tool name (e.g., 'modify_data').
             scopes: List of scope strings from the delegation token.
+            required_scope: The scope required by this tool (e.g., 'tools:write').
 
         Returns:
-            True if the tool is in scope (or no tool-specific scopes exist).
+            True if the tool is in scope.
         """
+        # Check scope-level claim first (e.g., "tools:read" in scopes)
+        if required_scope and required_scope in scopes:
+            # Also verify the specific tool is listed (belt-and-suspenders)
+            tool_scopes = [s for s in scopes if s.startswith("tool:")]
+            if not tool_scopes:
+                return True  # No tool-level constraints, scope-level is sufficient
+            return f"tool:{tool_name}" in tool_scopes
+
+        # Fallback: check tool-level claim directly
         tool_scopes = [s for s in scopes if s.startswith("tool:")]
         if not tool_scopes:
-            # No tool-specific scopes = all tools allowed at token level
             return True
         return f"tool:{tool_name}" in tool_scopes

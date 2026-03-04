@@ -45,6 +45,7 @@ interface DashboardLayoutProps {
     agentPermissions?: AgentPermissionsData | null;
     onGetAgentPermissions?: (agentId: string) => void;
     onSetAgentPermissions?: (agentId: string, permissions: Record<string, boolean>) => void;
+    onRegisterExternalAgent?: (url: string) => void;
     // Credential management
     agentCredentialKeys?: Record<string, string[]>;
     onFetchAgentCredentials?: (agentId: string) => Promise<unknown>;
@@ -79,6 +80,7 @@ export default function DashboardLayout({
     onDeleteAgentCredential,
     onStartOAuthFlow,
     onSetAgentVisibility,
+    onRegisterExternalAgent,
 }: DashboardLayoutProps) {
     const [chatToDelete, setChatToDelete] = useState<string | null>(null);
     const [permModalAgent, setPermModalAgent] = useState<string | null>(null);
@@ -86,6 +88,7 @@ export default function DashboardLayout({
     const [chatSearch, setChatSearch] = useState("");
     const [agentsModalOpen, setAgentsModalOpen] = useState(false);
     const [agentsTab, setAgentsTab] = useState<"my" | "all">("my");
+    const [externalAgentUrl, setExternalAgentUrl] = useState("");
 
     // Close delete modal on Escape
     useEffect(() => {
@@ -274,6 +277,41 @@ export default function DashboardLayout({
                                     <span className="text-[10px] opacity-60">({publicAgents.length})</span>
                                 </button>
                             </div>
+
+                            {/* Register External Agent */}
+                            {onRegisterExternalAgent && (
+                                <div className="px-6 pt-3">
+                                    <form
+                                        onSubmit={(e) => {
+                                            e.preventDefault();
+                                            const url = externalAgentUrl.trim();
+                                            if (url) {
+                                                onRegisterExternalAgent(url);
+                                                setExternalAgentUrl("");
+                                            }
+                                        }}
+                                        className="flex gap-2"
+                                    >
+                                        <input
+                                            type="url"
+                                            value={externalAgentUrl}
+                                            onChange={(e) => setExternalAgentUrl(e.target.value)}
+                                            placeholder="Register external A2A agent URL..."
+                                            className="flex-1 px-3 py-1.5 text-xs bg-white/5 border border-white/10 rounded-lg
+                                                       text-white placeholder-astral-muted/50 focus:outline-none focus:border-astral-primary/40"
+                                        />
+                                        <button
+                                            type="submit"
+                                            disabled={!externalAgentUrl.trim()}
+                                            className="px-3 py-1.5 text-xs font-medium rounded-lg bg-astral-primary/15 text-astral-primary
+                                                       border border-astral-primary/20 hover:bg-astral-primary/25 transition-colors
+                                                       disabled:opacity-30 disabled:cursor-not-allowed"
+                                        >
+                                            <Plus size={12} />
+                                        </button>
+                                    </form>
+                                </div>
+                            )}
 
                             {/* Grid */}
                             <div className="flex-1 overflow-y-auto p-4">
@@ -578,11 +616,13 @@ export default function DashboardLayout({
                         agentId={agentPermissions.agent_id}
                         agentName={agentPermissions.agent_name}
                         agentDescription={modalAgent?.description}
+                        scopes={agentPermissions.scopes}
+                        toolScopeMap={agentPermissions.tool_scope_map}
                         permissions={agentPermissions.permissions}
                         toolDescriptions={agentPermissions.tool_descriptions}
                         securityFlags={agentPermissions.security_flags}
-                        onSave={(agentId, perms) => {
-                            onSetAgentPermissions?.(agentId, perms);
+                        onSave={(agentId, scopes) => {
+                            onSetAgentPermissions?.(agentId, scopes);
                         }}
                         requiredCredentials={modalAgent?.metadata?.required_credentials}
                         storedCredentialKeys={agentCredentialKeys[permModalAgent] || []}

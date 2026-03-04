@@ -144,6 +144,20 @@ class Database:
             )
         ''')
 
+        # Agent scopes — per-user, per-agent scope-based authorization
+        # Replaces per-tool permissions with 4 scopes: tools:read, tools:write, tools:search, tools:system
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS agent_scopes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                enabled BOOLEAN NOT NULL DEFAULT 0,
+                updated_at INTEGER,
+                UNIQUE(user_id, agent_id, scope)
+            )
+        ''')
+
         # Users table — persists user profiles from Keycloak/OIDC
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
@@ -157,6 +171,13 @@ class Database:
                 updated_at INTEGER
             )
         ''')
+
+        # Indexes on user_id for query performance
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_chats_user_id ON chats(user_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_saved_components_user_id ON saved_components(user_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_chat_files_user_id ON chat_files(user_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_agent_scopes_user_id ON agent_scopes(user_id, agent_id)')
 
         conn.commit()
         conn.close()

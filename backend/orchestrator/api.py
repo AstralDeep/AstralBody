@@ -376,8 +376,8 @@ async def list_agents(request: Request):
 @agent_router.get(
     "/{agent_id}/permissions",
     response_model=AgentPermissionsResponse,
-    summary="Get agent tool permissions",
-    description="Returns the current user's per-tool permissions for the specified agent.",
+    summary="Get agent scope permissions",
+    description="Returns the current user's scope-based permissions for the specified agent.",
 )
 async def get_agent_permissions(
     request: Request,
@@ -390,12 +390,16 @@ async def get_agent_permissions(
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
     available_tools = [s.id for s in card.skills]
     tool_descriptions = {s.id: s.description for s in card.skills}
+    scopes = orch.tool_permissions.get_agent_scopes(user_id, agent_id)
+    tool_scope_map = orch.tool_permissions.get_tool_scope_map(agent_id)
     permissions = orch.tool_permissions.get_effective_permissions(
         user_id, agent_id, available_tools
     )
     return AgentPermissionsResponse(
         agent_id=agent_id,
         agent_name=card.name,
+        scopes=scopes,
+        tool_scope_map=tool_scope_map,
         permissions=permissions,
         tool_descriptions=tool_descriptions,
         security_flags=orch.security_flags.get(agent_id, {}),
@@ -405,8 +409,8 @@ async def get_agent_permissions(
 @agent_router.put(
     "/{agent_id}/permissions",
     response_model=AgentPermissionsResponse,
-    summary="Update agent tool permissions",
-    description="Update the current user's per-tool permissions for the specified agent. Set tool_name to true (allowed) or false (blocked).",
+    summary="Update agent scope permissions",
+    description="Update the current user's scope-based permissions for the specified agent. Scopes: tools:read, tools:write, tools:search, tools:system.",
 )
 async def set_agent_permissions(
     request: Request,
@@ -418,24 +422,20 @@ async def set_agent_permissions(
     card = orch.agent_cards.get(agent_id)
     if not card:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
-    # Prevent re-enabling system-blocked tools via REST API
-    agent_flags = orch.security_flags.get(agent_id, {})
-    filtered_perms = {}
-    for tool_name, allowed in body.permissions.items():
-        if allowed and tool_name in agent_flags and agent_flags[tool_name].get("blocked"):
-            filtered_perms[tool_name] = False
-        else:
-            filtered_perms[tool_name] = allowed
-    orch.tool_permissions.set_bulk_permissions(user_id, agent_id, filtered_perms)
+    orch.tool_permissions.set_agent_scopes(user_id, agent_id, body.scopes)
     available_tools = [s.id for s in card.skills]
     tool_descriptions = {s.id: s.description for s in card.skills}
-    updated_permissions = orch.tool_permissions.get_effective_permissions(
+    scopes = orch.tool_permissions.get_agent_scopes(user_id, agent_id)
+    tool_scope_map = orch.tool_permissions.get_tool_scope_map(agent_id)
+    permissions = orch.tool_permissions.get_effective_permissions(
         user_id, agent_id, available_tools
     )
     return AgentPermissionsResponse(
         agent_id=agent_id,
         agent_name=card.name,
-        permissions=updated_permissions,
+        scopes=scopes,
+        tool_scope_map=tool_scope_map,
+        permissions=permissions,
         tool_descriptions=tool_descriptions,
         security_flags=orch.security_flags.get(agent_id, {}),
     )

@@ -204,21 +204,21 @@ class TestMCPTools:
     """Tests for MCP tool functions."""
 
     def test_search_patients_all(self):
-        from agents.mcp_tools import search_patients
+        from agents.medical.mcp_tools import search_patients
         result = search_patients()
         assert "_ui_components" in result
         assert "_data" in result
         assert result["_data"]["total"] == 10  # All mock patients
 
     def test_search_patients_age_filter(self):
-        from agents.mcp_tools import search_patients
+        from agents.medical.mcp_tools import search_patients
         result = search_patients(min_age=30)
         assert result["_data"]["total"] > 0
         for p in result["_data"]["patients"]:
             assert p["age"] >= 30
 
     def test_search_patients_no_results(self):
-        from agents.mcp_tools import search_patients
+        from agents.medical.mcp_tools import search_patients
         result = search_patients(min_age=200)
         assert "_ui_components" in result
         # Should contain an alert
@@ -226,33 +226,32 @@ class TestMCPTools:
         assert comp["type"] == "alert"
 
     def test_search_patients_condition_filter(self):
-        from agents.mcp_tools import search_patients
+        from agents.medical.mcp_tools import search_patients
         result = search_patients(condition="Degenerative")
         assert result["_data"]["total"] > 0
         for p in result["_data"]["patients"]:
             assert "Degenerative" in p["condition"]
 
-    def test_graph_patient_data_bar(self):
-        from agents.mcp_tools import graph_patient_data
-        result = graph_patient_data(metric="age", chart_type="bar")
-        assert "_ui_components" in result
-        comps = result["_ui_components"]
-        # Should contain a card with a bar_chart inside
-        assert any(c["type"] == "card" for c in comps)
-
-    def test_graph_patient_data_pie(self):
-        from agents.mcp_tools import graph_patient_data
-        result = graph_patient_data(metric="heart_rate", chart_type="pie")
+    def test_generate_dynamic_chart_bar(self):
+        from agents.general.mcp_tools import generate_dynamic_chart
+        data = [{"name": "A", "value": 10}, {"name": "B", "value": 20}]
+        result = generate_dynamic_chart(data=data, x_key="name", y_key="value", chart_type="bar")
         assert "_ui_components" in result
 
-    def test_graph_patient_data_line(self):
-        from agents.mcp_tools import graph_patient_data
-        result = graph_patient_data(metric="blood_pressure", chart_type="line")
+    def test_generate_dynamic_chart_pie(self):
+        from agents.general.mcp_tools import generate_dynamic_chart
+        data = [{"name": "A", "value": 10}, {"name": "B", "value": 20}]
+        result = generate_dynamic_chart(data=data, x_key="name", y_key="value", chart_type="pie")
         assert "_ui_components" in result
-        assert result["_data"]["metric"] == "blood_pressure"
+
+    def test_generate_dynamic_chart_line(self):
+        from agents.general.mcp_tools import generate_dynamic_chart
+        data = [{"name": "A", "value": 10}, {"name": "B", "value": 20}]
+        result = generate_dynamic_chart(data=data, x_key="name", y_key="value", chart_type="line")
+        assert "_ui_components" in result
 
     def test_system_status(self):
-        from agents.mcp_tools import get_system_status
+        from agents.general.mcp_tools import get_system_status
         result = get_system_status()
         assert "_ui_components" in result
         assert "_data" in result
@@ -260,25 +259,25 @@ class TestMCPTools:
         assert "memory_percent" in result["_data"]
 
     def test_cpu_info(self):
-        from agents.mcp_tools import get_cpu_info
+        from agents.general.mcp_tools import get_cpu_info
         result = get_cpu_info()
         assert "_ui_components" in result
         assert result["_data"]["cores"] > 0
 
     def test_memory_info(self):
-        from agents.mcp_tools import get_memory_info
+        from agents.general.mcp_tools import get_memory_info
         result = get_memory_info()
         assert "_ui_components" in result
         assert "ram_percent" in result["_data"]
 
     def test_disk_info(self):
-        from agents.mcp_tools import get_disk_info
+        from agents.general.mcp_tools import get_disk_info
         result = get_disk_info()
         assert "_ui_components" in result
 
     def test_tool_registry_completeness(self):
-        from agents.mcp_tools import TOOL_REGISTRY
-        expected = ["search_patients", "graph_patient_data", "get_system_status",
+        from agents.general.mcp_tools import TOOL_REGISTRY
+        expected = ["generate_dynamic_chart", "get_system_status",
                      "get_cpu_info", "get_memory_info", "get_disk_info", "search_wikipedia"]
         for name in expected:
             assert name in TOOL_REGISTRY, f"Missing tool: {name}"
@@ -294,22 +293,22 @@ class TestMCPServer:
     """Tests for MCP Server dispatch."""
 
     def test_tools_list(self):
-        from agents.mcp_server import MCPServer
+        from agents.general.mcp_server import MCPServer
         from shared.protocol import MCPRequest
         server = MCPServer()
         req = MCPRequest(request_id="r1", method="tools/list", params={})
         resp = server.process_request(req)
         assert resp.result is not None
-        assert len(resp.result["tools"]) == 7
+        assert len(resp.result["tools"]) == 8
 
     def test_tool_call_success(self):
-        from agents.mcp_server import MCPServer
+        from agents.general.mcp_server import MCPServer
         from shared.protocol import MCPRequest
         server = MCPServer()
         req = MCPRequest(
             request_id="r2",
             method="tools/call",
-            params={"name": "search_patients", "arguments": {"min_age": 30}}
+            params={"name": "get_system_status", "arguments": {}}
         )
         resp = server.process_request(req)
         assert resp.error is None
@@ -317,7 +316,7 @@ class TestMCPServer:
         assert len(resp.ui_components) > 0
 
     def test_tool_call_unknown(self):
-        from agents.mcp_server import MCPServer
+        from agents.general.mcp_server import MCPServer
         from shared.protocol import MCPRequest
         server = MCPServer()
         req = MCPRequest(
@@ -331,7 +330,7 @@ class TestMCPServer:
         assert resp.error.get("retryable") is False
 
     def test_unknown_method(self):
-        from agents.mcp_server import MCPServer
+        from agents.general.mcp_server import MCPServer
         from shared.protocol import MCPRequest
         server = MCPServer()
         req = MCPRequest(request_id="r4", method="unknown/method", params={})
@@ -349,7 +348,7 @@ class TestMCPServerErrorClassification:
 
     def test_retryable_connection_error(self):
         """ConnectionError should be classified as retryable."""
-        from agents.mcp_server import MCPServer
+        from agents.general.mcp_server import MCPServer
         from shared.protocol import MCPRequest
         server = MCPServer()
         # Register a mock tool that raises ConnectionError
@@ -366,7 +365,7 @@ class TestMCPServerErrorClassification:
 
     def test_non_retryable_type_error(self):
         """TypeError should be classified as non-retryable."""
-        from agents.mcp_server import MCPServer
+        from agents.general.mcp_server import MCPServer
         from shared.protocol import MCPRequest
         server = MCPServer()
         server.tools["bad_args_tool"] = {
@@ -382,7 +381,7 @@ class TestMCPServerErrorClassification:
 
     def test_tool_alert_error_detection(self):
         """Tool returning Alert with variant='error' should be detected as an error."""
-        from agents.mcp_server import MCPServer
+        from agents.general.mcp_server import MCPServer
         from shared.protocol import MCPRequest
         from shared.primitives import Alert, create_ui_response
         server = MCPServer()
@@ -403,7 +402,7 @@ class TestMCPServerErrorClassification:
 
     def test_classify_error_static_method(self):
         """Test the _classify_error static method directly."""
-        from agents.mcp_server import MCPServer
+        from agents.general.mcp_server import MCPServer
         assert MCPServer._classify_error(ConnectionError()) is True
         assert MCPServer._classify_error(TimeoutError()) is True
         assert MCPServer._classify_error(TypeError()) is False
@@ -513,14 +512,16 @@ class TestOrchestratorRetry:
 
         orchestrator.execute_tool_and_wait = mock_execute
         ws = AsyncMock()
+        # _safe_send checks for send_text (FastAPI WebSocket) first
+        ws.send_text = AsyncMock()
 
         result = await orchestrator._execute_with_retry(ws, "agent-1", "test_tool", {},
                                                          max_retries=3)
         assert result.error is None
 
-        # Check that ws.send was called with retrying status
+        # Check that ws.send_text was called with retrying status
         status_calls = [
-            call for call in ws.send.call_args_list
+            call for call in ws.send_text.call_args_list
             if '"retrying"' in str(call)
         ]
         assert len(status_calls) == 2  # Two retries before success
@@ -532,10 +533,10 @@ class TestOrchestratorRetry:
 class TestWikipediaRobustness:
     """Tests for Wikipedia tool HTTP error handling."""
 
-    @patch('agents.mcp_tools.requests.get')
+    @patch('agents.general.mcp_tools.requests.get')
     def test_wikipedia_http_500(self, mock_get):
         """HTTP 500 error should raise an exception."""
-        from agents.mcp_tools import search_wikipedia
+        from agents.general.mcp_tools import search_wikipedia
         mock_resp = MagicMock()
         mock_resp.status_code = 500
         mock_resp.raise_for_status.side_effect = Exception("500 Server Error")
@@ -547,10 +548,10 @@ class TestWikipediaRobustness:
         assert comp["variant"] == "error"
         assert "500 Server Error" in comp["message"]
 
-    @patch('agents.mcp_tools.requests.get')
+    @patch('agents.general.mcp_tools.requests.get')
     def test_wikipedia_success(self, mock_get):
         """Successful Wikipedia response should return proper UI components."""
-        from agents.mcp_tools import search_wikipedia
+        from agents.general.mcp_tools import search_wikipedia
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.raise_for_status.return_value = None

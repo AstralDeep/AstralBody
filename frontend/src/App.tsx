@@ -45,6 +45,7 @@ function App() {
     deleteAgentCredential,
     startOAuthFlow,
     setAgentVisibility,
+    registerExternalAgent,
   } = useWebSocket(
     WS_URL,
     auth.user?.access_token
@@ -207,6 +208,7 @@ function App() {
       onStartOAuthFlow={startOAuthFlow}
       userEmail={userEmail}
       onSetAgentVisibility={setAgentVisibility}
+      onRegisterExternalAgent={registerExternalAgent}
     >
       <ChatInterface
         messages={messages}

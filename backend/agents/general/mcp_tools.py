@@ -864,6 +864,7 @@ def search_arxiv(query: str, max_results: int = 10, session_id: str = "default",
 TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
    "generate_dynamic_chart": {
         "function": generate_dynamic_chart,
+        "scope": "tools:read",
         "description": "Create a dynamic chart/graph visualization from generic tabular data. Automatically selects the best chart type ('bar', 'line', 'pie', 'scatter') based on data heuristics, or accepts a specific chart type. Supports plotting specific X and Y axes, or frequency counts if no Y axis is provided.",
         "input_schema": {
             "type": "object",
@@ -899,6 +900,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "get_system_status": {
         "function": get_system_status,
+        "scope": "tools:system",
         "description": "Get comprehensive system status including CPU, memory, and disk usage with visual metrics.",
         "input_schema": {
             "type": "object",
@@ -907,6 +909,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "get_cpu_info": {
         "function": get_cpu_info,
+        "scope": "tools:system",
         "description": "Get detailed CPU information including per-core usage.",
         "input_schema": {
             "type": "object",
@@ -915,6 +918,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "get_memory_info": {
         "function": get_memory_info,
+        "scope": "tools:system",
         "description": "Get detailed memory (RAM + swap) information.",
         "input_schema": {
             "type": "object",
@@ -923,6 +927,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "get_disk_info": {
         "function": get_disk_info,
+        "scope": "tools:system",
         "description": "Get disk partition and usage information.",
         "input_schema": {
             "type": "object",
@@ -931,6 +936,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "search_wikipedia": {
         "function": search_wikipedia,
+        "scope": "tools:search",
         "description": "Search Wikipedia for articles and summaries on any topic.",
         "input_schema": {
             "type": "object",
@@ -943,6 +949,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "search_arxiv": {
         "function": search_arxiv,
+        "scope": "tools:search",
         "description": "Search arXiv for academic papers and research.",
         "input_schema": {
             "type": "object",
@@ -955,6 +962,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "modify_data": {
         "function": modify_data,
+        "scope": "tools:write",
         "description": "Modify CSV/Excel data with basic CRUD operations like dropping columns as well as row-based calculations. Supports add_column, update_column, calculate_column, drop_column, rename_column, filter_rows, and sort_rows. IMPORTANT: If a 'file_path' is available in the chat context, you MUST use it instead of 'csv_data' to ensure the entire file is processed.",
         "input_schema": {
             "type": "object",

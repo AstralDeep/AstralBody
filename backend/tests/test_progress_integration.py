@@ -146,92 +146,86 @@ def test_endpoint_simulation():
     # This test simulates what the endpoint does
     from unittest.mock import AsyncMock
     
-    # Mock the agent_generator.generate_code method
-    with patch('orchestrator.agent_generator.agent_generator') as mock_gen:
-        # Setup mock to call progress callback
-        def mock_generate_code(session_id, progress_callback=None, user_id=None):
-            # Simulate progress events
-            emitter = ProgressEmitter(ProgressPhase.GENERATION, progress_callback)
-            
-            if progress_callback:
-                # Emit some progress events
-                event1 = ProgressEvent(
-                    phase=ProgressPhase.GENERATION,
-                    step=ProgressStep.PROMPT_CONSTRUCTION,
-                    percentage=10,
-                    message="Building prompt..."
-                )
-                progress_callback(event1)
-                
-                event2 = ProgressEvent(
-                    phase=ProgressPhase.GENERATION,
-                    step=ProgressStep.LLM_API_CALL,
-                    percentage=30,
-                    message="Calling LLM..."
-                )
-                progress_callback(event2)
-                
-                event3 = ProgressEvent(
-                    phase=ProgressPhase.GENERATION,
-                    step=ProgressStep.GENERATION_COMPLETE,
-                    percentage=100,
-                    message="Generation complete!"
-                )
-                progress_callback(event3)
-            
-            return {"files": {"tools": "# Test code", "agent": "", "server": ""}}
-        
-        mock_gen.generate_code = AsyncMock(side_effect=mock_generate_code)
-        
-        # Simulate what the endpoint does
-        collected = []
-        
-        async def simulate_endpoint():
-            queue = asyncio.Queue()
-            
-            def progress_callback(event):
-                queue.put_nowait(f"data: {json.dumps(event.to_dict())}\n\n")
-            
-            # Simulate background task
-            async def generate_task():
-                result = await mock_gen.generate_code(
-                    "test-session",
-                    progress_callback=progress_callback,
-                    user_id="test-user"
-                )
-                await queue.put(json.dumps({
-                    "type": "complete",
-                    "result": result
-                }))
-            
-            asyncio.create_task(generate_task())
-            
-            # Collect events
-            events = []
-            for _ in range(4):  # Expect 3 progress + 1 complete
-                try:
-                    event = await asyncio.wait_for(queue.get(), timeout=1.0)
-                    events.append(event)
-                except asyncio.TimeoutError:
-                    break
-            
-            return events
-        
-        # Run simulation
-        events = asyncio.run(simulate_endpoint())
-        
-        # Verify we got events
-        assert len(events) >= 3  # At least 3 progress events
-        
-        # First events should be SSE formatted
-        for i in range(min(3, len(events))):
-            if events[i].startswith('data: '):
-                # Parse and verify
-                json_str = events[i][6:-2]
-                data = json.loads(json_str)
-                assert data["type"] == "progress"
-        
-        print("[OK] Endpoint simulation test passed")
+    # Simulate progress callback flow without agent_generator (module was removed)
+    def mock_generate_code(session_id, progress_callback=None, user_id=None):
+        emitter = ProgressEmitter(ProgressPhase.GENERATION, progress_callback)
+
+        if progress_callback:
+            event1 = ProgressEvent(
+                phase=ProgressPhase.GENERATION,
+                step=ProgressStep.PROMPT_CONSTRUCTION,
+                percentage=10,
+                message="Building prompt..."
+            )
+            progress_callback(event1)
+
+            event2 = ProgressEvent(
+                phase=ProgressPhase.GENERATION,
+                step=ProgressStep.LLM_API_CALL,
+                percentage=30,
+                message="Calling LLM..."
+            )
+            progress_callback(event2)
+
+            event3 = ProgressEvent(
+                phase=ProgressPhase.GENERATION,
+                step=ProgressStep.GENERATION_COMPLETE,
+                percentage=100,
+                message="Generation complete!"
+            )
+            progress_callback(event3)
+
+        return {"files": {"tools": "# Test code", "agent": "", "server": ""}}
+
+    mock_gen = AsyncMock(side_effect=mock_generate_code)
+
+    # Simulate what the endpoint does
+    async def simulate_endpoint():
+        queue = asyncio.Queue()
+
+        def progress_callback(event):
+            queue.put_nowait(f"data: {json.dumps(event.to_dict())}\n\n")
+
+        # Simulate background task
+        async def generate_task():
+            result = await mock_gen(
+                "test-session",
+                progress_callback=progress_callback,
+                user_id="test-user"
+            )
+            await queue.put(json.dumps({
+                "type": "complete",
+                "result": result
+            }))
+
+        asyncio.create_task(generate_task())
+
+        # Collect events
+        events = []
+        for _ in range(4):  # Expect 3 progress + 1 complete
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=1.0)
+                events.append(event)
+            except asyncio.TimeoutError:
+                break
+
+        return events
+
+    # Run simulation
+    events = asyncio.run(simulate_endpoint())
+
+    # Verify we got events
+    assert len(events) >= 3  # At least 3 progress events
+
+    # First events should be SSE formatted
+    for i in range(min(3, len(events))):
+        if events[i].startswith('data: '):
+            # Parse and verify
+            json_str = events[i][6:-2]
+            data = json.loads(json_str)
+            assert data["type"] == "progress"
+
+    print("[OK] Endpoint simulation test passed")
 
 
 def test_frontend_hook_compatibility():

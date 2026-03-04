@@ -239,7 +239,7 @@ class TestAgentEndpoints:
 
     def test_dashboard(self, client):
         """Get dashboard data."""
-        resp = client.get("/api/dashboard")
+        resp = client.get("/api/dashboard", headers=AUTH_HEADER)
         assert resp.status_code == 200
         data = resp.json()
         assert "agents" in data

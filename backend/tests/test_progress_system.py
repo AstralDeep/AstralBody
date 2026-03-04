@@ -297,10 +297,7 @@ def test_progress_emitter_sse():
 
 
 def test_integration_with_agent_generator():
-    """Test that ProgressEmitter integrates with agent_generator."""
-    # This is a more complex test that would require mocking
-    # For now, just verify imports work
-    from orchestrator.agent_generator import AgentGeneratorClient
+    """Test that ProgressEmitter works with generation flows."""
     from shared.progress import ProgressEmitter, ProgressPhase
     
     # Create a mock callback to collect events

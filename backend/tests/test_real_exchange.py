@@ -70,4 +70,5 @@ async def main():
             print(f"  PASS: aud includes agent-service" if AGENT_CLIENT in str(deleg.get("aud", "")) else f"  INFO: aud = {deleg.get('aud')}")
             print(f"  PASS: act claim present" if deleg.get("act") else "  INFO: act claim not present (expected with scope mapper)")
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
