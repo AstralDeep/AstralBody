@@ -150,7 +150,9 @@ class AgentInfo(BaseModel):
     name: str
     description: Optional[str] = None
     tools: List[AgentTool] = []
-    permissions: Optional[Dict[str, bool]] = Field(None, description="Per-tool permission map (tool_name: allowed)")
+    scopes: Optional[Dict[str, bool]] = Field(None, description="Scope-level permissions (tools:read, tools:write, tools:search, tools:system)")
+    tool_scope_map: Optional[Dict[str, str]] = Field(None, description="Map of tool_name to required scope")
+    permissions: Optional[Dict[str, bool]] = Field(None, description="Per-tool permission map derived from scopes (tool_name: allowed)")
     security_flags: Optional[Dict[str, Any]] = Field(None, description="System-level security flags per tool from proactive review")
     status: str = "connected"
     owner_email: Optional[str] = Field(None, description="Email of the agent owner")
@@ -163,17 +165,19 @@ class AgentListResponse(BaseModel):
 
 
 class AgentPermissionsRequest(BaseModel):
-    """Update tool permissions for an agent."""
-    permissions: Dict[str, bool] = Field(..., description="Map of tool_name to allowed (true/false)")
+    """Update scope-based permissions for an agent."""
+    scopes: Dict[str, bool] = Field(..., description="Map of scope to enabled (true/false): tools:read, tools:write, tools:search, tools:system")
 
-    model_config = {"json_schema_extra": {"examples": [{"permissions": {"modify_data": False, "get_system_status": True}}]}}
+    model_config = {"json_schema_extra": {"examples": [{"scopes": {"tools:read": True, "tools:write": False, "tools:search": True, "tools:system": False}}]}}
 
 
 class AgentPermissionsResponse(BaseModel):
-    """Current tool permissions for an agent."""
+    """Current scope-based permissions for an agent."""
     agent_id: str
     agent_name: str
-    permissions: Dict[str, bool] = Field(..., description="Map of tool_name to allowed (true/false)")
+    scopes: Dict[str, bool] = Field(default_factory=dict, description="Scope-level permissions (tools:read, tools:write, tools:search, tools:system)")
+    tool_scope_map: Optional[Dict[str, str]] = Field(None, description="Map of tool_name to required scope")
+    permissions: Dict[str, bool] = Field(default_factory=dict, description="Per-tool permission map derived from scopes (tool_name: allowed)")
     tool_descriptions: Optional[Dict[str, str]] = Field(None, description="Map of tool_name to description")
     security_flags: Optional[Dict[str, Any]] = Field(None, description="System-level security flags per tool from proactive review")
 

@@ -79,6 +79,11 @@ class Orchestrator:
         self.pending_requests: Dict[str, asyncio.Future] = {}
         self.cancelled_sessions: Dict[str, bool] = {}  # websocket id -> cancelled flag
 
+        # A2A external agent connections (JSON-RPC transport)
+        self.a2a_clients: Dict[str, Any] = {}  # agent_id -> A2A client
+        self.a2a_agent_cards: Dict[str, Any] = {}  # agent_id -> official A2A AgentCard
+        self.agent_urls: Dict[str, str] = {}  # agent_id -> base URL (for peer registry)
+
         # LLM Client
         api_key = os.getenv("OPENAI_API_KEY")
         base_url = os.getenv("OPENAI_BASE_URL")
@@ -127,18 +132,25 @@ class Orchestrator:
             logger.warning("RegisterAgent with no card")
             return
 
-        self.agents[card.agent_id] = websocket
+        if websocket is not None:
+            self.agents[card.agent_id] = websocket
         self.agent_cards[card.agent_id] = card
 
-        # Extract capabilities for routing
+        # Extract capabilities for routing and tool→scope mapping
         caps = []
+        tool_scope_map = {}
         for skill in card.skills:
             caps.append({
                 "name": skill.id,
                 "description": skill.description,
                 "input_schema": skill.input_schema
             })
+            # Store tool→scope mapping from agent-declared scopes
+            tool_scope_map[skill.id] = getattr(skill, 'scope', '') or 'tools:read'
         self.agent_capabilities[card.agent_id] = caps
+
+        # Register tool→scope mapping in the permission manager
+        self.tool_permissions.register_tool_scopes(card.agent_id, tool_scope_map)
 
         logger.info(f"Agent registered: {card.agent_id} ({card.name}) with {len(caps)} tools")
 
@@ -167,10 +179,11 @@ class Orchestrator:
             else:
                 ownership = {}
 
-        # Notify all UI clients (include per-user permissions and security flags)
+        # Notify all UI clients (include per-user scopes, tool_scope_map, and security flags)
         for ui in self.ui_clients:
             try:
                 user_id = self._get_user_id(ui)
+                scopes = self.tool_permissions.get_agent_scopes(user_id, card.agent_id)
                 permissions = self.tool_permissions.get_effective_permissions(
                     user_id, card.agent_id, tool_names
                 )
@@ -181,6 +194,8 @@ class Orchestrator:
                     "description": card.description,
                     "tools": tool_names,
                     "permissions": permissions,
+                    "scopes": scopes,
+                    "tool_scope_map": tool_scope_map,
                     "security_flags": self.security_flags.get(card.agent_id, {}),
                     "owner_email": ownership.get("owner_email"),
                     "is_public": bool(ownership.get("is_public", False)),
@@ -221,6 +236,9 @@ class Orchestrator:
             if isinstance(parsed, RegisterAgent):
                 await self.register_agent(ws, parsed)
 
+            # Store agent URL for peer registry
+            self.agent_urls[agent_id] = base_url
+
             # Start listening loop
             asyncio.create_task(self._agent_listen_loop(ws, agent_id))
 
@@ -228,6 +246,88 @@ class Orchestrator:
 
         except Exception as e:
             logger.debug(f"Discovery attempt to {base_url} skipped: {e}")
+
+    async def discover_a2a_agent(self, base_url: str, notify_ui: bool = True):
+        """Discover an external agent — tries WebSocket first, falls back to A2A JSON-RPC.
+
+        Strategy:
+        1. Try to connect via WebSocket (fastest, bidirectional, preferred)
+        2. If WebSocket fails, fall back to official A2A protocol (JSON-RPC)
+        """
+        # Step 1: Try WebSocket first
+        try:
+            await self.discover_agent(base_url)
+            # Check if WebSocket discovery succeeded
+            for aid, url in self.agent_urls.items():
+                if url == base_url and aid in self.agents:
+                    logger.info(f"External agent at {base_url} connected via WebSocket (preferred)")
+                    # Also set up A2A client as backup
+                    await self._setup_a2a_client_for_agent(base_url, aid)
+                    return
+        except Exception as e:
+            logger.debug(f"WebSocket discovery to {base_url} failed: {e}")
+
+        # Step 2: Fall back to A2A JSON-RPC
+        try:
+            import httpx
+            from a2a.client.card_resolver import A2ACardResolver
+            from a2a.client.client_factory import ClientFactory, ClientConfig
+            from shared.a2a_bridge import a2a_card_to_custom
+
+            async with httpx.AsyncClient() as http_client:
+                resolver = A2ACardResolver(http_client, base_url)
+                a2a_card = await resolver.get_agent_card()
+
+            custom_card = a2a_card_to_custom(a2a_card)
+            agent_id = custom_card.agent_id
+
+            if agent_id in self.agents or agent_id in self.a2a_clients:
+                logger.debug(f"A2A agent {agent_id} already connected")
+                return
+
+            # Create persistent A2A client
+            config = ClientConfig(streaming=True)
+            client = await ClientFactory.connect(
+                agent=a2a_card,
+                client_config=config,
+            )
+
+            self.a2a_clients[agent_id] = client
+            self.a2a_agent_cards[agent_id] = a2a_card
+            self.agent_urls[agent_id] = base_url
+
+            # Register via the same path as WS agents (for routing, permissions, etc.)
+            register_msg = RegisterAgent(agent_card=custom_card)
+            await self.register_agent(None, register_msg)
+
+            logger.info(f"External agent discovered via A2A (WebSocket unavailable): {agent_id} at {base_url}")
+
+        except Exception as e:
+            logger.debug(f"A2A discovery to {base_url} also failed: {e}")
+
+    async def _setup_a2a_client_for_agent(self, base_url: str, agent_id: str):
+        """Set up an A2A client as backup transport for a WebSocket-connected agent."""
+        try:
+            import httpx
+            from a2a.client.card_resolver import A2ACardResolver
+            from a2a.client.client_factory import ClientFactory, ClientConfig
+
+            a2a_url = f"{base_url}/a2a"
+            async with httpx.AsyncClient() as http_client:
+                resolver = A2ACardResolver(http_client, a2a_url)
+                a2a_card = await resolver.get_agent_card()
+
+            config = ClientConfig(streaming=True)
+            client = await ClientFactory.connect(
+                agent=a2a_card,
+                client_config=config,
+            )
+
+            self.a2a_clients[agent_id] = client
+            self.a2a_agent_cards[agent_id] = a2a_card
+            logger.info(f"A2A backup client set up for {agent_id}")
+        except Exception as e:
+            logger.debug(f"A2A backup setup for {agent_id} failed (non-critical): {e}")
 
     async def _agent_listen_loop(self, ws, agent_id: str):
         """Listen for messages from a connected agent."""
@@ -354,6 +454,36 @@ class Orchestrator:
 
                 elif msg.action == "discover_agents":
                     await self.send_agent_list(websocket)
+
+                elif msg.action == "register_external_agent":
+                    # Register an external A2A agent by URL (entered by user in frontend)
+                    agent_url = msg.payload.get("url", "").strip().rstrip("/")
+                    if not agent_url:
+                        await self.send_ui_render(websocket, [
+                            Alert(message="Please provide an agent URL", variant="error").to_json()
+                        ])
+                    else:
+                        await self._safe_send(websocket, json.dumps({
+                            "type": "chat_status",
+                            "status": "thinking",
+                            "message": f"Discovering agent at {agent_url}..."
+                        }))
+                        await self.discover_a2a_agent(agent_url)
+                        if any(aid for aid, card in self.agent_cards.items()
+                               if card.metadata.get("a2a_url") == agent_url):
+                            await self.send_agent_list(websocket)
+                            await self._safe_send(websocket, json.dumps({
+                                "type": "chat_status", "status": "done",
+                                "message": f"External agent registered from {agent_url}"
+                            }))
+                        else:
+                            await self.send_ui_render(websocket, [
+                                Alert(message=f"Could not discover A2A agent at {agent_url}", variant="error").to_json()
+                            ])
+                            await self._safe_send(websocket, json.dumps({
+                                "type": "chat_status", "status": "done",
+                                "message": "Discovery failed"
+                            }))
 
                 elif msg.action == "get_history":
                     chats = self.history.get_recent_chats(user_id=user_id)
@@ -523,6 +653,8 @@ class Orchestrator:
                         return
                     available_tools = [s.id for s in card.skills]
                     tool_descriptions = {s.id: s.description for s in card.skills}
+                    scopes = self.tool_permissions.get_agent_scopes(user_id, agent_id)
+                    tool_scope_map = self.tool_permissions.get_tool_scope_map(agent_id)
                     permissions = self.tool_permissions.get_effective_permissions(
                         user_id, agent_id, available_tools
                     )
@@ -530,6 +662,8 @@ class Orchestrator:
                         "type": "agent_permissions",
                         "agent_id": agent_id,
                         "agent_name": card.name,
+                        "scopes": scopes,
+                        "tool_scope_map": tool_scope_map,
                         "permissions": permissions,
                         "tool_descriptions": tool_descriptions,
                         "security_flags": self.security_flags.get(agent_id, {})
@@ -537,25 +671,26 @@ class Orchestrator:
 
                 elif msg.action == "set_agent_permissions":
                     agent_id = msg.payload.get("agent_id")
-                    permissions = msg.payload.get("permissions", {})
-                    if not agent_id or not isinstance(permissions, dict):
+                    scopes = msg.payload.get("scopes", {})
+                    if not agent_id or not isinstance(scopes, dict):
                         return
-                    # Prevent re-enabling system-blocked tools
-                    agent_flags = self.security_flags.get(agent_id, {})
-                    for tool_name in permissions:
-                        if permissions[tool_name] and tool_name in agent_flags and agent_flags[tool_name].get("blocked"):
-                            logger.warning(f"Prevented re-enable of system-blocked tool '{tool_name}' for user={user_id} agent={agent_id}")
-                            permissions[tool_name] = False
-                    self.tool_permissions.set_bulk_permissions(
-                        user_id, agent_id, permissions
+                    self.tool_permissions.set_agent_scopes(
+                        user_id, agent_id, scopes
                     )
-                    logger.info(f"Permissions updated: user={user_id} agent={agent_id}")
+                    logger.info(f"Scopes updated: user={user_id} agent={agent_id} scopes={scopes}")
+                    # Compute effective per-tool permissions from new scopes
+                    card = self.agent_cards.get(agent_id)
+                    available_tools = [s.id for s in card.skills] if card else []
+                    permissions = self.tool_permissions.get_effective_permissions(
+                        user_id, agent_id, available_tools
+                    )
                     await self._safe_send(websocket, json.dumps({
                         "type": "agent_permissions_updated",
                         "agent_id": agent_id,
+                        "scopes": scopes,
                         "permissions": permissions
                     }))
-                    
+
                     # Also broadcast an updated dashboard to all UI clients for this user
                     # so their total tools count updates immediately
                     for client in self.ui_clients:
@@ -1528,7 +1663,7 @@ CRITICAL RULES:
             if creds:
                 args["_credentials"] = creds
 
-        if not agent_id or agent_id not in self.agents:
+        if not agent_id or (agent_id not in self.agents and agent_id not in self.a2a_clients):
             err_msg = f"No agent available for tool '{tool_name}'"
             await self.send_ui_render(websocket, [
                 Alert(message=err_msg, variant="error").to_json()
@@ -1611,7 +1746,7 @@ CRITICAL RULES:
                 tool_names.append(tool_name)
                 continue
 
-            if agent_id and agent_id in self.agents:
+            if agent_id and (agent_id in self.agents or agent_id in self.a2a_clients):
                 tasks.append(self._execute_with_retry(websocket, agent_id, tool_name, args))
                 tool_names.append(tool_name)
             else:
@@ -1709,7 +1844,53 @@ CRITICAL RULES:
         return last_result
 
     async def execute_tool_and_wait(self, agent_id: str, tool_name: str, args: Dict, timeout: float = 30.0) -> Optional[MCPResponse]:
-        """Send an MCP tool call to an agent and wait for the response."""
+        """Send an MCP tool call to an agent and wait for the response.
+
+        Strategy: Always try WebSocket first (fastest, bidirectional), then
+        fall back to A2A JSON-RPC if WebSocket is unavailable or fails.
+        """
+        # Try WebSocket first
+        if agent_id in self.agents:
+            result = await self._execute_via_websocket(agent_id, tool_name, args, timeout)
+            if result and not (result.error and result.error.get("retryable")):
+                return result
+            # WebSocket failed with a retryable error — fall back to A2A if available
+            if agent_id in self.a2a_clients:
+                logger.info(f"WebSocket call failed for {agent_id}, falling back to A2A")
+                return await self._execute_via_a2a(agent_id, tool_name, args, timeout)
+            return result
+
+        # No WebSocket connection — try A2A
+        if agent_id in self.a2a_clients:
+            return await self._execute_via_a2a(agent_id, tool_name, args, timeout)
+
+        # Agent has a known URL but no active connection — attempt WebSocket reconnect then A2A
+        if agent_id in self.agent_urls:
+            base_url = self.agent_urls[agent_id]
+            logger.info(f"Agent {agent_id} disconnected, attempting WebSocket reconnect to {base_url}")
+            try:
+                await self.discover_agent(base_url)
+                if agent_id in self.agents:
+                    return await self._execute_via_websocket(agent_id, tool_name, args, timeout)
+            except Exception as e:
+                logger.debug(f"WebSocket reconnect failed for {agent_id}: {e}")
+
+            # WebSocket reconnect failed — try A2A discovery as fallback
+            logger.info(f"WebSocket reconnect failed for {agent_id}, attempting A2A fallback")
+            try:
+                await self.discover_a2a_agent(base_url, notify_ui=False)
+                if agent_id in self.a2a_clients:
+                    return await self._execute_via_a2a(agent_id, tool_name, args, timeout)
+            except Exception as e:
+                logger.debug(f"A2A fallback discovery failed for {agent_id}: {e}")
+
+        return MCPResponse(
+            request_id=f"req_{tool_name}_{int(time.time() * 1000)}",
+            error={"message": f"Agent {agent_id} not connected via WebSocket or A2A", "retryable": False},
+        )
+
+    async def _execute_via_websocket(self, agent_id: str, tool_name: str, args: Dict, timeout: float = 30.0) -> Optional[MCPResponse]:
+        """Execute a tool call via WebSocket (internal agents)."""
         request_id = f"req_{tool_name}_{int(time.time() * 1000)}"
 
         request = MCPRequest(
@@ -1725,7 +1906,7 @@ CRITICAL RULES:
         try:
             agent_ws = self.agents[agent_id]
             await agent_ws.send(request.to_json())
-            logger.info(f"Sent tool call: {tool_name} → {agent_id}")
+            logger.info(f"Sent tool call (WS): {tool_name} → {agent_id}")
 
             result = await asyncio.wait_for(future, timeout=timeout)
             return result
@@ -1740,6 +1921,76 @@ CRITICAL RULES:
                                error={"message": str(e), "retryable": True})
         finally:
             self.pending_requests.pop(request_id, None)
+
+    async def _execute_via_a2a(self, agent_id: str, tool_name: str, args: Dict, timeout: float = 30.0) -> Optional[MCPResponse]:
+        """Execute a tool call via A2A JSON-RPC (external agents)."""
+        import uuid
+        from a2a.types import (
+            Message as A2AMessage, DataPart, Part, Role, Task, TaskState,
+        )
+        from shared.a2a_bridge import a2a_response_to_mcp_response
+
+        request_id = f"a2a_{tool_name}_{int(time.time() * 1000)}"
+        client = self.a2a_clients[agent_id]
+
+        # Build A2A message with tool call in DataPart
+        msg = A2AMessage(
+            message_id=str(uuid.uuid4()),
+            role=Role.user,
+            parts=[Part(root=DataPart(data={
+                "method": "tools/call",
+                "name": tool_name,
+                "arguments": {k: v for k, v in args.items() if not k.startswith("_")},
+            }))],
+        )
+
+        # Forward delegation token in request metadata
+        delegation_token = args.get("_delegation_token")
+
+        try:
+            logger.info(f"Sent tool call (A2A): {tool_name} → {agent_id}")
+
+            # Use the A2A client to send the message
+            # The client returns an async iterator of events
+            context = None
+            if delegation_token:
+                from a2a.client.client import ClientCallContext
+                context = ClientCallContext(
+                    metadata={"authorization": f"Bearer {delegation_token}"},
+                )
+
+            last_task = None
+            last_message = None
+            async for event in await asyncio.wait_for(
+                client.send_message(msg, context=context),
+                timeout=timeout,
+            ):
+                if isinstance(event, tuple):
+                    # ClientEvent = (Task, UpdateEvent | None)
+                    task, _ = event
+                    last_task = task
+                else:
+                    # Direct Message response
+                    last_message = event
+
+            if last_task:
+                return a2a_response_to_mcp_response(last_task, request_id)
+            elif last_message:
+                return a2a_response_to_mcp_response(last_message, request_id)
+            else:
+                return MCPResponse(
+                    request_id=request_id,
+                    error={"message": "No response from A2A agent", "retryable": True},
+                )
+
+        except asyncio.TimeoutError:
+            logger.error(f"A2A tool call timed out: {tool_name}")
+            return MCPResponse(request_id=request_id,
+                               error={"message": "A2A tool call timed out", "retryable": True})
+        except Exception as e:
+            logger.error(f"A2A tool execution error: {e}")
+            return MCPResponse(request_id=request_id,
+                               error={"message": str(e), "retryable": True})
 
     async def _get_delegation_token(self, websocket, agent_id: str, user_id: str) -> Optional[str]:
         """Generate an RFC 8693 delegation token scoped to safe, allowed tools.
@@ -1769,8 +2020,11 @@ CRITICAL RULES:
                     continue
                 allowed_tools.append(skill.id)
 
+            # Get enabled scope names for the delegation token
+            enabled_scopes = self.tool_permissions.get_enabled_scope_names(user_id, agent_id)
+
             result = await self.delegation.exchange_token_for_agent(
-                raw_token, agent_id, allowed_tools, user_id
+                raw_token, agent_id, allowed_tools, user_id, enabled_scopes
             )
             if "error" in result:
                 logger.warning(f"Delegation token exchange failed for agent={agent_id}: {result}")
@@ -1835,6 +2089,8 @@ CRITICAL RULES:
         agent_list = []
         for agent_id, card in self.agent_cards.items():
             available_tools = [s.id for s in card.skills]
+            scopes = self.tool_permissions.get_agent_scopes(user_id, agent_id)
+            tool_scope_map = self.tool_permissions.get_tool_scope_map(agent_id)
             permissions = self.tool_permissions.get_effective_permissions(
                 user_id, agent_id, available_tools
             )
@@ -1845,6 +2101,8 @@ CRITICAL RULES:
                 "description": card.description,
                 "tools": available_tools,
                 "tool_descriptions": {s.id: s.description for s in card.skills},
+                "scopes": scopes,
+                "tool_scope_map": tool_scope_map,
                 "permissions": permissions,
                 "security_flags": self.security_flags.get(agent_id, {}),
                 "status": "connected",
@@ -1878,6 +2136,8 @@ CRITICAL RULES:
         agents = []
         for agent_id, card in self.agent_cards.items():
             available_tools = [s.id for s in card.skills]
+            scopes = self.tool_permissions.get_agent_scopes(user_id, agent_id)
+            tool_scope_map = self.tool_permissions.get_tool_scope_map(agent_id)
             permissions = self.tool_permissions.get_effective_permissions(
                 user_id, agent_id, available_tools
             )
@@ -1887,6 +2147,8 @@ CRITICAL RULES:
                 "name": card.name,
                 "description": card.description,
                 "tools": [{"name": s.id, "description": s.description} for s in card.skills],
+                "scopes": scopes,
+                "tool_scope_map": tool_scope_map,
                 "permissions": permissions,
                 "security_flags": self.security_flags.get(agent_id, {}),
                 "status": "connected",
@@ -2012,11 +2274,31 @@ CRITICAL RULES:
         app.include_router(dashboard_router)
         app.include_router(auth_router)
 
+        # Mount A2A JSON-RPC server (orchestrator as A2A agent)
+        try:
+            from orchestrator.a2a_orchestrator_executor import setup_orchestrator_a2a
+            setup_orchestrator_a2a(app, self)
+            logger.info(f"A2A JSON-RPC endpoint mounted at /a2a/")
+        except Exception as e:
+            logger.warning(f"A2A server setup skipped: {e}")
+
+        # Discover external A2A agents from env var
+        external_agents = os.getenv("A2A_EXTERNAL_AGENTS", "")
+        if external_agents:
+            async def _discover_external():
+                await asyncio.sleep(3)  # Wait for server to start
+                for url in external_agents.split(","):
+                    url = url.strip()
+                    if url:
+                        await self.discover_a2a_agent(url)
+            asyncio.create_task(_discover_external())
+
         # Start combined server
         config = uvicorn.Config(app, host="0.0.0.0", port=PORT, log_level="info")
         server = uvicorn.Server(config)
         logger.info(f"Consolidated server (Gateway) listening on http://0.0.0.0:{PORT}")
         logger.info(f"API docs available at http://localhost:{PORT}/docs")
+        logger.info(f"A2A endpoint: http://localhost:{PORT}/a2a/")
         await server.serve()
 
     async def _monitor_agents(self, start_port: int, max_ports: int = 10):

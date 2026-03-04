@@ -89,6 +89,7 @@ class AgentSkill:
     input_schema: Optional[Dict[str, Any]] = None
     output_schema: Optional[Dict[str, Any]] = None
     tags: List[str] = field(default_factory=list)
+    scope: str = ""  # Required scope: "tools:read", "tools:write", "tools:search", "tools:system"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -117,7 +118,8 @@ class AgentCard:
             "version": self.version,
             "skills": [
                 {"id": s.id, "name": s.name, "description": s.description,
-                 "input_schema": s.input_schema, "tags": s.tags}
+                 "input_schema": s.input_schema, "tags": s.tags,
+                 "scope": s.scope}
                 for s in self.skills
             ] if self.skills else []
         }

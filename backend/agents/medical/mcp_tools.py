@@ -344,6 +344,7 @@ def analyze_csv_file(file_path: str, missing_strategy: str = 'ask', session_id: 
 TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     "search_patients": {
         "function": search_patients,
+        "scope": "tools:read",
         "description": "Search patients by age range and/or condition. Returns a table of matching patients with status metrics.",
         "input_schema": {
             "type": "object",
@@ -356,6 +357,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "generate_synthetic_patients": {
         "function": generate_synthetic_patients,
+        "scope": "tools:write",
         "description": "Generate mock synthetic patient data and provide a FileDownload UI component.",
         "input_schema": {
             "type": "object",
@@ -366,6 +368,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "analyze_patient_data": {
         "function": analyze_patient_data,
+        "scope": "tools:read",
         "description": "Request a patient dataset upload using the FileUpload UI component. Use this ONLY if the user hasn't provided data yet.",
         "input_schema": {
             "type": "object",
@@ -374,6 +377,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "analyze_generic_data": {
         "function": analyze_generic_data,
+        "scope": "tools:read",
         "description": "Analyze generic CSV data and compute statistics. MUST BE USED for ANY CSV data provided by the user, regardless of column names! Do NOT enforce strict patient data columns.",
         "input_schema": {
             "type": "object",
@@ -386,6 +390,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "analyze_csv_file": {
         "function": analyze_csv_file,
+        "scope": "tools:read",
         "description": "Analyze a CSV file stored on the backend. USE THIS for LARGE CSV files that are already uploaded. Provide the absolute file_path.",
         "input_schema": {
             "type": "object",

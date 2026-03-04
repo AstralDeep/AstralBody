@@ -1,14 +1,17 @@
 import asyncio
 import json
-import websockets
+import os
 import sys
+import pytest
+
+import websockets
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # Define the complex query
 QUERY = "search all the patients, graph their age, then do an arxiv search about the main disease in this patient population, then give me the system stats (cpu, memory, storage, all of it)"
-URI = f"ws://localhost:{os.getenv('ORCHESTRATOR_PORT')}"
+URI = f"ws://localhost:{os.getenv('ORCHESTRATOR_PORT', '8000')}"
 
 # Helper to print to both stdout and file
 log_file = open("verification_log.txt", "w", encoding="utf-8")
@@ -18,6 +21,8 @@ def log(msg):
     log_file.write(msg + "\n")
     log_file.flush()
 
+@pytest.mark.asyncio
+@pytest.mark.integration
 async def test_flow():
     log(f"Connecting to {URI}...")
     try:

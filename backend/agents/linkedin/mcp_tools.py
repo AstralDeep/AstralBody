@@ -757,6 +757,7 @@ def suggest_engagement_actions(
 TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     "get_my_profile": {
         "function": get_my_profile,
+        "scope": "tools:read",
         "description": (
             "Show the authenticated LinkedIn user's profile — name, email, "
             "member ID, and linked organization. Useful for verifying the "
@@ -770,6 +771,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "publish_post": {
         "function": publish_post,
+        "scope": "tools:write",
         "description": (
             "Publish a LinkedIn post as the authenticated user. Supports "
             "plain-text posts and article shares with commentary. Use "
@@ -810,6 +812,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "react_to_post": {
         "function": react_to_post,
+        "scope": "tools:write",
         "description": (
             "React to a LinkedIn post. Reaction types: LIKE, PRAISE (Celebrate), "
             "EMPATHY (Support), INTEREST (Curious), ENTERTAINMENT (Funny), "
@@ -834,6 +837,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "comment_on_post": {
         "function": comment_on_post,
+        "scope": "tools:write",
         "description": (
             "Add a comment to a LinkedIn post as the authenticated user. "
             "Requires the post URN and comment text."
@@ -855,6 +859,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "draft_linkedin_post": {
         "function": draft_linkedin_post,
+        "scope": "tools:read",
         "description": (
             "Draft a LinkedIn post using CAAI content frames and brand voice. "
             "Generates Standard, Concise, and Bold variations with a checklist. "
@@ -892,6 +897,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "get_content_suggestions": {
         "function": get_content_suggestions,
+        "scope": "tools:read",
         "description": (
             "Generate content ideas using CAAI content frames: Thought Leadership, "
             "Empowering the Next Generation, Project Showcase, Partnership & Collaboration, "
@@ -921,6 +927,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "suggest_engagement_actions": {
         "function": suggest_engagement_actions,
+        "scope": "tools:read",
         "description": (
             "Get actionable recommendations to grow LinkedIn presence — "
             "Quick Wins, Weekly Actions, Strategic initiatives, and a "

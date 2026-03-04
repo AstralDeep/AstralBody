@@ -1976,6 +1976,7 @@ def lookup_forms_templates(
 TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     "analyze_cover_letter": {
         "function": analyze_cover_letter,
+        "scope": "tools:read",
         "description": (
             "Securely analyze a grant cover letter to extract budget-relevant "
             "signals. Identifies personnel needs, equipment, travel, computing, "
@@ -2005,6 +2006,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "suggest_budget_items": {
         "function": suggest_budget_items,
+        "scope": "tools:read",
         "description": (
             "Suggest categorized budget line items based on project parameters. "
             "Returns items organized by CGS/PAPPG categories (A-J) with typical "
@@ -2059,6 +2061,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "calculate_salary_fte": {
         "function": calculate_salary_fte,
+        "scope": "tools:read",
         "description": (
             "Calculate salary and FTE costs for project personnel. Handles "
             "academic-year (9-month) and calendar-year (12-month) appointments, "
@@ -2098,6 +2101,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "calculate_travel_costs": {
         "function": calculate_travel_costs,
+        "scope": "tools:read",
         "description": (
             "Estimate travel costs for a grant budget. Calculates per-trip costs "
             "using airfare estimates and GSA per diem rates (defaults provided). "
@@ -2137,6 +2141,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "estimate_equipment_costs": {
         "function": estimate_equipment_costs,
+        "scope": "tools:read",
         "description": (
             "Estimate and classify equipment vs. supply costs. Items at or above "
             "the federal threshold ($5,000) are classified as equipment and "
@@ -2171,6 +2176,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "calculate_fa_costs": {
         "function": calculate_fa_costs,
+        "scope": "tools:read",
         "description": (
             "Calculate Facilities & Administrative (indirect) costs on the MTDC base. "
             "Automatically excludes equipment, participant support, tuition, and "
@@ -2207,6 +2213,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "generate_cgs_budget": {
         "function": generate_cgs_budget,
+        "scope": "tools:write",
         "description": (
             "Generate a full CGS-templated budget with year-by-year breakdown "
             "and cumulative totals. Outputs standard budget categories A-J with "
@@ -2251,6 +2258,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "get_budget_guidelines": {
         "function": get_budget_guidelines,
+        "scope": "tools:read",
         "description": (
             "Return budget rules and guidelines from the knowledge base. "
             "Covers NSF PAPPG rules, NIH salary caps/modular budgets, "
@@ -2281,6 +2289,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
 
     "search_research_admin": {
         "function": search_research_admin,
+        "scope": "tools:search",
         "description": (
             "Search across UKy OSPA, CGS, and PDO policies, forms, processes, "
             "and institutional information. The primary Q&A tool for UKy research "
@@ -2312,6 +2321,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "find_office_contact": {
         "function": find_office_contact,
+        "scope": "tools:read",
         "description": (
             "Route a research admin question to the correct UKy office (OSPA, CGS, or PDO). "
             "Answers: 'Who do I contact about budget development?' → CGS. "
@@ -2333,6 +2343,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "calculate_submission_deadlines": {
         "function": calculate_submission_deadlines,
+        "scope": "tools:read",
         "description": (
             "Calculate cascading internal deadlines given a sponsor submission deadline. "
             "Computes PIF (30 business days), college IAF (5-14 business days before OSPA), "
@@ -2356,6 +2367,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "get_institutional_info": {
         "function": get_institutional_info,
+        "scope": "tools:read",
         "description": (
             "Quick lookup for UKy institutional boilerplate: DUNS, UEI, EIN, CAGE code, "
             "F&A rates, institutional address, AOR info, Cayuse details. "
@@ -2375,6 +2387,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "lookup_forms_templates": {
         "function": lookup_forms_templates,
+        "scope": "tools:read",
         "description": (
             "Find specific forms, templates, and resources from UKy OSPA, CGS, and PDO. "
             "Search by keyword or filter by office. Returns form names, purposes, "

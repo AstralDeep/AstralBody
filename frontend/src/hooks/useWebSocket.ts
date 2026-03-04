@@ -29,6 +29,8 @@ export interface Agent {
     description?: string;
     tools: string[];
     tool_descriptions?: Record<string, string>;
+    scopes?: Record<string, boolean>;
+    tool_scope_map?: Record<string, string>;
     permissions?: Record<string, boolean>;
     security_flags?: Record<string, SecurityFlag>;
     metadata?: AgentMetadata;
@@ -62,6 +64,8 @@ export interface ChatStatus {
 export interface AgentPermissionsData {
     agent_id: string;
     agent_name: string;
+    scopes: Record<string, boolean>;
+    tool_scope_map: Record<string, string>;
     permissions: Record<string, boolean>;
     tool_descriptions: Record<string, string>;
     security_flags?: Record<string, SecurityFlag>;
@@ -196,6 +200,8 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                         description: (data.description as string) || undefined,
                         tools: (data.tools as string[]) || [],
                         tool_descriptions: (data.tool_descriptions as Record<string, string>) || undefined,
+                        scopes: (data.scopes as Record<string, boolean>) || undefined,
+                        tool_scope_map: (data.tool_scope_map as Record<string, string>) || undefined,
                         permissions: (data.permissions as Record<string, boolean>) || undefined,
                         security_flags: (data.security_flags as Record<string, SecurityFlag>) || undefined,
                         metadata: (data.metadata as AgentMetadata) || undefined,
@@ -353,16 +359,24 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                 break;
 
             case "agent_permissions_updated":
-                // Update permissions in local state and also update the agent's permissions in the agents array
-                if (data.agent_id && data.permissions) {
+                // Update scopes and derived permissions in local state
+                if (data.agent_id) {
                     setAgents(prev => prev.map(a =>
                         a.id === data.agent_id
-                            ? { ...a, permissions: data.permissions as Record<string, boolean> }
+                            ? {
+                                ...a,
+                                scopes: (data.scopes as Record<string, boolean>) || a.scopes,
+                                permissions: (data.permissions as Record<string, boolean>) || a.permissions,
+                            }
                             : a
                     ));
                     setAgentPermissions(prev =>
                         prev && prev.agent_id === data.agent_id
-                            ? { ...prev, permissions: data.permissions as Record<string, boolean> }
+                            ? {
+                                ...prev,
+                                scopes: (data.scopes as Record<string, boolean>) || prev.scopes,
+                                permissions: (data.permissions as Record<string, boolean>) || prev.permissions,
+                            }
                             : prev
                     );
                 }
@@ -592,6 +606,15 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         }));
     }, []);
 
+    const registerExternalAgent = useCallback((url: string) => {
+        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+        wsRef.current.send(JSON.stringify({
+            type: "ui_event",
+            action: "register_external_agent",
+            payload: { url }
+        }));
+    }, []);
+
     // Saved components functions
     const saveComponent = useCallback(async (componentData: Record<string, unknown>, componentType: string, title?: string): Promise<boolean> => {
         // console.log('saveComponent called:', { componentType, title, wsRefCurrent: wsRef.current, wsReadyState: wsRef.current?.readyState, activeChatId, timestamp: new Date().toISOString() });
@@ -696,12 +719,12 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         }));
     }, []);
 
-    const setAgentPermissionsAction = useCallback((agentId: string, permissions: Record<string, boolean>) => {
+    const setAgentPermissionsAction = useCallback((agentId: string, scopes: Record<string, boolean>) => {
         if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
         wsRef.current.send(JSON.stringify({
             type: "ui_event",
             action: "set_agent_permissions",
-            payload: { agent_id: agentId, permissions }
+            payload: { agent_id: agentId, scopes }
         }));
     }, []);
 
@@ -927,6 +950,7 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         sendMessage,
         cancelTask,
         discoverAgents,
+        registerExternalAgent,
         activeChatId,
         chatHistory,
         loadChat,

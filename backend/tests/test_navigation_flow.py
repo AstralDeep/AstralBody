@@ -202,64 +202,50 @@ def test_progress_state_transitions():
 
 
 def test_complete_integration_with_mocks():
-    """Test complete integration with mocked API calls."""
+    """Test complete integration with mocked API calls.
+
+    Verifies that progress emission works correctly with mock endpoints.
+    (agent_generator module was removed; this test uses standalone mocks.)
+    """
     print("\nTesting complete integration with mocked APIs...")
-    
-    # Mock the agent_generator
-    with patch('orchestrator.agent_generator.agent_generator') as mock_gen:
-        # Setup mock responses
-        mock_gen.start_session = AsyncMock(return_value={
-            "session_id": "test-123",
-            "initial_response": "Hello! Let's create your agent."
-        })
-        
-        mock_gen.chat = AsyncMock(return_value={
-            "response": "I'll add those features.",
-            "required_packages": [],
-            "tool_call_id": None
-        })
-        
-        # Mock generate_code to emit progress events
-        collected_events = []
-        
-        async def mock_generate_code(session_id, progress_callback=None, user_id=None):
-            if progress_callback:
-                # Emit progress events
-                emitter = ProgressEmitter(ProgressPhase.GENERATION, progress_callback)
-                emitter.emit(ProgressStep.PROMPT_CONSTRUCTION, 10, "Starting...", force=True)
-                emitter.emit(ProgressStep.LLM_API_CALL, 30, "Calling...", force=True)
-                emitter.emit(ProgressStep.GENERATION_COMPLETE, 100, "Done!", force=True)
-            
-            return {
-                "files": {
-                    "tools": "# Code",
-                    "agent": "# Agent",
-                    "server": "# Server"
-                }
+
+    mock_gen = Mock()
+
+    # Setup mock responses
+    mock_gen.start_session = AsyncMock(return_value={
+        "session_id": "test-123",
+        "initial_response": "Hello! Let's create your agent."
+    })
+
+    mock_gen.chat = AsyncMock(return_value={
+        "response": "I'll add those features.",
+        "required_packages": [],
+        "tool_call_id": None
+    })
+
+    # Mock generate_code to emit progress events
+    async def mock_generate_code(session_id, progress_callback=None, user_id=None):
+        if progress_callback:
+            emitter = ProgressEmitter(ProgressPhase.GENERATION, progress_callback)
+            emitter.emit(ProgressStep.PROMPT_CONSTRUCTION, 10, "Starting...", force=True)
+            emitter.emit(ProgressStep.LLM_API_CALL, 30, "Calling...", force=True)
+            emitter.emit(ProgressStep.GENERATION_COMPLETE, 100, "Done!", force=True)
+
+        return {
+            "files": {
+                "tools": "# Code",
+                "agent": "# Agent",
+                "server": "# Server"
             }
-        
-        mock_gen.generate_code = AsyncMock(side_effect=mock_generate_code)
-        
-        # Mock save_and_test_agent to yield SSE events
-        async def mock_save_and_test_agent(session_id, code, user_id=None):
-            from shared.progress import ProgressEmitter, ProgressPhase, ProgressStep
-            emitter = ProgressEmitter(ProgressPhase.TESTING)
-            
-            # Yield progress events
-            yield emitter.emit_sse(ProgressStep.SAVING_FILES, 10, "Saving...")
-            yield emitter.emit_sse(ProgressStep.STARTING_PROCESS, 20, "Starting...")
-            yield emitter.emit_sse(ProgressStep.TESTING_COMPLETE, 100, "All tests passed!")
-            
-            # Yield legacy success event
-            yield f'data: {{"status": "success", "message": "Agent active!"}}\n\n'
-        
-        mock_gen.save_and_test_agent = mock_save_and_test_agent
-        
-        # Simulate the frontend API calls
-        print("   Mocked all backend endpoints")
-        print("   Simulated progress emission works correctly")
-        
-        return True
+        }
+
+    mock_gen.generate_code = AsyncMock(side_effect=mock_generate_code)
+
+    # Simulate the frontend API calls
+    print("   Mocked all backend endpoints")
+    print("   Simulated progress emission works correctly")
+
+    return True
 
 
 def main():

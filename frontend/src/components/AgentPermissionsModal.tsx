@@ -1,12 +1,15 @@
 /**
- * AgentPermissionsModal — Per-agent tool authorization management.
+ * AgentPermissionsModal -- Scope-based agent authorization management.
  *
- * Displays a modal overlay with toggleable permission switches for each
- * tool registered by a connected agent. Part of the RFC 8693 delegated
- * authorization framework.
+ * Displays a modal overlay with scope toggle cards (read, write, search,
+ * system) instead of individual per-tool switches.  Each scope card is
+ * expandable to show which tools fall under it, and toggling a scope ON
+ * triggers a confirmation dialog explaining what the scope grants.
+ *
+ * Part of the RFC 8693 delegated authorization framework.
  *
  * When an agent declares required_credentials in its metadata, the modal
- * shows a credentials section. Tools are locked until all required
+ * shows a credentials section.  Tools are locked until all required
  * credentials are provided.
  */
 import React, { useState, useEffect, useCallback } from "react";
@@ -22,7 +25,6 @@ import {
     Pencil,
     Search,
     Cpu,
-    BarChart3,
     Save,
     Loader2,
     KeyRound,
@@ -34,33 +36,14 @@ import {
     Linkedin,
     Globe,
     ArrowLeft,
+    ChevronDown,
 } from "lucide-react";
 import { API_URL } from "../config";
 import type { RequiredCredential } from "../hooks/useWebSocket";
 
-/**
- * Tool metadata for display — categories and risk levels.
- */
-const TOOL_META: Record<string, { category: string; risk: "read" | "write"; icon: React.ReactNode }> = {
-    generate_dynamic_chart: { category: "Data", risk: "read", icon: <BarChart3 size={14} /> },
-    modify_data: { category: "Data", risk: "write", icon: <Pencil size={14} /> },
-    get_system_status: { category: "System", risk: "read", icon: <Cpu size={14} /> },
-    get_cpu_info: { category: "System", risk: "read", icon: <Cpu size={14} /> },
-    get_memory_info: { category: "System", risk: "read", icon: <Cpu size={14} /> },
-    get_disk_info: { category: "System", risk: "read", icon: <Cpu size={14} /> },
-    search_wikipedia: { category: "Search", risk: "read", icon: <Search size={14} /> },
-    search_arxiv: { category: "Search", risk: "read", icon: <Search size={14} /> },
-};
-
-function getToolMeta(toolName: string) {
-    return TOOL_META[toolName] || { category: "Other", risk: "read" as const, icon: <Eye size={14} /> };
-}
-
-function formatToolName(name: string): string {
-    return name
-        .replace(/_/g, " ")
-        .replace(/\b\w/g, (c) => c.toUpperCase());
-}
+/* ------------------------------------------------------------------ */
+/*  Types                                                              */
+/* ------------------------------------------------------------------ */
 
 interface SecurityFlagInfo {
     category: string;
@@ -78,16 +61,95 @@ const SECURITY_CATEGORY_LABELS: Record<string, string> = {
     NETWORK_MANIPULATION: "Network Access Risk",
 };
 
+/* ------------------------------------------------------------------ */
+/*  Scope metadata                                                     */
+/* ------------------------------------------------------------------ */
+
+interface ScopeMeta {
+    key: string;
+    label: string;
+    description: string;
+    icon: React.ReactNode;
+    warning: string;
+    color: string;          // tailwind color stem, e.g. "green"
+    colorClass: string;     // text color class
+    bgClass: string;        // bg tint class
+}
+
+const SCOPE_DEFINITIONS: ScopeMeta[] = [
+    {
+        key: "tools:read",
+        label: "Read",
+        description: "View data, files, profiles, and analytics",
+        icon: <Eye size={16} />,
+        warning:
+            "This agent will be able to read your data, including files, profiles, and analytics. It can view but not modify your information.",
+        color: "green",
+        colorClass: "text-green-400",
+        bgClass: "bg-green-500",
+    },
+    {
+        key: "tools:write",
+        label: "Write",
+        description: "Create, modify, and delete data on your behalf",
+        icon: <Pencil size={16} />,
+        warning:
+            "This agent will be able to create, modify, and delete data on your behalf. This includes writing files, posting to external services (e.g., LinkedIn), and updating settings.",
+        color: "amber",
+        colorClass: "text-amber-400",
+        bgClass: "bg-amber-500",
+    },
+    {
+        key: "tools:search",
+        label: "Search",
+        description: "Query external APIs, databases, and web search",
+        icon: <Search size={16} />,
+        warning:
+            "This agent will be able to query external APIs and databases, including academic databases, grant repositories, and web search engines. Search queries may be sent to third-party services.",
+        color: "blue",
+        colorClass: "text-blue-400",
+        bgClass: "bg-blue-500",
+    },
+    {
+        key: "tools:system",
+        label: "System",
+        description: "Access CPU, memory, disk, and server environment info",
+        icon: <Cpu size={16} />,
+        warning:
+            "This agent will be able to access system resources including CPU usage, memory information, and disk status. This reveals details about the server environment.",
+        color: "purple",
+        colorClass: "text-purple-400",
+        bgClass: "bg-purple-500",
+    },
+];
+
+/* ------------------------------------------------------------------ */
+/*  Helpers                                                            */
+/* ------------------------------------------------------------------ */
+
+function formatToolName(name: string): string {
+    return name
+        .replace(/_/g, " ")
+        .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/* ------------------------------------------------------------------ */
+/*  Props                                                              */
+/* ------------------------------------------------------------------ */
+
 interface AgentPermissionsModalProps {
     isOpen: boolean;
     onClose: () => void;
     agentId: string;
     agentName: string;
     agentDescription?: string;
+    // Scope-based permissions
+    scopes?: Record<string, boolean>;
+    toolScopeMap?: Record<string, string>;
     permissions: Record<string, boolean>;
     toolDescriptions: Record<string, string>;
     securityFlags?: Record<string, SecurityFlagInfo>;
-    onSave: (agentId: string, permissions: Record<string, boolean>) => void;
+    onSave: (agentId: string, scopes: Record<string, boolean>) => void;
     // Credential management
     requiredCredentials?: RequiredCredential[];
     storedCredentialKeys?: string[];
@@ -102,13 +164,19 @@ interface AgentPermissionsModalProps {
     onBack?: () => void;
 }
 
+/* ------------------------------------------------------------------ */
+/*  Component                                                          */
+/* ------------------------------------------------------------------ */
+
 export default function AgentPermissionsModal({
     isOpen,
     onClose,
     agentId,
     agentName,
     agentDescription,
-    permissions: initialPermissions,
+    scopes: initialScopes,
+    toolScopeMap = {},
+    permissions,
     toolDescriptions,
     securityFlags,
     onSave,
@@ -122,9 +190,36 @@ export default function AgentPermissionsModal({
     onSetVisibility,
     onBack,
 }: AgentPermissionsModalProps) {
-    const [localPermissions, setLocalPermissions] = useState<Record<string, boolean>>({});
+
+    /* ---------- Derive initial scopes from props ---------- */
+
+    const deriveScopes = useCallback((): Record<string, boolean> => {
+        if (initialScopes) return { ...initialScopes };
+        // Fallback: infer scopes from per-tool permissions + toolScopeMap
+        const inferred: Record<string, boolean> = {};
+        for (const def of SCOPE_DEFINITIONS) {
+            inferred[def.key] = false;
+        }
+        for (const [tool, enabled] of Object.entries(permissions)) {
+            const scope = toolScopeMap[tool];
+            if (scope && enabled) {
+                inferred[scope] = true;
+            }
+        }
+        return inferred;
+    }, [initialScopes, permissions, toolScopeMap]);
+
+    /* ---------- State ---------- */
+
+    const [localScopes, setLocalScopes] = useState<Record<string, boolean>>({});
     const [saving, setSaving] = useState(false);
     const [hasChanges, setHasChanges] = useState(false);
+
+    // Which scope cards are expanded
+    const [expandedScopes, setExpandedScopes] = useState<Record<string, boolean>>({});
+
+    // Scope warning confirmation dialog
+    const [pendingScopeToggle, setPendingScopeToggle] = useState<ScopeMeta | null>(null);
 
     // Credential state
     const [credentialValues, setCredentialValues] = useState<Record<string, string>>({});
@@ -145,7 +240,7 @@ export default function AgentPermissionsModal({
     const credentialsComplete = missingCredentials.length === 0;
     const needsCredentials = hasRequiredCredentials && !credentialsComplete;
 
-    // Check if this agent needs OAuth (has client_id/secret type credentials)
+    // LinkedIn OAuth helpers
     const hasClientIdStored = storedCredentialKeys.includes("LINKEDIN_CLIENT_ID");
     const hasClientSecretStored = storedCredentialKeys.includes("LINKEDIN_CLIENT_SECRET");
     const hasAccessToken = storedCredentialKeys.includes("LINKEDIN_ACCESS_TOKEN");
@@ -180,24 +275,26 @@ export default function AgentPermissionsModal({
         }
     }, [agentId, hasAccessToken]);
 
-    // Sync local state when modal opens or permissions change
+    /* ---------- Effects ---------- */
+
+    // Sync local state when modal opens or props change
     useEffect(() => {
         if (isOpen) {
-            setLocalPermissions({ ...initialPermissions });
+            setLocalScopes(deriveScopes());
             setHasChanges(false);
             setSaving(false);
+            setExpandedScopes({});
+            setPendingScopeToggle(null);
             setCredentialValues({});
             setSavingCredentials(false);
             setDeletingKey(null);
             setOauthStatus(null);
             setLocalIsPublic(initialIsPublic);
             setShowPublicWarning(false);
-            // Auto-show credential form if credentials are missing
             setShowCredentialForm(!credentialsComplete && !!hasRequiredCredentials);
-            // Fetch OAuth status if token exists
             fetchOAuthStatus();
         }
-    }, [isOpen, initialPermissions, initialIsPublic, credentialsComplete, hasRequiredCredentials, fetchOAuthStatus]);
+    }, [isOpen, deriveScopes, initialIsPublic, credentialsComplete, hasRequiredCredentials, fetchOAuthStatus]);
 
     // Close on Escape key
     useEffect(() => {
@@ -209,30 +306,69 @@ export default function AgentPermissionsModal({
         return () => document.removeEventListener("keydown", handleKeyDown);
     }, [isOpen, onClose]);
 
-    const toggleTool = (toolName: string) => {
-        if (needsCredentials) return; // Can't toggle when credentials missing
-        setLocalPermissions((prev) => {
-            const updated = { ...prev, [toolName]: !prev[toolName] };
-            const changed = Object.keys(updated).some(
-                (k) => updated[k] !== initialPermissions[k]
-            );
+    /* ---------- Scope helpers ---------- */
+
+    /** Group tools by their scope for display */
+    const toolsByScope: Record<string, string[]> = {};
+    for (const def of SCOPE_DEFINITIONS) {
+        toolsByScope[def.key] = [];
+    }
+    for (const [tool] of Object.entries(permissions)) {
+        const scope = toolScopeMap[tool];
+        if (scope && toolsByScope[scope]) {
+            toolsByScope[scope].push(tool);
+        }
+    }
+
+    const enabledScopeCount = SCOPE_DEFINITIONS.filter(d => localScopes[d.key]).length;
+
+    const requestScopeToggle = (scopeDef: ScopeMeta) => {
+        if (needsCredentials) return;
+        if (!localScopes[scopeDef.key]) {
+            // Turning ON -- show warning first
+            setPendingScopeToggle(scopeDef);
+        } else {
+            // Turning OFF -- no confirmation needed
+            applyScopeToggle(scopeDef.key, false);
+        }
+    };
+
+    const applyScopeToggle = (scopeKey: string, value: boolean) => {
+        setLocalScopes(prev => {
+            const updated = { ...prev, [scopeKey]: value };
+            const baseline = deriveScopes();
+            const changed = Object.keys(updated).some(k => updated[k] !== baseline[k]);
             setHasChanges(changed);
             return updated;
         });
     };
 
+    const confirmScopeToggle = () => {
+        if (pendingScopeToggle) {
+            applyScopeToggle(pendingScopeToggle.key, true);
+            setPendingScopeToggle(null);
+        }
+    };
+
+    const toggleExpanded = (scopeKey: string) => {
+        setExpandedScopes(prev => ({ ...prev, [scopeKey]: !prev[scopeKey] }));
+    };
+
+    /* ---------- Save ---------- */
+
     const handleSave = () => {
         setSaving(true);
-        onSave(agentId, localPermissions);
+        onSave(agentId, localScopes);
         setTimeout(() => {
             setSaving(false);
             onClose();
         }, 300);
     };
 
+    /* ---------- Credential handlers ---------- */
+
     const handleSaveCredentials = async () => {
         if (!onSaveCredentials) return;
-        // Filter out empty values
         const toSave: Record<string, string> = {};
         for (const [k, v] of Object.entries(credentialValues)) {
             if (v.trim()) toSave[k] = v.trim();
@@ -260,16 +396,15 @@ export default function AgentPermissionsModal({
         setAuthorizing(true);
         await onStartOAuth(agentId);
         setAuthorizing(false);
-        // Refresh OAuth status after authorization attempt
         setTimeout(() => fetchOAuthStatus(), 500);
     };
 
+    /* ---------- Visibility handlers ---------- */
+
     const handleVisibilityToggle = () => {
         if (localIsPublic) {
-            // Making private — no warning needed
             confirmVisibilityChange(false);
         } else {
-            // Making public — show warning
             setShowPublicWarning(true);
         }
     };
@@ -285,29 +420,11 @@ export default function AgentPermissionsModal({
         }
     };
 
-    const systemBlockedCount = Object.keys(securityFlags || {}).filter(
-        t => securityFlags?.[t]?.blocked
-    ).length;
-    const enabledCount = Object.entries(localPermissions).filter(
-        ([name, v]) => v && !(securityFlags?.[name]?.blocked)
-    ).length;
-    const totalCount = Object.keys(localPermissions).length;
-
-    // Group tools by category
-    const grouped: Record<string, string[]> = {};
-    for (const tool of Object.keys(localPermissions)) {
-        const { category } = getToolMeta(tool);
-        if (!grouped[category]) grouped[category] = [];
-        grouped[category].push(tool);
-    }
-
-    const categoryOrder = ["Data", "System", "Search", "Other"];
-    const sortedCategories = Object.keys(grouped).sort(
-        (a, b) => (categoryOrder.indexOf(a) === -1 ? 99 : categoryOrder.indexOf(a))
-            - (categoryOrder.indexOf(b) === -1 ? 99 : categoryOrder.indexOf(b))
-    );
-
     const hasCredentialInputValues = Object.values(credentialValues).some(v => v.trim().length > 0);
+
+    /* ================================================================ */
+    /*  Render                                                          */
+    /* ================================================================ */
 
     return (
         <AnimatePresence>
@@ -318,13 +435,13 @@ export default function AgentPermissionsModal({
                         animate={{ opacity: 1, scale: 1, y: 0 }}
                         exit={{ opacity: 0, scale: 0.95, y: 10 }}
                         transition={{ duration: 0.2 }}
-                        className="bg-astral-surface border border-white/10 rounded-xl shadow-2xl w-full max-w-lg mx-4 overflow-hidden"
+                        className="bg-astral-surface border border-white/10 rounded-xl shadow-2xl w-full max-w-lg mx-4 overflow-hidden relative"
                         role="dialog"
                         aria-modal="true"
                         aria-label={`${agentName} permissions`}
                         onClick={(e) => e.stopPropagation()}
                     >
-                        {/* Header */}
+                        {/* ── Header ──────────────────────────────────── */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-white/5">
                             <div className="flex items-center gap-3">
                                 {onBack && (
@@ -344,10 +461,7 @@ export default function AgentPermissionsModal({
                                         {agentName}
                                     </h2>
                                     <p className="text-[11px] text-astral-muted">
-                                        {enabledCount}/{totalCount - systemBlockedCount} tools enabled
-                                        {systemBlockedCount > 0 && (
-                                            <span className="text-red-400"> &middot; {systemBlockedCount} blocked</span>
-                                        )}
+                                        {enabledScopeCount}/{SCOPE_DEFINITIONS.length} scopes enabled
                                         {needsCredentials && (
                                             <span className="text-amber-400"> &middot; credentials required</span>
                                         )}
@@ -362,7 +476,7 @@ export default function AgentPermissionsModal({
                             </button>
                         </div>
 
-                        {/* Agent Description */}
+                        {/* ── Agent Description ───────────────────────── */}
                         {agentDescription && (
                             <div className="px-6 pt-4 pb-0">
                                 <p className="text-xs text-astral-muted/80 leading-relaxed">
@@ -371,7 +485,7 @@ export default function AgentPermissionsModal({
                             </div>
                         )}
 
-                        {/* Public Warning Confirmation Modal */}
+                        {/* ── Public Warning Confirmation Modal ────────── */}
                         <AnimatePresence>
                             {showPublicWarning && (
                                 <motion.div
@@ -438,10 +552,60 @@ export default function AgentPermissionsModal({
                             )}
                         </AnimatePresence>
 
-                        {/* Scrollable Content */}
+                        {/* ── Scope Warning Confirmation Dialog ────────── */}
+                        <AnimatePresence>
+                            {pendingScopeToggle && (
+                                <motion.div
+                                    initial={{ opacity: 0 }}
+                                    animate={{ opacity: 1 }}
+                                    exit={{ opacity: 0 }}
+                                    className="absolute inset-0 z-10 flex items-center justify-center bg-black/70 backdrop-blur-sm rounded-xl"
+                                    onClick={() => setPendingScopeToggle(null)}
+                                >
+                                    <motion.div
+                                        initial={{ opacity: 0, scale: 0.95 }}
+                                        animate={{ opacity: 1, scale: 1 }}
+                                        exit={{ opacity: 0, scale: 0.95 }}
+                                        className="bg-astral-surface border border-amber-500/20 rounded-xl p-6 shadow-2xl max-w-sm mx-4"
+                                        onClick={(e) => e.stopPropagation()}
+                                    >
+                                        <div className="flex items-center gap-3 mb-3">
+                                            <div className={`w-10 h-10 rounded-lg ${pendingScopeToggle.bgClass}/15 flex items-center justify-center flex-shrink-0`}>
+                                                <AlertTriangle size={20} className="text-amber-400" />
+                                            </div>
+                                            <h3 className="text-sm font-semibold text-white">
+                                                Enable {pendingScopeToggle.label} Scope?
+                                            </h3>
+                                        </div>
+                                        <p className="text-xs text-astral-muted leading-relaxed mb-5">
+                                            {pendingScopeToggle.warning}
+                                        </p>
+                                        <div className="flex justify-end gap-2">
+                                            <button
+                                                onClick={() => setPendingScopeToggle(null)}
+                                                className="px-4 py-2 text-xs font-medium text-astral-muted hover:text-white hover:bg-white/5 rounded-lg transition-colors"
+                                            >
+                                                Cancel
+                                            </button>
+                                            <button
+                                                onClick={confirmScopeToggle}
+                                                className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-lg transition-colors
+                                                    ${pendingScopeToggle.colorClass} ${pendingScopeToggle.bgClass}/15 hover:${pendingScopeToggle.bgClass}/25
+                                                    border ${pendingScopeToggle.bgClass}/20`}
+                                            >
+                                                <ShieldCheck size={12} />
+                                                <span>Enable {pendingScopeToggle.label}</span>
+                                            </button>
+                                        </div>
+                                    </motion.div>
+                                </motion.div>
+                            )}
+                        </AnimatePresence>
+
+                        {/* ── Scrollable Content ──────────────────────── */}
                         <div className="px-6 py-4 max-h-[60vh] overflow-y-auto space-y-5">
 
-                            {/* ── Visibility Toggle (owner only) ─────────────── */}
+                            {/* ── Visibility Toggle (owner only) ─────────── */}
                             {isOwner && onSetVisibility && (
                                 <div>
                                     <p className="text-[10px] font-semibold uppercase tracking-widest text-astral-muted flex items-center gap-1.5 mb-2">
@@ -484,7 +648,7 @@ export default function AgentPermissionsModal({
                                 </div>
                             )}
 
-                            {/* ── Credentials Section ────────────────────────── */}
+                            {/* ── Credentials Section ────────────────────── */}
                             {hasRequiredCredentials && (
                                 <div>
                                     <div className="flex items-center justify-between mb-2">
@@ -596,7 +760,7 @@ export default function AgentPermissionsModal({
                                 </div>
                             )}
 
-                            {/* ── LinkedIn Connection Status ────────────────── */}
+                            {/* ── LinkedIn Connection Status ──────────────── */}
                             {canAuthorize && (
                                 <div>
                                     <p className="text-[10px] font-semibold uppercase tracking-widest text-astral-muted flex items-center gap-1.5 mb-2">
@@ -700,7 +864,7 @@ export default function AgentPermissionsModal({
                                 </div>
                             )}
 
-                            {/* ── Credential Lock Banner ─────────────────────── */}
+                            {/* ── Credential Lock Banner ─────────────────── */}
                             {needsCredentials && (
                                 <div className="flex items-center gap-2 px-3 py-2.5 rounded-lg bg-amber-500/[0.08] border border-amber-500/15">
                                     <Lock size={14} className="text-amber-400 flex-shrink-0" />
@@ -712,96 +876,147 @@ export default function AgentPermissionsModal({
                                 </div>
                             )}
 
-                            {/* ── Tool List ──────────────────────────────────── */}
+                            {/* ── Scope Cards ────────────────────────────── */}
                             <div className={needsCredentials ? "opacity-40 pointer-events-none select-none" : ""}>
-                                {sortedCategories.map((category) => (
-                                    <div key={category} className="mb-4 last:mb-0">
-                                        <p className="text-[10px] font-semibold uppercase tracking-widest text-astral-muted mb-2">
-                                            {category}
-                                        </p>
-                                        <div className="space-y-1">
-                                            {grouped[category].map((tool) => {
-                                                const meta = getToolMeta(tool);
-                                                const enabled = localPermissions[tool];
-                                                const flag = securityFlags?.[tool];
-                                                const isSystemBlocked = flag?.blocked === true;
-                                                return (
-                                                    <div
-                                                        key={tool}
-                                                        className={`flex items-center gap-3 px-3 py-2.5 rounded-lg transition-colors group
-                                                            ${isSystemBlocked
-                                                                ? "bg-red-500/[0.08] border border-red-500/20 cursor-not-allowed opacity-80"
-                                                                : enabled
-                                                                    ? "bg-white/[0.03] hover:bg-white/[0.06] cursor-pointer"
-                                                                    : "bg-white/[0.01] hover:bg-white/[0.03] opacity-60 cursor-pointer"}`}
-                                                        onClick={() => !isSystemBlocked && toggleTool(tool)}
-                                                    >
-                                                        {/* Icon */}
-                                                        <div className={`w-7 h-7 rounded-md flex items-center justify-center flex-shrink-0
-                                                            ${isSystemBlocked
-                                                                ? "bg-red-500/20 text-red-400"
-                                                                : enabled
-                                                                    ? "bg-astral-primary/15 text-astral-primary"
-                                                                    : "bg-white/5 text-astral-muted"}`}>
-                                                            {isSystemBlocked ? <ShieldAlert size={14} /> : meta.icon}
-                                                        </div>
+                                <p className="text-[10px] font-semibold uppercase tracking-widest text-astral-muted flex items-center gap-1.5 mb-3">
+                                    <Shield size={10} />
+                                    Permission Scopes
+                                </p>
 
-                                                        {/* Info */}
-                                                        <div className="flex-1 min-w-0">
-                                                            <div className="flex items-center gap-2">
-                                                                <p className={`text-xs font-medium truncate ${isSystemBlocked ? "text-red-300" : "text-white"}`}>
-                                                                    {formatToolName(tool)}
-                                                                </p>
-                                                                {isSystemBlocked ? (
-                                                                    <span className="text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded-full bg-red-500/20 text-red-400">
-                                                                        Blocked
-                                                                    </span>
-                                                                ) : (
-                                                                    <span className={`text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded-full
-                                                                        ${meta.risk === "write"
-                                                                            ? "bg-amber-500/15 text-amber-400"
-                                                                            : "bg-green-500/15 text-green-400"}`}>
-                                                                        {meta.risk === "write" ? "Write" : "Read"}
-                                                                    </span>
-                                                                )}
-                                                            </div>
-                                                            <p className="text-[10px] text-astral-muted truncate mt-0.5">
-                                                                {toolDescriptions[tool] || "No description available"}
+                                <div className="space-y-2">
+                                    {SCOPE_DEFINITIONS.map((scopeDef) => {
+                                        const enabled = !!localScopes[scopeDef.key];
+                                        const tools = toolsByScope[scopeDef.key] || [];
+                                        const expanded = !!expandedScopes[scopeDef.key];
+                                        const blockedTools = tools.filter(t => securityFlags?.[t]?.blocked);
+                                        const hasBlockedTools = blockedTools.length > 0;
+
+                                        return (
+                                            <div key={scopeDef.key}
+                                                className={`rounded-lg border overflow-hidden transition-colors
+                                                    ${enabled
+                                                        ? `${scopeDef.bgClass}/[0.06] border-${scopeDef.color}-500/15`
+                                                        : "bg-white/[0.02] border-white/5"}`}
+                                            >
+                                                {/* Scope card header */}
+                                                <div
+                                                    className="flex items-center gap-3 px-3 py-3 cursor-pointer"
+                                                    onClick={() => requestScopeToggle(scopeDef)}
+                                                >
+                                                    {/* Scope icon */}
+                                                    <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0
+                                                        ${enabled
+                                                            ? `${scopeDef.bgClass}/15 ${scopeDef.colorClass}`
+                                                            : "bg-white/5 text-astral-muted"}`}
+                                                    >
+                                                        {scopeDef.icon}
+                                                    </div>
+
+                                                    {/* Scope info */}
+                                                    <div className="flex-1 min-w-0">
+                                                        <div className="flex items-center gap-2">
+                                                            <p className="text-xs font-medium text-white">
+                                                                {scopeDef.label}
                                                             </p>
-                                                            {isSystemBlocked && flag && (
-                                                                <div className="flex items-center gap-1 mt-1">
-                                                                    <AlertTriangle size={10} className="text-red-400 flex-shrink-0" />
-                                                                    <p className="text-[9px] text-red-400/80">
-                                                                        <span className="font-medium">{SECURITY_CATEGORY_LABELS[flag.category] || flag.category}</span>
-                                                                        {" — "}{flag.reason}
-                                                                    </p>
-                                                                </div>
+                                                            {hasBlockedTools && (
+                                                                <span className="text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded-full bg-red-500/15 text-red-400">
+                                                                    {blockedTools.length} blocked
+                                                                </span>
                                                             )}
                                                         </div>
+                                                        <p className="text-[10px] text-astral-muted mt-0.5">
+                                                            {scopeDef.description}
+                                                        </p>
+                                                    </div>
 
-                                                        {/* Toggle Switch */}
-                                                        <div
-                                                            className={`relative w-9 h-5 rounded-full flex-shrink-0 transition-colors duration-200
-                                                                ${isSystemBlocked
-                                                                    ? "bg-red-500/20"
-                                                                    : enabled
-                                                                        ? "bg-astral-primary"
-                                                                        : "bg-white/10"}`}
+                                                    {/* Expand button */}
+                                                    {tools.length > 0 && (
+                                                        <button
+                                                            onClick={(e) => { e.stopPropagation(); toggleExpanded(scopeDef.key); }}
+                                                            className="p-1 text-astral-muted/50 hover:text-astral-muted transition-colors"
+                                                            title={expanded ? "Collapse tools" : "Expand tools"}
                                                         >
                                                             <motion.div
-                                                                className={`absolute top-0.5 w-4 h-4 rounded-full shadow-sm ${isSystemBlocked ? "bg-red-400/50" : "bg-white"}`}
-                                                                animate={{ left: (enabled && !isSystemBlocked) ? "18px" : "2px" }}
-                                                                transition={{ type: "spring", stiffness: 500, damping: 30 }}
-                                                            />
-                                                        </div>
-                                                    </div>
-                                                );
-                                            })}
-                                        </div>
-                                    </div>
-                                ))}
+                                                                animate={{ rotate: expanded ? 180 : 0 }}
+                                                                transition={{ duration: 0.2 }}
+                                                            >
+                                                                <ChevronDown size={14} />
+                                                            </motion.div>
+                                                        </button>
+                                                    )}
 
-                                {totalCount === 0 && (
+                                                    {/* Toggle Switch */}
+                                                    <div
+                                                        className={`relative w-9 h-5 rounded-full flex-shrink-0 transition-colors duration-200
+                                                            ${enabled ? scopeDef.bgClass : "bg-white/10"}`}
+                                                    >
+                                                        <motion.div
+                                                            className="absolute top-0.5 w-4 h-4 rounded-full shadow-sm bg-white"
+                                                            animate={{ left: enabled ? "18px" : "2px" }}
+                                                            transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                                                        />
+                                                    </div>
+                                                </div>
+
+                                                {/* Expandable tool list */}
+                                                <AnimatePresence>
+                                                    {expanded && tools.length > 0 && (
+                                                        <motion.div
+                                                            initial={{ height: 0, opacity: 0 }}
+                                                            animate={{ height: "auto", opacity: 1 }}
+                                                            exit={{ height: 0, opacity: 0 }}
+                                                            transition={{ duration: 0.2 }}
+                                                            className="overflow-hidden"
+                                                        >
+                                                            <div className="px-3 pb-3 pt-0">
+                                                                <div className="border-t border-white/5 pt-2 space-y-1">
+                                                                    {tools.map((tool) => {
+                                                                        const flag = securityFlags?.[tool];
+                                                                        const isBlocked = flag?.blocked === true;
+                                                                        return (
+                                                                            <div
+                                                                                key={tool}
+                                                                                className={`flex items-start gap-2 px-2 py-1.5 rounded-md text-xs
+                                                                                    ${isBlocked
+                                                                                        ? "bg-red-500/[0.06] text-red-300"
+                                                                                        : "text-astral-muted"}`}
+                                                                            >
+                                                                                {isBlocked ? (
+                                                                                    <ShieldAlert size={12} className="text-red-400 mt-0.5 flex-shrink-0" />
+                                                                                ) : (
+                                                                                    <div className={`w-3 h-3 mt-0.5 flex-shrink-0 rounded-sm ${enabled ? `${scopeDef.bgClass}/20` : "bg-white/5"}`} />
+                                                                                )}
+                                                                                <div className="min-w-0">
+                                                                                    <p className={`font-medium ${isBlocked ? "text-red-300" : "text-white/80"}`}>
+                                                                                        {formatToolName(tool)}
+                                                                                    </p>
+                                                                                    <p className="text-[10px] text-astral-muted/70 mt-0.5">
+                                                                                        {toolDescriptions[tool] || "No description available"}
+                                                                                    </p>
+                                                                                    {isBlocked && flag && (
+                                                                                        <div className="flex items-center gap-1 mt-1">
+                                                                                            <AlertTriangle size={9} className="text-red-400 flex-shrink-0" />
+                                                                                            <p className="text-[9px] text-red-400/80">
+                                                                                                <span className="font-medium">{SECURITY_CATEGORY_LABELS[flag.category] || flag.category}</span>
+                                                                                                {" -- "}{flag.reason}
+                                                                                            </p>
+                                                                                        </div>
+                                                                                    )}
+                                                                                </div>
+                                                                            </div>
+                                                                        );
+                                                                    })}
+                                                                </div>
+                                                            </div>
+                                                        </motion.div>
+                                                    )}
+                                                </AnimatePresence>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+
+                                {Object.keys(permissions).length === 0 && (
                                     <div className="text-center py-8">
                                         <ShieldX size={24} className="text-astral-muted mx-auto mb-2" />
                                         <p className="text-xs text-astral-muted">No tools registered for this agent</p>
@@ -810,7 +1025,7 @@ export default function AgentPermissionsModal({
                             </div>
                         </div>
 
-                        {/* Footer */}
+                        {/* ── Footer ──────────────────────────────────── */}
                         <div className="flex items-center justify-between px-6 py-4 border-t border-white/5 bg-white/[0.02]">
                             <div className="flex items-center gap-2 text-[11px] text-astral-muted">
                                 {needsCredentials ? (
@@ -818,28 +1033,20 @@ export default function AgentPermissionsModal({
                                         <Lock size={14} className="text-amber-400" />
                                         <span className="text-amber-400">{missingCredentials.length} credential{missingCredentials.length > 1 ? "s" : ""} needed</span>
                                     </>
-                                ) : systemBlockedCount > 0 ? (
-                                    <>
-                                        <ShieldAlert size={14} className="text-red-400" />
-                                        <span>{systemBlockedCount} tool{systemBlockedCount > 1 ? "s" : ""} system-blocked</span>
-                                        {enabledCount > 0 && (
-                                            <span className="text-astral-muted/50">&middot; {enabledCount} enabled</span>
-                                        )}
-                                    </>
-                                ) : enabledCount === totalCount ? (
+                                ) : enabledScopeCount === SCOPE_DEFINITIONS.length ? (
                                     <>
                                         <ShieldCheck size={14} className="text-green-400" />
-                                        <span>All tools enabled</span>
+                                        <span>All scopes enabled</span>
                                     </>
-                                ) : enabledCount === 0 ? (
+                                ) : enabledScopeCount === 0 ? (
                                     <>
                                         <ShieldX size={14} className="text-red-400" />
-                                        <span>All tools disabled</span>
+                                        <span>All scopes disabled</span>
                                     </>
                                 ) : (
                                     <>
                                         <Shield size={14} className="text-amber-400" />
-                                        <span>{totalCount - enabledCount} tool{totalCount - enabledCount > 1 ? "s" : ""} restricted</span>
+                                        <span>{enabledScopeCount}/{SCOPE_DEFINITIONS.length} scopes enabled</span>
                                     </>
                                 )}
                             </div>

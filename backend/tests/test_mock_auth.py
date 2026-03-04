@@ -9,6 +9,7 @@ import asyncio
 import json
 import base64
 import logging
+import pytest
 
 # Suppress logging from Orchestrator
 logging.getLogger('Orchestrator').setLevel(logging.WARNING)
@@ -38,6 +39,7 @@ def decode_jwt_payload(token: str) -> dict:
     payload_json = base64.b64decode(payload_b64).decode('utf-8')
     return json.loads(payload_json)
 
+@pytest.mark.asyncio
 async def test_mock_auth_with_jwt():
     """Test validate_token with the JWT token from MockAuthContext."""
     print("\n=== Test 1: JWT token with mock auth enabled ===")
@@ -68,6 +70,7 @@ async def test_mock_auth_with_jwt():
     print("  [PASS] JWT token validated successfully with correct roles")
     return True
 
+@pytest.mark.asyncio
 async def test_mock_auth_with_dev_token():
     """Test validate_token with the legacy 'dev-token' string."""
     print("\n=== Test 2: 'dev-token' string with mock auth enabled ===")
@@ -90,6 +93,7 @@ async def test_mock_auth_with_dev_token():
     print("  [PASS] dev-token validated successfully")
     return True
 
+@pytest.mark.asyncio
 async def test_mock_auth_with_invalid_token():
     """Test that invalid token returns None (or default mock user?)."""
     print("\n=== Test 3: Invalid token with mock auth enabled ===")
@@ -105,6 +109,7 @@ async def test_mock_auth_with_invalid_token():
     print("  [PASS] Invalid token falls back to default mock user")
     return True
 
+@pytest.mark.asyncio
 async def test_mock_auth_disabled():
     """Test that when VITE_USE_MOCK_AUTH is false, token validation fails (no Keycloak config)."""
     print("\n=== Test 4: Mock auth disabled (real auth) ===")
@@ -129,6 +134,7 @@ async def test_mock_auth_disabled():
         print(f"  Note: payload returned (maybe mock auth still active?): {payload}")
         return False
 
+@pytest.mark.asyncio
 async def test_role_extraction():
     """Verify that roles are correctly extracted from the payload."""
     print("\n=== Test 5: Role extraction ===")

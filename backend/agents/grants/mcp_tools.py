@@ -1113,6 +1113,7 @@ def analyze_funding_trends(
 TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     "search_grants": {
         "function": search_grants,
+        "scope": "tools:search",
         "description": (
             "Search federal funding opportunities across NSF, NIH, DOE, DoD "
             "and other agencies via grants.gov. Filters by keyword, agency, "
@@ -1156,6 +1157,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "get_grant_details": {
         "function": get_grant_details,
+        "scope": "tools:read",
         "description": (
             "Get detailed information about a specific grant opportunity "
             "including full description, eligibility, award ceiling/floor, "
@@ -1179,6 +1181,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "match_grants_to_caai": {
         "function": match_grants_to_caai,
+        "scope": "tools:search",
         "description": (
             "Search funding opportunities and score them against UKy Center "
             "for Applied AI (CAAI) capabilities. Ranks opportunities by "
@@ -1217,6 +1220,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "get_caai_profile": {
         "function": get_caai_profile,
+        "scope": "tools:read",
         "description": (
             "Get UKy Center for Applied AI (CAAI) profile including mission, "
             "expertise areas, key personnel, project history, and capabilities. "
@@ -1238,6 +1242,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "analyze_funding_trends": {
         "function": analyze_funding_trends,
+        "scope": "tools:read",
         "description": (
             "Analyze federal funding trends for AI and CAAI-relevant topics "
             "across agencies. Shows distribution of opportunities by agency "

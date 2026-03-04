@@ -4,10 +4,14 @@ import websockets
 import json
 import uuid
 import os
+import pytest
 from dotenv import load_dotenv
 
 load_dotenv()
 
+
+@pytest.mark.asyncio
+@pytest.mark.integration
 async def test_workflow():
     chat_id = str(uuid.uuid4())
     print(f"Generated chat_id: {chat_id}")

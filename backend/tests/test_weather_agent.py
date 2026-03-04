@@ -26,7 +26,15 @@ from agents.weather.mcp_tools import (
 
 class TestWeatherAgent:
     """Test suite for WeatherAgent tools."""
-    
+
+    @pytest.fixture(autouse=True)
+    def clear_geocoding_cache(self):
+        """Clear the geocoding cache before each test to prevent mock pollution."""
+        from agents.weather import mcp_tools
+        mcp_tools._geocoding_cache.clear()
+        yield
+        mcp_tools._geocoding_cache.clear()
+
     @pytest.fixture
     def mock_geocode_response(self):
         """Mock response for geocoding API."""
