@@ -757,7 +757,7 @@ def suggest_engagement_actions(
 TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     "get_my_profile": {
         "function": get_my_profile,
-        "scope": "tools:read",
+        "scope": "tools:search",
         "description": (
             "Show the authenticated LinkedIn user's profile — name, email, "
             "member ID, and linked organization. Useful for verifying the "

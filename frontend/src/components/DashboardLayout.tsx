@@ -2,7 +2,7 @@
  * DashboardLayout — Main app shell with sidebar and header.
  * Shows connected agents, their tools, and connection status.
  */
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
     LayoutDashboard,
@@ -24,9 +24,13 @@ import {
     Globe,
     Lock,
     User,
+    FileCode,
+    Trash2,
 } from "lucide-react";
+import { API_URL } from "../config";
 import type { Agent, ChatSession, AgentPermissionsData, ConnectionState } from "../hooks/useWebSocket";
 import AgentPermissionsModal from "./AgentPermissionsModal";
+import CreateAgentModal from "./CreateAgentModal";
 
 interface DashboardLayoutProps {
     children: React.ReactNode;
@@ -53,6 +57,7 @@ interface DashboardLayoutProps {
     onDeleteAgentCredential?: (agentId: string, key: string) => Promise<boolean>;
     onStartOAuthFlow?: (agentId: string) => Promise<boolean>;
     onSetAgentVisibility?: (agentId: string, isPublic: boolean) => Promise<boolean>;
+    onDiscoverAgents?: () => void;
 }
 
 export default function DashboardLayout({
@@ -68,8 +73,7 @@ export default function DashboardLayout({
     onDeleteChat,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     isAdmin: _isAdmin,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    accessToken: _accessToken,
+    accessToken,
     userEmail,
     agentPermissions,
     onGetAgentPermissions,
@@ -81,14 +85,69 @@ export default function DashboardLayout({
     onStartOAuthFlow,
     onSetAgentVisibility,
     onRegisterExternalAgent,
+    onDiscoverAgents,
 }: DashboardLayoutProps) {
     const [chatToDelete, setChatToDelete] = useState<string | null>(null);
     const [permModalAgent, setPermModalAgent] = useState<string | null>(null);
     const [sidebarOpen, setSidebarOpen] = useState(false);
     const [chatSearch, setChatSearch] = useState("");
     const [agentsModalOpen, setAgentsModalOpen] = useState(false);
-    const [agentsTab, setAgentsTab] = useState<"my" | "all">("my");
+    const [agentsTab, setAgentsTab] = useState<"my" | "all" | "drafts">("my");
     const [externalAgentUrl, setExternalAgentUrl] = useState("");
+    const [createAgentOpen, setCreateAgentOpen] = useState(false);
+    const [resumeDraftId, setResumeDraftId] = useState<string | null>(null);
+
+    // Draft agents
+    interface DraftAgentSummary {
+        id: string;
+        agent_name: string;
+        agent_slug: string;
+        description: string;
+        status: string;
+        port?: number | null;
+        created_at?: number;
+    }
+    const [drafts, setDrafts] = useState<DraftAgentSummary[]>([]);
+    const [draftsLoading, setDraftsLoading] = useState(false);
+
+    const fetchDrafts = useCallback(async () => {
+        if (!accessToken) return;
+        setDraftsLoading(true);
+        try {
+            const resp = await fetch(`${API_URL}/api/agents/drafts`, {
+                headers: { Authorization: `Bearer ${accessToken}` },
+            });
+            if (resp.ok) {
+                const data = await resp.json();
+                setDrafts(data.drafts || []);
+            }
+        } catch { /* ignore */ }
+        finally { setDraftsLoading(false); }
+    }, [accessToken]);
+
+    // Fetch drafts when switching to Drafts tab or opening modal
+    useEffect(() => {
+        if (agentsModalOpen && agentsTab === "drafts") {
+            fetchDrafts();
+        }
+    }, [agentsModalOpen, agentsTab, fetchDrafts]);
+
+    const deleteDraft = async (draftId: string) => {
+        if (!accessToken) return;
+        try {
+            await fetch(`${API_URL}/api/agents/drafts/${draftId}`, {
+                method: "DELETE",
+                headers: { Authorization: `Bearer ${accessToken}` },
+            });
+            setDrafts(prev => prev.filter(d => d.id !== draftId));
+        } catch { /* ignore */ }
+    };
+
+    const openDraftInModal = (draftId: string) => {
+        setAgentsModalOpen(false);
+        setResumeDraftId(draftId);
+        setCreateAgentOpen(true);
+    };
 
     // Close delete modal on Escape
     useEffect(() => {
@@ -244,12 +303,21 @@ export default function DashboardLayout({
                                         <p className="text-xs text-astral-muted">{agents.length} agent{agents.length !== 1 ? "s" : ""} connected &middot; {totalTools} tools available</p>
                                     </div>
                                 </div>
-                                <button
-                                    onClick={() => setAgentsModalOpen(false)}
-                                    className="p-1.5 rounded-lg hover:bg-white/10 transition-colors"
-                                >
-                                    <X size={16} className="text-astral-muted" />
-                                </button>
+                                <div className="flex items-center gap-1.5">
+                                    <button
+                                        onClick={() => { setAgentsModalOpen(false); setCreateAgentOpen(true); }}
+                                        className="p-1.5 rounded-lg hover:bg-astral-accent/15 transition-colors group"
+                                        title="Create new agent"
+                                    >
+                                        <Plus size={16} className="text-astral-muted group-hover:text-astral-accent" />
+                                    </button>
+                                    <button
+                                        onClick={() => setAgentsModalOpen(false)}
+                                        className="p-1.5 rounded-lg hover:bg-white/10 transition-colors"
+                                    >
+                                        <X size={16} className="text-astral-muted" />
+                                    </button>
+                                </div>
                             </div>
 
                             {/* Tabs */}
@@ -275,6 +343,17 @@ export default function DashboardLayout({
                                     <Globe size={12} />
                                     Public Agents
                                     <span className="text-[10px] opacity-60">({publicAgents.length})</span>
+                                </button>
+                                <button
+                                    onClick={() => setAgentsTab("drafts")}
+                                    className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors
+                                        ${agentsTab === "drafts"
+                                            ? "bg-astral-accent/15 text-astral-accent border border-astral-accent/20"
+                                            : "text-astral-muted hover:text-white hover:bg-white/5 border border-transparent"}`}
+                                >
+                                    <FileCode size={12} />
+                                    Drafts
+                                    {drafts.length > 0 && <span className="text-[10px] opacity-60">({drafts.length})</span>}
                                 </button>
                             </div>
 
@@ -315,7 +394,77 @@ export default function DashboardLayout({
 
                             {/* Grid */}
                             <div className="flex-1 overflow-y-auto p-4">
-                                {filteredAgents.length === 0 ? (
+                                {/* Drafts tab */}
+                                {agentsTab === "drafts" ? (
+                                    draftsLoading ? (
+                                        <div className="flex items-center justify-center py-12 text-astral-muted">
+                                            <span className="text-sm">Loading drafts...</span>
+                                        </div>
+                                    ) : drafts.length === 0 ? (
+                                        <div className="flex flex-col items-center justify-center py-12 text-astral-muted">
+                                            <FileCode size={32} className="mb-3 opacity-30" />
+                                            <p className="text-sm">No draft agents yet</p>
+                                            <p className="text-xs opacity-60 mt-1">Create a new agent to get started.</p>
+                                        </div>
+                                    ) : (
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                            {drafts.map((d) => {
+                                                const statusColors: Record<string, string> = {
+                                                    pending: "bg-gray-400", generating: "bg-blue-400 animate-pulse",
+                                                    generated: "bg-green-400", testing: "bg-amber-400 animate-pulse",
+                                                    analyzing: "bg-blue-400 animate-pulse", approved: "bg-green-400",
+                                                    pending_review: "bg-amber-400", rejected: "bg-red-400",
+                                                    live: "bg-green-400", error: "bg-red-400",
+                                                };
+                                                const statusLabels: Record<string, string> = {
+                                                    pending: "Pending", generating: "Generating...",
+                                                    generated: "Ready to Test", testing: "Testing",
+                                                    analyzing: "Analyzing...", approved: "Approved",
+                                                    pending_review: "Awaiting Review", rejected: "Rejected",
+                                                    live: "Live", error: "Error",
+                                                };
+                                                return (
+                                                    <div
+                                                        key={d.id}
+                                                        className="flex items-start gap-3 p-4 rounded-xl border border-white/5 bg-white/[0.02]
+                                                                   hover:bg-white/5 hover:border-astral-accent/20 transition-all text-left group"
+                                                    >
+                                                        <button
+                                                            onClick={() => openDraftInModal(d.id)}
+                                                            className="flex items-start gap-3 flex-1 min-w-0 text-left"
+                                                        >
+                                                            <div className="w-9 h-9 rounded-lg bg-astral-accent/20 flex items-center justify-center flex-shrink-0 mt-0.5">
+                                                                <FileCode size={16} className="text-astral-accent" />
+                                                            </div>
+                                                            <div className="flex-1 min-w-0">
+                                                                <div className="flex items-center gap-2">
+                                                                    <p className="text-sm font-medium text-white truncate">{d.agent_name}</p>
+                                                                    <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${statusColors[d.status] || "bg-gray-400"}`} />
+                                                                </div>
+                                                                <p className="text-[11px] text-astral-muted mt-0.5 line-clamp-2">{d.description}</p>
+                                                                <div className="flex items-center gap-2 mt-1.5">
+                                                                    <span className="text-[10px] text-astral-muted/70">
+                                                                        {statusLabels[d.status] || d.status}
+                                                                    </span>
+                                                                    {d.port && (
+                                                                        <span className="text-[10px] text-astral-muted/50">Port {d.port}</span>
+                                                                    )}
+                                                                </div>
+                                                            </div>
+                                                        </button>
+                                                        <button
+                                                            onClick={() => deleteDraft(d.id)}
+                                                            className="p-1.5 rounded-lg opacity-0 group-hover:opacity-100 hover:bg-red-500/10 text-astral-muted hover:text-red-400 transition-all flex-shrink-0"
+                                                            title="Delete draft"
+                                                        >
+                                                            <Trash2 size={12} />
+                                                        </button>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    )
+                                ) : filteredAgents.length === 0 ? (
                                     <div className="flex flex-col items-center justify-center py-12 text-astral-muted">
                                         <Bot size={32} className="mb-3 opacity-30" />
                                         <p className="text-sm">
@@ -603,6 +752,25 @@ export default function DashboardLayout({
                 {/* Page Content */}
                 <div className="flex-1 overflow-hidden">{children}</div>
             </main>
+
+            {/* Create Agent Modal */}
+            <CreateAgentModal
+                isOpen={createAgentOpen}
+                onClose={() => { setCreateAgentOpen(false); setResumeDraftId(null); }}
+                accessToken={accessToken}
+                onAgentCreated={() => {
+                    setCreateAgentOpen(false);
+                    setResumeDraftId(null);
+                    setAgentsTab("my");
+                    setAgentsModalOpen(true);
+                    // Refresh agent list after a short delay to allow the new agent to register
+                    if (onDiscoverAgents) {
+                        setTimeout(() => onDiscoverAgents(), 2000);
+                        setTimeout(() => onDiscoverAgents(), 5000);
+                    }
+                }}
+                resumeDraftId={resumeDraftId}
+            />
 
             {/* Agent Permissions Modal */}
             {permModalAgent && agentPermissions && agentPermissions.agent_id === permModalAgent && (() => {

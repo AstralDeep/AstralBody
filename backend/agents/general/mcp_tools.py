@@ -1087,7 +1087,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "change_theme": {
         "function": change_theme,
-        "scope": "tools:read",
+        "scope": "tools:write",
         "description": "Show theme customization interface. Presents preset themes (Midnight, Daylight, Ocean, Sunset, Forest) and color pickers to customize the UI appearance in real time. Use this when the user asks to change colors, theme, appearance, or look of the site.",
         "input_schema": {
             "type": "object",

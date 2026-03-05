@@ -1157,7 +1157,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "get_grant_details": {
         "function": get_grant_details,
-        "scope": "tools:read",
+        "scope": "tools:search",
         "description": (
             "Get detailed information about a specific grant opportunity "
             "including full description, eligibility, award ceiling/floor, "
@@ -1242,7 +1242,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "analyze_funding_trends": {
         "function": analyze_funding_trends,
-        "scope": "tools:read",
+        "scope": "tools:search",
         "description": (
             "Analyze federal funding trends for AI and CAAI-relevant topics "
             "across agencies. Shows distribution of opportunities by agency "

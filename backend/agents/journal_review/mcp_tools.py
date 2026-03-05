@@ -1073,7 +1073,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
 
     "get_journal_profile": {
         "function": get_journal_profile,
-        "scope": "tools:read",
+        "scope": "tools:search",
         "description": (
             "Get a comprehensive profile for a specific scientific journal including "
             "h-index, approximate impact factor, citation counts, publication volume, "
@@ -1098,7 +1098,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
 
     "compare_journals": {
         "function": compare_journals,
-        "scope": "tools:read",
+        "scope": "tools:search",
         "description": (
             "Compare 2-5 scientific journals side-by-side on key metrics: h-index, "
             "impact factor, citation count, publication volume, open access status, "
@@ -1119,7 +1119,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
 
     "analyze_paper_fit": {
         "function": analyze_paper_fit,
-        "scope": "tools:read",
+        "scope": "tools:search",
         "description": (
             "Analyze how well a research paper fits specific journals or automatically "
             "find the best-fit journals. Finds real papers on the same topic to identify "
@@ -1159,7 +1159,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
 
     "get_field_landscape": {
         "function": get_field_landscape,
-        "scope": "tools:read",
+        "scope": "tools:search",
         "description": (
             "Get an overview of the top journals in a research field or discipline, "
             "ranked by citation impact. Discovers journals by finding real papers in "

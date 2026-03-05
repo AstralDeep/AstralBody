@@ -121,6 +121,10 @@ class Orchestrator:
         # ROTE — Response Output Translation Engine
         self.rote = ROTE()
 
+        # Agent Lifecycle Manager — handles user-created draft agents
+        from orchestrator.agent_lifecycle import AgentLifecycleManager
+        self.lifecycle_manager = AgentLifecycleManager(db=self.history.db, orchestrator=self)
+
     # =========================================================================
     # AGENT MANAGEMENT
     # =========================================================================
@@ -178,6 +182,10 @@ class Orchestrator:
                 logger.info(f"Auto-assigned agent '{card.agent_id}' to {default_owner}")
             else:
                 ownership = {}
+
+        # Don't broadcast draft agents to UI — they only appear in the Drafts tab
+        if self._is_draft_agent(card.agent_id):
+            return
 
         # Notify all UI clients (include per-user scopes, tool_scope_map, and security flags)
         for ui in self.ui_clients:
@@ -431,7 +439,8 @@ class Orchestrator:
                 if msg.action == "chat_message":
                     user_message = msg.payload.get("message", "")
                     chat_id = msg.session_id or msg.payload.get("chat_id")
-                    
+                    draft_agent_id = msg.payload.get("draft_agent_id")
+
                     # If no chat_id provided, create one
                     if not chat_id:
                         chat_id = self.history.create_chat(user_id=user_id)
@@ -451,7 +460,7 @@ class Orchestrator:
 
                     display_message = msg.payload.get("display_message")
                     self.cancelled_sessions[id(websocket)] = False
-                    await self.handle_chat_message(websocket, user_message, chat_id, display_message, user_id=user_id)
+                    await self.handle_chat_message(websocket, user_message, chat_id, display_message, user_id=user_id, draft_agent_id=draft_agent_id)
 
                 elif msg.action == "cancel_task":
                     self.cancelled_sessions[id(websocket)] = True
@@ -1079,7 +1088,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     break
         return asyncio.create_task(_heartbeat_loop())
 
-    async def handle_chat_message(self, websocket, message: str, chat_id: str, display_message: str = None, user_id: str = None):
+    async def handle_chat_message(self, websocket, message: str, chat_id: str, display_message: str = None, user_id: str = None, draft_agent_id: str = None):
         """Process a chat message: LLM determines which tools to call (Multi-Turn Re-Act Loop)."""
         logger.info(f"Processing chat message: '{message}' for chat_id {chat_id}")
         if user_id is None:
@@ -1120,12 +1129,20 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
         # Build tool definitions from registered agents
         # Filter by user's per-agent tool permissions (RFC 8693 delegation)
-        logger.info(f"Building tool definitions from {len(self.agent_cards)} agents...")
+        # Draft test chats: only expose the draft agent's tools
+        if draft_agent_id:
+            logger.info(f"Draft test chat — filtering tools to agent: {draft_agent_id}")
+        else:
+            logger.info(f"Building tool definitions from {len(self.agent_cards)} agents...")
         tools_desc = []
         tool_to_agent = {}  # Map tool name → agent_id
 
         for agent_id, card in self.agent_cards.items():
             if agent_id not in self.agents:
+                continue
+
+            # Draft test: only include tools from the draft agent being tested
+            if draft_agent_id and agent_id != draft_agent_id:
                 continue
 
             for skill in card.skills:
@@ -1140,12 +1157,13 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     logger.debug(f"Tool '{skill.id}' blocked for user={user_id} agent={agent_id}")
                     continue
 
+                schema = self._sanitize_tool_schema(skill.input_schema or {"type": "object", "properties": {}})
                 tool_def = {
                     "type": "function",
                     "function": {
                         "name": skill.id,
                         "description": skill.description,
-                        "parameters": skill.input_schema or {"type": "object", "properties": {}}
+                        "parameters": schema
                     }
                 }
                 tools_desc.append(tool_def)
@@ -1299,11 +1317,28 @@ CRITICAL RULES:
                         res_list = await self.execute_parallel_tools(websocket, llm_msg.tool_calls, tool_to_agent, chat_id, user_id=user_id)
                         tool_results.extend(res_list)
 
-                    # Collect tool UI components and send as a single collapsible
+                    # Collect tool UI components and tag each (recursively) with source metadata
+                    def _tag_source(comp, agent_id, tool_name):
+                        """Recursively tag a component dict and all nested children."""
+                        if not isinstance(comp, dict):
+                            return
+                        comp["_source_agent"] = agent_id
+                        comp["_source_tool"] = tool_name
+                        for key in ("content", "children"):
+                            nested = comp.get(key)
+                            if isinstance(nested, list):
+                                for child in nested:
+                                    _tag_source(child, agent_id, tool_name)
+
                     tool_ui_components = []
-                    for res in tool_results:
+                    for i_tc, res in enumerate(tool_results):
                         if res and res.ui_components and not res.error:
-                            tool_ui_components.extend(res.ui_components)
+                            tc = llm_msg.tool_calls[i_tc] if i_tc < len(llm_msg.tool_calls) else None
+                            t_name = tc.function.name if tc else ""
+                            a_id = tool_to_agent.get(t_name, "")
+                            for comp in res.ui_components:
+                                _tag_source(comp, a_id, t_name)
+                                tool_ui_components.append(comp)
 
                     if tool_ui_components:
                         # Build label with agent attribution
@@ -1510,25 +1545,63 @@ CRITICAL RULES:
             logger.warning(f"WebSocket closed during chat processing for chat_id {chat_id} — client likely reconnected")
         except Exception as e:
             logger.error(f"LLM routing error: {e}", exc_info=True)
-            # Clear the 'thinking' spinner so the UI doesn't hang
-            await self._safe_send(websocket, json.dumps({
-                "type": "chat_status",
-                "status": "done",
-                "message": ""
-            }))
-            # Show a user-friendly error message
             error_text = str(e)
-            if "424" in error_text or "Failed Dependency" in error_text or "Repository Not Found" in error_text:
-                error_text = f"The LLM server cannot find the configured model '{self.llm_model}'. Please verify the model name in your .env file and that the vLLM server has this model loaded."
-            elif "502" in error_text or "Bad Gateway" in error_text:
-                error_text = "The AI model returned a 502 Bad Gateway error. It may be overloaded or restarting. Please try again in a moment."
-            elif "504" in error_text or "Gateway Time-out" in error_text:
-                error_text = "The AI model timed out. It may be overloaded or still warming up. Please try again in a moment."
-            elif "timeout" in error_text.lower():
-                error_text = "Request timed out waiting for the AI model. Please try again."
-            await self.send_ui_render(websocket, [
-                Alert(message=error_text, variant="error", title="Error").to_json()
-            ])
+
+            # Auto-fix: if this is a draft agent test chat and the error is a bad tool schema,
+            # trigger auto-fix so the agent code gets corrected automatically.
+            if draft_agent_id and hasattr(self, 'lifecycle_manager') and ("invalid" in error_text.lower() and "schema" in error_text.lower()):
+                logger.info(f"Bad tool schema for draft agent {draft_agent_id} — triggering auto-fix")
+                try:
+                    await self._safe_send(websocket, json.dumps({
+                        "type": "chat_status", "status": "fixing",
+                        "message": f"Invalid tool schema detected — auto-fixing agent code..."
+                    }))
+                    fixed = await self.lifecycle_manager.auto_fix_tool_error(
+                        draft_agent_id, "_schema_validation",
+                        f"The agent's TOOL_REGISTRY has invalid input_schema definitions. "
+                        f"The LLM API rejected the tool schemas with this error: {error_text}\n"
+                        f"Common cause: using 'required': True on individual properties instead of "
+                        f"a 'required': ['field1', 'field2'] array at the object level.",
+                        websocket
+                    )
+                    if fixed:
+                        await self.send_ui_render(websocket, [
+                            Alert(message="Tool schema fixed. Agent restarted — please try your message again.", variant="info").to_json()
+                        ])
+                    else:
+                        await self.send_ui_render(websocket, [
+                            Alert(message="Auto-fix could not resolve the schema issue. Try refining the agent.", variant="warning").to_json()
+                        ])
+                    await self._safe_send(websocket, json.dumps({
+                        "type": "chat_status", "status": "done", "message": ""
+                    }))
+                except Exception as fix_err:
+                    logger.warning(f"Auto-fix for schema error failed: {fix_err}")
+                    await self._safe_send(websocket, json.dumps({
+                        "type": "chat_status", "status": "done", "message": ""
+                    }))
+                    await self.send_ui_render(websocket, [
+                        Alert(message=f"Tool schema error and auto-fix failed: {error_text}", variant="error", title="Error").to_json()
+                    ])
+            else:
+                # Clear the 'thinking' spinner so the UI doesn't hang
+                await self._safe_send(websocket, json.dumps({
+                    "type": "chat_status",
+                    "status": "done",
+                    "message": ""
+                }))
+                # Show a user-friendly error message
+                if "424" in error_text or "Failed Dependency" in error_text or "Repository Not Found" in error_text:
+                    error_text = f"The LLM server cannot find the configured model '{self.llm_model}'. Please verify the model name in your .env file and that the vLLM server has this model loaded."
+                elif "502" in error_text or "Bad Gateway" in error_text:
+                    error_text = "The AI model returned a 502 Bad Gateway error. It may be overloaded or restarting. Please try again in a moment."
+                elif "504" in error_text or "Gateway Time-out" in error_text:
+                    error_text = "The AI model timed out. It may be overloaded or still warming up. Please try again in a moment."
+                elif "timeout" in error_text.lower():
+                    error_text = "Request timed out waiting for the AI model. Please try again."
+                await self.send_ui_render(websocket, [
+                    Alert(message=error_text, variant="error", title="Error").to_json()
+                ])
         finally:
             heartbeat_task.cancel()
 
@@ -1718,6 +1791,32 @@ CRITICAL RULES:
                 Alert(message=f"Tool '{tool_name}' failed: {err_msg}", variant="error").to_json()
             ])
 
+            # Auto-fix: if this is a draft agent, attempt to fix the tool error automatically
+            if agent_id and hasattr(self, 'lifecycle_manager'):
+                try:
+                    await self._safe_send(websocket, json.dumps({
+                        "type": "chat_status", "status": "fixing",
+                        "message": f"Auto-fixing tool '{tool_name}'..."
+                    }))
+                    fixed = await self.lifecycle_manager.auto_fix_tool_error(
+                        agent_id, tool_name, err_msg, websocket
+                    )
+                    if fixed:
+                        logger.info(f"Auto-fix attempted for draft agent {agent_id} tool '{tool_name}'")
+                        await self.send_ui_render(websocket, [
+                            Alert(message=f"Auto-fix applied for '{tool_name}'. Agent restarted — try again.", variant="info").to_json()
+                        ])
+                    await self._safe_send(websocket, json.dumps({
+                        "type": "chat_status", "status": "thinking",
+                        "message": "Continuing after fix..."
+                    }))
+                except Exception as e:
+                    logger.warning(f"Auto-fix failed for {agent_id}: {e}")
+                    await self._safe_send(websocket, json.dumps({
+                        "type": "chat_status", "status": "thinking",
+                        "message": "Continuing..."
+                    }))
+
         return result
 
     async def execute_parallel_tools(self, websocket, tool_calls, tool_to_agent: Dict, chat_id: str = None, user_id: str = None) -> List[Optional[MCPResponse]]:
@@ -1809,7 +1908,36 @@ CRITICAL RULES:
         # Only render errors immediately — successful results are batched by caller
         if error_components:
             await self.send_ui_render(websocket, error_components)
-            
+
+        # Auto-fix: attempt to fix draft agent tool errors
+        if hasattr(self, 'lifecycle_manager'):
+            for i, result in enumerate(final_results):
+                if result and result.error:
+                    t_name = tool_names[i] if i < len(tool_names) else None
+                    a_id = tool_to_agent.get(t_name) if t_name else None
+                    if a_id:
+                        try:
+                            await self._safe_send(websocket, json.dumps({
+                                "type": "chat_status", "status": "fixing",
+                                "message": f"Auto-fixing tool '{t_name}'..."
+                            }))
+                            await self.lifecycle_manager.auto_fix_tool_error(
+                                a_id, t_name, result.error.get('message', ''), websocket
+                            )
+                            await self.send_ui_render(websocket, [
+                                Alert(message=f"Auto-fix applied for '{t_name}'. Agent restarted — try again.", variant="info").to_json()
+                            ])
+                            await self._safe_send(websocket, json.dumps({
+                                "type": "chat_status", "status": "thinking",
+                                "message": "Continuing after fix..."
+                            }))
+                        except Exception as e:
+                            logger.warning(f"Auto-fix failed for {a_id}: {e}")
+                            await self._safe_send(websocket, json.dumps({
+                                "type": "chat_status", "status": "thinking",
+                                "message": "Continuing..."
+                            }))
+
         return final_results
 
     async def _execute_with_retry(
@@ -2112,12 +2240,63 @@ CRITICAL RULES:
         msg = UIRender(components=adapted)
         await self._safe_send(websocket, msg.to_json())
 
+    @staticmethod
+    def _sanitize_tool_schema(schema: dict) -> dict:
+        """Fix common agent-generated schema issues before sending to the LLM.
+
+        Addresses: property-level "required": true/false (invalid in OpenAI tool
+        schemas) — must be an array at the object level instead.
+        """
+        if not isinstance(schema, dict):
+            return {"type": "object", "properties": {}}
+
+        schema = dict(schema)  # shallow copy
+        props = schema.get("properties")
+        if isinstance(props, dict):
+            required_fields = list(schema.get("required", []) if isinstance(schema.get("required"), list) else [])
+            cleaned_props = {}
+            for key, val in props.items():
+                if isinstance(val, dict):
+                    val = dict(val)  # shallow copy
+                    prop_req = val.pop("required", None)
+                    # If a property had "required": true, promote to object-level required array
+                    if prop_req is True and key not in required_fields:
+                        required_fields.append(key)
+                    # Recurse for nested object properties
+                    if val.get("type") == "object" and "properties" in val:
+                        val = Orchestrator._sanitize_tool_schema(val)
+                    cleaned_props[key] = val
+                else:
+                    cleaned_props[key] = val
+            schema["properties"] = cleaned_props
+            if required_fields:
+                schema["required"] = required_fields
+            elif "required" in schema and not isinstance(schema["required"], list):
+                del schema["required"]
+
+        # Ensure top-level type
+        if "type" not in schema:
+            schema["type"] = "object"
+
+        return schema
+
+    def _is_draft_agent(self, agent_id: str) -> bool:
+        """Check if an agent_id belongs to a non-live draft agent."""
+        if hasattr(self, 'lifecycle_manager'):
+            draft = self.lifecycle_manager._get_draft_by_agent_id(agent_id)
+            if draft and draft["status"] != "live":
+                return True
+        return False
+
     async def send_dashboard(self, websocket):
         """Send the initial dashboard view."""
         user_id = self._get_user_id(websocket)
         ownership_map = {o["agent_id"]: o for o in self.history.db.get_all_agent_ownership()}
         agent_list = []
         for agent_id, card in self.agent_cards.items():
+            # Hide draft agents that aren't live yet — they only appear in the Drafts tab
+            if self._is_draft_agent(agent_id):
+                continue
             available_tools = [s.id for s in card.skills]
             scopes = self.tool_permissions.get_agent_scopes(user_id, agent_id)
             tool_scope_map = self.tool_permissions.get_tool_scope_map(agent_id)
@@ -2165,6 +2344,9 @@ CRITICAL RULES:
         ownership_map = {o["agent_id"]: o for o in self.history.db.get_all_agent_ownership()}
         agents = []
         for agent_id, card in self.agent_cards.items():
+            # Hide draft agents that aren't live yet
+            if self._is_draft_agent(agent_id):
+                continue
             available_tools = [s.id for s in card.skills]
             scopes = self.tool_permissions.get_agent_scopes(user_id, agent_id)
             tool_scope_map = self.tool_permissions.get_tool_scope_map(agent_id)
@@ -2296,11 +2478,12 @@ CRITICAL RULES:
             await self.handle_ui_connection_fastapi(websocket)
 
         # Mount REST API routers
-        from orchestrator.api import chat_router, component_router, agent_router, dashboard_router
+        from orchestrator.api import chat_router, component_router, agent_router, dashboard_router, draft_router
         from orchestrator.auth import auth_router
         app.include_router(chat_router)
         app.include_router(component_router)
         app.include_router(agent_router)
+        app.include_router(draft_router)
         app.include_router(dashboard_router)
         app.include_router(auth_router)
 

@@ -217,6 +217,11 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                 setAgents((data.agents as Agent[]) || []);
                 break;
 
+            case "agent_creation_progress":
+                // Dispatch a custom event so CreateAgentModal can listen
+                window.dispatchEvent(new CustomEvent("agent_creation_progress", { detail: data }));
+                break;
+
             case "chat_status":
                 setChatStatus({
                     status: (data.status as "idle" | "thinking" | "executing" | "done") || "idle",

@@ -211,6 +211,69 @@ class CredentialDeleteResponse(BaseModel):
 
 
 # =============================================================================
+# Draft Agent Models
+# =============================================================================
+
+class ToolSpec(BaseModel):
+    """Specification for a tool to be generated."""
+    name: str = Field(..., description="Tool function name (snake_case)")
+    description: str = Field(..., description="What the tool does")
+    input_schema: Optional[Dict[str, Any]] = Field(None, description="JSON Schema for tool inputs")
+    scope: str = Field("tools:read", description="Required scope: tools:read, tools:write, tools:search, tools:system")
+
+
+class DraftAgentCreateRequest(BaseModel):
+    """Create a new draft agent."""
+    agent_name: str = Field(..., min_length=2, max_length=100, description="Human-readable agent name")
+    description: str = Field(..., min_length=10, description="What the agent does")
+    tools: Optional[List[ToolSpec]] = Field(None, description="Tool specifications (optional — AI will generate based on description)")
+    skill_tags: Optional[List[str]] = Field(None, description="Skill tags for routing")
+    packages: Optional[List[str]] = Field(None, description="Python packages the agent may import (e.g., requests, pandas)")
+
+    model_config = {"json_schema_extra": {"examples": [{"agent_name": "Stock Tracker", "description": "An agent that tracks stock prices and provides analysis", "tools": [{"name": "get_stock_price", "description": "Get current stock price by ticker symbol", "scope": "tools:read"}], "skill_tags": ["stocks", "finance"], "packages": ["requests"]}]}}
+
+
+class DraftAgentRefineRequest(BaseModel):
+    """Refine a draft agent via natural language."""
+    message: str = Field(..., min_length=1, description="What to change about the agent")
+
+
+class AdminReviewRequest(BaseModel):
+    """Admin approves or rejects a draft agent."""
+    decision: str = Field(..., description="'approve' or 'reject'")
+    notes: Optional[str] = Field(None, description="Admin notes")
+
+
+class DraftAgentResponse(BaseModel):
+    """Draft agent details."""
+    id: str
+    user_id: str
+    agent_name: str
+    agent_slug: str
+    description: str
+    tools_spec: Optional[Any] = None
+    skill_tags: Optional[Any] = None
+    packages: Optional[Any] = None
+    status: str
+    generation_log: Optional[Any] = None
+    security_report: Optional[Any] = None
+    validation_report: Optional[Any] = None
+    error_message: Optional[str] = None
+    port: Optional[int] = None
+    review_notes: Optional[str] = None
+    reviewed_by: Optional[str] = None
+    refinement_history: Optional[Any] = None
+    required_credentials: Optional[Any] = None
+    created_at: Optional[int] = None
+    updated_at: Optional[int] = None
+
+
+class DraftAgentListResponse(BaseModel):
+    """List of draft agents."""
+    drafts: List[DraftAgentResponse]
+
+
+# =============================================================================
 # Dashboard / System Models
 # =============================================================================
 

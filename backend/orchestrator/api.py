@@ -9,6 +9,7 @@ WebSocket remains the primary channel for real-time features (streaming
 chat responses, live status updates). These REST endpoints provide
 request/response access for CRUD operations.
 """
+import json
 import os
 import time
 import logging
@@ -32,6 +33,8 @@ from orchestrator.models import (
     CredentialSetRequest, CredentialListResponse, CredentialDeleteResponse,
     DashboardResponse,
     ErrorResponse,
+    DraftAgentCreateRequest, DraftAgentRefineRequest, AdminReviewRequest,
+    DraftAgentResponse, DraftAgentListResponse,
 )
 from orchestrator.auth import get_current_user_id, require_user_id, get_current_user_payload
 
@@ -356,6 +359,9 @@ async def list_agents(request: Request):
     ownership_map = {o["agent_id"]: o for o in db.get_all_agent_ownership()}
     agents = []
     for agent_id, card in orch.agent_cards.items():
+        # Hide draft agents that aren't live yet
+        if orch._is_draft_agent(agent_id):
+            continue
         ownership = ownership_map.get(agent_id, {})
         agents.append(AgentInfo(
             id=card.agent_id,
@@ -790,6 +796,431 @@ if (window.opener) {{
 setTimeout(() => window.close(), 2000);
 </script>
 </body></html>"""
+
+
+# =============================================================================
+# Draft Agent Router
+# =============================================================================
+
+draft_router = APIRouter(prefix="/api/agents/drafts", tags=["Draft Agents"])
+
+
+def _get_lifecycle(request: Request):
+    """Retrieve the AgentLifecycleManager from app state."""
+    orch = _get_orchestrator(request)
+    lifecycle = getattr(orch, 'lifecycle_manager', None)
+    if lifecycle is None:
+        raise HTTPException(status_code=503, detail="Agent lifecycle manager not initialized")
+    return lifecycle
+
+
+def _find_user_websocket(orch, user_id: str):
+    """Find the WebSocket connection for a given user_id (for progress updates)."""
+    for ws, session in orch.ui_sessions.items():
+        if session.get("user_id") == user_id:
+            return ws
+    return None
+
+
+def _parse_json_field(value):
+    """Parse a JSON string field, returning None if empty/null."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            return __import__('json').loads(value)
+        except (ValueError, TypeError):
+            return value
+    return value
+
+
+def _backfill_validation_tools(validation_report: dict, slug: str, orch) -> dict:
+    """Backfill 'tools' into a validation report from the orchestrator's agent cards."""
+    if not validation_report or validation_report.get("tools"):
+        return validation_report  # already has tools or no report
+    agent_id = f"{slug.replace('_', '-')}-1"
+    card = orch.agent_cards.get(agent_id) if orch else None
+    if not card:
+        return validation_report
+    tools = []
+    for skill in card.skills:
+        schema = skill.input_schema or {}
+        props = schema.get("properties", {})
+        required = schema.get("required", []) if isinstance(schema.get("required"), list) else []
+        params = []
+        for pname, pinfo in props.items():
+            if isinstance(pinfo, dict):
+                params.append({
+                    "name": pname,
+                    "type": pinfo.get("type", "any"),
+                    "description": pinfo.get("description", ""),
+                    "required": pname in required,
+                })
+        tools.append({
+            "name": skill.id,
+            "description": skill.description or "",
+            "scope": getattr(skill, "scope", "tools:read") or "tools:read",
+            "parameters": params,
+        })
+    validation_report["tools"] = tools
+    return validation_report
+
+
+def _draft_to_response(draft: dict, orch=None) -> DraftAgentResponse:
+    """Convert a raw draft dict to a DraftAgentResponse with parsed JSON fields."""
+    validation_report = _parse_json_field(draft.get("validation_report"))
+    if validation_report and orch:
+        validation_report = _backfill_validation_tools(
+            validation_report, draft["agent_slug"], orch
+        )
+    return DraftAgentResponse(
+        id=draft["id"],
+        user_id=draft["user_id"],
+        agent_name=draft["agent_name"],
+        agent_slug=draft["agent_slug"],
+        description=draft["description"],
+        tools_spec=_parse_json_field(draft.get("tools_spec")),
+        skill_tags=_parse_json_field(draft.get("skill_tags")),
+        packages=_parse_json_field(draft.get("packages")),
+        status=draft["status"],
+        generation_log=_parse_json_field(draft.get("generation_log")),
+        security_report=_parse_json_field(draft.get("security_report")),
+        validation_report=validation_report,
+        error_message=draft.get("error_message"),
+        port=draft.get("port"),
+        review_notes=draft.get("review_notes"),
+        reviewed_by=draft.get("reviewed_by"),
+        refinement_history=_parse_json_field(draft.get("refinement_history")),
+        required_credentials=_parse_json_field(draft.get("required_credentials")),
+        created_at=draft.get("created_at"),
+        updated_at=draft.get("updated_at"),
+    )
+
+
+@draft_router.get(
+    "",
+    response_model=DraftAgentListResponse,
+    summary="List draft agents",
+    description="Returns all draft agents belonging to the current user.",
+)
+async def list_drafts(
+    request: Request,
+    user_id: str = Depends(require_user_id),
+):
+    orch = _get_orchestrator(request)
+    drafts = orch.history.db.get_user_draft_agents(user_id)
+    return DraftAgentListResponse(
+        drafts=[_draft_to_response(d, orch) for d in drafts]
+    )
+
+
+@draft_router.post(
+    "",
+    response_model=DraftAgentResponse,
+    summary="Create a draft agent",
+    description="Creates a new draft agent with the given specification. Does not generate code yet.",
+)
+async def create_draft(
+    request: Request,
+    body: DraftAgentCreateRequest,
+    user_id: str = Depends(require_user_id),
+):
+    orch = _get_orchestrator(request)
+    lifecycle = _get_lifecycle(request)
+    try:
+        draft = await lifecycle.create_draft(
+            user_id=user_id,
+            agent_name=body.agent_name,
+            description=body.description,
+            tools_spec=[t.model_dump() for t in body.tools] if body.tools else None,
+            skill_tags=body.skill_tags,
+            packages=body.packages,
+        )
+        return _draft_to_response(draft, orch)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@draft_router.get(
+    "/pending-review",
+    response_model=DraftAgentListResponse,
+    summary="List drafts pending admin review",
+    description="Admin endpoint: returns all draft agents awaiting review.",
+)
+async def list_pending_review(
+    request: Request,
+    user_id: str = Depends(require_user_id),
+    payload: dict = Depends(get_current_user_payload),
+):
+    roles = payload.get("roles", []) if payload else []
+    if "admin" not in roles:
+        raise HTTPException(status_code=403, detail="Admin role required")
+
+    orch = _get_orchestrator(request)
+    drafts = orch.history.db.get_pending_review_drafts()
+    return DraftAgentListResponse(
+        drafts=[_draft_to_response(d, orch) for d in drafts]
+    )
+
+
+@draft_router.get(
+    "/{draft_id}",
+    response_model=DraftAgentResponse,
+    summary="Get draft agent details",
+)
+async def get_draft(
+    request: Request,
+    draft_id: str,
+    user_id: str = Depends(require_user_id),
+):
+    orch = _get_orchestrator(request)
+    draft = orch.history.db.get_draft_agent(draft_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft agent not found")
+    if draft["user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="Not your draft agent")
+    return _draft_to_response(draft, orch)
+
+
+@draft_router.delete(
+    "/{draft_id}",
+    response_model=DeleteResponse,
+    summary="Delete a draft agent",
+    description="Stops the agent process, removes files, and deletes the record.",
+)
+async def delete_draft(
+    request: Request,
+    draft_id: str,
+    user_id: str = Depends(require_user_id),
+):
+    orch = _get_orchestrator(request)
+    draft = orch.history.db.get_draft_agent(draft_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft agent not found")
+    if draft["user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="Not your draft agent")
+
+    lifecycle = _get_lifecycle(request)
+    deleted = await lifecycle.delete_draft(draft_id)
+    if not deleted:
+        raise HTTPException(status_code=500, detail="Failed to delete draft agent")
+    return DeleteResponse(message="Draft agent deleted successfully")
+
+
+@draft_router.post(
+    "/{draft_id}/generate",
+    response_model=DraftAgentResponse,
+    summary="Generate agent code",
+    description="Triggers LLM code generation for the draft agent. Progress updates are sent via WebSocket.",
+)
+async def generate_draft(
+    request: Request,
+    draft_id: str,
+    user_id: str = Depends(require_user_id),
+):
+    orch = _get_orchestrator(request)
+    draft = orch.history.db.get_draft_agent(draft_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft agent not found")
+    if draft["user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="Not your draft agent")
+
+    lifecycle = _get_lifecycle(request)
+    # Find user's WebSocket for progress updates
+    ws = _find_user_websocket(orch, user_id)
+    result = await lifecycle.generate_code(draft_id, websocket=ws)
+    return _draft_to_response(result, orch)
+
+
+@draft_router.post(
+    "/{draft_id}/refine",
+    response_model=DraftAgentResponse,
+    summary="Refine agent via chat",
+    description="Refines the agent's tool implementations based on a natural language message.",
+)
+async def refine_draft(
+    request: Request,
+    draft_id: str,
+    body: DraftAgentRefineRequest,
+    user_id: str = Depends(require_user_id),
+):
+    orch = _get_orchestrator(request)
+    draft = orch.history.db.get_draft_agent(draft_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft agent not found")
+    if draft["user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="Not your draft agent")
+
+    lifecycle = _get_lifecycle(request)
+    ws = _find_user_websocket(orch, user_id)
+    result = await lifecycle.refine_agent(draft_id, body.message, websocket=ws)
+    return _draft_to_response(result, orch)
+
+
+@draft_router.post(
+    "/{draft_id}/test",
+    response_model=DraftAgentResponse,
+    summary="Start draft agent for testing",
+    description="Launches the draft agent subprocess. The orchestrator will auto-discover it.",
+)
+async def test_draft(
+    request: Request,
+    draft_id: str,
+    user_id: str = Depends(require_user_id),
+):
+    orch = _get_orchestrator(request)
+    draft = orch.history.db.get_draft_agent(draft_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft agent not found")
+    if draft["user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="Not your draft agent")
+
+    lifecycle = _get_lifecycle(request)
+    ws = _find_user_websocket(orch, user_id)
+    try:
+        result = await lifecycle.start_draft_agent(draft_id, websocket=ws)
+        return _draft_to_response(result, orch)
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@draft_router.post(
+    "/{draft_id}/stop",
+    response_model=DraftAgentResponse,
+    summary="Stop testing draft agent",
+)
+async def stop_draft(
+    request: Request,
+    draft_id: str,
+    user_id: str = Depends(require_user_id),
+):
+    orch = _get_orchestrator(request)
+    draft = orch.history.db.get_draft_agent(draft_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft agent not found")
+    if draft["user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="Not your draft agent")
+
+    lifecycle = _get_lifecycle(request)
+    await lifecycle.stop_draft_agent(draft_id)
+    orch.history.db.update_draft_agent(draft_id, status="generated")
+    updated = orch.history.db.get_draft_agent(draft_id)
+    return _draft_to_response(updated, orch)
+
+
+@draft_router.post(
+    "/{draft_id}/approve",
+    response_model=DraftAgentResponse,
+    summary="Approve draft agent",
+    description="Runs comprehensive security analysis. Auto-approves if clean, sends to admin review if high-severity findings.",
+)
+async def approve_draft(
+    request: Request,
+    draft_id: str,
+    user_id: str = Depends(require_user_id),
+):
+    orch = _get_orchestrator(request)
+    draft = orch.history.db.get_draft_agent(draft_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft agent not found")
+    if draft["user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="Not your draft agent")
+
+    lifecycle = _get_lifecycle(request)
+    ws = _find_user_websocket(orch, user_id)
+    result = await lifecycle.approve_agent(draft_id, websocket=ws)
+    return _draft_to_response(result, orch)
+
+
+@draft_router.post(
+    "/{draft_id}/review",
+    response_model=DraftAgentResponse,
+    summary="Admin review: approve or reject",
+    description="Admin endpoint to approve or reject a draft agent pending review.",
+)
+async def admin_review(
+    request: Request,
+    draft_id: str,
+    body: AdminReviewRequest,
+    user_id: str = Depends(require_user_id),
+    payload: dict = Depends(get_current_user_payload),
+):
+    roles = payload.get("roles", []) if payload else []
+    if "admin" not in roles:
+        raise HTTPException(status_code=403, detail="Admin role required")
+
+    lifecycle = _get_lifecycle(request)
+    ws = None  # Could look up draft owner's WS for notification
+    try:
+        result = await lifecycle.admin_review(
+            draft_id, body.decision, admin_user_id=user_id,
+            notes=body.notes, websocket=ws
+        )
+        return _draft_to_response(result, orch)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ─── Draft Agent Credentials ─────────────────────────────────────────────────
+
+@draft_router.get(
+    "/{draft_id}/credentials",
+    summary="Get credential status for a draft agent",
+    description="Returns required credentials and which ones the user has already stored.",
+)
+async def get_draft_credentials(
+    request: Request,
+    draft_id: str,
+    user_id: str = Depends(require_user_id),
+):
+    orch = _get_orchestrator(request)
+    draft = orch.history.db.get_draft_agent(draft_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft agent not found")
+    if draft["user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="Not your draft agent")
+
+    agent_id = f"{draft['agent_slug'].replace('_', '-')}-1"
+    stored_keys = orch.credential_manager.list_credential_keys(user_id, agent_id)
+    required = json.loads(draft.get("required_credentials") or "[]")
+
+    return {
+        "draft_id": draft_id,
+        "agent_id": agent_id,
+        "required_credentials": required,
+        "stored_credential_keys": stored_keys,
+    }
+
+
+@draft_router.put(
+    "/{draft_id}/credentials",
+    summary="Set credentials for a draft agent",
+    description="Store encrypted credentials for a draft agent before testing.",
+)
+async def set_draft_credentials(
+    request: Request,
+    draft_id: str,
+    body: CredentialSetRequest,
+    user_id: str = Depends(require_user_id),
+):
+    orch = _get_orchestrator(request)
+    draft = orch.history.db.get_draft_agent(draft_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft agent not found")
+    if draft["user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="Not your draft agent")
+
+    agent_id = f"{draft['agent_slug'].replace('_', '-')}-1"
+    orch.credential_manager.set_bulk_credentials(user_id, agent_id, body.credentials)
+    stored_keys = orch.credential_manager.list_credential_keys(user_id, agent_id)
+    required = json.loads(draft.get("required_credentials") or "[]")
+
+    return {
+        "draft_id": draft_id,
+        "agent_id": agent_id,
+        "required_credentials": required,
+        "stored_credential_keys": stored_keys,
+    }
 
 
 # =============================================================================

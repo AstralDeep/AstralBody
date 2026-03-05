@@ -214,10 +214,23 @@ class Database:
                 review_notes TEXT,
                 reviewed_by TEXT,
                 refinement_history TEXT,
+                validation_report TEXT,
                 created_at INTEGER,
                 updated_at INTEGER
             )
         ''')
+
+        # Add validation_report column if missing (migration for existing DBs)
+        try:
+            cursor.execute("ALTER TABLE draft_agents ADD COLUMN validation_report TEXT")
+        except Exception:
+            pass
+
+        # Add required_credentials column if missing (migration for existing DBs)
+        try:
+            cursor.execute("ALTER TABLE draft_agents ADD COLUMN required_credentials TEXT")
+        except Exception:
+            pass
 
         # Indexes on user_id for query performance
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_chats_user_id ON chats(user_id)')
@@ -411,12 +424,19 @@ class Database:
         return dict(row) if row else None
 
     def get_user_draft_agents(self, user_id: str) -> List[Dict]:
-        """Get all draft agents for a user."""
+        """Get all draft agents for a user (excludes live/rejected agents)."""
         rows = self.fetch_all(
-            "SELECT * FROM draft_agents WHERE user_id = ? ORDER BY created_at DESC",
+            "SELECT * FROM draft_agents WHERE user_id = ? AND status NOT IN ('live', 'rejected') ORDER BY created_at DESC",
             (user_id,)
         )
         return [dict(r) for r in rows]
+
+    def get_draft_agent_by_slug(self, slug: str) -> Optional[Dict]:
+        """Get a draft agent by its slug."""
+        row = self.fetch_one(
+            "SELECT * FROM draft_agents WHERE agent_slug = ?", (slug,)
+        )
+        return dict(row) if row else None
 
     def get_pending_review_drafts(self) -> List[Dict]:
         """Get all draft agents awaiting admin review."""

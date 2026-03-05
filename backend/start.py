@@ -41,10 +41,34 @@ def main():
             for item in os.listdir(agents_dir):
                 item_path = os.path.join(agents_dir, item)
                 if os.path.isdir(item_path) and not item.startswith("__"):
+                    # Skip draft agents from port count
+                    if os.path.exists(os.path.join(item_path, ".draft")):
+                        continue
                     agent_scripts = [f for f in os.listdir(item_path) if f.endswith("_agent.py")]
                     if agent_scripts:
                         valid_agents.append(item)
         
+        # Assign DEFAULT_AGENT_OWNER to any agents (live or draft) without an owner
+        default_owner = os.environ.get("DEFAULT_AGENT_OWNER")
+        if default_owner:
+            all_agents = []
+            if os.path.exists(agents_dir):
+                for item in os.listdir(agents_dir):
+                    item_path = os.path.join(agents_dir, item)
+                    if os.path.isdir(item_path) and not item.startswith("__"):
+                        agent_scripts = [f for f in os.listdir(item_path) if f.endswith("_agent.py")]
+                        if agent_scripts:
+                            all_agents.append(item)
+            if all_agents:
+                from shared.database import Database
+                db = Database()
+                for agent_name in all_agents:
+                    ownership = db.get_agent_ownership(agent_name)
+                    if not ownership:
+                        db.set_agent_ownership(agent_name, default_owner, is_public=False)
+                        print(f"  Assigned owner '{default_owner}' to agent: {agent_name}")
+                db.close()
+
         # Set MAX_AGENTS based on what we found, defaulting to 1 if none found to avoid errors
         max_agents = max(1, len(valid_agents))
         env = os.environ.copy()
@@ -60,6 +84,10 @@ def main():
         for item in os.listdir(agents_dir):
             item_path = os.path.join(agents_dir, item)
             if os.path.isdir(item_path) and not item.startswith("__"):
+                # Skip draft agents — they are started on-demand via the UI
+                if os.path.exists(os.path.join(item_path, ".draft")):
+                    print(f"Skipping draft agent: {item}")
+                    continue
                 agent_scripts = [f for f in os.listdir(item_path) if f.endswith("_agent.py")]
                 if agent_scripts:
                     custom_agent_script = os.path.join(item_path, agent_scripts[0])
