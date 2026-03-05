@@ -945,6 +945,20 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
     }, []);
 
     // ── Agent Visibility ──────────────────────────────────────────────
+    const sendTablePaginate = useCallback((event: { source_tool: string; source_agent: string; source_params: Record<string, unknown>; limit: number; offset: number }) => {
+        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+        wsRef.current.send(JSON.stringify({
+            type: "ui_event",
+            action: "table_paginate",
+            payload: {
+                tool_name: event.source_tool,
+                agent_id: event.source_agent,
+                params: { ...event.source_params, limit: event.limit, offset: event.offset },
+            }
+        }));
+        setChatStatus({ status: "executing", message: "Loading table data..." });
+    }, []);
+
     const setAgentVisibility = useCallback(async (agentId: string, isPublic: boolean): Promise<boolean> => {
         try {
             const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -1005,5 +1019,6 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         deleteAgentCredential,
         startOAuthFlow,
         setAgentVisibility,
+        sendTablePaginate,
     };
 }

@@ -101,6 +101,15 @@ class Table(Component):
     headers: List[str] = field(default_factory=list)
     rows: List[List[Any]] = field(default_factory=list)
     variant: str = "default"
+    # Pagination (optional — when present, frontend renders controls)
+    total_rows: Optional[int] = None
+    page_size: Optional[int] = None
+    page_offset: Optional[int] = None
+    page_sizes: List[int] = field(default_factory=list)
+    # Tool re-invocation context (enables frontend to request different pages)
+    source_tool: Optional[str] = None
+    source_agent: Optional[str] = None
+    source_params: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

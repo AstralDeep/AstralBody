@@ -185,11 +185,20 @@ function AddAllToUIButton({ components, onSave }: { components: AnyProps[]; onSa
     );
 }
 
+export interface TablePaginateEvent {
+    source_tool: string;
+    source_agent: string;
+    source_params: Record<string, unknown>;
+    limit: number;
+    offset: number;
+}
+
 interface DynamicRendererProps {
     components: unknown;
     onSaveComponent?: (componentData: Record<string, unknown>, componentType: string, title?: string) => Promise<boolean>;
     activeChatId?: string | null;
     onSendMessage?: (message: string) => void;
+    onTablePaginate?: (event: TablePaginateEvent) => void;
 }
 
 // ─── Error Boundary ────────────────────────────────────────────────
@@ -222,7 +231,7 @@ class RenderErrorBoundary extends Component<
 
 // ─── Component Renderers ───────────────────────────────────────────
 
-function renderComponent(comp: AnyProps, index: number, onSaveComponent?: (componentData: AnyProps, componentType: string) => Promise<boolean>, onSendMessage?: (message: string) => void): React.ReactNode {
+function renderComponent(comp: AnyProps, index: number, onSaveComponent?: (componentData: AnyProps, componentType: string) => Promise<boolean>, onSendMessage?: (message: string) => void, onTablePaginate?: (event: TablePaginateEvent) => void): React.ReactNode {
     if (!comp || typeof comp !== "object") return null;
     const { type, ...props } = comp;
 
@@ -230,7 +239,7 @@ function renderComponent(comp: AnyProps, index: number, onSaveComponent?: (compo
     // Used inside extractSavableComponents, not needed here directly.
     void savableComponents;
 
-    const baseProps = { ...props, onSaveComponent, onSendMessage };
+    const baseProps = { ...props, onSaveComponent, onSendMessage, onTablePaginate };
 
     switch (type) {
         case "container":
@@ -279,17 +288,17 @@ function renderComponent(comp: AnyProps, index: number, onSaveComponent?: (compo
     }
 }
 
-function renderChildren(items: unknown, onSaveComponent?: (componentData: Record<string, unknown>, componentType: string) => Promise<boolean>, onSendMessage?: (message: string) => void): React.ReactNode {
+function renderChildren(items: unknown, onSaveComponent?: (componentData: Record<string, unknown>, componentType: string) => Promise<boolean>, onSendMessage?: (message: string) => void, onTablePaginate?: (event: TablePaginateEvent) => void): React.ReactNode {
     if (!Array.isArray(items)) return null;
-    return items.map((c, i) => renderComponent(c, i, onSaveComponent, onSendMessage));
+    return items.map((c, i) => renderComponent(c, i, onSaveComponent, onSendMessage, onTablePaginate));
 }
 
 // ── Container ──────────────────────────────────────────────────────
-function RenderContainer({ children, content, onSaveComponent, onSendMessage }: AnyProps) {
+function RenderContainer({ children, content, onSaveComponent, onSendMessage, onTablePaginate }: AnyProps) {
     const kids = children || content || [];
     return (
         <div className="flex flex-col gap-4 relative group">
-            {renderChildren(kids, onSaveComponent, onSendMessage)}
+            {renderChildren(kids, onSaveComponent, onSendMessage, onTablePaginate)}
         </div>
     );
 }
@@ -334,7 +343,7 @@ function RenderText({ content, variant = "body" }: AnyProps) {
 }
 
 // ── Card ───────────────────────────────────────────────────────────
-function RenderCard({ title, children, content, onSaveComponent, onSendMessage }: AnyProps) {
+function RenderCard({ title, children, content, onSaveComponent, onSendMessage, onTablePaginate }: AnyProps) {
     const kids = children || content || [];
     return (
         <motion.div
@@ -351,7 +360,7 @@ function RenderCard({ title, children, content, onSaveComponent, onSendMessage }
                     </h3>
                 </div>
             )}
-            <div className="space-y-3">{renderChildren(kids, onSaveComponent, onSendMessage)}</div>
+            <div className="space-y-3">{renderChildren(kids, onSaveComponent, onSendMessage, onTablePaginate)}</div>
         </motion.div>
     );
 }
@@ -369,15 +378,54 @@ function renderCellValue(cell: AnyProps) {
     return String(cell);
 }
 
-function RenderTable({ headers, rows, title: compTitle, label }: AnyProps) {
+function RenderTable({ headers, rows, title: compTitle, label,
+    total_rows, page_size, page_offset, page_sizes,
+    source_tool, source_agent, source_params, onTablePaginate }: AnyProps) {
     if (!headers || !rows) return null;
 
     const title = compTitle || label || "Table";
+    const hasPagination = total_rows != null && page_size != null && source_tool && source_agent;
+    const currentOffset = page_offset || 0;
+    const currentSize = page_size || rows.length;
+    const sizes = page_sizes?.length ? page_sizes : [25, 50, 100, 200];
+    const showingFrom = currentOffset + 1;
+    const showingTo = Math.min(currentOffset + currentSize, total_rows || rows.length);
+    const hasNext = hasPagination && (currentOffset + currentSize) < total_rows;
+    const hasPrev = hasPagination && currentOffset > 0;
+
+    const handlePageSizeChange = (newSize: number) => {
+        if (onTablePaginate && source_tool && source_agent) {
+            onTablePaginate({
+                source_tool,
+                source_agent,
+                source_params: source_params || {},
+                limit: newSize,
+                offset: 0, // Reset to first page on size change
+            });
+        }
+    };
+
+    const handlePageChange = (newOffset: number) => {
+        if (onTablePaginate && source_tool && source_agent) {
+            onTablePaginate({
+                source_tool,
+                source_agent,
+                source_params: source_params || {},
+                limit: currentSize,
+                offset: Math.max(0, newOffset),
+            });
+        }
+    };
 
     return (
         <div className="rounded-lg border border-white/5">
-            <div className="p-3 border-b border-white/5 bg-astral-primary/5">
+            <div className="p-3 border-b border-white/5 bg-astral-primary/5 flex items-center justify-between">
                 <div className="text-sm font-medium text-astral-text">{title}</div>
+                {hasPagination && (
+                    <div className="text-xs text-astral-muted">
+                        {showingFrom}–{showingTo} of {total_rows}
+                    </div>
+                )}
             </div>
             {/* Desktop: standard table */}
             <div className="hidden sm:block overflow-x-auto">
@@ -415,6 +463,39 @@ function RenderTable({ headers, rows, title: compTitle, label }: AnyProps) {
                     </div>
                 ))}
             </div>
+            {/* Pagination controls */}
+            {hasPagination && onTablePaginate && (
+                <div className="p-3 border-t border-white/5 bg-astral-primary/5 flex items-center justify-between gap-4">
+                    <div className="flex items-center gap-2">
+                        <span className="text-xs text-astral-muted">Rows per page:</span>
+                        <select
+                            value={currentSize}
+                            onChange={(e) => handlePageSizeChange(Number(e.target.value))}
+                            className="text-xs bg-astral-surface border border-white/10 rounded px-2 py-1 text-astral-text focus:outline-none focus:border-astral-primary [&>option]:bg-astral-surface [&>option]:text-astral-text"
+                        >
+                            {sizes.map((s: number) => (
+                                <option key={s} value={s}>{s}</option>
+                            ))}
+                        </select>
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <button
+                            onClick={() => handlePageChange(currentOffset - currentSize)}
+                            disabled={!hasPrev}
+                            className="text-xs px-3 py-1 rounded border border-white/10 text-astral-text hover:bg-white/10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                        >
+                            Prev
+                        </button>
+                        <button
+                            onClick={() => handlePageChange(currentOffset + currentSize)}
+                            disabled={!hasNext}
+                            className="text-xs px-3 py-1 rounded border border-white/10 text-astral-text hover:bg-white/10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                        >
+                            Next
+                        </button>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }
@@ -497,7 +578,7 @@ function RenderProgress({ value, label, show_percentage }: AnyProps) {
 }
 
 // ── Grid ───────────────────────────────────────────────────────────
-function RenderGrid({ columns = 2, gap = 16, children, content, onSaveComponent, onSendMessage }: AnyProps) {
+function RenderGrid({ columns = 2, gap = 16, children, content, onSaveComponent, onSendMessage, onTablePaginate }: AnyProps) {
     const kids = children || content || [];
 
     // Responsive: use Tailwind classes instead of hardcoded columns so grids
@@ -514,7 +595,7 @@ function RenderGrid({ columns = 2, gap = 16, children, content, onSaveComponent,
 
     return (
         <div className={`grid ${cls}`} style={{ gap: `${gap}px` }}>
-            {renderChildren(kids, onSaveComponent, onSendMessage)}
+            {renderChildren(kids, onSaveComponent, onSendMessage, onTablePaginate)}
         </div>
     );
 }
@@ -820,7 +901,7 @@ function RenderColorPicker({ label, color_key, value, _source_agent, _source_too
 }
 
 // ── Collapsible ────────────────────────────────────────────────────
-function RenderCollapsible({ title, children, content, default_open, onSaveComponent, onSendMessage }: AnyProps) {
+function RenderCollapsible({ title, children, content, default_open, onSaveComponent, onSendMessage, onTablePaginate, headerAction }: AnyProps) {
     const [isOpen, setIsOpen] = useState(default_open ?? false);
     const kids = children || content || [];
     const displayTitle = title || "Details";
@@ -848,7 +929,7 @@ function RenderCollapsible({ title, children, content, default_open, onSaveCompo
                         {displayTitle}
                     </span>
                 </button>
-
+                {headerAction}
             </div>
             <AnimatePresence initial={false}>
                 {isOpen && (
@@ -860,7 +941,7 @@ function RenderCollapsible({ title, children, content, default_open, onSaveCompo
                         className="overflow-hidden"
                     >
                         <div className="px-4 pb-3 pt-1 border-t border-white/5 space-y-2">
-                            {renderChildren(kids, onSaveComponent, onSendMessage)}
+                            {renderChildren(kids, onSaveComponent, onSendMessage, onTablePaginate)}
                         </div>
                     </motion.div>
                 )}
@@ -1023,7 +1104,7 @@ function RenderFileDownload({ label, url, filename }: AnyProps) {
 }
 
 // ─── Main DynamicRenderer ──────────────────────────────────────────
-export default function DynamicRenderer({ components, onSaveComponent, onSendMessage }: DynamicRendererProps) {
+export default function DynamicRenderer({ components, onSaveComponent, onSendMessage, onTablePaginate }: DynamicRendererProps) {
     const comps = Array.isArray(components) ? components : [components];
 
     // console.log('DynamicRenderer rendered with:', {
@@ -1035,20 +1116,37 @@ export default function DynamicRenderer({ components, onSaveComponent, onSendMes
 
     if (!comps || comps.length === 0) return null;
 
+    // Find first collapsible to inject the "Add all to UI" button into its header
+    let addAllInjected = false;
+
     return (
         <RenderErrorBoundary>
-            <div className="dynamic-renderer space-y-4">
-                {onSaveComponent && (
-                    <div className="flex items-center justify-between mb-2">
-                        <div className="text-xs text-astral-muted font-medium uppercase tracking-wider">Components</div>
-                        <AddAllToUIButton components={comps} onSave={onSaveComponent} />
-                    </div>
+            <div className="dynamic-renderer space-y-3">
+                {comps.map((comp, i) => {
+                    const c = comp as Record<string, unknown>;
+                    if (onSaveComponent && !addAllInjected && c?.type === "collapsible") {
+                        addAllInjected = true;
+                        return (
+                            <RenderErrorBoundary key={i}>
+                                <RenderCollapsible
+                                    {...c}
+                                    onSaveComponent={onSaveComponent}
+                                    onSendMessage={onSendMessage}
+                                    onTablePaginate={onTablePaginate}
+                                    headerAction={<AddAllToUIButton components={comps} onSave={onSaveComponent} />}
+                                />
+                            </RenderErrorBoundary>
+                        );
+                    }
+                    return (
+                        <RenderErrorBoundary key={i}>
+                            {renderComponent(comp, i, onSaveComponent, onSendMessage, onTablePaginate)}
+                        </RenderErrorBoundary>
+                    );
+                })}
+                {onSaveComponent && !addAllInjected && (
+                    <AddAllToUIButton components={comps} onSave={onSaveComponent} />
                 )}
-                {comps.map((comp, i) => (
-                    <RenderErrorBoundary key={i}>
-                        {renderComponent(comp, i, onSaveComponent, onSendMessage)}
-                    </RenderErrorBoundary>
-                ))}
             </div>
         </RenderErrorBoundary>
     );

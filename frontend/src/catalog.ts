@@ -40,8 +40,17 @@ export const catalog = defineCatalog(schema, {
                 variant: z.string().optional(),
                 id: z.string().nullable().optional(),
                 style: z.record(z.string(), z.string()).optional(),
+                // Pagination (optional)
+                total_rows: z.number().nullable().optional(),
+                page_size: z.number().nullable().optional(),
+                page_offset: z.number().nullable().optional(),
+                page_sizes: z.array(z.number()).optional(),
+                // Tool re-invocation context
+                source_tool: z.string().nullable().optional(),
+                source_agent: z.string().nullable().optional(),
+                source_params: z.record(z.string(), z.any()).optional(),
             }),
-            description: "Data table with headers and rows",
+            description: "Data table with headers, rows, and optional pagination controls",
         },
         metric: {
             props: z.object({
