@@ -811,6 +811,46 @@ class Orchestrator:
                             "error": f"Failed to condense components: {str(e)}"
                         }))
 
+                elif msg.action == "table_paginate":
+                    # Re-invoke a tool with updated pagination params
+                    tool_name = msg.payload.get("tool_name")
+                    agent_id = msg.payload.get("agent_id")
+                    params = msg.payload.get("params", {})
+
+                    if not tool_name or not agent_id:
+                        await self.send_ui_render(websocket, [
+                            Alert(message="Missing tool_name or agent_id for pagination", variant="error").to_json()
+                        ])
+                        await self._safe_send(websocket, json.dumps({
+                            "type": "chat_status", "status": "done", "message": ""
+                        }))
+                        return
+
+                    # Inject per-user credentials
+                    args = dict(params)
+                    if user_id and agent_id:
+                        creds = self.credential_manager.get_agent_credentials(user_id, agent_id)
+                        if creds:
+                            args["_credentials"] = creds
+
+                    try:
+                        result = await self._execute_with_retry(websocket, agent_id, tool_name, args)
+                        if result and result.ui_components:
+                            await self.send_ui_render(websocket, result.ui_components)
+                        elif result and result.error:
+                            await self.send_ui_render(websocket, [
+                                Alert(message=result.error.get("message", "Pagination failed"), variant="error").to_json()
+                            ])
+                    except Exception as e:
+                        logger.error(f"table_paginate failed: {e}", exc_info=True)
+                        await self.send_ui_render(websocket, [
+                            Alert(message=f"Pagination failed: {e}", variant="error").to_json()
+                        ])
+                    finally:
+                        await self._safe_send(websocket, json.dumps({
+                            "type": "chat_status", "status": "done", "message": ""
+                        }))
+
         except Exception as e:
             logger.error(f"Error handling UI message: {e}")
 
@@ -1400,7 +1440,10 @@ CRITICAL RULES:
                     error_msg = ""
                     
                     # Heuristic: if it looks like JSON containing a component
-                    if content.strip().startswith("{") or content.strip().startswith("[") or "```json" in content:
+                    stripped = content.strip()
+                    looks_like_json = stripped.startswith("{") or stripped.startswith("[") or "```json" in content
+
+                    if looks_like_json:
                         raw_json = content
                         if "```json" in content:
                             match = re.search(r'```json\n(.*?)\n```', content, re.DOTALL)
@@ -1410,7 +1453,16 @@ CRITICAL RULES:
                                 match = re.search(r'```(.*?)```', content, re.DOTALL)
                                 if match:
                                     raw_json = match.group(1).strip()
-                        
+                    else:
+                        # Fallback: LLM may have output text before JSON components
+                        # Search for a JSON array or object containing a "type" field
+                        json_match = re.search(r'(\[[\s\S]*\]|\{[\s\S]*\})\s*$', content)
+                        if json_match:
+                            raw_json = json_match.group(1)
+                            looks_like_json = True
+                            logger.info("Extracted trailing JSON from mixed text+JSON response")
+
+                    if looks_like_json:
                         try:
                             # Try to parse and find valid components
                             # Using the same technique as the _combine_components_llm parser
@@ -1424,7 +1476,7 @@ CRITICAL RULES:
                                     if raw_json.endswith("```"):
                                         raw_json = raw_json[:-3]
                                     raw_json = raw_json.strip()
-                                
+
                                 try:
                                     data = json.loads(raw_json)
                                 except json.JSONDecodeError:

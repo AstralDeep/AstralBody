@@ -89,7 +89,7 @@ export default function DashboardLayout({
 }: DashboardLayoutProps) {
     const [chatToDelete, setChatToDelete] = useState<string | null>(null);
     const [permModalAgent, setPermModalAgent] = useState<string | null>(null);
-    const [sidebarOpen, setSidebarOpen] = useState(false);
+    const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth >= 768);
     const [chatSearch, setChatSearch] = useState("");
     const [agentsModalOpen, setAgentsModalOpen] = useState(false);
     const [agentsTab, setAgentsTab] = useState<"my" | "all" | "drafts">("my");
@@ -543,16 +543,18 @@ export default function DashboardLayout({
                 />
             )}
 
-            {/* Sidebar */}
+            {/* Sidebar — Gemini-style: collapses to icon rail on desktop, overlay on mobile */}
             <aside className={`
-                fixed inset-y-0 left-0 z-50 w-64 flex flex-col border-r border-white/5 bg-astral-surface/30 backdrop-blur-xl
-                transform transition-transform duration-200 ease-in-out
+                flex flex-col border-r border-white/5 bg-astral-surface/30 backdrop-blur-xl flex-shrink-0 overflow-hidden
+                fixed inset-y-0 left-0 z-50 w-64
+                transform transition-all duration-200 ease-in-out
                 ${sidebarOpen ? "translate-x-0" : "-translate-x-full"}
-                md:static md:translate-x-0
+                md:static md:z-auto md:translate-x-0
+                ${sidebarOpen ? "md:w-64" : "md:w-16"}
             `}>
                 {/* Logo / Brand */}
-                <div className="h-14 md:h-16 flex items-center justify-between px-5 border-b border-white/5 safe-top">
-                    <div className="flex items-center gap-3">
+                <div className={`h-14 flex items-center border-b border-white/5 safe-top ${sidebarOpen ? "justify-between px-5" : "md:justify-center md:px-0 justify-between px-5"}`}>
+                    <div className={`flex items-center gap-3 transition-opacity duration-200 ${sidebarOpen ? "opacity-100" : "md:opacity-0 md:w-0 md:overflow-hidden"}`}>
                         <div className="flex items-center">
                             <img
                                 src="/AstralDeep.png"
@@ -561,16 +563,55 @@ export default function DashboardLayout({
                             />
                         </div>
                     </div>
+                    {/* Mobile: X to close overlay */}
                     <button
                         onClick={() => setSidebarOpen(false)}
                         className="p-1.5 rounded-lg hover:bg-white/10 transition-colors md:hidden"
                     >
                         <X size={18} className="text-astral-muted" />
                     </button>
+                    {/* Desktop: hamburger to toggle */}
+                    <button
+                        onClick={() => setSidebarOpen(!sidebarOpen)}
+                        className="p-1.5 rounded-lg hover:bg-white/10 transition-colors hidden md:block"
+                    >
+                        <Menu size={18} className="text-astral-muted" />
+                    </button>
                 </div>
 
-                {/* Navigation */}
-                <nav className="flex-1 overflow-y-auto overflow-x-hidden py-4 px-3 space-y-6">
+                {/* Collapsed icon rail (desktop only) */}
+                <div className={`flex-1 flex-col items-center pt-3 pb-4 gap-2 hidden ${sidebarOpen ? "md:hidden" : "md:flex"}`}>
+                    <button
+                        onClick={() => { onNewChat?.(); }}
+                        className="p-2.5 rounded-lg hover:bg-white/10 transition-colors"
+                        title="New chat"
+                    >
+                        <Plus size={18} className="text-astral-primary" />
+                    </button>
+                    <button
+                        onClick={() => setAgentsModalOpen(true)}
+                        className="p-2.5 rounded-lg hover:bg-white/10 transition-colors"
+                        title={`Agents — ${agents.length} connected`}
+                    >
+                        <Bot size={18} className="text-astral-primary" />
+                    </button>
+                    <div className="flex-1" />
+                    <div className="flex flex-col items-center gap-1 mb-1">
+                        <span className={`w-2 h-2 rounded-full ${isConnected ? "bg-green-400" : "bg-red-400"} ${connectionState === "reconnecting" || connectionState === "connecting" ? "animate-pulse" : ""}`}
+                            title={isConnected ? "Connected" : "Disconnected"}
+                        />
+                    </div>
+                    <button
+                        onClick={onLogout}
+                        className="p-2.5 rounded-lg hover:bg-white/10 transition-colors"
+                        title="Sign Out"
+                    >
+                        <LogOut size={18} className="text-astral-muted" />
+                    </button>
+                </div>
+
+                {/* Expanded navigation (always on mobile, conditional on desktop) */}
+                <nav className={`flex-1 overflow-y-auto overflow-x-hidden py-4 px-3 space-y-6 ${sidebarOpen ? "" : "md:hidden"}`}>
 
                     {/* Status Section */}
                     <div>
@@ -701,8 +742,8 @@ export default function DashboardLayout({
                     </div>
                 </nav>
 
-                {/* Footer */}
-                <div className="border-t border-white/5 p-3">
+                {/* Footer (expanded only) */}
+                <div className={`border-t border-white/5 p-3 ${sidebarOpen ? "" : "md:hidden"}`}>
                     <button
                         onClick={onLogout}
                         className="w-full flex items-center gap-2 px-3 py-2 text-xs text-astral-muted
@@ -720,7 +761,7 @@ export default function DashboardLayout({
                 <header className="h-14 relative flex items-center justify-between px-3 sm:px-6 border-b border-white/5 bg-astral-bg/80 backdrop-blur-md flex-shrink-0 safe-top">
                     <div className="flex items-center gap-2 sm:gap-3">
                         <button
-                            onClick={() => setSidebarOpen(true)}
+                            onClick={() => setSidebarOpen(!sidebarOpen)}
                             className="p-2 rounded-lg hover:bg-white/10 transition-colors md:hidden"
                         >
                             <Menu size={20} className="text-astral-muted" />
@@ -728,7 +769,7 @@ export default function DashboardLayout({
                         <LayoutDashboard size={16} className="text-astral-muted hidden sm:block" />
                         <span className="text-sm font-medium text-white hidden sm:block">Dashboard</span>
                     </div>
-                    {/* Centered logo — visible only when sidebar is collapsed */}
+                    {/* Centered logo — visible on mobile only */}
                     <div className="absolute left-1/2 -translate-x-1/2 md:hidden">
                         <img
                             src="/AstralDeep.png"

@@ -12,6 +12,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Send, Bot, User, Sparkles, Loader2, ChevronLeft, Paperclip, UploadCloud, X, FileMinus, FileText, Square } from "lucide-react";
 import { toast } from "sonner";
 import DynamicRenderer from "./DynamicRenderer";
+import type { TablePaginateEvent } from "./DynamicRenderer";
 import UISavedDrawer from "./UISavedDrawer";
 import { BFF_URL } from "../config";
 import type { ChatStatus } from "../hooks/useWebSocket";
@@ -31,6 +32,7 @@ interface ChatInterfaceProps {
     isCombining: boolean;
     combineError: string | null;
     accessToken?: string;
+    onTablePaginate?: (event: TablePaginateEvent) => void;
 }
 
 const SUGGESTIONS = [
@@ -55,6 +57,7 @@ export default function ChatInterface({
     isCombining,
     combineError,
     accessToken,
+    onTablePaginate,
 }: ChatInterfaceProps) {
     const [input, setInput] = useState(() => {
         try { return localStorage.getItem("astral-draft") || ""; } catch { return ""; }
@@ -387,7 +390,7 @@ export default function ChatInterface({
             </AnimatePresence>
 
             {/* Messages Area */}
-            <div className="flex-1 overflow-y-auto px-3 sm:px-6 py-3 sm:py-4 space-y-4 sm:space-y-6">
+            <div className="flex-1 overflow-y-auto px-3 sm:px-8 py-3 sm:py-4 space-y-4 sm:space-y-6">
                 {messages.length === 0 && (
                     <div className="flex flex-col items-center justify-center h-full text-center">
                         <motion.div
@@ -438,8 +441,8 @@ export default function ChatInterface({
                         )}
                         <div
                             className={`${msg.role === "user"
-                                ? "max-w-[85%] sm:max-w-md bg-astral-primary/20 border border-astral-primary/30 rounded-2xl rounded-tr-sm px-3 sm:px-4 py-2.5 sm:py-3"
-                                : "flex-1 max-w-full sm:max-w-4xl min-w-0"
+                                ? "max-w-[85%] bg-astral-primary/20 border border-astral-primary/30 rounded-2xl rounded-tr-sm px-3 sm:px-4 py-2.5 sm:py-3"
+                                : "flex-1 max-w-full min-w-0"
                                 }`}
                         >
                             {msg.role === "user" ? (
@@ -452,6 +455,7 @@ export default function ChatInterface({
                                     onSaveComponent={onSaveComponent}
                                     activeChatId={activeChatId}
                                     onSendMessage={onSendMessage}
+                                    onTablePaginate={onTablePaginate}
                                 />
                             )}
                         </div>
@@ -496,8 +500,8 @@ export default function ChatInterface({
             </div>
 
             {/* Input Area */}
-            <div className="border-t border-white/5 p-2 sm:p-4 bg-astral-bg/80 backdrop-blur-md safe-bottom">
-                <form onSubmit={handleSubmit} className="flex flex-col gap-2 sm:gap-3 max-w-4xl mx-auto">
+            <div className="p-2 sm:px-8 sm:py-4 bg-astral-bg/80 backdrop-blur-md safe-bottom">
+                <form onSubmit={handleSubmit} className="flex flex-col gap-2 sm:gap-3 mx-auto w-full">
 
                     {/* Staged File View */}
                     <AnimatePresence>
