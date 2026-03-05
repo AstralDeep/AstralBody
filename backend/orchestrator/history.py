@@ -149,8 +149,11 @@ class HistoryManager:
         }
 
     def get_recent_chats(self, limit: int = 20, user_id: str = 'legacy') -> List[Dict]:
-        """Get list of recent chats (metadata only)."""
-        rows = self.db.fetch_all("SELECT * FROM chats WHERE user_id = ? ORDER BY updated_at DESC LIMIT ?", (user_id, limit))
+        """Get list of recent chats (metadata only). Excludes draft-test chats."""
+        rows = self.db.fetch_all(
+            "SELECT * FROM chats WHERE user_id = ? AND id NOT LIKE 'draft-test-%' ORDER BY updated_at DESC LIMIT ?",
+            (user_id, limit),
+        )
         
         results = []
         for row in rows:

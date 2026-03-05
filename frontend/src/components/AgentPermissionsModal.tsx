@@ -361,8 +361,6 @@ export default function AgentPermissionsModal({
         setLocalToolOverrides(prev => {
             const currentlyEnabled = prev[toolName] ?? true; // default = enabled (follows scope)
             const updated = { ...prev, [toolName]: !currentlyEnabled };
-            // Clean up: remove entries that are true (= no override, follows scope default)
-            if (updated[toolName]) delete updated[toolName];
             detectChanges(localScopes, updated);
             return updated;
         });

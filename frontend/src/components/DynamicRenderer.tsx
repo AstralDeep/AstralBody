@@ -25,6 +25,7 @@ import "katex/dist/katex.min.css";
 import { useSmartAuth } from "../hooks/useSmartAuth";
 import { toast } from "sonner";
 import { useTheme, type ThemeColors } from "../contexts/ThemeContext";
+import { useAgentPermissions } from "../contexts/AgentPermissionContext";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyProps = any;
@@ -759,8 +760,11 @@ function RenderGenericPlotly({ title, data, layout, config }: AnyProps) {
 }
 
 // ── Button ─────────────────────────────────────────────────────────
-function RenderButton({ label, variant = "primary", action, payload, onSendMessage }: AnyProps) {
+function RenderButton({ label, variant = "primary", action, payload, onSendMessage, _source_agent, _source_tool }: AnyProps) {
     const theme = useTheme();
+    const { isToolAllowed } = useAgentPermissions();
+    const allowed = isToolAllowed(_source_agent || "", _source_tool || "");
+
     const variants: Record<string, string> = {
         primary: "bg-astral-primary hover:bg-astral-primary/80 text-white",
         secondary: "bg-white/10 hover:bg-white/20 text-astral-text",
@@ -768,6 +772,7 @@ function RenderButton({ label, variant = "primary", action, payload, onSendMessa
     };
 
     const handleClick = () => {
+        if (!allowed) return;
         if (action === "theme_preset" && payload?.colors) {
             theme.setColors(payload.colors as ThemeColors);
         } else if (action === "chat_message" && payload?.message && onSendMessage) {
@@ -778,7 +783,9 @@ function RenderButton({ label, variant = "primary", action, payload, onSendMessa
     return (
         <button
             onClick={handleClick}
-            className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${variants[variant] || variants.primary}`}
+            disabled={!allowed}
+            title={!allowed ? "This tool's permissions have been revoked" : undefined}
+            className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${variants[variant] || variants.primary} ${!allowed ? "opacity-40 cursor-not-allowed grayscale" : ""}`}
         >
             {label}
         </button>
@@ -786,12 +793,14 @@ function RenderButton({ label, variant = "primary", action, payload, onSendMessa
 }
 
 // ── ColorPicker ────────────────────────────────────────────────────
-function RenderColorPicker({ label, color_key, value }: AnyProps) {
+function RenderColorPicker({ label, color_key, value, _source_agent, _source_tool }: AnyProps) {
     const { colors, setColor } = useTheme();
+    const { isToolAllowed } = useAgentPermissions();
+    const allowed = isToolAllowed(_source_agent || "", _source_tool || "");
     const currentValue = colors[color_key as keyof ThemeColors] || value || "#000000";
 
     return (
-        <div className="flex items-center gap-3 py-1">
+        <div className={`flex items-center gap-3 py-1 ${!allowed ? "opacity-40 grayscale" : ""}`}>
             <label className="text-sm text-astral-text font-medium min-w-[100px]">
                 {label}
             </label>
@@ -799,8 +808,10 @@ function RenderColorPicker({ label, color_key, value }: AnyProps) {
                 <input
                     type="color"
                     value={currentValue}
-                    onChange={(e) => setColor(color_key as keyof ThemeColors, e.target.value)}
-                    className="w-10 h-10 rounded-lg cursor-pointer border-2 border-white/10 bg-transparent [&::-webkit-color-swatch-wrapper]:p-0.5 [&::-webkit-color-swatch]:rounded-md [&::-webkit-color-swatch]:border-none"
+                    onChange={(e) => allowed && setColor(color_key as keyof ThemeColors, e.target.value)}
+                    disabled={!allowed}
+                    title={!allowed ? "This tool's permissions have been revoked" : undefined}
+                    className={`w-10 h-10 rounded-lg border-2 border-white/10 bg-transparent [&::-webkit-color-swatch-wrapper]:p-0.5 [&::-webkit-color-swatch]:rounded-md [&::-webkit-color-swatch]:border-none ${allowed ? "cursor-pointer" : "cursor-not-allowed"}`}
                 />
             </div>
             <span className="text-xs text-astral-muted font-mono">{currentValue}</span>

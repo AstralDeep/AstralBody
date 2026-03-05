@@ -9,6 +9,7 @@ import { useWebSocket } from "./hooks/useWebSocket";
 import { AlertCircle } from "lucide-react";
 import { Toaster } from "sonner";
 import { ThemeProvider } from "./contexts/ThemeContext";
+import { AgentPermissionProvider } from "./contexts/AgentPermissionContext";
 
 import { WS_URL } from "./config";
 
@@ -47,6 +48,7 @@ function App() {
     startOAuthFlow,
     setAgentVisibility,
     registerExternalAgent,
+    discoverAgents,
   } = useWebSocket(
     WS_URL,
     auth.user?.access_token
@@ -210,7 +212,9 @@ function App() {
       userEmail={userEmail}
       onSetAgentVisibility={setAgentVisibility}
       onRegisterExternalAgent={registerExternalAgent}
+      onDiscoverAgents={discoverAgents}
     >
+      <AgentPermissionProvider agents={agents}>
       <ChatInterface
         messages={messages}
         chatStatus={chatStatus}
@@ -227,6 +231,7 @@ function App() {
         combineError={combineError}
         accessToken={auth.user?.access_token}
       />
+      </AgentPermissionProvider>
     </DashboardLayout>
     </ThemeProvider>
   );

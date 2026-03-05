@@ -16,6 +16,8 @@ from typing import Dict, Any, Optional, List
 from openai import OpenAI
 from httpx import Timeout
 
+from orchestrator.agent_spec import generate_llm_prompt_section
+
 logger = logging.getLogger("AgentGenerator")
 
 
@@ -25,7 +27,7 @@ AGENT_PY_TEMPLATE = '''#!/usr/bin/env python3
 """
 {service_name} — A2A-compliant agent.
 
-{description}
+{docstring_description}
 """
 import asyncio
 import os
@@ -42,11 +44,11 @@ logging.basicConfig(level=logging.INFO,
 
 
 class {class_name}(BaseA2AAgent):
-    """{description}"""
+    """{docstring_description}"""
 
     agent_id = "{agent_id}"
     service_name = "{service_name}"
-    description = "{description}"
+    description = """{escaped_description}"""
     skill_tags = {skill_tags}
 
     def __init__(self, port: int = None):
@@ -70,6 +72,7 @@ MCP Server for {service_name} — dispatches tool calls to tool functions.
 import os
 import sys
 import json
+import inspect
 import logging
 from typing import Dict, Any
 
@@ -141,6 +144,16 @@ class MCPServer:
 
             try:
                 tool_fn = self.tools[tool_name]["function"]
+                # Filter out orchestrator-injected kwargs the tool doesn't expect
+                sig = inspect.signature(tool_fn)
+                params = sig.parameters
+                has_var_keyword = any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+                )
+                if not has_var_keyword:
+                    arguments = {{
+                        k: v for k, v in arguments.items() if k in params
+                    }}
                 result = tool_fn(**arguments)
 
                 if isinstance(result, dict) and "_ui_components" in result:
@@ -220,6 +233,24 @@ class AgentCodeGenerator:
         """Convert slug to PascalCase class name."""
         return ''.join(word.capitalize() for word in slug.split('_')) + 'Agent'
 
+    @staticmethod
+    def _sanitize_description(description: str) -> str:
+        """Sanitize description for safe injection into Python source code.
+
+        Returns a single-line string safe for use in triple-quoted strings.
+        Collapses whitespace, escapes backslashes and triple quotes, and
+        ensures the string doesn't end with a quote (which would collide
+        with the closing triple-quote delimiter).
+        """
+        # Collapse all whitespace (newlines, tabs, multiple spaces) to single spaces
+        safe = ' '.join(description.split())
+        # Escape backslashes first, then triple quotes
+        safe = safe.replace('\\', '\\\\').replace('"""', '\\"\\"\\"')
+        # If it ends with a quote, add a trailing space to prevent """" ambiguity
+        if safe.endswith('"'):
+            safe += ' '
+        return safe
+
     def generate_template_files(self, agent_name: str, description: str,
                                  slug: str, skill_tags: List[str] = None) -> Dict[str, str]:
         """Generate the boilerplate agent_py and mcp_server files from templates."""
@@ -227,10 +258,12 @@ class AgentCodeGenerator:
         agent_id = f"{slug.replace('_', '-')}-1"
         port_env_var = f"{slug.upper()}_AGENT_PORT"
         tags_repr = repr(skill_tags or [])
+        safe_desc = self._sanitize_description(description)
 
         agent_py = AGENT_PY_TEMPLATE.format(
-            service_name=agent_name,
-            description=description.replace('"', '\\"'),
+            service_name=agent_name.replace('"', '\\"'),
+            docstring_description=safe_desc,
+            escaped_description=safe_desc,
             slug=slug,
             class_name=class_name,
             agent_id=agent_id,
@@ -270,6 +303,8 @@ class AgentCodeGenerator:
         if packages:
             packages_note = f"\nAllowed packages to import: {', '.join(packages)}"
 
+        ui_spec = generate_llm_prompt_section()
+
         prompt = f"""You are a Python code generator for an agent tool system. Generate a complete `mcp_tools.py` file.
 
 ## Agent Info
@@ -280,41 +315,36 @@ class AgentCodeGenerator:
 {tools_description if tools_description else "Create appropriate tools based on the agent description."}
 {packages_note}
 
-## REQUIRED FORMAT
+{ui_spec}
 
-The file MUST export a `TOOL_REGISTRY` dictionary. Each tool function should:
-1. Accept keyword arguments matching the input_schema
-2. Return a dict with `_ui_components` (list of UI component dicts) and `_data` (raw data for LLM)
-3. Handle errors gracefully by returning an Alert component with variant="error"
+## CREDENTIAL DECLARATION
 
-## UI Component Types Available
-You can return these component types in `_ui_components`:
-- {{"type": "Alert", "message": "...", "variant": "info|success|warning|error"}}
-- {{"type": "Text", "content": "...", "variant": "h3|body|caption"}}
-- {{"type": "Card", "title": "...", "children": [...]}}
-- {{"type": "Table", "headers": [...], "rows": [[...], ...]}}
-- {{"type": "Metric", "label": "...", "value": "...", "trend": "up|down|neutral"}}
-- {{"type": "List", "items": [...]}}
-- {{"type": "Code", "code": "...", "language": "..."}}
-- {{"type": "Progress", "value": 75, "label": "..."}}
+If this agent needs external API keys, OAuth tokens, or other secrets for **third-party services**
+(e.g. a weather API, email service, database), declare them with REQUIRED_CREDENTIALS:
 
-## TOOL_REGISTRY Format
 ```python
-TOOL_REGISTRY = {{
-    "tool_name": {{
-        "function": tool_function,
-        "description": "What this tool does",
-        "input_schema": {{
-            "type": "object",
-            "properties": {{
-                "param_name": {{"type": "string", "description": "..."}}
-            }},
-            "required": ["param_name"]
-        }},
-        "scope": "tools:read"  # or tools:write, tools:search, tools:system
-    }}
-}}
+REQUIRED_CREDENTIALS = [
+    {{
+        "key": "SERVICE_API_KEY",        # UPPER_SNAKE_CASE key name
+        "label": "Service API Key",      # Human-readable label
+        "description": "Get this from ...",  # Help text for the user
+        "required": True,                # True if agent cannot work without it
+        "type": "api_key"                # One of: api_key, oauth_client_id, oauth_client_secret, token, password, username
+    }},
+]
 ```
+
+If the agent does NOT need any external credentials (e.g. it only generates data locally
+or uses public APIs), set `REQUIRED_CREDENTIALS = []`.
+
+**NEVER declare credentials for the LLM itself** (no OpenAI key, no model config, no AI/LLM API keys).
+The LLM is provided by the system and shared across all agents — agents do not need their own LLM credentials.
+Only declare credentials for external third-party services the agent's tools call directly.
+
+IMPORTANT: Credentials are injected at runtime via the `_credentials` dict parameter.
+Inside tool functions, accept `**kwargs` and access them like:
+`api_key = kwargs.get("_credentials", {{}}).get("SERVICE_API_KEY", "")`
+Do NOT hardcode secrets. Do NOT use os.environ for secrets.
 
 ## SECURITY RULES — You MUST follow these:
 - Do NOT use `eval()`, `exec()`, `compile()`, or `__import__()`
@@ -358,6 +388,8 @@ Output ONLY the Python code. No markdown fences, no explanations."""
         if not self.llm_client:
             raise RuntimeError("LLM not configured — cannot refine agent tools")
 
+        ui_spec = generate_llm_prompt_section()
+
         prompt = f"""You are refining the tool implementations for an agent.
 
 ## Agent Info
@@ -371,6 +403,29 @@ Output ONLY the Python code. No markdown fences, no explanations."""
 
 ## User's requested changes:
 {user_message}
+
+{ui_spec}
+
+IMPORTANT: Ensure all UI components use the shared.primitives classes (Card, MetricCard, Alert, etc.)
+and call `.to_json()` to serialize them. Do NOT use raw dicts for UI components.
+
+## CREDENTIAL DECLARATION
+
+The file must include a `REQUIRED_CREDENTIALS` list at the module level. If the agent needs
+external API keys, OAuth tokens, or other secrets for **third-party services**, declare each one:
+
+```python
+REQUIRED_CREDENTIALS = [
+    {{"key": "SERVICE_API_KEY", "label": "Service API Key", "description": "Get this from ...", "required": True, "type": "api_key"}},
+]
+```
+
+If no credentials are needed, set `REQUIRED_CREDENTIALS = []`.
+If the refinement adds or removes API integrations, update REQUIRED_CREDENTIALS accordingly.
+Access credentials at runtime via: `kwargs.get("_credentials", {{}}).get("KEY", "")`
+
+**NEVER declare credentials for the LLM/AI model** (no OpenAI key, no model config).
+The LLM is system-provided and shared across all agents. Only declare credentials for external services.
 
 ## SECURITY RULES — You MUST follow these:
 - Do NOT use `eval()`, `exec()`, `compile()`, or `__import__()`
