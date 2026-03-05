@@ -14,9 +14,10 @@ import {
     AlertTriangle,
     ExternalLink,
     ChevronRight,
-    Plus,
     UploadCloud,
     Download,
+    Wrench,
+    PanelTopOpen,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkMath from "remark-math";
@@ -98,7 +99,7 @@ function extractSavableComponents(component: AnyProps, result: { componentData: 
     }
 }
 
-// Button to add all components
+// Button to add all components — compact icon that expands on hover
 function AddAllToUIButton({ components, onSave }: { components: AnyProps[]; onSave: (componentData: AnyProps, componentType: string, title?: string) => Promise<boolean> }) {
     const [isSaving, setIsSaving] = useState(false);
     const [saved, setSaved] = useState(false);
@@ -147,38 +148,40 @@ function AddAllToUIButton({ components, onSave }: { components: AnyProps[]; onSa
         <button
             onClick={handleClick}
             disabled={isSaving || saved}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all duration-200
+            className={`group/addbtn flex items-center gap-1 h-6 rounded-md text-[10px] font-medium transition-all duration-200 overflow-hidden
                 ${saved
-                    ? 'bg-green-500/20 text-green-400 border border-green-500/30'
+                    ? 'bg-green-500/20 text-green-400 px-2'
                     : isSaving
-                        ? 'bg-astral-primary/20 text-astral-primary border border-astral-primary/30'
+                        ? 'bg-astral-primary/10 text-astral-primary px-2'
                         : error
-                            ? 'bg-red-500/10 text-red-400 border border-red-500/30 hover:bg-red-500/20 hover:border-red-500/50'
-                            : 'bg-white/10 text-astral-muted hover:text-white hover:bg-white/20 border border-white/10 hover:border-astral-primary/30'
+                            ? 'bg-red-500/10 text-red-400 px-2'
+                            : 'text-astral-muted/60 hover:text-astral-muted hover:bg-white/5 px-2'
                 }
-                disabled:opacity-50 disabled:cursor-not-allowed`}
-            title={error ? `Error: ${error}` : saved ? 'All components added to UI drawer' : 'Add all components to UI drawer'}
-            aria-label={error ? 'Error saving components' : saved ? 'All components saved' : 'Add all components to UI drawer'}
+                disabled:cursor-not-allowed`}
+            title={error ? `Error: ${error}` : saved ? 'All components added to UI drawer' : 'Pin to dashboard'}
+            aria-label={error ? 'Error saving components' : saved ? 'All components saved' : 'Pin all to dashboard'}
         >
             {saved ? (
                 <>
-                    <CheckCircle size={12} />
-                    <span>All Added</span>
+                    <CheckCircle size={11} />
+                    <span>Pinned</span>
                 </>
             ) : isSaving ? (
                 <>
-                    <div className="animate-spin rounded-full h-3 w-3 border-t-2 border-b-2 border-current" />
-                    <span>Saving...</span>
+                    <div className="animate-spin rounded-full h-2.5 w-2.5 border-t border-b border-current" />
+                    <span>Saving</span>
                 </>
             ) : error ? (
                 <>
-                    <div className="text-red-400">!</div>
+                    <AlertCircle size={11} />
                     <span>Error</span>
                 </>
             ) : (
                 <>
-                    <Plus size={12} />
-                    <span>Add all to UI</span>
+                    <PanelTopOpen size={12} className="shrink-0" />
+                    <span className="whitespace-nowrap">
+                        Pin to UI
+                    </span>
                 </>
             )}
         </button>
@@ -906,31 +909,52 @@ function RenderCollapsible({ title, children, content, default_open, onSaveCompo
     const kids = children || content || [];
     const displayTitle = title || "Details";
 
+    // Parse "Tool Results — Agent: Tool Name" into parts for better display
+    const isToolResult = typeof displayTitle === 'string' && displayTitle.startsWith("Tool Results");
+    const toolName = isToolResult
+        ? displayTitle.replace(/^Tool Results\s*[—–-]\s*/, '')
+        : null;
+    const childCount = Array.isArray(kids) ? kids.length : 0;
+
     return (
         <motion.div
-            initial={{ opacity: 0, y: 6 }}
+            initial={{ opacity: 0, y: 4 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.2 }}
-            className="rounded-xl border border-white/5 overflow-hidden bg-white/[0.02]"
+            transition={{ duration: 0.15 }}
+            className="rounded-lg border border-white/[0.06] overflow-hidden bg-white/[0.015] group/collapsible"
         >
-            <div className="flex items-center justify-between px-4 py-2.5 hover:bg-white/5 transition-colors">
-                <button
-                    onClick={() => setIsOpen(!isOpen)}
-                    className="flex items-center gap-2 text-left flex-1"
+            <button
+                onClick={() => setIsOpen(!isOpen)}
+                className="flex items-center w-full gap-2 px-3 py-2 hover:bg-white/[0.03] transition-colors text-left"
+            >
+                <motion.span
+                    animate={{ rotate: isOpen ? 90 : 0 }}
+                    transition={{ duration: 0.15 }}
+                    className="text-astral-muted/50"
                 >
-                    <motion.span
-                        animate={{ rotate: isOpen ? 90 : 0 }}
-                        transition={{ duration: 0.15 }}
-                        className="text-astral-muted"
-                    >
-                        <ChevronRight size={14} />
-                    </motion.span>
-                    <span className="text-xs font-medium text-astral-muted uppercase tracking-wider">
+                    <ChevronRight size={12} />
+                </motion.span>
+                {isToolResult ? (
+                    <span className="flex items-center gap-2 flex-1 min-w-0">
+                        <Wrench size={11} className="text-astral-muted/40 shrink-0" />
+                        <span className="text-[11px] font-medium text-astral-muted/70 truncate">
+                            {toolName}
+                        </span>
+                        {childCount > 0 && (
+                            <span className="text-[9px] text-astral-muted/30 tabular-nums">
+                                {childCount} {childCount === 1 ? 'item' : 'items'}
+                            </span>
+                        )}
+                    </span>
+                ) : (
+                    <span className="text-[11px] font-medium text-astral-muted/70 uppercase tracking-wider flex-1 truncate">
                         {displayTitle}
                     </span>
-                </button>
-                {headerAction}
-            </div>
+                )}
+                <span className="shrink-0">
+                    {headerAction}
+                </span>
+            </button>
             <AnimatePresence initial={false}>
                 {isOpen && (
                     <motion.div
@@ -940,7 +964,7 @@ function RenderCollapsible({ title, children, content, default_open, onSaveCompo
                         transition={{ duration: 0.2, ease: "easeInOut" }}
                         className="overflow-hidden"
                     >
-                        <div className="px-4 pb-3 pt-1 border-t border-white/5 space-y-2">
+                        <div className="px-3 pb-3 pt-1.5 border-t border-white/[0.04] space-y-2 max-h-[420px] overflow-y-auto scrollbar-thin">
                             {renderChildren(kids, onSaveComponent, onSendMessage, onTablePaginate)}
                         </div>
                     </motion.div>
