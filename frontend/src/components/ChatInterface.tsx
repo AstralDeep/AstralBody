@@ -442,7 +442,7 @@ export default function ChatInterface({
                         <div
                             className={`${msg.role === "user"
                                 ? "max-w-[85%] bg-astral-primary/20 border border-astral-primary/30 rounded-2xl rounded-tr-sm px-3 sm:px-4 py-2.5 sm:py-3"
-                                : "flex-1 max-w-full min-w-0"
+                                : "flex-1 max-w-[calc(100%-5rem)] min-w-0"
                                 }`}
                         >
                             {msg.role === "user" ? (

@@ -78,6 +78,8 @@ class Orchestrator:
         self.agent_capabilities: Dict[str, List[Dict]] = {}
         self.pending_requests: Dict[str, asyncio.Future] = {}
         self.cancelled_sessions: Dict[str, bool] = {}  # websocket id -> cancelled flag
+        self._chat_locks: Dict[int, asyncio.Lock] = {}  # per-websocket lock for chat serialization
+        self._registered_events: Dict[int, asyncio.Event] = {}  # gate non-register messages until auth completes
 
         # A2A external agent connections (JSON-RPC transport)
         self.a2a_clients: Dict[str, Any] = {}  # agent_id -> A2A client
@@ -375,6 +377,20 @@ class Orchestrator:
         except Exception as e:
             logger.error(f"Error handling agent message: {e}")
 
+    async def _safe_handle_ui_message(self, websocket, message: str):
+        """Wrapper that catches exceptions from fire-and-forget UI message tasks.
+        Non-register messages wait for registration to complete first."""
+        try:
+            # Quick parse to check if this is a register_ui message
+            is_register = '"register_ui"' in message
+            if not is_register:
+                evt = self._registered_events.get(id(websocket))
+                if evt and not evt.is_set():
+                    await evt.wait()
+            await self.handle_ui_message(websocket, message)
+        except Exception as e:
+            logger.error(f"UI message task error: {e}", exc_info=True)
+
     async def handle_ui_message(self, websocket, message: str):
         """Handle message from a UI client."""
         try:
@@ -416,10 +432,19 @@ class Orchestrator:
                     except Exception as e:
                         logger.warning(f"Failed to load user preferences: {e}")
 
+                    # Mark registration complete so queued messages can proceed
+                    evt = self._registered_events.get(id(websocket))
+                    if evt:
+                        evt.set()
+
                     # Notify UI of success (optional, or just send dashboard)
                     await self.send_dashboard(websocket)
                 else:
                     logger.warning("UI registration failed: Invalid or missing token")
+                    # Ungate waiting tasks so they hit the auth check naturally
+                    evt = self._registered_events.get(id(websocket))
+                    if evt:
+                        evt.set()
                     await self.send_ui_render(websocket, [
                         Alert(message="Authentication failed. Please log in again.", variant="error").to_json()
                     ])
@@ -460,7 +485,12 @@ class Orchestrator:
 
                     display_message = msg.payload.get("display_message")
                     self.cancelled_sessions[id(websocket)] = False
-                    await self.handle_chat_message(websocket, user_message, chat_id, display_message, user_id=user_id, draft_agent_id=draft_agent_id)
+                    # Use serialized wrapper so concurrent chat messages
+                    # for the same session are processed one at a time.
+                    await self._serialized_chat(
+                        websocket, user_message, chat_id, display_message,
+                        user_id=user_id, draft_agent_id=draft_agent_id,
+                    )
 
                 elif msg.action == "cancel_task":
                     self.cancelled_sessions[id(websocket)] = True
@@ -1127,6 +1157,24 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 except Exception:
                     break
         return asyncio.create_task(_heartbeat_loop())
+
+    async def _serialized_chat(self, websocket, message, chat_id, display_message, *, user_id=None, draft_agent_id=None):
+        """Run handle_chat_message under a per-websocket lock so messages
+        are serialized but the WS receive loop is never blocked."""
+        ws_id = id(websocket)
+        lock = self._chat_locks.setdefault(ws_id, asyncio.Lock())
+        async with lock:
+            try:
+                await self.handle_chat_message(
+                    websocket, message, chat_id, display_message,
+                    user_id=user_id, draft_agent_id=draft_agent_id,
+                )
+            except Exception as e:
+                logger.error(f"Chat task error: {e}", exc_info=True)
+                await self._safe_send(websocket, json.dumps({
+                    "type": "chat_status", "status": "done",
+                    "message": f"Error: {e}"
+                }))
 
     async def handle_chat_message(self, websocket, message: str, chat_id: str, display_message: str = None, user_id: str = None, draft_agent_id: str = None):
         """Process a chat message: LLM determines which tools to call (Multi-Turn Re-Act Loop)."""
@@ -2436,11 +2484,15 @@ CRITICAL RULES:
         """Handle a UI client WebSocket connection using FastAPI."""
         await websocket.accept()
         self.ui_clients.append(websocket)
+        self._registered_events[id(websocket)] = asyncio.Event()
         logger.info(f"UI client connected (total: {len(self.ui_clients)})")
         try:
             while True:
                 message = await websocket.receive_text()
-                await self.handle_ui_message(websocket, message)
+                # Fire as task so the receive loop stays responsive —
+                # long-running handlers (chat, condense, combine, paginate)
+                # won't block button clicks or cancel_task messages.
+                asyncio.create_task(self._safe_handle_ui_message(websocket, message))
         except WebSocketDisconnect:
             logger.info("UI client disconnected")
         except Exception as e:
@@ -2452,16 +2504,19 @@ CRITICAL RULES:
                 self.ui_clients.remove(websocket)
             if websocket in self.ui_sessions:
                 del self.ui_sessions[websocket]
+            self._chat_locks.pop(id(websocket), None)
+            self._registered_events.pop(id(websocket), None)
             self.rote.cleanup(websocket)
             logger.info(f"UI client session cleaned up (total: {len(self.ui_clients)})")
 
     async def handle_ui_connection(self, websocket, path=None):
         """Handle a UI client WebSocket connection (legacy websockets lib)."""
         self.ui_clients.append(websocket)
+        self._registered_events[id(websocket)] = asyncio.Event()
         logger.info(f"UI client connected (total: {len(self.ui_clients)})")
         try:
             async for message in websocket:
-                await self.handle_ui_message(websocket, message)
+                asyncio.create_task(self._safe_handle_ui_message(websocket, message))
         except websockets.exceptions.ConnectionClosed:
             logger.info("UI client disconnected")
         finally:
@@ -2469,6 +2524,8 @@ CRITICAL RULES:
                 self.ui_clients.remove(websocket)
             if websocket in self.ui_sessions:
                 del self.ui_sessions[websocket]
+            self._chat_locks.pop(id(websocket), None)
+            self._registered_events.pop(id(websocket), None)
             self.rote.cleanup(websocket)
             logger.info(f"UI client session cleaned up (total: {len(self.ui_clients)})")
 

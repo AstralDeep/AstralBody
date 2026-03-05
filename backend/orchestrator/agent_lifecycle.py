@@ -741,6 +741,11 @@ class AgentLifecycleManager:
         if not draft:
             return False
 
+        # Auto-fix is only allowed for draft agents, not live ones
+        if draft["status"] == LIVE:
+            logger.info(f"Auto-fix skipped for live agent {agent_id} (tool '{tool_name}')")
+            return False
+
         draft_id = draft["id"]
         slug = draft["agent_slug"]
         tools_file = os.path.join(self._agents_dir, slug, "mcp_tools.py")

@@ -509,13 +509,54 @@ def get_assigned_tasks(table_id: str, assignee: str, status: str = "",
     """
     try:
         client = _build_client(kwargs)
-        # Use like with wildcards for flexible name matching
+
+        # Try server-side filter first; fall back to client-side filtering
+        # if the field type doesn't support 'like' (e.g. User fields → 422).
         where = f"(Assignee,like,%{assignee}%)"
         if status:
             where += f"~and(Status,eq,{status})"
 
-        params: Dict[str, Any] = {"where": where, "limit": limit}
-        data = client.get(f"/api/v2/tables/{table_id}/records", params=params)
+        try:
+            params: Dict[str, Any] = {"where": where, "limit": limit}
+            data = client.get(f"/api/v2/tables/{table_id}/records", params=params)
+        except requests.HTTPError as http_err:
+            if http_err.response is not None and http_err.response.status_code == 422:
+                # 'like' unsupported for this field type – fetch with status
+                # filter only (if any) and match assignee client-side.
+                fallback_where = f"(Status,eq,{status})" if status else ""
+                fb_params: Dict[str, Any] = {"limit": limit}
+                if fallback_where:
+                    fb_params["where"] = fallback_where
+                data = client.get(f"/api/v2/tables/{table_id}/records", params=fb_params)
+                # Client-side assignee filtering
+                assignee_lower = assignee.lower()
+                filtered = []
+                for rec in data.get("list", []):
+                    raw = rec.get("Assignee", "")
+                    # User fields can be a string, dict, or list of dicts
+                    text = ""
+                    if isinstance(raw, str):
+                        text = raw
+                    elif isinstance(raw, dict):
+                        text = f"{raw.get('display_name', '')} {raw.get('email', '')}"
+                    elif isinstance(raw, list):
+                        parts = []
+                        for u in raw:
+                            if isinstance(u, dict):
+                                parts.append(f"{u.get('display_name', '')} {u.get('email', '')}")
+                            else:
+                                parts.append(str(u))
+                        text = " ".join(parts)
+                    else:
+                        text = str(raw)
+                    if assignee_lower in text.lower():
+                        filtered.append(rec)
+                data["list"] = filtered
+                if "pageInfo" in data:
+                    data["pageInfo"]["totalRows"] = len(filtered)
+            else:
+                raise
+
         records = data.get("list", [])
         page_info = data.get("pageInfo", {})
         total = page_info.get("totalRows", len(records))

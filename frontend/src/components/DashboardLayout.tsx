@@ -89,7 +89,15 @@ export default function DashboardLayout({
 }: DashboardLayoutProps) {
     const [chatToDelete, setChatToDelete] = useState<string | null>(null);
     const [permModalAgent, setPermModalAgent] = useState<string | null>(null);
-    const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth >= 768);
+    const [sidebarOpen, setSidebarOpen] = useState(() => {
+        const saved = localStorage.getItem("sidebarOpen");
+        if (saved !== null) return saved === "true";
+        return window.innerWidth >= 768;
+    });
+
+    useEffect(() => {
+        localStorage.setItem("sidebarOpen", String(sidebarOpen));
+    }, [sidebarOpen]);
     const [chatSearch, setChatSearch] = useState("");
     const [agentsModalOpen, setAgentsModalOpen] = useState(false);
     const [agentsTab, setAgentsTab] = useState<"my" | "all" | "drafts">("my");
@@ -702,7 +710,7 @@ export default function DashboardLayout({
                             ).map((chat) => (
                                 <div key={chat.id} className="relative group">
                                     <button
-                                        onClick={() => { onLoadChat?.(chat.id); setSidebarOpen(false); }}
+                                        onClick={() => { onLoadChat?.(chat.id); if (window.innerWidth < 768) setSidebarOpen(false); }}
                                         className={`w-full flex items-center gap-2 px-2 py-2 rounded-lg transition-colors text-left pr-8
                                         ${activeChatId === chat.id ? "bg-white/10 text-white" : "hover:bg-white/5 text-astral-muted hover:text-white"}`}
                                     >
@@ -779,7 +787,7 @@ export default function DashboardLayout({
                     </div>
                     <div className="flex items-center gap-2 sm:gap-3">
                         <button
-                            onClick={() => { onNewChat?.(); setSidebarOpen(false); }}
+                            onClick={() => { onNewChat?.(); if (window.innerWidth < 768) setSidebarOpen(false); }}
                             className="flex items-center gap-2 px-3 py-1.5 bg-astral-primary/10
                                      border border-astral-primary/20 rounded-md text-xs font-medium
                                      text-astral-primary hover:bg-astral-primary/20 transition-colors"
