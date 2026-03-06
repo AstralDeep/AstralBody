@@ -232,6 +232,12 @@ class Database:
         except Exception:
             pass
 
+        # Add status column if missing (migration for existing DBs)
+        try:
+            cursor.execute("ALTER TABLE draft_agents ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'")
+        except Exception:
+            pass
+
         # Indexes on user_id for query performance
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_chats_user_id ON chats(user_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id)')

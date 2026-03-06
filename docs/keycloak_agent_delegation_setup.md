@@ -3,7 +3,20 @@
 > **Keycloak 26.2+** · **RFC 8693 — OAuth 2.0 Token Exchange**
 > https://datatracker.ietf.org/doc/html/rfc8693
 
+> **See also:** [AstralBody Technical Document](./AstralBody_Technical_Document.md) — Section 6 (Delegated Authority Framework) and Section 14 (Appendix A) for the full security architecture context.
+
 Keycloak 26.2 introduced **Standard Token Exchange V2** as a fully supported feature (no longer preview). The old "Permissions" tab is removed — configuration is now a simple toggle in client settings.
+
+---
+
+## Why This Matters: The Delegated Authority Framework
+
+This setup enables the **Delegated Authority Framework (DAF)** — the security layer that prevents Tool Poisoning Attacks from escalating. Instead of forwarding the user's full-access token to agents (impersonation), the orchestrator exchanges it for a **narrowly-scoped delegation token** with:
+
+- **`act` claim** — Identifies the agent as the actor (not the user), enabling audit trails
+- **Attenuated scopes** — Only the permissions needed for the current task (e.g., `tools:read tool:get_weather`)
+- **Short expiry** — 5-minute lifetime limits the window of exposure
+- **Blast radius containment** — A compromised tool can only access what the delegation token permits
 
 ---
 
@@ -197,31 +210,25 @@ Paste the `access_token` at [jwt.io](https://jwt.io) and verify:
 
 ## Token Flow Diagram
 
-```
-┌──────────┐    1. Login     ┌───────────┐
-│  Browser  │───────────────►│  Keycloak  │
-│ (Frontend)│◄───────────────│  (Astral)  │
-└──────┬───┘  User Token     └─────┬─────┘
-       │                           │
-       │ 2. User Token             │
-       ▼                           │
-┌──────────────┐                   │
-│ Orchestrator │  3. Token Exchange│
-│    (BFF)     │──────────────────►│
-│              │◄──────────────────│
-│              │  Delegation Token │
-│              │  (sub=user,       │
-│              │   act=agent-id,   │
-│              │   scope=tools:*)  │
-└──────┬───────┘                   │
-       │                           │
-       │ 4. MCP Tool Call          │
-       │    + Delegation Token     │
-       ▼                           │
-┌──────────────┐                   │
-│    Agent     │ 5. Validates token│
-│ (general-1)  │   Enforces scope  │
-└──────────────┘                   │
+```mermaid
+sequenceDiagram
+    participant Browser as Browser (Frontend)
+    participant KC as Keycloak (Astral)
+    participant Orch as Orchestrator (BFF)
+    participant Agent as Agent (general-1)
+
+    Browser->>KC: 1. Login (OIDC)
+    KC-->>Browser: User Token
+
+    Browser->>Orch: 2. User Token (WebSocket register_ui)
+
+    Orch->>KC: 3. RFC 8693 Token Exchange
+    Note right of KC: grant_type=token-exchange<br/>subject_token=user_token<br/>audience=astral-agent-service<br/>scope=tools:read tool:get_weather
+    KC-->>Orch: Delegation Token<br/>(sub=user, act=agent-id, scope=tools:*)
+
+    Orch->>Agent: 4. MCP Tool Call + Delegation Token
+    Agent->>Agent: 5. Validate token, enforce scope
+    Agent-->>Orch: Tool result
 ```
 
 ---
