@@ -77,6 +77,12 @@ export interface WSMessage {
     [key: string]: unknown;
 }
 
+export interface DeviceCapabilityFlags {
+    hasMicrophone: boolean;
+    hasGeolocation: boolean;
+    speechServerAvailable: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // ROTE: Device capability detection
 // ---------------------------------------------------------------------------
@@ -178,6 +184,11 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
     const [isCombining, setIsCombining] = useState(false);
     const [combineError, setCombineError] = useState<string | null>(null);
     const [agentPermissions, setAgentPermissions] = useState<AgentPermissionsData | null>(null);
+    const [deviceCapabilities, setDeviceCapabilities] = useState<DeviceCapabilityFlags>({
+        hasMicrophone: false,
+        hasGeolocation: false,
+        speechServerAvailable: false,
+    });
     const wsRef = useRef<WebSocket | null>(null);
     const reconnectTimer = useRef<number | null>(null);
     const pendingSaveResolveRef = useRef<((value: boolean) => void) | null>(null);
@@ -390,10 +401,18 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                 }
                 break;
 
-            case "rote_config":
-                // ROTE has confirmed the device profile — no UI action needed.
-                // The backend will adapt all future ui_render payloads automatically.
+            case "rote_config": {
+                // ROTE has confirmed the device profile — extract capability flags
+                // so the UI can conditionally render mic/TTS/location features.
+                const profile = data.device_profile as Record<string, unknown> | undefined;
+                const caps = profile?.capabilities as Record<string, unknown> | undefined;
+                setDeviceCapabilities({
+                    hasMicrophone: Boolean(caps?.has_microphone),
+                    hasGeolocation: Boolean(caps?.has_geolocation),
+                    speechServerAvailable: Boolean(data.speech_server_available),
+                });
                 break;
+            }
 
             case "user_preferences":
                 // Server sent stored user preferences (theme, etc.)
@@ -1020,5 +1039,6 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         startOAuthFlow,
         setAgentVisibility,
         sendTablePaginate,
+        deviceCapabilities,
     };
 }

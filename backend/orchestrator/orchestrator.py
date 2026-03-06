@@ -418,6 +418,7 @@ class Orchestrator:
                     await self._safe_send(websocket, json.dumps({
                         "type": "rote_config",
                         "device_profile": rote_profile.to_dict(),
+                        "speech_server_available": bool(os.getenv("SPEACHES_URL", "").strip()),
                     }))
 
                     # Send stored user preferences (theme, etc.)
@@ -766,10 +767,13 @@ class Orchestrator:
                     await self._safe_send(websocket, json.dumps({
                         "type": "rote_config",
                         "device_profile": new_profile.to_dict(),
+                        "speech_server_available": bool(os.getenv("SPEACHES_URL", "").strip()),
                     }))
-                    # If the profile changed and we have cached components, re-send them
+                    # If the profile changed and we have cached components, re-send them.
+                    # Use UIUpdate (not UIRender) so the frontend replaces the last
+                    # components in-place instead of appending a duplicate message.
                     if re_adapted is not None:
-                        msg_out = UIRender(components=re_adapted)
+                        msg_out = UIUpdate(components=re_adapted)
                         await self._safe_send(websocket, msg_out.to_json())
 
                 elif msg.action == "save_theme":
@@ -2587,7 +2591,7 @@ CRITICAL RULES:
             await self.handle_ui_connection_fastapi(websocket)
 
         # Mount REST API routers
-        from orchestrator.api import chat_router, component_router, agent_router, dashboard_router, draft_router
+        from orchestrator.api import chat_router, component_router, agent_router, dashboard_router, draft_router, voice_router
         from orchestrator.auth import auth_router
         app.include_router(chat_router)
         app.include_router(component_router)
@@ -2595,6 +2599,7 @@ CRITICAL RULES:
         app.include_router(draft_router)
         app.include_router(dashboard_router)
         app.include_router(auth_router)
+        app.include_router(voice_router)
 
         # Mount A2A JSON-RPC server (orchestrator as A2A agent)
         try:

@@ -9,14 +9,18 @@ WebSocket remains the primary channel for real-time features (streaming
 chat responses, live status updates). These REST endpoints provide
 request/response access for CRUD operations.
 """
+import asyncio
+import base64
 import json
 import os
 import time
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
-from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
+import aiohttp
+import websockets as ws_client
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Query, UploadFile, File, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse, Response
 
 from orchestrator.models import (
     ChatMessageRequest, ChatMessageResponse,
@@ -1262,3 +1266,245 @@ async def get_dashboard(
         agents=agents,
         total_tools=total_tools,
     )
+
+
+# =============================================================================
+# Voice Router  (STT / TTS proxy to Speaches.ai)
+# =============================================================================
+
+voice_router = APIRouter(prefix="/api/voice", tags=["Voice"])
+
+
+@voice_router.post("/transcribe", summary="Speech-to-text via Speaches.ai")
+async def transcribe_audio(
+    file: UploadFile = File(...),
+    user_id: str = Depends(require_user_id),
+):
+    """Accept an audio file, forward it to the Speaches STT endpoint, return transcribed text."""
+    speaches_url = os.getenv("SPEACHES_URL")
+    if not speaches_url:
+        raise HTTPException(status_code=503, detail="SPEACHES_URL not configured")
+
+    stt_model = os.getenv("SPEACHES_STT_MODEL", "Systran/faster-whisper-large-v3")
+    audio_bytes = await file.read()
+
+    try:
+        form = aiohttp.FormData()
+        form.add_field("file", audio_bytes, filename=file.filename or "audio.webm", content_type=file.content_type or "audio/webm")
+        form.add_field("model", stt_model)
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{speaches_url}/v1/audio/transcriptions", data=form) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    logger.error(f"Speaches STT error {resp.status}: {body}")
+                    raise HTTPException(status_code=502, detail=f"Speaches STT error: {body}")
+                result = await resp.json()
+                return JSONResponse(content=result)
+    except aiohttp.ClientError as e:
+        logger.error(f"Speaches STT connection error: {e}")
+        raise HTTPException(status_code=502, detail=f"Cannot reach Speaches server: {e}")
+
+
+def _truncate_for_speech(text: str, max_chars: int = 300) -> str:
+    """Truncate text at a sentence boundary for natural-sounding TTS."""
+    if len(text) <= max_chars:
+        return text
+    # Find the last sentence-ending punctuation within the limit
+    truncated = text[:max_chars]
+    for end in (". ", "! ", "? "):
+        idx = truncated.rfind(end)
+        if idx > 50:  # ensure at least some content
+            return truncated[: idx + 1]
+    # Fallback: cut at last space
+    idx = truncated.rfind(" ")
+    return (truncated[:idx] if idx > 50 else truncated) + "."
+
+
+@voice_router.post("/speak", summary="Text-to-speech via Speaches.ai")
+async def text_to_speech(
+    request: Request,
+    user_id: str = Depends(require_user_id),
+):
+    """Accept text, truncate for brevity, stream audio from Speaches TTS."""
+    from fastapi.responses import StreamingResponse
+
+    speaches_url = os.getenv("SPEACHES_URL")
+    if not speaches_url:
+        raise HTTPException(status_code=503, detail="SPEACHES_URL not configured")
+
+    body = await request.json()
+    text = body.get("text", "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="No text provided")
+
+    voice = body.get("voice", "af_heart")
+    tts_model = os.getenv("SPEACHES_TTS_MODEL", "speaches-ai/Kokoro-82M-v1.0-ONNX-int8")
+
+    # Fast truncation instead of slow LLM summarization
+    text = _truncate_for_speech(text)
+    logger.info(f"TTS request: {len(text)} chars, model={tts_model}")
+
+    try:
+        payload = {"model": tts_model, "input": text, "voice": voice}
+        session = aiohttp.ClientSession()
+        resp = await session.post(f"{speaches_url}/v1/audio/speech", json=payload)
+
+        if resp.status != 200:
+            err = await resp.text()
+            await resp.release()
+            await session.close()
+            logger.error(f"Speaches TTS error {resp.status}: {err}")
+            raise HTTPException(status_code=502, detail=f"Speaches TTS error: {err}")
+
+        content_type = resp.headers.get("Content-Type", "audio/mpeg")
+
+        async def stream_audio():
+            try:
+                async for chunk in resp.content.iter_chunked(4096):
+                    yield chunk
+            finally:
+                await resp.release()
+                await session.close()
+
+        return StreamingResponse(stream_audio(), media_type=content_type)
+    except aiohttp.ClientError as e:
+        logger.error(f"Speaches TTS connection error: {e}")
+        raise HTTPException(status_code=502, detail=f"Cannot reach Speaches server: {e}")
+
+
+@voice_router.websocket("/stream")
+async def voice_stream(ws: WebSocket):
+    """
+    Real-time voice streaming proxy to Speaches Realtime API.
+
+    Protocol (frontend -> this endpoint):
+    - Frontend sends binary audio frames (PCM16 16kHz mono)
+    - This proxy base64-encodes them and forwards as OpenAI Realtime
+      `input_audio_buffer.append` events to Speaches.
+    - Transcription events from Speaches are forwarded back as JSON.
+
+    Frontend should listen for:
+    - {"type": "transcription.delta", "text": "partial..."}
+    - {"type": "transcription.done", "text": "final transcription"}
+    - {"type": "speech.started"}
+    - {"type": "speech.stopped"}
+    - {"type": "error", "message": "..."}
+    """
+    await ws.accept()
+
+    speaches_url = os.getenv("SPEACHES_URL", "").strip()
+    if not speaches_url:
+        await ws.send_json({"type": "error", "message": "Speech server not configured"})
+        await ws.close()
+        return
+
+    stt_model = os.getenv("SPEACHES_STT_MODEL", "Systran/faster-whisper-large-v3")
+
+    # Build the Speaches Realtime WebSocket URL
+    scheme = "wss" if speaches_url.startswith("https") else "ws"
+    host = speaches_url.replace("https://", "").replace("http://", "")
+    realtime_url = f"{scheme}://{host}/v1/realtime?model={stt_model}&intent=transcription"
+
+    speaches_ws = None
+    try:
+        speaches_ws = await ws_client.connect(realtime_url)
+        logger.info(f"Voice stream: connected to Speaches Realtime at {realtime_url}")
+
+        async def forward_speaches_to_client():
+            """Read events from Speaches and forward simplified events to the frontend."""
+            try:
+                async for message in speaches_ws:
+                    try:
+                        event = json.loads(message)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+
+                    event_type = event.get("type", "")
+                    logger.debug(f"Voice stream: Speaches event: {event_type}")
+
+                    if event_type == "input_audio_buffer.speech_started":
+                        await ws.send_json({"type": "speech.started"})
+
+                    elif event_type == "input_audio_buffer.speech_stopped":
+                        await ws.send_json({"type": "speech.stopped"})
+
+                    elif event_type == "conversation.item.input_audio_transcription.completed":
+                        transcript = event.get("transcript", "")
+                        await ws.send_json({"type": "transcription.done", "text": transcript})
+
+                    elif "transcription" in event_type and "delta" in event_type:
+                        delta = event.get("delta", "")
+                        if delta:
+                            await ws.send_json({"type": "transcription.delta", "text": delta})
+
+                    elif event_type == "error":
+                        err_msg = event.get("error", {}).get("message", "Unknown error")
+                        err_type = event.get("error", {}).get("type", "")
+                        # Speaches returns "Not Found" when no speech is detected
+                        # in the committed audio — translate to a clean "no speech" event
+                        if err_msg == "Not Found" or (err_type == "invalid_request_error" and "not found" in err_msg.lower()):
+                            await ws.send_json({"type": "transcription.done", "text": ""})
+                        else:
+                            await ws.send_json({"type": "error", "message": err_msg})
+
+            except (ws_client.exceptions.ConnectionClosed, Exception) as e:
+                logger.debug(f"Voice stream: Speaches connection closed: {e}")
+
+        # Start the Speaches -> client forwarding task
+        forward_task = asyncio.create_task(forward_speaches_to_client())
+
+        # Read binary audio from the frontend and forward to Speaches
+        try:
+            while True:
+                data = await ws.receive()
+
+                if data["type"] == "websocket.disconnect":
+                    break
+
+                logger.debug(f"Voice stream: received frame type={data.get('type')}, has_bytes={'bytes' in data and bool(data.get('bytes'))}, has_text={'text' in data and bool(data.get('text'))}")
+                if "bytes" in data and data["bytes"]:
+                    # Frontend sends raw audio bytes -> encode to base64 for OpenAI Realtime protocol
+                    audio_b64 = base64.b64encode(data["bytes"]).decode("ascii")
+                    await speaches_ws.send(json.dumps({
+                        "type": "input_audio_buffer.append",
+                        "audio": audio_b64,
+                    }))
+                elif "text" in data and data["text"]:
+                    # Frontend may send JSON control messages
+                    try:
+                        ctrl = json.loads(data["text"])
+                        ctrl_type = ctrl.get("type", "")
+                        if ctrl_type == "stop":
+                            # Commit the audio buffer to trigger final transcription
+                            await speaches_ws.send(json.dumps({
+                                "type": "input_audio_buffer.commit",
+                            }))
+                    except json.JSONDecodeError:
+                        pass
+
+        except WebSocketDisconnect:
+            logger.debug("Voice stream: frontend disconnected")
+        finally:
+            forward_task.cancel()
+            try:
+                await forward_task
+            except asyncio.CancelledError:
+                pass
+
+    except Exception as e:
+        logger.error(f"Voice stream: failed to connect to Speaches Realtime: {e}")
+        try:
+            await ws.send_json({"type": "error", "message": f"Cannot connect to speech server: {e}"})
+        except Exception:
+            pass
+    finally:
+        if speaches_ws:
+            try:
+                await speaches_ws.close()
+            except Exception:
+                pass
+        try:
+            await ws.close()
+        except Exception:
+            pass

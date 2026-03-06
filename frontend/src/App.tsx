@@ -50,6 +50,7 @@ function App() {
     registerExternalAgent,
     discoverAgents,
     sendTablePaginate,
+    deviceCapabilities,
   } = useWebSocket(
     WS_URL,
     auth.user?.access_token
@@ -232,6 +233,7 @@ function App() {
         combineError={combineError}
         accessToken={auth.user?.access_token}
         onTablePaginate={sendTablePaginate}
+        deviceCapabilities={deviceCapabilities}
       />
       </AgentPermissionProvider>
     </DashboardLayout>
