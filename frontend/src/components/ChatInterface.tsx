@@ -9,13 +9,13 @@
  */
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Send, Bot, User, Sparkles, Loader2, ChevronLeft, Paperclip, UploadCloud, X, FileMinus, FileText, Square } from "lucide-react";
+import { Send, Bot, User, Sparkles, Loader2, ChevronLeft, Paperclip, UploadCloud, X, FileMinus, FileText, Square, Mic, Volume2, VolumeX } from "lucide-react";
 import { toast } from "sonner";
 import DynamicRenderer from "./DynamicRenderer";
 import type { TablePaginateEvent } from "./DynamicRenderer";
 import UISavedDrawer from "./UISavedDrawer";
 import { BFF_URL } from "../config";
-import type { ChatStatus } from "../hooks/useWebSocket";
+import type { ChatStatus, DeviceCapabilityFlags } from "../hooks/useWebSocket";
 
 interface ChatInterfaceProps {
     messages: { role: string; content: unknown }[];
@@ -33,6 +33,7 @@ interface ChatInterfaceProps {
     combineError: string | null;
     accessToken?: string;
     onTablePaginate?: (event: TablePaginateEvent) => void;
+    deviceCapabilities?: DeviceCapabilityFlags;
 }
 
 const SUGGESTIONS = [
@@ -58,7 +59,13 @@ export default function ChatInterface({
     combineError,
     accessToken,
     onTablePaginate,
+    deviceCapabilities = { hasMicrophone: false, hasGeolocation: false, speechServerAvailable: false },
 }: ChatInterfaceProps) {
+    // Capability gating — buttons hidden until rote_config confirms capabilities
+    const canUseVoiceInput = deviceCapabilities.hasMicrophone && deviceCapabilities.speechServerAvailable;
+    const canUseVoiceOutput = deviceCapabilities.speechServerAvailable;
+    const canUseGeolocation = deviceCapabilities.hasGeolocation;
+
     const [input, setInput] = useState(() => {
         try { return localStorage.getItem("astral-draft") || ""; } catch { return ""; }
     });
@@ -74,6 +81,44 @@ export default function ChatInterface({
 
     const bottomRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
+
+    // Voice Input (STT) state — real-time streaming via WebSocket
+    const [isRecording, setIsRecording] = useState(false);
+    const [isTranscribing, setIsTranscribing] = useState(false);
+    const [streamingTranscript, setStreamingTranscript] = useState("");
+    const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+    const voiceWsRef = useRef<WebSocket | null>(null);
+    const mediaStreamRef = useRef<MediaStream | null>(null);
+    const audioContextRef = useRef<AudioContext | null>(null);
+    const audioChunksRef = useRef<Blob[]>([]);
+
+    // Voice Output (TTS) state
+    const [ttsEnabled, setTtsEnabled] = useState(false);
+    const [isSpeaking, setIsSpeaking] = useState(false);
+    const audioRef = useRef<HTMLAudioElement | null>(null);
+    const lastSpokenMsgIdx = useRef<number>(-1);
+
+    // Geolocation — silently acquire once when capability is confirmed
+    const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
+
+    useEffect(() => {
+        if (!canUseGeolocation || userLocation) return;
+        navigator.geolocation.getCurrentPosition(
+            (pos) => {
+                setUserLocation({
+                    latitude: parseFloat(pos.coords.latitude.toFixed(4)),
+                    longitude: parseFloat(pos.coords.longitude.toFixed(4)),
+                });
+            },
+            (err) => console.debug("Geolocation unavailable:", err.message),
+            { timeout: 8000, maximumAge: 300_000 }
+        );
+    }, [canUseGeolocation, userLocation]);
+
+    const enrichWithLocation = useCallback((text: string): string => {
+        if (!userLocation) return text;
+        return `${text}\n\n[User location: ${userLocation.latitude}, ${userLocation.longitude}]`;
+    }, [userLocation]);
 
     // Auto-scroll to bottom on new messages
     useEffect(() => {
@@ -102,6 +147,289 @@ export default function ChatInterface({
             fileInputRef.current.value = '';
         }
     };
+
+    // ── Voice Input (STT) — Real-time streaming via WebSocket ────────
+    const sendAudioForTranscription = useCallback(async (audioBlob: Blob) => {
+        // Fallback batch transcription (used if streaming WS fails)
+        setIsTranscribing(true);
+        try {
+            const formData = new FormData();
+            formData.append("file", audioBlob, "recording.webm");
+            const headers: HeadersInit = {};
+            if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
+            const res = await fetch(`${BFF_URL}/api/voice/transcribe`, {
+                method: "POST",
+                headers,
+                body: formData,
+            });
+            if (!res.ok) throw new Error("Transcription failed");
+            const data = await res.json();
+            const text = data.text?.trim();
+            if (text) {
+                onSendMessage(enrichWithLocation(text), text);
+            } else {
+                toast.error("No speech detected");
+            }
+        } catch (err) {
+            console.error("Transcription error:", err);
+            toast.error("Failed to transcribe audio");
+        } finally {
+            setIsTranscribing(false);
+        }
+    }, [accessToken, onSendMessage, enrichWithLocation]);
+
+    // Helper: convert Float32 audio samples to Int16 PCM buffer
+    const float32ToPcm16 = useCallback((float32: Float32Array): ArrayBuffer => {
+        const buf = new ArrayBuffer(float32.length * 2);
+        const view = new DataView(buf);
+        for (let i = 0; i < float32.length; i++) {
+            const s = Math.max(-1, Math.min(1, float32[i]));
+            view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+        }
+        return buf;
+    }, []);
+
+    const startRecording = useCallback(async () => {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+            });
+            mediaStreamRef.current = stream;
+
+            // Also start MediaRecorder for batch fallback (it handles webm fine)
+            const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+                ? "audio/webm;codecs=opus"
+                : MediaRecorder.isTypeSupported("audio/webm")
+                    ? "audio/webm"
+                    : "audio/mp4";
+            const mediaRecorder = new MediaRecorder(stream, { mimeType });
+            mediaRecorderRef.current = mediaRecorder;
+            audioChunksRef.current = [];
+            mediaRecorder.ondataavailable = (e) => {
+                if (e.data.size > 0) audioChunksRef.current.push(e.data);
+            };
+            mediaRecorder.start(250);
+
+            // Set up AudioContext at the mic's native sample rate
+            // and downsample to 24kHz PCM16 before sending to Speaches
+            const audioCtx = new AudioContext();
+            audioContextRef.current = audioCtx;
+            const nativeSR = audioCtx.sampleRate;
+            const targetSR = 24000;
+            const source = audioCtx.createMediaStreamSource(stream);
+            const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+
+            let streamingActive = false;
+            let gotTranscription = false;
+
+            // Open streaming WebSocket
+            const wsScheme = window.location.protocol === "https:" ? "wss" : "ws";
+            const voiceWsUrl = `${wsScheme}://${window.location.host}/api/voice/stream`;
+            const voiceWs = new WebSocket(voiceWsUrl);
+            voiceWsRef.current = voiceWs;
+
+            voiceWs.onopen = () => {
+                streamingActive = true;
+            };
+
+            // Stream raw PCM16 audio to the WebSocket, downsampling if needed
+            processor.onaudioprocess = (e) => {
+                if (streamingActive && voiceWs.readyState === WebSocket.OPEN) {
+                    let samples = e.inputBuffer.getChannelData(0);
+                    // Downsample from native rate (e.g. 48kHz) to 24kHz
+                    if (nativeSR !== targetSR) {
+                        const ratio = nativeSR / targetSR;
+                        const newLen = Math.floor(samples.length / ratio);
+                        const resampled = new Float32Array(newLen);
+                        for (let i = 0; i < newLen; i++) {
+                            resampled[i] = samples[Math.floor(i * ratio)];
+                        }
+                        samples = resampled;
+                    }
+                    const pcm16 = float32ToPcm16(samples);
+                    voiceWs.send(pcm16);
+                }
+            };
+            source.connect(processor);
+            processor.connect(audioCtx.destination);
+
+            voiceWs.onmessage = (event) => {
+                try {
+                    const msg = JSON.parse(event.data);
+                    if (msg.type === "transcription.delta") {
+                        setStreamingTranscript((prev) => prev + msg.text);
+                    } else if (msg.type === "transcription.done") {
+                        gotTranscription = true;
+                        const finalText = msg.text?.trim();
+                        setStreamingTranscript("");
+                        setIsRecording(false);
+                        setIsTranscribing(false);
+                        // Clean up audio pipeline
+                        processor.disconnect();
+                        source.disconnect();
+                        audioCtx.close();
+                        audioContextRef.current = null;
+                        stream.getTracks().forEach((t) => t.stop());
+                        mediaStreamRef.current = null;
+                        if (mediaRecorderRef.current?.state === "recording") {
+                            mediaRecorderRef.current.stop();
+                        }
+                        voiceWs.close();
+                        voiceWsRef.current = null;
+                        if (finalText) {
+                            onSendMessage(enrichWithLocation(finalText), finalText);
+                        } else {
+                            toast.error("No speech detected");
+                        }
+                    } else if (msg.type === "error") {
+                        console.warn("Voice stream server error:", msg.message);
+                        streamingActive = false;
+                        voiceWs.close();
+                    }
+                } catch {
+                    // Ignore parse errors
+                }
+            };
+
+            voiceWs.onerror = () => {
+                console.warn("Voice stream WebSocket error");
+                streamingActive = false;
+            };
+
+            voiceWs.onclose = () => {
+                voiceWsRef.current = null;
+                // Clean up audio pipeline
+                try { processor.disconnect(); } catch { /* already disconnected */ }
+                try { source.disconnect(); } catch { /* already disconnected */ }
+                try { audioCtx.close(); } catch { /* already closed */ }
+                audioContextRef.current = null;
+
+                if (!gotTranscription) {
+                    // Streaming failed — fall back to batch transcription
+                    if (mediaRecorderRef.current?.state === "recording") {
+                        mediaRecorderRef.current.stop();
+                    }
+                    stream.getTracks().forEach((t) => t.stop());
+                    mediaStreamRef.current = null;
+                    setIsRecording(false);
+                    if (audioChunksRef.current.length > 0) {
+                        console.info("Falling back to batch transcription");
+                        const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
+                        sendAudioForTranscription(audioBlob);
+                    } else {
+                        setIsTranscribing(false);
+                        setStreamingTranscript("");
+                    }
+                }
+            };
+
+            setIsRecording(true);
+            setStreamingTranscript("");
+        } catch (err) {
+            const msg = err instanceof DOMException && err.name === "NotAllowedError"
+                ? "Microphone access denied"
+                : `Microphone error: ${err instanceof Error ? err.message : String(err)}`;
+            console.error("startRecording error:", err);
+            toast.error(msg);
+        }
+    }, [onSendMessage, enrichWithLocation, sendAudioForTranscription, float32ToPcm16]);
+
+    const stopRecording = useCallback(() => {
+        // Signal the streaming server to commit and produce final transcription
+        if (voiceWsRef.current?.readyState === WebSocket.OPEN) {
+            voiceWsRef.current.send(JSON.stringify({ type: "stop" }));
+            setIsTranscribing(true);
+        } else {
+            // No streaming WS — stop MediaRecorder for batch fallback
+            if (mediaRecorderRef.current?.state === "recording") {
+                mediaRecorderRef.current.stop();
+            }
+            if (mediaStreamRef.current) {
+                mediaStreamRef.current.getTracks().forEach((t) => t.stop());
+                mediaStreamRef.current = null;
+            }
+            if (audioContextRef.current) {
+                audioContextRef.current.close();
+                audioContextRef.current = null;
+            }
+            setIsRecording(false);
+            if (audioChunksRef.current.length > 0) {
+                const mimeType = mediaRecorderRef.current?.mimeType || "audio/webm";
+                const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
+                sendAudioForTranscription(audioBlob);
+            }
+        }
+    }, [sendAudioForTranscription]);
+
+    // ── Voice Output (TTS) — fires on ui_render, not waiting for "done" ──
+    const extractAnalysisText = useCallback((components: Array<Record<string, unknown>>): string => {
+        let text = "";
+        for (const comp of components) {
+            if (comp.type === "card" && comp.title === "Analysis") {
+                const content = comp.content as Array<Record<string, unknown>>;
+                if (Array.isArray(content)) {
+                    for (const child of content) {
+                        if (child.type === "text" && typeof child.content === "string") {
+                            text += child.content + " ";
+                        }
+                    }
+                }
+            }
+        }
+        return text
+            .replace(/#{1,6}\s/g, "")
+            .replace(/\*\*(.*?)\*\*/g, "$1")
+            .replace(/\*(.*?)\*/g, "$1")
+            .replace(/`(.*?)`/g, "$1")
+            .replace(/```[\s\S]*?```/g, "")
+            .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+            .trim();
+    }, []);
+
+    const speakAnalysis = useCallback(async (text: string) => {
+        setIsSpeaking(true);
+        try {
+            const headers: HeadersInit = { "Content-Type": "application/json" };
+            if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
+            const res = await fetch(`${BFF_URL}/api/voice/speak`, {
+                method: "POST",
+                headers,
+                body: JSON.stringify({ text }),
+            });
+            if (!res.ok) throw new Error("TTS failed");
+            const audioBlob = await res.blob();
+            const audioUrl = URL.createObjectURL(audioBlob);
+            const audio = new Audio(audioUrl);
+            audioRef.current = audio;
+            audio.onended = () => {
+                setIsSpeaking(false);
+                URL.revokeObjectURL(audioUrl);
+                audioRef.current = null;
+            };
+            audio.play();
+        } catch (err) {
+            console.error("TTS error:", err);
+            setIsSpeaking(false);
+        }
+    }, [accessToken]);
+
+    // Trigger TTS as soon as an Analysis card arrives (on each new assistant message)
+    useEffect(() => {
+        if (!ttsEnabled || messages.length === 0) return;
+        if (lastSpokenMsgIdx.current >= messages.length - 1) return;
+
+        const lastMsg = messages[messages.length - 1];
+        if (lastMsg.role !== "assistant") return;
+
+        const components = lastMsg.content as Array<Record<string, unknown>>;
+        if (!Array.isArray(components)) return;
+
+        const plainText = extractAnalysisText(components);
+        if (!plainText) return;
+
+        lastSpokenMsgIdx.current = messages.length - 1;
+        speakAnalysis(plainText);
+    }, [ttsEnabled, messages, extractAnalysisText, speakAnalysis]);
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -159,7 +487,7 @@ export default function ChatInterface({
  
  Please use the provided absolute \`file_path\` with an appropriate tool (like \`analyze_csv_file\`) to handle this request. Only use \`modify_data\` if the user explicitly asks to edit the file or add columns.`;
 
-                        onSendMessage(fullMsg, displayMsg, targetChatId);
+                        onSendMessage(enrichWithLocation(fullMsg), displayMsg, targetChatId);
                     } catch (err: unknown) {
                         const errorMessage = err instanceof Error ? err.message : String(err);
                         console.error("Upload error:", err);
@@ -173,17 +501,17 @@ export default function ChatInterface({
                     if (attachedFile.name.toLowerCase().endsWith('.csv')) {
                         const prompt = hasText ? `${input.trim()}\n\n` : '';
                         const displayMsg = `${prompt}[Attached File: ${attachedFile.name}]\n\n\`\`\`csv\n${fileContent}\n\`\`\``;
-                        onSendMessage(`${prompt}Here is my data from ${attachedFile.name}. Please run various data analyses on it and tell me the results:\n\n\`\`\`csv\n${fileContent}\n\`\`\``, displayMsg, targetChatId);
+                        onSendMessage(enrichWithLocation(`${prompt}Here is my data from ${attachedFile.name}. Please run various data analyses on it and tell me the results:\n\n\`\`\`csv\n${fileContent}\n\`\`\``), displayMsg, targetChatId);
                     } else {
                         const prompt = hasText ? `${input.trim()}\n\n` : '';
                         const displayMsg = `${prompt}[Attached File: ${attachedFile.name}]\n\n\`\`\`text\n${fileContent}\n\`\`\``;
-                        onSendMessage(`${prompt}I've attached a file named ${attachedFile.name}. Here are the contents:\n\n\`\`\`text\n${fileContent}\n\`\`\``, displayMsg, targetChatId);
+                        onSendMessage(enrichWithLocation(`${prompt}I've attached a file named ${attachedFile.name}. Here are the contents:\n\n\`\`\`text\n${fileContent}\n\`\`\``), displayMsg, targetChatId);
                     }
                 }
             }
         } else if (hasText) {
             const targetChatId = activeChatId || crypto.randomUUID();
-            onSendMessage(input.trim(), undefined, targetChatId);
+            onSendMessage(enrichWithLocation(input.trim()), input.trim(), targetChatId);
         }
 
         setInput("");
@@ -503,6 +831,21 @@ export default function ChatInterface({
             <div className="p-2 sm:px-8 sm:py-4 bg-astral-bg/80 backdrop-blur-md safe-bottom">
                 <form onSubmit={handleSubmit} className="flex flex-col gap-2 sm:gap-3 mx-auto w-full">
 
+                    {/* Recording Indicator */}
+                    <AnimatePresence>
+                        {isRecording && (
+                            <motion.div
+                                initial={{ opacity: 0, y: 6 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                exit={{ opacity: 0, y: 6 }}
+                                className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-red-500/15 border border-red-500/30 text-red-400 text-xs font-medium self-start"
+                            >
+                                <span className="w-2 h-2 rounded-full bg-red-400 animate-pulse" />
+                                Recording your voice...
+                            </motion.div>
+                        )}
+                    </AnimatePresence>
+
                     {/* Staged File View */}
                     <AnimatePresence>
                         {attachedFile && (
@@ -561,15 +904,75 @@ export default function ChatInterface({
 
                             <input
                                 type="text"
-                                value={input}
-                                onChange={(e) => setInput(e.target.value)}
-                                placeholder={isConnected ? "Ask anything or attach a file..." : "Connecting to orchestrator..."}
-                                disabled={!isConnected || (chatStatus.status !== "idle" && chatStatus.status !== "done")}
+                                value={isRecording || isTranscribing ? streamingTranscript || "" : input}
+                                onChange={(e) => { if (!isRecording && !isTranscribing) setInput(e.target.value); }}
+                                placeholder={
+                                    isRecording
+                                        ? "Listening..."
+                                        : isTranscribing
+                                            ? "Transcribing..."
+                                            : isConnected
+                                                ? "Ask anything or attach a file..."
+                                                : "Connecting to orchestrator..."
+                                }
+                                disabled={!isConnected || isRecording || isTranscribing || (chatStatus.status !== "idle" && chatStatus.status !== "done")}
                                 className="w-full py-3 bg-transparent text-sm text-white placeholder:text-astral-muted/50
                              focus:outline-none disabled:opacity-50"
                                 id="chat-input"
                                 aria-label="Chat message input"
                             />
+
+                            {/* Mic (STT) Button — only shown when device has mic AND speech server is available */}
+                            {canUseVoiceInput && (
+                                <button
+                                    type="button"
+                                    onClick={isRecording ? stopRecording : startRecording}
+                                    disabled={!isConnected || isTranscribing || (chatStatus.status !== "idle" && chatStatus.status !== "done")}
+                                    className={`p-2 rounded-lg transition-colors flex-shrink-0 ${
+                                        isRecording
+                                            ? "text-red-400 hover:text-red-300 bg-red-500/20"
+                                            : "text-astral-muted hover:text-white hover:bg-white/10"
+                                    } disabled:opacity-50 disabled:cursor-not-allowed`}
+                                    title={isRecording ? "Stop recording" : "Voice input"}
+                                >
+                                    {isTranscribing ? (
+                                        <Loader2 size={20} className="animate-spin text-astral-primary" />
+                                    ) : isRecording ? (
+                                        <Square size={16} />
+                                    ) : (
+                                        <Mic size={20} />
+                                    )}
+                                </button>
+                            )}
+
+                            {/* TTS Toggle Button — only shown when speech server is available */}
+                            {canUseVoiceOutput && (
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setTtsEnabled((prev) => !prev);
+                                        if (ttsEnabled && audioRef.current) {
+                                            audioRef.current.pause();
+                                            audioRef.current = null;
+                                            setIsSpeaking(false);
+                                        }
+                                    }}
+                                    className={`p-2 rounded-lg transition-colors flex-shrink-0 ${
+                                        ttsEnabled
+                                            ? "text-astral-primary bg-astral-primary/20"
+                                            : "text-astral-muted hover:text-white hover:bg-white/10"
+                                    }`}
+                                    title={ttsEnabled ? "Disable voice output" : "Enable voice output"}
+                                >
+                                    {isSpeaking ? (
+                                        <Volume2 size={20} className="animate-pulse" />
+                                    ) : ttsEnabled ? (
+                                        <Volume2 size={20} />
+                                    ) : (
+                                        <VolumeX size={20} />
+                                    )}
+                                </button>
+                            )}
                         </div>
                         <button
                             type="submit"
