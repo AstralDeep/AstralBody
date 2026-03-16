@@ -59,6 +59,26 @@ _CATEGORY_LABELS = {
     "permission_delegation": "Permission \\& Delegation",
     "transport_comparison": "Transport Comparison",
     "frontend_rendering": "Frontend Rendering",
+    "cost_overhead": "Security Cost Overhead",
+}
+
+# CLEAR Framework dimension mapping (suite → CLEAR dimension)
+_CLEAR_MAPPING = {
+    "cost_overhead": "Cost",
+    "transport_comparison": "Latency / Reliability",
+    "frontend_rendering": "Efficacy",
+    "rote_adaptation": "Efficacy",
+    "tool_poisoning": "Assurance",
+    "prompt_injection": "Assurance",
+    "permission_delegation": "Assurance",
+}
+
+# CLEAR dimension descriptions
+_CLEAR_DESCRIPTIONS = {
+    "Cost": "Security processing overhead and computational expenditure",
+    "Latency / Reliability": "Transport response time, throughput, ordering, and reconnection",
+    "Efficacy": "UI rendering fidelity and device adaptation correctness",
+    "Assurance": "Authorization enforcement, threat detection, and injection resistance",
 }
 
 # Short descriptions for backend test functions.
@@ -107,6 +127,14 @@ _TEST_DESCRIPTIONS: Dict[str, str] = {
     "test_ws_message_ordering": "WS messages arrive in send order",
     "test_ws_reconnection": "WS reconnection with session continuity",
     "test_ws_concurrent_connections": "WS 10 concurrent connections fairness",
+    # Cost Overhead
+    "test_tool_analyzer_timing": "ToolSecurityAnalyzer mean/p95 latency (10-tool corpus)",
+    "test_code_analyzer_timing": "CodeSecurityAnalyzer timing across code complexities",
+    "test_combined_registration_overhead": "Combined security screening overhead per registration",
+    "test_memory_overhead": "Memory delta during 50-tool batch analysis",
+    # Adversarial evasion (tool poisoning)
+    "test_innocuous_name_dangerous_schema": "Innocuous name with subtly dangerous schema field",
+    "test_synonym_evasion": "Synonym/paraphrasing evasion of regex patterns (xfail)",
 }
 
 # Frontend test groups — maps the Vitest "describe" prefix to a short label.
@@ -181,7 +209,7 @@ def generate_category_table(
             "description": _latex_escape(_get_description(case.test_name)),
             "short_name": _latex_escape(_abbreviated_name(func)),
             "outcome": "Pass" if case.outcome.value == "passed" else "Fail",
-            "outcome_mark": r"\checkmark" if case.outcome.value == "passed" else r"\times",
+            "outcome_mark": r"\checkmark" if case.outcome.value == "passed" else r"$\times$",
             "duration_ms": f"{case.duration_ms:.1f}",
         })
 
@@ -223,7 +251,7 @@ def generate_frontend_table(
                 "description": _latex_escape(_get_description(case.test_name)),
                 "short_name": _latex_escape(_parse_frontend_short_name(case.test_name)),
                 "outcome": "Pass" if case.outcome.value == "passed" else "Fail",
-                "outcome_mark": r"\checkmark" if case.outcome.value == "passed" else r"\times",
+                "outcome_mark": r"\checkmark" if case.outcome.value == "passed" else r"$\times$",
                 "duration_ms": f"{case.duration_ms:.1f}",
             })
             counter += 1
@@ -269,6 +297,49 @@ def generate_summary_table(
     return filename
 
 
+def generate_clear_summary_table(
+    all_cases: List[TestCaseResult], output_dir: str
+) -> str:
+    """Generate the CLEAR Framework coverage summary table."""
+    env = _get_jinja_env()
+    template = env.get_template("clear_summary.tex.j2")
+
+    # Group cases by CLEAR dimension
+    dimensions: Dict[str, List[TestCaseResult]] = {}
+    for c in all_cases:
+        dim = _CLEAR_MAPPING.get(c.suite, "Other")
+        dimensions.setdefault(dim, []).append(c)
+
+    # Build rows in a stable order
+    dim_order = ["Cost", "Latency / Reliability", "Efficacy", "Assurance"]
+    rows = []
+    for dim in dim_order:
+        cases = dimensions.get(dim, [])
+        if not cases:
+            continue
+        total = len(cases)
+        passed = sum(1 for c in cases if c.outcome.value == "passed")
+        suites = sorted({c.suite for c in cases})
+        suite_labels = ", ".join(
+            _CATEGORY_LABELS.get(s, s) for s in suites
+        )
+        rows.append({
+            "dimension": dim,
+            "description": _CLEAR_DESCRIPTIONS.get(dim, ""),
+            "suites": suite_labels,
+            "total": total,
+            "passed": passed,
+            "failed": total - passed,
+            "pass_rate": f"{(passed / total * 100):.0f}\\%" if total > 0 else "---",
+        })
+
+    content = template.render(rows=rows)
+    filename = "clear_mapping_table.tex"
+    with open(os.path.join(output_dir, filename), "w", encoding="utf-8") as f:
+        f.write(content)
+    return filename
+
+
 def generate_audit_appendix(db: AuditDatabase, run_id: str, output_dir: str) -> str:
     """Generate the test execution log table (no reviewer/verification columns)."""
     env = _get_jinja_env()
@@ -289,7 +360,7 @@ def generate_audit_appendix(db: AuditDatabase, run_id: str, output_dir: str) -> 
             "id": f"{prefix}-{suite_counters[suite]:03d}",
             "case_name": _latex_escape(_get_description(case.test_name)),
             "outcome": "Pass" if case.outcome.value == "passed" else "Fail",
-            "outcome_mark": r"\checkmark" if case.outcome.value == "passed" else r"\times",
+            "outcome_mark": r"\checkmark" if case.outcome.value == "passed" else r"$\times$",
             "duration_ms": f"{case.duration_ms:.1f}",
         })
 
@@ -427,6 +498,17 @@ def generate_all_artifacts(
             )
             db.insert_artifact(art)
             artifacts.append(art)
+
+    # CLEAR Framework summary table
+    filename = generate_clear_summary_table(cases, output_dir)
+    art = LatexArtifact(
+        run_id=run_id,
+        filename=filename,
+        generated_from=[c.id for c in cases],
+        verification_complete=True,
+    )
+    db.insert_artifact(art)
+    artifacts.append(art)
 
     # Summary table
     filename = generate_summary_table(cases, output_dir)
