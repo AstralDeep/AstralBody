@@ -1,0 +1,388 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`SDUI Component Rendering via DynamicRenderer > FR-001: renders text component with h1 variant 1`] = `
+<div>
+  <div
+    class="dynamic-renderer space-y-3"
+  >
+    <h1
+      class="text-2xl font-bold text-astral-text"
+    >
+      Hello World
+    </h1>
+  </div>
+</div>
+`;
+
+exports[`SDUI Component Rendering via DynamicRenderer > FR-002: renders card with title and children 1`] = `
+<div>
+  <div
+    class="dynamic-renderer space-y-3"
+  >
+    <div
+      animate="[object Object]"
+      class="glass-card p-3 sm:p-5 relative"
+      initial="[object Object]"
+      transition="[object Object]"
+    >
+      <div
+        class="mb-3"
+      >
+        <h3
+          class="text-base font-semibold text-astral-text flex items-center gap-2"
+        >
+          <span
+            class="w-1 h-4 rounded-full bg-astral-primary inline-block"
+          />
+          Test Card
+        </h3>
+      </div>
+      <div
+        class="space-y-3"
+      >
+        <p
+          class="text-sm text-astral-text leading-relaxed"
+        >
+          Inner content
+        </p>
+      </div>
+    </div>
+  </div>
+</div>
+`;
+
+exports[`SDUI Component Rendering via DynamicRenderer > FR-003: renders table with headers and rows 1`] = `
+<div>
+  <div
+    class="dynamic-renderer space-y-3"
+  >
+    <div
+      class="rounded-lg border border-white/5"
+    >
+      <div
+        class="p-3 border-b border-white/5 bg-astral-primary/5 flex items-center justify-between"
+      >
+        <div
+          class="text-sm font-medium text-astral-text"
+        >
+          Table
+        </div>
+      </div>
+      <div
+        class="hidden sm:block overflow-x-auto"
+      >
+        <table
+          class="w-full text-sm"
+        >
+          <thead>
+            <tr
+              class="bg-astral-primary/10 border-b border-white/5"
+            >
+              <th
+                class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-astral-muted whitespace-nowrap"
+              >
+                Name
+              </th>
+              <th
+                class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-astral-muted whitespace-nowrap"
+              >
+                Status
+              </th>
+              <th
+                class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-astral-muted whitespace-nowrap"
+              >
+                Score
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              class="border-b border-white/5 hover:bg-white/5 transition-colors"
+            >
+              <td
+                class="px-4 py-3 text-astral-text"
+              >
+                Alice
+              </td>
+              <td
+                class="px-4 py-3 text-astral-text"
+              >
+                <span
+                  class="px-2 py-0.5 rounded-full text-xs font-medium bg-red-500/20 text-red-400"
+                >
+                  Critical
+                </span>
+              </td>
+              <td
+                class="px-4 py-3 text-astral-text"
+              >
+                95
+              </td>
+            </tr>
+            <tr
+              class="border-b border-white/5 hover:bg-white/5 transition-colors"
+            >
+              <td
+                class="px-4 py-3 text-astral-text"
+              >
+                Bob
+              </td>
+              <td
+                class="px-4 py-3 text-astral-text"
+              >
+                <span
+                  class="px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-500/20 text-yellow-400"
+                >
+                  Moderate
+                </span>
+              </td>
+              <td
+                class="px-4 py-3 text-astral-text"
+              >
+                72
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div
+        class="sm:hidden divide-y divide-white/5"
+      >
+        <div
+          class="p-3 space-y-1.5 hover:bg-white/5 transition-colors"
+        >
+          <div
+            class="flex justify-between items-baseline gap-2"
+          >
+            <span
+              class="text-[10px] font-medium uppercase tracking-wider text-astral-muted flex-shrink-0"
+            >
+              Name
+            </span>
+            <span
+              class="text-xs text-astral-text text-right"
+            >
+              Alice
+            </span>
+          </div>
+          <div
+            class="flex justify-between items-baseline gap-2"
+          >
+            <span
+              class="text-[10px] font-medium uppercase tracking-wider text-astral-muted flex-shrink-0"
+            >
+              Status
+            </span>
+            <span
+              class="text-xs text-astral-text text-right"
+            >
+              <span
+                class="px-2 py-0.5 rounded-full text-xs font-medium bg-red-500/20 text-red-400"
+              >
+                Critical
+              </span>
+            </span>
+          </div>
+          <div
+            class="flex justify-between items-baseline gap-2"
+          >
+            <span
+              class="text-[10px] font-medium uppercase tracking-wider text-astral-muted flex-shrink-0"
+            >
+              Score
+            </span>
+            <span
+              class="text-xs text-astral-text text-right"
+            >
+              95
+            </span>
+          </div>
+        </div>
+        <div
+          class="p-3 space-y-1.5 hover:bg-white/5 transition-colors"
+        >
+          <div
+            class="flex justify-between items-baseline gap-2"
+          >
+            <span
+              class="text-[10px] font-medium uppercase tracking-wider text-astral-muted flex-shrink-0"
+            >
+              Name
+            </span>
+            <span
+              class="text-xs text-astral-text text-right"
+            >
+              Bob
+            </span>
+          </div>
+          <div
+            class="flex justify-between items-baseline gap-2"
+          >
+            <span
+              class="text-[10px] font-medium uppercase tracking-wider text-astral-muted flex-shrink-0"
+            >
+              Status
+            </span>
+            <span
+              class="text-xs text-astral-text text-right"
+            >
+              <span
+                class="px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-500/20 text-yellow-400"
+              >
+                Moderate
+              </span>
+            </span>
+          </div>
+          <div
+            class="flex justify-between items-baseline gap-2"
+          >
+            <span
+              class="text-[10px] font-medium uppercase tracking-wider text-astral-muted flex-shrink-0"
+            >
+              Score
+            </span>
+            <span
+              class="text-xs text-astral-text text-right"
+            >
+              72
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+`;
+
+exports[`SDUI Component Rendering via DynamicRenderer > FR-004: renders metric card with value 1`] = `
+<div>
+  <div
+    class="dynamic-renderer space-y-3"
+  >
+    <div
+      animate="[object Object]"
+      class="rounded-xl p-4 bg-gradient-to-br from-astral-primary/20 to-astral-primary/5 border border-white/5 relative"
+      initial="[object Object]"
+    >
+      <p
+        class="text-xs text-astral-muted font-medium uppercase tracking-wider mb-1"
+      >
+        CPU Usage
+      </p>
+      <div
+        class="flex-1"
+      >
+        <p
+          class="text-2xl font-bold text-astral-text"
+        >
+          78%
+        </p>
+        <p
+          class="text-xs text-astral-muted mt-1"
+        >
+          Last 5 minutes
+        </p>
+      </div>
+      <div
+        class="mt-3 h-1.5 bg-white/10 rounded-full overflow-hidden"
+      >
+        <div
+          animate="[object Object]"
+          class="h-full rounded-full bg-yellow-500"
+          initial="[object Object]"
+          transition="[object Object]"
+        />
+      </div>
+    </div>
+  </div>
+</div>
+`;
+
+exports[`SDUI Component Rendering via DynamicRenderer > FR-006: renders progress bar 1`] = `
+<div>
+  <div
+    class="dynamic-renderer space-y-3"
+  >
+    <div>
+      <div
+        class="flex justify-between text-xs text-astral-muted w-full mb-1"
+      >
+        <span>
+          Upload Progress
+        </span>
+        <span>
+          65
+          %
+        </span>
+      </div>
+      <div
+        class="h-2 bg-white/10 rounded-full overflow-hidden"
+      >
+        <div
+          animate="[object Object]"
+          class="h-full bg-gradient-to-r from-astral-primary to-astral-secondary rounded-full"
+          initial="[object Object]"
+          transition="[object Object]"
+        />
+      </div>
+    </div>
+  </div>
+</div>
+`;
+
+exports[`SDUI Component Rendering via DynamicRenderer > FR-007: renders grid layout 1`] = `
+<div>
+  <div
+    class="dynamic-renderer space-y-3"
+  >
+    <div
+      class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3"
+      style="gap: 16px;"
+    >
+      <p
+        class="text-sm text-astral-text leading-relaxed"
+      >
+        Cell 1
+      </p>
+      <p
+        class="text-sm text-astral-text leading-relaxed"
+      >
+        Cell 2
+      </p>
+      <p
+        class="text-sm text-astral-text leading-relaxed"
+      >
+        Cell 3
+      </p>
+    </div>
+  </div>
+</div>
+`;
+
+exports[`SDUI Component Rendering via DynamicRenderer > FR-009: renders code block with language 1`] = `
+<div>
+  <div
+    class="dynamic-renderer space-y-3"
+  >
+    <div
+      class="rounded-lg bg-black/40 border border-white/5 overflow-hidden"
+    >
+      <div
+        class="px-4 py-2 border-b border-white/5 text-xs text-astral-muted"
+      >
+        python
+      </div>
+      <pre
+        class="p-4 text-sm overflow-x-auto"
+        style="font-family: "JetBrains Mono", monospace;"
+      >
+        <code
+          class="text-green-400"
+        >
+          print('hello')
+        </code>
+      </pre>
+    </div>
+  </div>
+</div>
+`;

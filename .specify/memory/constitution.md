@@ -1,106 +1,154 @@
 <!--
-SYNC IMPACT REPORT
-==================
-Version Change: 1.0.0 → 1.1.0 (MINOR bump: new principles added)
+  Sync Impact Report
+  ==================
+  Version change: N/A → 1.0.0 (initial creation)
 
-Modified Principles:
-- None (existing principles unchanged)
+  Principles added:
+    1. Primary Language (Python)
+    2. Frontend Framework (Vite + React/TypeScript)
+    3. Testing Standards (90% coverage, unit + integration)
+    4. Code Quality (PEP 8, ESLint)
+    5. Dependency Management (approval required)
+    6. Documentation (docstrings, /docs endpoint)
+    7. Security (Keycloak, RFC 8693 delegated tokens)
+    8. User Experience (consistent UI, dynamic generation)
 
-Added Sections:
-- VI. Agent Integration Testing (NON-NEGOTIABLE)
-- VII. Agent Architecture Standardization
+  Templates requiring updates:
+    ✅ .specify/templates/plan-template.md — generic, compatible
+    ✅ .specify/templates/spec-template.md — generic, compatible
+    ✅ .specify/templates/tasks-template.md — generic, compatible
+    ✅ No command templates found
+    ✅ No runtime guidance docs require changes
 
-Removed Sections:
-- None
-
-Templates Requiring Updates:
-- ✅ .specify/templates/plan-template.md (Constitution Check section should reference new agent testing principles)
-- ✅ .specify/templates/spec-template.md (Should include agent integration testing in requirements)
-- ✅ .specify/templates/tasks-template.md (Should include agent creation tasks with three-file pattern)
-- ✅ .specify/templates/checklist-template.md (Should include agent validation checklist)
-- ⚠️ .specify/templates/agent-file-template.md (May need updates for new agent standards)
-
-Follow-up TODOs:
-- Update agent creation documentation to reference backend/agents/general as reference
-- Create integration test templates for new agents
-- Add agent validation checklist to development workflow
+  Follow-up TODOs: None
 -->
 
-# Astral Constitution
+# AstralBody Constitution
 
 ## Core Principles
 
-### I. Code Quality (NON-NEGOTIABLE)
+### I. Primary Language
 
-All code must adhere to strict quality standards: comprehensive documentation, consistent style, linting, and peer review. Code must be modular, maintainable, and follow the project's architectural patterns. Technical debt must be tracked and addressed before accumulation.
+All backend code MUST be written in Python.
 
-### II. Testing Standards (NON-NEGOTIABLE)
+- No other backend languages are permitted without a
+  constitution amendment.
+- Python version MUST be kept current with the project's
+  declared minimum (see `pyproject.toml` or equivalent).
 
-Test-Driven Development (TDD) is mandatory for all features. Tests must be written before implementation, covering unit, integration, and contract tests. Test coverage must meet or exceed 80% for critical paths. All tests must pass before merging.
+### II. Frontend Framework
 
-### III. User Experience Consistency
+The frontend MUST be built using Vite with React and
+TypeScript.
 
-User interfaces and interactions must follow consistent design patterns, provide clear feedback, and maintain accessibility standards. UX must be validated with real users where possible. Error messages must be helpful and actionable.
+- All frontend source files MUST use TypeScript (`.ts`/`.tsx`),
+  not plain JavaScript.
+- Vite MUST remain the build tool; no migration to other
+  bundlers without a constitution amendment.
 
-### IV. Performance Requirements
+### III. Testing Standards
 
-Systems must meet defined performance benchmarks: latency under 200ms for interactive features, memory usage within budget, and scalability to handle expected load. Performance testing is required for all new features.
+Every new feature MUST include unit and integration tests with
+a minimum of 90% code coverage.
 
-### V. Observability & Monitoring
+- Tests MUST be written for all new code paths.
+- Coverage MUST be measured and enforced in CI.
+- No feature branch may merge without meeting the 90%
+  threshold on changed code.
 
-All components must expose metrics, logs, and health checks. Real‑time monitoring must be enabled for production systems. Debuggability through structured logging is required.
+### IV. Code Quality
 
-### VI. Agent Integration Testing (NON-NEGOTIABLE)
+All code MUST adhere to established style standards.
 
-All new specialist agents MUST include integration tests with the existing system architecture before being considered valid for deployment. Integration tests must verify:
-- WebSocket connection establishment with the orchestrator
-- Proper registration via A2A agent-card endpoint
-- Correct handling of MCP tool requests and responses
-- UI primitive generation and serialization
-- Error handling and retry logic
+- Python code MUST comply with PEP 8. Linting MUST be enforced
+  via tooling (e.g., ruff, flake8).
+- TypeScript code MUST pass standard ESLint rules. Linting
+  MUST be enforced in CI.
+- No linting exceptions without inline justification comments.
 
-Test coverage for agent integration must exceed 90% for connection logic. New agents without passing integration tests MUST NOT be merged into the main branch.
+### V. Dependency Management
 
-### VII. Agent Architecture Standardization
+No new third-party library may be added without explicit
+approval from a lead developer.
 
-The connection logic and UI generation framework is contained in the `backend/agents/general` directory, which serves as the reference implementation. All new specialist agents MUST:
+- Proposed dependencies MUST be documented in the PR
+  description with rationale.
+- Lead developer approval MUST be recorded in the PR review.
+- Transitive dependency impact MUST be considered.
 
-1. **Follow the three-file pattern**:
-   - `{agent_name}_agent.py` - Main agent class with FastAPI server
-   - `mcp_server.py` - MCP request dispatcher
-   - `mcp_tools.py` - Tool registry with UI primitive functions
+### VI. Documentation
 
-2. **Use proper naming conventions**:
-   - Class names must reflect the agent's purpose (e.g., `MedicalAgent`, `ResearchAgent`)
-   - File names must use the agent's name (e.g., `medical_agent.py`, not `general_agent.py`)
-   - Docstrings must accurately describe the agent's specific capabilities
+All public APIs and complex functions MUST be documented.
 
-3. **Extend, don't copy**:
-   - Use the general agent as a reference for connection patterns
-   - Customize tool implementations for the agent's domain
-   - Update agent card descriptions to reflect actual capabilities
-   - Never copy documentation verbatim without context
+- Python functions MUST have docstrings following Google or
+  NumPy style.
+- TypeScript exports MUST have JSDoc comments.
+- Backend APIs MUST expose interactive documentation at the
+  `/docs` URL (e.g., via FastAPI's built-in Swagger UI).
 
-4. **Maintain separation of concerns**:
-   - Connection logic remains in the agent class
-   - Tool dispatch remains in MCP server
-   - UI generation remains in tool functions
-   - Business logic specific to the agent's domain in tool implementations
+### VII. Security
 
-## Implementation Guidelines
-- **Focus on the Specialist Agent**: DO NOT ATTEMPT TO IMPLEMENT THE ORCHESTRATOR LOGIC or FRONTEND! The specialist agent is a completely backend service that PRODUCES UI definitions that are sent to the Orchestrator for rendering. If you need connection details for the orchestrator to test aspect of the specialist code, YOU MUST ASK THE USER FOR THOSE DETAILS! Do not create a frontend to test. You may only create the backend logic for the specialist agent.
-- **Use of Python Virtual Environments**: You MUST use Python virtual environments before installing or running any Python code using `python -m venv .venv`.
+Standard security practices MUST be implemented across all
+system boundaries.
 
-## Development Standards
+- Input validation MUST be applied to all external inputs.
+- Authentication MUST use the project's Keycloak IAM instance.
+  No alternative auth providers without a constitution
+  amendment.
+- Authorization MUST be enforced at the API layer via
+  Keycloak roles/scopes.
+- Agents MUST use RFC 8693 delegated tokens with attenuated
+  scopes. Scopes are automatically set by the system for
+  security; users MAY override or set scopes explicitly.
+- Secrets MUST NOT be committed to version control.
 
-All development must follow the established workflow: feature specification → implementation plan → task breakdown → code review → automated testing → deployment. Code reviews are mandatory and must include at least one senior engineer. Continuous integration must run all tests and linting before merging.
+### VIII. User Experience
 
-## Security & Compliance
+The UI MUST maintain a consistent design language while
+supporting backend-driven dynamic generation.
 
-Security best practices must be integrated into the development lifecycle. All dependencies must be scanned for vulnerabilities. Authentication and authorization must be implemented following the principle of least privilege. Data protection regulations must be respected.
+- The frontend MUST use the predefined set of primitive
+  components for all UI rendering.
+- The backend MAY dynamically generate frontend layouts by
+  composing these primitive components.
+- New primitive components MUST be approved and documented
+  before use.
+
+## Technology Stack
+
+- **Backend**: Python (FastAPI or equivalent ASGI framework)
+- **Frontend**: Vite + React + TypeScript
+- **Authentication**: Keycloak IAM
+- **Agent Auth**: RFC 8693 token exchange with attenuated scopes
+- **Containerization**: Docker / Docker Compose
+- **License**: Apache 2.0
+
+## Development Workflow
+
+- All changes MUST go through pull requests.
+- PRs MUST pass CI checks (linting, tests, coverage) before
+  merge.
+- PRs introducing new dependencies MUST include lead developer
+  approval.
+- Constitution compliance MUST be verified during code review.
+- Each PR MUST reference relevant spec/task IDs when
+  applicable.
 
 ## Governance
 
-Amendments to this constitution require a proposal, discussion, and approval by the project maintainers. Version increments follow semantic versioning: MAJOR for backward‑incompatible changes, MINOR for new principles or sections, PATCH for clarifications and non‑semantic refinements. All projects must undergo a compliance review before each major release.
+This constitution is the highest-authority document governing
+AstralBody development practices. It supersedes all other
+guidance when conflicts arise.
 
-**Version**: 1.1.0 | **Ratified**: 2026-01-06 | **Last Amended**: 2026-02-25
+- **Amendments**: Any change to this constitution MUST be
+  proposed via PR, reviewed by at least one lead developer,
+  and documented with rationale.
+- **Versioning**: This document follows semantic versioning.
+  MAJOR for principle removals/redefinitions, MINOR for new
+  principles or material expansions, PATCH for clarifications
+  and wording fixes.
+- **Compliance**: All PRs and code reviews MUST verify
+  adherence to these principles. Violations MUST be resolved
+  before merge.
+
+**Version**: 1.0.0 | **Ratified**: 2026-03-11 | **Last Amended**: 2026-03-11
