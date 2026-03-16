@@ -5,6 +5,7 @@ backend/tmp/
 docs/*
 CLAUDE.md
 /.ruff_cache/
+Qualifying_Exam/
 
 .claude/
 

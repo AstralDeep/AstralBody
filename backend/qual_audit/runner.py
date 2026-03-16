@@ -185,7 +185,8 @@ def run_frontend_tests(
         )
 
     json_file = os.path.join(frontend_dir, "_vitest_report.json")
-    args = ["npx", "vitest", "run", "--reporter=json", f"--outputFile={json_file}"]
+    npx = "npx.cmd" if sys.platform == "win32" else "npx"
+    args = [npx, "vitest", "run", "--reporter=json", f"--outputFile={json_file}"]
 
     env = {**os.environ, "VITE_USE_MOCK_AUTH": "true"}
     try:

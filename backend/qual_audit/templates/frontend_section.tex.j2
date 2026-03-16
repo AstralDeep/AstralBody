@@ -25,7 +25,7 @@
 \multicolumn{4}{l}{\textit{<< group.label >>}} \\
 \midrule
 <% for row in group.rows %>
-<< row.id >> & << row.description >> {\scriptsize (<< row.short_name >>)} & << row.duration_ms >> & << row.outcome_mark >> << row.outcome >> \\
+<< row.id >> & << row.description >> {\scriptsize (<< row.short_name >>)} & << row.duration_ms >> & << row.outcome_mark >> \\
 <% endfor %>
 <% if not loop.last %>
 \midrule
