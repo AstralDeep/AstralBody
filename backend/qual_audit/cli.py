@@ -45,7 +45,15 @@ def cli():
     "--categories", "-c", default=None,
     help="Comma-separated categories: tool_poisoning,prompt_injection,rote_adaptation,permission_delegation,transport_comparison,frontend",
 )
-def run(categories):
+@click.option(
+    "--export", "-e", "do_export", is_flag=True, default=False,
+    help="Auto-generate LaTeX table files after tests complete (skips verification check).",
+)
+@click.option(
+    "--output", "-o", default=None,
+    help="Output directory for .tex files (used with --export).",
+)
+def run(categories, do_export, output):
     """Execute test suites and record results."""
     db = _db()
     cats = [c.strip() for c in categories.split(",")] if categories else None
@@ -69,6 +77,16 @@ def run(categories):
     click.echo(f"\nRun ID: {run_id}")
     click.echo(f"Status: {run_obj.status.value if run_obj else 'unknown'}")
     click.echo(f"Total: {len(cases)} | Passed: {passed} | Failed: {failed}")
+
+    if do_export:
+        from qual_audit.latex_export import _DEFAULT_OUTPUT, generate_all_artifacts
+
+        out_dir = output or _DEFAULT_OUTPUT
+        os.makedirs(out_dir, exist_ok=True)
+        artifacts = generate_all_artifacts(db, run_id, out_dir)
+        click.echo(f"\nExported {len(artifacts)} LaTeX file(s) to {out_dir}")
+        for art in artifacts:
+            click.echo(f"  {art.filename}")
 
 
 @cli.command()

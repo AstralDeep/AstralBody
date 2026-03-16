@@ -181,7 +181,7 @@ def generate_category_table(
             "description": _latex_escape(_get_description(case.test_name)),
             "short_name": _latex_escape(_abbreviated_name(func)),
             "outcome": "Pass" if case.outcome.value == "passed" else "Fail",
-            "outcome_mark": r"\cmark" if case.outcome.value == "passed" else r"\xmark",
+            "outcome_mark": r"\checkmark" if case.outcome.value == "passed" else r"\times",
             "duration_ms": f"{case.duration_ms:.1f}",
         })
 
@@ -223,7 +223,7 @@ def generate_frontend_table(
                 "description": _latex_escape(_get_description(case.test_name)),
                 "short_name": _latex_escape(_parse_frontend_short_name(case.test_name)),
                 "outcome": "Pass" if case.outcome.value == "passed" else "Fail",
-                "outcome_mark": r"\cmark" if case.outcome.value == "passed" else r"\xmark",
+                "outcome_mark": r"\checkmark" if case.outcome.value == "passed" else r"\times",
                 "duration_ms": f"{case.duration_ms:.1f}",
             })
             counter += 1
@@ -289,7 +289,7 @@ def generate_audit_appendix(db: AuditDatabase, run_id: str, output_dir: str) -> 
             "id": f"{prefix}-{suite_counters[suite]:03d}",
             "case_name": _latex_escape(_get_description(case.test_name)),
             "outcome": "Pass" if case.outcome.value == "passed" else "Fail",
-            "outcome_mark": r"\cmark" if case.outcome.value == "passed" else r"\xmark",
+            "outcome_mark": r"\checkmark" if case.outcome.value == "passed" else r"\times",
             "duration_ms": f"{case.duration_ms:.1f}",
         })
 
