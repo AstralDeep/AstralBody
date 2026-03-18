@@ -193,6 +193,25 @@ async def send_message(
     )
 
 
+@chat_router.get(
+    "/{chat_id}/usage",
+    summary="Get LLM token usage for a chat",
+    description="Returns accumulated LLM token usage (prompt, completion, total) for a conversation.",
+)
+async def get_chat_usage(
+    request: Request,
+    chat_id: str,
+    user_id: str = Depends(require_user_id),
+):
+    orch = _get_orchestrator(request)
+    usage = orch.token_usage.get(chat_id, {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+    })
+    return JSONResponse(content={"chat_id": chat_id, "usage": usage})
+
+
 # =============================================================================
 # Component Router
 # =============================================================================

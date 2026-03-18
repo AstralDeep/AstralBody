@@ -18,10 +18,14 @@ import json
 import hmac
 import hashlib
 import base64
+import uuid
 import logging
 from typing import Optional, Dict, List
 
 import aiohttp
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.backends import default_backend
 
 logger = logging.getLogger("DelegationService")
 
@@ -50,12 +54,131 @@ class DelegationService:
         )
         self.mock_auth = os.getenv("VITE_USE_MOCK_AUTH", "false").lower() == "true"
 
+        # RFC 9449 DPoP: Generate ephemeral EC P-256 key pair for
+        # cryptographic binding of delegation tokens to this Orchestrator instance.
+        self._dpop_private_key = ec.generate_private_key(
+            ec.SECP256R1(), default_backend()
+        )
+        self._dpop_public_key = self._dpop_private_key.public_key()
+        self._dpop_jwk = self._build_jwk(self._dpop_public_key)
+        self._dpop_thumbprint = self._compute_jwk_thumbprint(self._dpop_jwk)
+
         if self.mock_auth:
-            logger.info("DelegationService running in MOCK mode")
+            logger.info("DelegationService running in MOCK mode (DPoP enabled)")
         else:
             logger.info(
-                f"DelegationService configured for Keycloak: {self.authority}"
+                f"DelegationService configured for Keycloak: {self.authority} (DPoP enabled)"
             )
+
+    # -----------------------------------------------------------------
+    # RFC 9449 DPoP — Demonstrating Proof of Possession
+    # -----------------------------------------------------------------
+
+    @staticmethod
+    def _build_jwk(public_key) -> dict:
+        """Build a JWK dict from an EC public key (P-256)."""
+        numbers = public_key.public_numbers()
+        x_bytes = numbers.x.to_bytes(32, byteorder="big")
+        y_bytes = numbers.y.to_bytes(32, byteorder="big")
+        return {
+            "kty": "EC",
+            "crv": "P-256",
+            "x": base64.urlsafe_b64encode(x_bytes).rstrip(b"=").decode(),
+            "y": base64.urlsafe_b64encode(y_bytes).rstrip(b"=").decode(),
+        }
+
+    @staticmethod
+    def _compute_jwk_thumbprint(jwk: dict) -> str:
+        """Compute the JWK Thumbprint (RFC 7638) for DPoP token binding.
+
+        The thumbprint is the base64url-encoded SHA-256 hash of the canonical
+        JSON serialization of the JWK's required members (crv, kty, x, y for EC).
+        """
+        canonical = json.dumps(
+            {"crv": jwk["crv"], "kty": jwk["kty"], "x": jwk["x"], "y": jwk["y"]},
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        digest = hashlib.sha256(canonical.encode()).digest()
+        return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+    def _create_dpop_proof(
+        self, htm: str, htu: str, access_token: Optional[str] = None
+    ) -> str:
+        """Create a DPoP proof JWT per RFC 9449 §4.
+
+        Args:
+            htm: HTTP method (e.g. "POST", "GET").
+            htu: HTTP target URI of the request.
+            access_token: If provided, the access token hash (ath) is included
+                          for token-bound proof verification.
+
+        Returns:
+            A compact-serialized DPoP proof JWT (ES256-signed).
+        """
+        header = {
+            "typ": "dpop+jwt",
+            "alg": "ES256",
+            "jwk": self._dpop_jwk,
+        }
+        payload = {
+            "jti": str(uuid.uuid4()),
+            "htm": htm,
+            "htu": htu,
+            "iat": int(time.time()),
+        }
+        if access_token:
+            # RFC 9449 §4.2: ath = base64url(SHA-256(access_token))
+            ath_digest = hashlib.sha256(access_token.encode()).digest()
+            payload["ath"] = base64.urlsafe_b64encode(ath_digest).rstrip(b"=").decode()
+
+        # Sign with the ephemeral private key using ES256
+        header_b64 = (
+            base64.urlsafe_b64encode(json.dumps(header).encode())
+            .rstrip(b"=")
+            .decode()
+        )
+        payload_b64 = (
+            base64.urlsafe_b64encode(json.dumps(payload).encode())
+            .rstrip(b"=")
+            .decode()
+        )
+        signing_input = f"{header_b64}.{payload_b64}".encode()
+
+        from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+        from cryptography.hazmat.primitives.hashes import SHA256
+        from cryptography.hazmat.primitives.asymmetric import ec as ec_module
+
+        der_sig = self._dpop_private_key.sign(
+            signing_input, ec_module.ECDSA(SHA256())
+        )
+        r, s = decode_dss_signature(der_sig)
+        # Convert to fixed-width R||S format (32 bytes each for P-256)
+        r_bytes = r.to_bytes(32, byteorder="big")
+        s_bytes = s.to_bytes(32, byteorder="big")
+        sig_b64 = (
+            base64.urlsafe_b64encode(r_bytes + s_bytes).rstrip(b"=").decode()
+        )
+
+        return f"{header_b64}.{payload_b64}.{sig_b64}"
+
+    def get_dpop_proof_for_request(
+        self, method: str, url: str, access_token: str
+    ) -> str:
+        """Generate a DPoP proof for presenting a delegation token to an agent.
+
+        This proof demonstrates that the Orchestrator possesses the private key
+        bound to the delegation token's ``cnf.jkt`` claim.
+
+        Args:
+            method: HTTP method of the request (e.g. "GET", "POST").
+            url: Target URL of the request.
+            access_token: The delegation token being presented.
+
+        Returns:
+            A DPoP proof JWT string to include as a ``DPoP`` header.
+        """
+        return self._create_dpop_proof(method, url, access_token)
 
     async def exchange_token_for_agent(
         self,
@@ -132,9 +255,14 @@ class DelegationService:
             f"{len(allowed_tools)} tool scopes"
         )
 
+        # RFC 9449: Include DPoP proof header to bind the resulting token
+        dpop_proof = self._create_dpop_proof("POST", token_url)
+
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(token_url, data=form_data) as resp:
+                async with session.post(
+                    token_url, data=form_data, headers={"DPoP": dpop_proof}
+                ) as resp:
                     body = await resp.json()
                     if resp.status != 200:
                         logger.error(
@@ -199,6 +327,7 @@ class DelegationService:
             "azp": self.client_id or "astral-frontend",
             "realm_access": {"roles": ["user"]},
             "delegation": True,  # Custom flag for easy identification
+            "cnf": {"jkt": self._dpop_thumbprint},  # RFC 9449 §6: DPoP binding
         }
 
         # Create a simple mock JWT (not cryptographically secure — dev only)
@@ -222,16 +351,17 @@ class DelegationService:
 
         logger.info(
             f"Mock delegation token created for agent '{agent_id}' "
-            f"with {len(allowed_tools)} tools"
+            f"with {len(allowed_tools)} tools (DPoP-bound)"
         )
 
         return {
             "access_token": mock_token,
-            "token_type": "Bearer",
+            "token_type": "DPoP",
             "expires_in": 300,
             "scope": combined_scopes,
             "issued_token_type": TOKEN_TYPE_ACCESS,
             "agent_id": agent_id,
+            "dpop_bound": True,
         }
 
     @staticmethod

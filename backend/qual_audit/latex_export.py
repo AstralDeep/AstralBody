@@ -1,5 +1,6 @@
 """LaTeX file generation from verified test results using Jinja2 templates."""
 
+import json
 import os
 from typing import Dict, List
 
@@ -60,6 +61,13 @@ _CATEGORY_LABELS = {
     "transport_comparison": "Transport Comparison",
     "frontend_rendering": "Frontend Rendering",
     "cost_overhead": "Security Cost Overhead",
+    "parallel_dispatch": "Parallel Multi-Agent Dispatch",
+}
+
+# Custom ID prefix overrides (category → prefix string)
+# Default is category[:2].upper()
+_CATEGORY_PREFIX = {
+    "parallel_dispatch": "PD-B",
 }
 
 # CLEAR Framework dimension mapping (suite → CLEAR dimension)
@@ -71,12 +79,13 @@ _CLEAR_MAPPING = {
     "tool_poisoning": "Assurance",
     "prompt_injection": "Assurance",
     "permission_delegation": "Assurance",
+    "parallel_dispatch": "Latency / Reliability",
 }
 
 # CLEAR dimension descriptions
 _CLEAR_DESCRIPTIONS = {
     "Cost": "Security processing overhead and computational expenditure",
-    "Latency / Reliability": "Transport response time, throughput, ordering, and reconnection",
+    "Latency / Reliability": "Transport response time, throughput, ordering, and parallel dispatch performance",
     "Efficacy": "UI rendering fidelity and device adaptation correctness",
     "Assurance": "Authorization enforcement, threat detection, and injection resistance",
 }
@@ -135,6 +144,10 @@ _TEST_DESCRIPTIONS: Dict[str, str] = {
     # Adversarial evasion (tool poisoning)
     "test_innocuous_name_dangerous_schema": "Innocuous name with subtly dangerous schema field",
     "test_synonym_evasion": "Synonym/paraphrasing evasion of regex patterns (xfail)",
+    # Parallel Multi-Agent Dispatch
+    "test_sequential_vs_parallel_latency": "Sequential vs parallel latency (3 real agents)",
+    "test_parallel_dispatch_correctness": "All parallel results returned without errors",
+    "test_parallel_speedup_factor": "Parallel speedup factor over multiple trials",
 }
 
 # Frontend test groups — maps the Vitest "describe" prefix to a short label.
@@ -202,10 +215,12 @@ def generate_category_table(
 
     rows = []
     for i, case in enumerate(cases, 1):
-        prefix = category[:2].upper()
+        prefix = _CATEGORY_PREFIX.get(category, category[:2].upper())
         func = _short_name(case.test_name)
+        # Use zero-padded 2-digit IDs for custom prefixes, 3-digit for default
+        id_num = f"{i:02d}" if category in _CATEGORY_PREFIX else f"{i:03d}"
         rows.append({
-            "id": f"{prefix}-{i:03d}",
+            "id": f"{prefix}{id_num}" if category in _CATEGORY_PREFIX else f"{prefix}-{id_num}",
             "description": _latex_escape(_get_description(case.test_name)),
             "short_name": _latex_escape(_abbreviated_name(func)),
             "outcome": "Pass" if case.outcome.value == "passed" else "Fail",
@@ -416,13 +431,13 @@ def generate_benchmark_chart(
     return filename
 
 
-def generate_transport_summary(
-    cases: List[TestCaseResult], output_dir: str
-) -> str:
-    """Generate the transport performance summary table (SSE vs WebSocket)."""
-    env = _get_jinja_env()
-    template = env.get_template("transport_summary.tex.j2")
+def print_transport_summary(cases: List[TestCaseResult]) -> None:
+    """Print transport throughput and latency values to the console.
 
+    Previously this generated a transport_summary_table.tex file.
+    The throughput values are now embedded directly in the paper's prose,
+    so we print them for manual reference instead.
+    """
     metrics = _split_transport_metrics(cases)
 
     # Estimate throughput from the throughput test durations
@@ -437,22 +452,56 @@ def generate_transport_summary(
     if ws_tp_cases and ws_tp_cases[0].duration_ms > 0:
         ws_throughput = f"{200 / (ws_tp_cases[0].duration_ms / 1000):.0f}"
 
-    content = template.render(
-        sse_mean=metrics.get("sse_mean_ms", "---"),
-        sse_median=metrics.get("sse_median_ms", "---"),
-        sse_p95=metrics.get("sse_p95_ms", "---"),
-        sse_p99=metrics.get("sse_p99_ms", "---"),
-        sse_throughput=sse_throughput,
-        ws_mean=metrics.get("ws_mean_ms", "---"),
-        ws_median=metrics.get("ws_median_ms", "---"),
-        ws_p95=metrics.get("ws_p95_ms", "---"),
-        ws_p99=metrics.get("ws_p99_ms", "---"),
-        ws_throughput=ws_throughput,
-    )
-    filename = "transport_summary_table.tex"
-    with open(os.path.join(output_dir, filename), "w", encoding="utf-8") as f:
-        f.write(content)
-    return filename
+    print("\n+----------------------------------------------------------------------+")
+    print("|              Transport Performance Summary                          |")
+    print("+----------------------------------------------------------------------+")
+    print(f"|  SSE (HTTP): {sse_throughput:>6} msg/s  |  "
+          f"Mean: {metrics.get('sse_mean_ms', '---'):>8}ms  "
+          f"Median: {metrics.get('sse_median_ms', '---'):>8}ms  "
+          f"P95: {metrics.get('sse_p95_ms', '---'):>8}ms  "
+          f"P99: {metrics.get('sse_p99_ms', '---'):>8}ms")
+    print(f"|  WebSocket:  {ws_throughput:>6} msg/s  |  "
+          f"Mean: {metrics.get('ws_mean_ms', '---'):>8}ms  "
+          f"Median: {metrics.get('ws_median_ms', '---'):>8}ms  "
+          f"P95: {metrics.get('ws_p95_ms', '---'):>8}ms  "
+          f"P99: {metrics.get('ws_p99_ms', '---'):>8}ms")
+    print("+----------------------------------------------------------------------+\n")
+
+
+def print_parallel_dispatch_summary():
+    """Print parallel dispatch benchmark results from the sidecar JSON file."""
+    import tempfile
+    bench_file = os.path.join(tempfile.gettempdir(), "astral_parallel_dispatch_bench.json")
+    if not os.path.exists(bench_file):
+        return
+
+    with open(bench_file, "r") as f:
+        data = json.load(f)
+
+    lat = data.get("latency", {})
+    spd = data.get("speedup_trials", {})
+
+    print("+----------------------------------------------------------------------+")
+    print("|           Parallel Multi-Agent Dispatch Summary                      |")
+    print("+----------------------------------------------------------------------+")
+    if lat:
+        print(f"|  Agents dispatched: {lat.get('agent_count', '?')}")
+        print(f"|    Weather  -- get_current_weather(city='New York')")
+        print(f"|    General  -- get_system_status()")
+        print(f"|    Medical  -- search_patients(30-60, diabetes)")
+        print(f"|  Sequential: {lat.get('sequential_ms', '---')}ms")
+        print(f"|  Parallel:   {lat.get('parallel_ms', '---')}ms")
+        print(f"|  Speedup:    {lat.get('speedup', '---')}x")
+    if spd:
+        print(f"|  Avg speedup ({spd.get('n_trials', '?')} warm trials): {spd.get('avg_speedup', '---')}x")
+        individual = spd.get("individual", [])
+        if individual:
+            trial_str = ", ".join(f"{s}x" for s in individual)
+            print(f"|  Individual trials: {trial_str}")
+    print("+----------------------------------------------------------------------+\n")
+
+    # Clean up sidecar file
+    os.unlink(bench_file)
 
 
 def generate_all_artifacts(
@@ -485,19 +534,25 @@ def generate_all_artifacts(
         db.insert_artifact(art)
         artifacts.append(art)
 
-    # Transport benchmark chart + summary table (if transport tests exist)
+    # Transport benchmark chart (if transport tests exist)
     if "transport_comparison" in suites:
         tc_cases = suites["transport_comparison"]
-        for gen_func in (generate_benchmark_chart, generate_transport_summary):
-            filename = gen_func(tc_cases, output_dir)
-            art = LatexArtifact(
-                run_id=run_id,
-                filename=filename,
-                generated_from=[c.id for c in tc_cases],
-                verification_complete=True,
-            )
-            db.insert_artifact(art)
-            artifacts.append(art)
+        filename = generate_benchmark_chart(tc_cases, output_dir)
+        art = LatexArtifact(
+            run_id=run_id,
+            filename=filename,
+            generated_from=[c.id for c in tc_cases],
+            verification_complete=True,
+        )
+        db.insert_artifact(art)
+        artifacts.append(art)
+
+        # Print throughput values to console (previously generated transport_summary_table.tex)
+        print_transport_summary(tc_cases)
+
+    # Print parallel dispatch benchmark data (if available from sidecar file)
+    if "parallel_dispatch" in suites:
+        print_parallel_dispatch_summary()
 
     # CLEAR Framework summary table
     filename = generate_clear_summary_table(cases, output_dir)

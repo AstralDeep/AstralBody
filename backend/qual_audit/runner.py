@@ -28,6 +28,7 @@ _SUITE_MAP = {
     "test_permission_delegation": "permission_delegation",
     "test_transport_comparison": "transport_comparison",
     "test_cost_overhead": "cost_overhead",
+    "test_parallel_dispatch": "parallel_dispatch",
 }
 
 
