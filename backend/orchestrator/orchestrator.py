@@ -120,6 +120,9 @@ class Orchestrator:
         self.security_analyzer = ToolSecurityAnalyzer()
         self.security_flags: Dict[str, Dict[str, Any]] = {}  # agent_id -> {tool_name: flag_dict}
 
+        # LLM Token Usage Tracking — per-conversation accumulation
+        self.token_usage: Dict[str, Dict[str, int]] = {}  # chat_id -> {prompt_tokens, completion_tokens, total_tokens}
+
         # ROTE — Response Output Translation Engine
         self.rote = ROTE()
 
@@ -992,7 +995,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
         try:
             # Use _call_llm for built-in retries (important for transient 502s)
-            llm_msg = await self._call_llm(
+            llm_msg, _usage = await self._call_llm(
                 None,  # no websocket needed for combine
                 [
                     {"role": "system", "content": "You are a precise UI component combiner. Output ONLY valid JSON or an ERROR message. No explanations, no markdown fences."},
@@ -1001,7 +1004,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 tools_desc=None,
                 temperature=0.1
             )
-            
+
             if not llm_msg:
                 return {"error": "LLM returned no response"}
             
@@ -1359,7 +1362,8 @@ CRITICAL RULES:
                 logger.info(f"--- Turn {turn_count}/{MAX_TURNS} ---")
 
                 # Call LLM
-                llm_msg = await self._call_llm(websocket, messages, tools_desc)
+                llm_msg, usage = await self._call_llm(websocket, messages, tools_desc)
+                self._accumulate_usage(chat_id, usage)
                 if not llm_msg:
                     logger.error("LLM returned None, stopping loop.")
                     await self._safe_send(websocket, json.dumps({
@@ -1709,11 +1713,37 @@ CRITICAL RULES:
         finally:
             heartbeat_task.cancel()
 
+    def _accumulate_usage(self, chat_id: Optional[str], usage):
+        """Accumulate LLM token usage for a conversation.
+
+        Args:
+            chat_id: Conversation identifier. Skipped if None.
+            usage: The ``usage`` object from an OpenAI-compatible response.
+        """
+        if not usage or not chat_id:
+            return
+        if chat_id not in self.token_usage:
+            self.token_usage[chat_id] = {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            }
+        self.token_usage[chat_id]["prompt_tokens"] += getattr(usage, "prompt_tokens", 0) or 0
+        self.token_usage[chat_id]["completion_tokens"] += getattr(usage, "completion_tokens", 0) or 0
+        self.token_usage[chat_id]["total_tokens"] += getattr(usage, "total_tokens", 0) or 0
+        logger.info(
+            f"Token usage for chat {chat_id}: {self.token_usage[chat_id]}"
+        )
+
     async def _call_llm(self, websocket, messages, tools_desc=None, temperature=None):
         """Helper to call LLM with retries and exponential backoff.
-        
+
         Only retries on transient errors (502, 503, 504). Fails fast on
         non-transient errors like 424 (model not found) or 401 (auth).
+
+        Returns:
+            Tuple of (message, usage) where usage is the token usage object
+            from the API response, or (None, None) on complete failure.
         """
         for attempt in range(1, self.MAX_RETRIES + 1):
             try:
@@ -1726,33 +1756,34 @@ CRITICAL RULES:
                     kwargs["tool_choice"] = "auto"
                 if temperature is not None:
                     kwargs["temperature"] = temperature
-                
+
                 response = await asyncio.to_thread(
                     self.llm_client.chat.completions.create,
                     **kwargs
                 )
-                return response.choices[0].message
+                usage = getattr(response, "usage", None)
+                return response.choices[0].message, usage
             except Exception as e:
                 error_str = str(e)
                 is_transient = any(code in error_str for code in ["502", "503", "504", "Bad Gateway", "Service Unavailable", "Connection", "timeout"])
                 is_fatal = any(code in error_str for code in ["424", "401", "403", "Repository Not Found", "Invalid username"])
-                
+
                 logger.warning(f"LLM Attempt {attempt}/{self.MAX_RETRIES} failed: {e}")
-                
+
                 # Don't retry fatal errors — they won't resolve with retries
                 if is_fatal:
                     logger.error(f"Fatal LLM error (no retry): {e}")
                     raise e
-                
+
                 if attempt == self.MAX_RETRIES:
                     raise e
-                
+
                 # Exponential backoff: 1s, 2s, 4s, 8s
                 backoff = min(2 ** (attempt - 1), 8)
                 if is_transient:
                     logger.info(f"Transient error detected, retrying in {backoff}s...")
                 await asyncio.sleep(backoff)
-        return None
+        return None, None
 
     async def _generate_tool_summary(self, websocket, messages, chat_id=None, user_id=None):
         """
@@ -1801,6 +1832,7 @@ CRITICAL RULES:
                 messages=summary_messages,
                 max_tokens=300,
             )
+            self._accumulate_usage(chat_id, getattr(response, "usage", None))
 
             summary_text = response.choices[0].message.content or ""
             summary_text = summary_text.strip()
