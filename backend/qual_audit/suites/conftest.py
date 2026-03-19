@@ -17,7 +17,7 @@ os.environ["VITE_USE_MOCK_AUTH"] = "true"
 
 @pytest.fixture
 def tmp_data_dir():
-    """Temporary directory for test databases."""
+    """Temporary directory for test data files (e.g. credential keys)."""
     d = tempfile.mkdtemp(prefix="astral_test_")
     yield d
     # Cleanup

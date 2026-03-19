@@ -5,7 +5,7 @@
  * the backend primitives. Uses mocked context providers.
  */
 import React from "react";
-import { describe, it, expect, vi, beforeAll } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 
 // Mock framer-motion to avoid animation snapshot instability
@@ -246,7 +246,7 @@ describe("SDUI Component Rendering via DynamicRenderer", () => {
 
     // ── FR-011: Line chart ────────────────────────────────────────
     it("FR-011: renders line chart with SVG", () => {
-        const { container } = render(
+        render(
             <DynamicRenderer
                 components={[{
                     type: "line_chart",
@@ -261,7 +261,7 @@ describe("SDUI Component Rendering via DynamicRenderer", () => {
 
     // ── FR-012: Pie chart ─────────────────────────────────────────
     it("FR-012: renders pie chart with legend", () => {
-        const { container } = render(
+        render(
             <DynamicRenderer
                 components={[{
                     type: "pie_chart",

@@ -25,13 +25,8 @@ from qual_audit.evidence import get_previous_hash, verify_chain  # noqa: E402
 from qual_audit.models import AuditAction, AuditEntry, VerificationStatus  # noqa: E402
 from qual_audit.runner import run_backend_tests, run_frontend_tests  # noqa: E402
 
-_DEFAULT_DB = os.path.join(
-    os.path.dirname(__file__), "..", "data", "test_audit.db"
-)
-
-
 def _db() -> AuditDatabase:
-    return AuditDatabase(_DEFAULT_DB)
+    return AuditDatabase()
 
 
 @click.group()

@@ -21,7 +21,6 @@ sys.path.insert(0, backend_dir)
 from shared.database import Database
 
 OWNER_EMAIL = "sam.armstrong@uky.edu"
-DB_PATH = os.path.join(backend_dir, "data", "astral.db")
 
 
 def get_connected_agent_ids():
@@ -43,7 +42,7 @@ def get_connected_agent_ids():
 
 
 def migrate():
-    db = Database(DB_PATH)
+    db = Database()
     now = int(time.time() * 1000)
 
     # Collect agent IDs from multiple sources
@@ -88,5 +87,5 @@ def migrate():
 
 if __name__ == "__main__":
     print(f"Migrating agent ownership to {OWNER_EMAIL}")
-    print(f"Database: {DB_PATH}\n")
+    print(f"Database: {os.getenv('DATABASE_URL', 'default')}\n")
     migrate()

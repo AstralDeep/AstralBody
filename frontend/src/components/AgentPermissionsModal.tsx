@@ -460,7 +460,7 @@ export default function AgentPermissionsModal({
                         animate={{ opacity: 1, scale: 1, y: 0 }}
                         exit={{ opacity: 0, scale: 0.95, y: 10 }}
                         transition={{ duration: 0.2 }}
-                        className="bg-astral-surface border border-white/10 rounded-xl shadow-2xl w-full max-w-lg mx-4 overflow-hidden relative"
+                        className="bg-astral-surface border border-white/10 rounded-xl shadow-2xl w-full max-w-lg mx-4 overflow-hidden relative flex flex-col max-h-[90vh]"
                         role="dialog"
                         aria-modal="true"
                         aria-label={`${agentName} permissions`}
@@ -628,7 +628,7 @@ export default function AgentPermissionsModal({
                         </AnimatePresence>
 
                         {/* ── Scrollable Content ──────────────────────── */}
-                        <div className="px-6 py-4 max-h-[60vh] overflow-y-auto space-y-5">
+                        <div className="px-6 py-4 flex-1 min-h-0 overflow-y-auto space-y-5">
 
                             {/* ── Visibility Toggle (owner only) ─────────── */}
                             {isOwner && onSetVisibility && (

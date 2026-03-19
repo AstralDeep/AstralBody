@@ -47,7 +47,7 @@ from shared.primitives import (
 )
 from rote.rote import ROTE
 
-load_dotenv(override=True)
+load_dotenv(override=False)
 
 PORT = int(os.getenv("ORCHESTRATOR_PORT", 8001))
 
@@ -107,7 +107,7 @@ class Orchestrator:
         data_dir = os.path.join(backend_dir, 'data')
         self.history = HistoryManager(data_dir=data_dir)
 
-        # Tool Permission Manager (RFC 8693 delegation) — backed by same SQLite DB
+        # Tool Permission Manager (RFC 8693 delegation) — backed by same PostgreSQL DB
         self.tool_permissions = ToolPermissionManager(db=self.history.db, data_dir=data_dir)
 
         # Per-user credential storage (encrypted API keys for agents)
@@ -889,7 +889,8 @@ class Orchestrator:
                         }))
 
         except Exception as e:
-            logger.error(f"Error handling UI message: {e}")
+            import traceback
+            logger.error(f"Error handling UI message: {e}\n{traceback.format_exc()}")
 
     # =========================================================================
     # COMPONENT COMBINING (LLM-powered)
