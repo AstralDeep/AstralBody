@@ -19,10 +19,13 @@ import requests
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from shared.primitives import (
-    Text, Card, Table, Alert, MetricCard, Grid, Grids,
-    BarChart, PieChart, List_, Collapsible, Tabs, TabItem, Divider,
-    create_ui_response,
+from shared.a2ui_builders import (
+    card, text, button, table, metric_card, alert, row, column, tabs,
+    code_block, bar_chart, line_chart, pie_chart, plotly_chart,
+    progress_bar, image, divider, file_download, file_upload,
+    color_picker, list_component, text_field,
+    slider, choice_picker, datetime_input, checkbox, modal, video, audio_player,
+    create_response, Node,
 )
 
 logger = logging.getLogger("JournalReviewTools")
@@ -257,8 +260,8 @@ def find_matching_journals(
             ranked_sources = [(s["id"], 0) for s in data["results"]]
 
     if not ranked_sources:
-        return create_ui_response([
-            Alert(message=f"No journals found for query: '{query}'. Try broader terms.",
+        return create_response([
+            alert(f"No journals found for query: '{query}'. Try broader terms.",
                   variant="warning")
         ])
 
@@ -284,8 +287,8 @@ def find_matching_journals(
     journals = journals[:max_results]
 
     if not journals:
-        return create_ui_response([
-            Alert(message="No journals matched your criteria. Try relaxing filters.",
+        return create_response([
+            alert("No journals matched your criteria. Try relaxing filters.",
                   variant="warning")
         ])
 
@@ -297,15 +300,15 @@ def find_matching_journals(
     oa_count = sum(1 for j in journals if j.get("is_oa"))
     top_journal = journals[0]
     components.append(
-        Grids(columns=4, id="summary-metrics", children=[
-            MetricCard(title="Top Match", value=f"{top_journal['fit']['overall']}%",
-                       subtitle=top_journal["name"][:40], id="top-match"),
-            MetricCard(title="Avg Fit Score", value=f"{avg_fit}%",
-                       subtitle=f"Across {len(journals)} journals", id="avg-fit"),
-            MetricCard(title="Open Access", value=str(oa_count),
-                       subtitle=f"of {len(journals)} results", id="oa-count"),
-            MetricCard(title="Top H-Index", value=str(top_journal.get("h_index", "N/A")),
-                       subtitle="Highest in results", id="top-h"),
+        row([
+            metric_card("Top Match", f"{top_journal['fit']['overall']}%",
+                        subtitle=top_journal["name"][:40]),
+            metric_card("Avg Fit Score", f"{avg_fit}%",
+                        subtitle=f"Across {len(journals)} journals"),
+            metric_card("Open Access", str(oa_count),
+                        subtitle=f"of {len(journals)} results"),
+            metric_card("Top H-Index", str(top_journal.get("h_index", "N/A")),
+                        subtitle="Highest in results"),
         ])
     )
 
@@ -329,13 +332,10 @@ def find_matching_journals(
         ])
 
     components.append(
-        Card(title=f"Matching Journals for: {query[:60]}", id="results-card", content=[
-            Table(
-                headers=["#", "Journal", "Fit", "Topic Match", "Papers Found",
-                          "H-Index", "~Impact Factor", "OA", "APC", "Publisher"],
-                rows=rows,
-                id="journals-table"
-            ),
+        card(f"Matching Journals for: {query[:60]}", [
+            table(["#", "Journal", "Fit", "Topic Match", "Papers Found",
+                   "H-Index", "~Impact Factor", "OA", "APC", "Publisher"],
+                  rows),
         ])
     )
 
@@ -343,25 +343,18 @@ def find_matching_journals(
     detail_items = []
     for j in journals[:3]:
         topics_str = ", ".join(j["topics"][:5]) if j["topics"] else "No topics listed"
-        jid = j.get("issn_l") or j["name"][:20].replace(" ", "-")
         detail_items.append(
-            Collapsible(
-                title=f"{j['name']} — Topics & Details",
-                id=f"detail-{jid}",
-                content=[
-                    Text(content=f"**Publisher:** {j['publisher']}", id=f"pub-{jid}"),
-                    Text(content=f"**ISSN:** {j['issn']}", id=f"issn-{jid}"),
-                    Text(content=f"**Topics:** {topics_str}", id=f"topics-{jid}"),
-                    Text(content=f"**Total Works:** {_fmt_number(j['works_count'])} | "
-                         f"**Total Citations:** {_fmt_number(j['cited_by_count'])}",
-                         id=f"counts-{jid}"),
-                    Text(content=f"**Homepage:** {j.get('homepage_url', 'N/A')}",
-                         id=f"url-{jid}"),
-                ]
-            )
+            card(f"{j['name']} — Topics & Details", [
+                text(f"**Publisher:** {j['publisher']}"),
+                text(f"**ISSN:** {j['issn']}"),
+                text(f"**Topics:** {topics_str}"),
+                text(f"**Total Works:** {_fmt_number(j['works_count'])} | "
+                     f"**Total Citations:** {_fmt_number(j['cited_by_count'])}"),
+                text(f"**Homepage:** {j.get('homepage_url', 'N/A')}"),
+            ], collapsible=True)
         )
     if detail_items:
-        components.append(Card(title="Top Match Details", id="details-card", content=detail_items))
+        components.append(card("Top Match Details", detail_items))
 
     # Data for LLM
     data_summary = {
@@ -388,10 +381,7 @@ def find_matching_journals(
         ],
     }
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": data_summary,
-    }
+    return create_response(components, data=data_summary)
 
 
 # ── Tool: get_journal_profile ───────────────────────────────────────────
@@ -439,8 +429,8 @@ def get_journal_profile(
                 source = data["results"][0]
 
     if not source:
-        return create_ui_response([
-            Alert(message=f"Journal not found: '{journal_name}'. Check the name or ISSN.",
+        return create_response([
+            alert(f"Journal not found: '{journal_name}'. Check the name or ISSN.",
                   variant="error")
         ])
 
@@ -465,15 +455,15 @@ def get_journal_profile(
     apc_str = f"${j['apc_usd']:,}" if j.get("apc_usd") else "N/A"
 
     components.append(
-        Grids(columns=4, id="profile-metrics", children=[
-            MetricCard(title="H-Index", value=str(j.get("h_index", "N/A")),
-                       subtitle="Lifetime", id="h-index"),
-            MetricCard(title="~Impact Factor", value=str(j.get("approx_impact_factor") or "N/A"),
-                       subtitle="2-year approx", id="impact-factor"),
-            MetricCard(title="Total Citations", value=_fmt_number(j["cited_by_count"]),
-                       subtitle="All time", id="total-cites"),
-            MetricCard(title="Access Model", value=oa_status,
-                       subtitle=f"APC: {apc_str}", id="access-model"),
+        row([
+            metric_card("H-Index", str(j.get("h_index", "N/A")),
+                        subtitle="Lifetime"),
+            metric_card("~Impact Factor", str(j.get("approx_impact_factor") or "N/A"),
+                        subtitle="2-year approx"),
+            metric_card("Total Citations", _fmt_number(j["cited_by_count"]),
+                        subtitle="All time"),
+            metric_card("Access Model", oa_status,
+                        subtitle=f"APC: {apc_str}"),
         ])
     )
 
@@ -499,8 +489,8 @@ def get_journal_profile(
     ]
 
     components.append(
-        Card(title=j["name"], id="journal-info", content=[
-            Table(headers=["Attribute", "Value"], rows=info_rows, id="info-table"),
+        card(j["name"], [
+            table(["Attribute", "Value"], info_rows),
         ])
     )
 
@@ -512,17 +502,11 @@ def get_journal_profile(
         cite_vals = [c.get("cited_by_count", 0) for c in reversed(counts_by_year)]
 
         components.append(
-            Card(title="Publication & Citation Trends (Last 10 Years)", id="trends-card", content=[
-                BarChart(
-                    labels=years,
-                    datasets=[{"label": "Papers Published", "data": works_vals}],
-                    id="works-trend"
-                ),
-                BarChart(
-                    labels=years,
-                    datasets=[{"label": "Citations Received", "data": cite_vals}],
-                    id="cites-trend"
-                ),
+            card("Publication & Citation Trends (Last 10 Years)", [
+                bar_chart(labels=years,
+                          datasets=[{"label": "Papers Published", "data": works_vals}]),
+                bar_chart(labels=years,
+                          datasets=[{"label": "Citations Received", "data": cite_vals}]),
             ])
         )
 
@@ -545,10 +529,7 @@ def get_journal_profile(
         "two_year_mean_citedness": j.get("two_year_mean_citedness"),
     }
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": profile_data,
-    }
+    return create_response(components, data=profile_data)
 
 
 # ── Tool: compare_journals ─────────────────────────────────────────────
@@ -569,8 +550,8 @@ def compare_journals(
     """
     names = [n.strip() for n in journal_names.split(";") if n.strip()]
     if len(names) < 2:
-        return create_ui_response([
-            Alert(message="Please provide at least 2 journal names separated by semicolons.",
+        return create_response([
+            alert("Please provide at least 2 journal names separated by semicolons.",
                   variant="warning")
         ])
     if len(names) > 5:
@@ -599,15 +580,15 @@ def compare_journals(
             not_found.append(name)
 
     if not journals:
-        return create_ui_response([
-            Alert(message="None of the specified journals were found.", variant="error")
+        return create_response([
+            alert("None of the specified journals were found.", variant="error")
         ])
 
     components = []
 
     if not_found:
         components.append(
-            Alert(message=f"Not found: {', '.join(not_found)}", variant="warning")
+            alert(f"Not found: {', '.join(not_found)}", variant="warning")
         )
 
     # Comparison table
@@ -628,12 +609,12 @@ def compare_journals(
 
     rows = []
     for metric_label, fn in metrics:
-        row = [metric_label] + [fn(j) for j in journals]
-        rows.append(row)
+        table_row = [metric_label] + [fn(j) for j in journals]
+        rows.append(table_row)
 
     components.append(
-        Card(title="Journal Comparison", id="comparison-card", content=[
-            Table(headers=headers, rows=rows, id="comparison-table"),
+        card("Journal Comparison", [
+            table(headers, rows),
         ])
     )
 
@@ -642,16 +623,14 @@ def compare_journals(
 
     h_values = [j.get("h_index") or 0 for j in journals]
     components.append(
-        BarChart(labels=j_labels,
-                 datasets=[{"label": "H-Index", "data": h_values}],
-                 id="h-index-chart")
+        bar_chart(labels=j_labels,
+                  datasets=[{"label": "H-Index", "data": h_values}])
     )
 
     cite_values = [j["cited_by_count"] for j in journals]
     components.append(
-        BarChart(labels=j_labels,
-                 datasets=[{"label": "Total Citations", "data": cite_values}],
-                 id="citation-chart")
+        bar_chart(labels=j_labels,
+                  datasets=[{"label": "Total Citations", "data": cite_values}])
     )
 
     compare_data = {
@@ -674,10 +653,7 @@ def compare_journals(
         ],
     }
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": compare_data,
-    }
+    return create_response(components, data=compare_data)
 
 
 # ── Tool: analyze_paper_fit ─────────────────────────────────────────────
@@ -707,8 +683,8 @@ def analyze_paper_fit(
     """
     kw_list = [k.strip() for k in paper_keywords.split(",") if k.strip()]
     if not kw_list:
-        return create_ui_response([
-            Alert(message="Please provide at least one keyword for the paper.", variant="warning")
+        return create_response([
+            alert("Please provide at least one keyword for the paper.", variant="warning")
         ])
 
     search_text = f"{paper_title} {' '.join(kw_list)}"
@@ -758,20 +734,19 @@ def analyze_paper_fit(
     journals = journals[:max_suggestions]
 
     if not journals:
-        return create_ui_response([
-            Alert(message="No matching journals found. Try different keywords.", variant="warning")
+        return create_response([
+            alert("No matching journals found. Try different keywords.", variant="warning")
         ])
 
     components = []
 
     # Paper info header
     components.append(
-        Card(title="Paper Under Review", id="paper-info", content=[
-            Text(content=f"**Title:** {paper_title}", id="paper-title"),
-            Text(content=f"**Keywords:** {', '.join(kw_list)}", id="paper-kw"),
-            Text(content=f"**Abstract:** {paper_abstract[:300]}{'...' if len(paper_abstract) > 300 else ''}"
-                 if paper_abstract else "**Abstract:** Not provided",
-                 id="paper-abstract"),
+        card("Paper Under Review", [
+            text(f"**Title:** {paper_title}"),
+            text(f"**Keywords:** {', '.join(kw_list)}"),
+            text(f"**Abstract:** {paper_abstract[:300]}{'...' if len(paper_abstract) > 300 else ''}"
+                 if paper_abstract else "**Abstract:** Not provided"),
         ])
     )
 
@@ -795,13 +770,10 @@ def analyze_paper_fit(
         ])
 
     components.append(
-        Card(title="Journal Fit Analysis", id="fit-card", content=[
-            Table(
-                headers=["#", "Journal", "Overall Fit", "Tier", "Topic Match",
-                          "Impact Score", "Activity", "OA"],
-                rows=rows,
-                id="fit-table"
-            ),
+        card("Journal Fit Analysis", [
+            table(["#", "Journal", "Overall Fit", "Tier", "Topic Match",
+                   "Impact Score", "Activity", "OA"],
+                  rows),
         ])
     )
 
@@ -809,16 +781,13 @@ def analyze_paper_fit(
     top3 = journals[:3]
     top3_labels = [j["name"][:25] for j in top3]
     components.append(
-        Card(title="Top 3 — Fit Score Breakdown", id="breakdown-card", content=[
-            BarChart(
-                labels=top3_labels,
-                datasets=[
-                    {"label": "Topic Relevance", "data": [j["fit"]["topic_relevance"] for j in top3]},
-                    {"label": "Impact Score", "data": [j["fit"]["impact"] for j in top3]},
-                    {"label": "Activity Score", "data": [j["fit"]["activity"] for j in top3]},
-                ],
-                id="fit-breakdown-chart"
-            ),
+        card("Top 3 — Fit Score Breakdown", [
+            bar_chart(labels=top3_labels,
+                      datasets=[
+                          {"label": "Topic Relevance", "data": [j["fit"]["topic_relevance"] for j in top3]},
+                          {"label": "Impact Score", "data": [j["fit"]["impact"] for j in top3]},
+                          {"label": "Activity Score", "data": [j["fit"]["activity"] for j in top3]},
+                      ]),
         ])
     )
 
@@ -837,8 +806,8 @@ def analyze_paper_fit(
         rec_text += f"Open access{apc}. "
 
     components.append(
-        Card(title="Recommendation", id="rec-card", content=[
-            Text(content=rec_text, id="rec-text"),
+        card("Recommendation", [
+            text(rec_text),
         ])
     )
 
@@ -865,10 +834,7 @@ def analyze_paper_fit(
         ],
     }
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": data_out,
-    }
+    return create_response(components, data=data_out)
 
 
 # ── Tool: get_field_landscape ───────────────────────────────────────────
@@ -910,8 +876,8 @@ def get_field_landscape(
             ranked_sources = [(s["id"], 0) for s in data["results"]]
 
     if not ranked_sources:
-        return create_ui_response([
-            Alert(message=f"No journals found for field: '{field}'.", variant="warning")
+        return create_response([
+            alert(f"No journals found for field: '{field}'.", variant="warning")
         ])
 
     candidate_ids = [sid for sid, _ in ranked_sources[:top_n * 2]]
@@ -929,8 +895,8 @@ def get_field_landscape(
     journals = journals[:top_n]
 
     if not journals:
-        return create_ui_response([
-            Alert(message=f"No journals found for field: '{field}'.", variant="warning")
+        return create_response([
+            alert(f"No journals found for field: '{field}'.", variant="warning")
         ])
 
     components = []
@@ -941,15 +907,15 @@ def get_field_landscape(
     avg_h = round(sum(j.get("h_index") or 0 for j in journals) / len(journals))
 
     components.append(
-        Grids(columns=4, id="landscape-metrics", children=[
-            MetricCard(title="Journals Found", value=str(len(journals)),
-                       subtitle=f"Top in {field}", id="count"),
-            MetricCard(title="Avg H-Index", value=str(avg_h),
-                       subtitle="Across results", id="avg-h"),
-            MetricCard(title="Open Access", value=f"{oa_pct}%",
-                       subtitle="Of listed journals", id="oa-pct"),
-            MetricCard(title="Combined Citations", value=_fmt_number(total_cites),
-                       subtitle="All journals", id="total-cites"),
+        row([
+            metric_card("Journals Found", str(len(journals)),
+                        subtitle=f"Top in {field}"),
+            metric_card("Avg H-Index", str(avg_h),
+                        subtitle="Across results"),
+            metric_card("Open Access", f"{oa_pct}%",
+                        subtitle="Of listed journals"),
+            metric_card("Combined Citations", _fmt_number(total_cites),
+                        subtitle="All journals"),
         ])
     )
 
@@ -968,13 +934,10 @@ def get_field_landscape(
         ])
 
     components.append(
-        Card(title=f"Top Journals in {field.title()}", id="landscape-card", content=[
-            Table(
-                headers=["#", "Journal", "Publisher", "H-Index", "~IF",
-                          "Citations", "Recent/yr", "OA"],
-                rows=rows,
-                id="landscape-table"
-            ),
+        card(f"Top Journals in {field.title()}", [
+            table(["#", "Journal", "Publisher", "H-Index", "~IF",
+                   "Citations", "Recent/yr", "OA"],
+                  rows),
         ])
     )
 
@@ -982,9 +945,8 @@ def get_field_landscape(
     chart_labels = [j["name"][:25] for j in journals[:10]]
     chart_vals = [j.get("h_index") or 0 for j in journals[:10]]
     components.append(
-        BarChart(labels=chart_labels,
-                 datasets=[{"label": "H-Index", "data": chart_vals}],
-                 id="landscape-h-chart")
+        bar_chart(labels=chart_labels,
+                  datasets=[{"label": "H-Index", "data": chart_vals}])
     )
 
     # Publisher distribution
@@ -994,9 +956,8 @@ def get_field_landscape(
         pub_counts[pub] = pub_counts.get(pub, 0) + 1
     if len(pub_counts) > 1:
         components.append(
-            PieChart(labels=list(pub_counts.keys()),
-                     data=list(pub_counts.values()),
-                     id="publisher-pie")
+            pie_chart(labels=list(pub_counts.keys()),
+                      data=list(pub_counts.values()))
         )
 
     data_out = {
@@ -1020,10 +981,7 @@ def get_field_landscape(
         ],
     }
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": data_out,
-    }
+    return create_response(components, data=data_out)
 
 
 # ── TOOL REGISTRY ──────────────────────────────────────────────────────

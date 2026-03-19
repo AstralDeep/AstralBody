@@ -1,16 +1,13 @@
 import os
 import sys
 from typing import Dict, Any, List, Optional
-import json
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from shared.primitives import (
-    Text, Card, Table, Container, MetricCard, ProgressBar,
-    Alert, Grid, BarChart, LineChart, PieChart, PlotlyChart, List_,
-    Collapsible, Divider, CodeBlock, Image, Tabs,
-    FileDownload, FileUpload, Button, Input, ColorPicker,
-    create_ui_response
+from shared.a2ui_builders import (
+    text, card, table, metric_card,
+    alert, row, pie_chart, divider,
+    create_response,
 )
 
 def search_stocks_by_criteria(sector: Optional[str] = None, industry: Optional[str] = None, dividend_yield_min: Optional[float] = None, market_cap_min: Optional[float] = None, market_cap_max: Optional[float] = None, volatility_max: Optional[float] = None, limit: int = 20, **kwargs) -> Dict[str, Any]:
@@ -76,56 +73,46 @@ def search_stocks_by_criteria(sector: Optional[str] = None, industry: Optional[s
                 f"{stock['beta']:.2f}"
             ])
 
-        components = [
-            Card(
-                title="Stock Search Results",
-                content=[
-                    Text(content=f"Criteria: {criteria_text}", variant="body"),
-                    Text(content=f"Found {len(filtered_stocks)} stocks matching criteria.", variant="body"),
-                    Divider(variant="solid"),
-                    Table(
-                        headers=["Ticker", "Name", "Sector", "Industry", "Price", "Div Yield", "Market Cap", "Beta"],
-                        rows=rows,
-                        variant="default"
-                    ) if filtered_stocks else Alert(message="No stocks found matching the criteria.", variant="warning"),
-                ]
-            )
-        ]
+        results_content = table(
+            ["Ticker", "Name", "Sector", "Industry", "Price", "Div Yield", "Market Cap", "Beta"],
+            rows,
+        ) if filtered_stocks else alert("No stocks found matching the criteria.", variant="warning")
 
-        return {
-            "_ui_components": [c.to_json() for c in components],
-            "_data": {
-                "criteria": {
-                    "sector": sector,
-                    "industry": industry,
-                    "dividend_yield_min": dividend_yield_min,
-                    "market_cap_min": market_cap_min,
-                    "market_cap_max": market_cap_max,
-                    "volatility_max": volatility_max,
-                    "limit": limit
-                },
-                "stocks": filtered_stocks,
-                "count": len(filtered_stocks)
-            }
-        }
-    except Exception as e:
-        return create_ui_response([
-            Alert(message=f"Failed to search stocks: {str(e)}", variant="error")
+        ui = card("Stock Search Results", [
+            text(f"Criteria: {criteria_text}", variant="body"),
+            text(f"Found {len(filtered_stocks)} stocks matching criteria.", variant="body"),
+            divider(),
+            results_content,
         ])
+
+        return create_response(ui, data={
+            "criteria": {
+                "sector": sector,
+                "industry": industry,
+                "dividend_yield_min": dividend_yield_min,
+                "market_cap_min": market_cap_min,
+                "market_cap_max": market_cap_max,
+                "volatility_max": volatility_max,
+                "limit": limit
+            },
+            "stocks": filtered_stocks,
+            "count": len(filtered_stocks)
+        })
+    except Exception as e:
+        return create_response(
+            alert(f"Failed to search stocks: {str(e)}", variant="error")
+        )
 
 def create_etf_from_description(description: str, number_of_stocks: int = 10, **kwargs) -> Dict[str, Any]:
     """Generate a proposed ETF portfolio based on a natural language description."""
     try:
         components = [
-            Card(
-                title="ETF Creation Request",
-                content=[
-                    Text(content=f"Description: {description}", variant="body"),
-                    Text(content=f"Target number of stocks: {number_of_stocks}", variant="body"),
-                    Divider(variant="solid"),
-                    Alert(message="This tool simulates ETF creation. In a real implementation, this would use NLP to parse the description and query a financial database.", variant="info"),
-                ]
-            )
+            card("ETF Creation Request", [
+                text(f"Description: {description}", variant="body"),
+                text(f"Target number of stocks: {number_of_stocks}", variant="body"),
+                divider(),
+                alert("This tool simulates ETF creation. In a real implementation, this would use NLP to parse the description and query a financial database.", variant="info"),
+            ])
         ]
 
         if "healthcare" in description.lower() and "dividend" in description.lower():
@@ -202,74 +189,61 @@ def create_etf_from_description(description: str, number_of_stocks: int = 10, **
             ])
 
         components.append(
-            Card(
-                title=f"Proposed ETF: {etf_name} ({etf_ticker})",
-                content=[
-                    Text(content=explanation, variant="body"),
-                    Divider(variant="solid"),
-                    Grid(
-                        columns=2,
-                        children=[
-                            MetricCard(title="ETF Ticker", value=etf_ticker),
-                            MetricCard(title="Number of Holdings", value=str(len(simulated_constituents))),
-                        ]
-                    ),
-                    Table(
-                        headers=["Ticker", "Name", "Weight", "Inclusion Reason"],
-                        rows=table_rows,
-                        variant="default"
-                    ),
-                    Divider(variant="solid"),
-                    Text(content="Note: This is a simulated ETF proposal for illustrative purposes. Actual ETF creation requires regulatory approval and detailed financial analysis.", variant="caption"),
-                ]
-            )
+            card(f"Proposed ETF: {etf_name} ({etf_ticker})", [
+                text(explanation, variant="body"),
+                divider(),
+                row([
+                    metric_card("ETF Ticker", etf_ticker),
+                    metric_card("Number of Holdings", str(len(simulated_constituents))),
+                ]),
+                table(
+                    ["Ticker", "Name", "Weight", "Inclusion Reason"],
+                    table_rows,
+                ),
+                divider(),
+                text("Note: This is a simulated ETF proposal for illustrative purposes. Actual ETF creation requires regulatory approval and detailed financial analysis.", variant="caption"),
+            ])
         )
 
         chart_labels = [s["ticker"] for s in simulated_constituents]
         chart_data = [s["weight"] * 100 for s in simulated_constituents]
 
         components.append(
-            Card(
-                title="ETF Allocation Visualization",
-                content=[
-                    PieChart(
-                        title="Portfolio Weight by Holding",
-                        labels=chart_labels,
-                        data=chart_data,
-                        colors=["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#84cc16", "#f97316", "#ec4899", "#6366f1"]
-                    )
-                ]
-            )
+            card("ETF Allocation Visualization", [
+                pie_chart(
+                    "Portfolio Weight by Holding",
+                    chart_labels,
+                    chart_data,
+                    colors=["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#84cc16", "#f97316", "#ec4899", "#6366f1"],
+                )
+            ])
         )
 
-        return {
-            "_ui_components": [c.to_json() for c in components],
-            "_data": {
-                "description": description,
-                "etf_name": etf_name,
-                "etf_ticker": etf_ticker,
-                "explanation": explanation,
-                "constituents": simulated_constituents,
-                "total_holdings": len(simulated_constituents)
-            }
-        }
+        return create_response(components, data={
+            "description": description,
+            "etf_name": etf_name,
+            "etf_ticker": etf_ticker,
+            "explanation": explanation,
+            "constituents": simulated_constituents,
+            "total_holdings": len(simulated_constituents)
+        })
     except Exception as e:
-        return create_ui_response([
-            Alert(message=f"Failed to create ETF from description: {str(e)}", variant="error")
-        ])
+        return create_response(
+            alert(f"Failed to create ETF from description: {str(e)}", variant="error")
+        )
 
 def analyze_etf_portfolio(tickers: List[str], weights: Optional[List[float]] = None, **kwargs) -> Dict[str, Any]:
     """Analyze a proposed ETF portfolio with metrics like sector breakdown and estimated performance."""
     try:
         if not tickers:
-            return create_ui_response([
-                Alert(message="Please provide at least one ticker to analyze.", variant="warning")
-            ])
+            return create_response(
+                alert("Please provide at least one ticker to analyze.", variant="warning")
+            )
 
         if weights and len(weights) != len(tickers):
-            return create_ui_response([
-                Alert(message="Number of weights must match number of tickers.", variant="error")
-            ])
+            return create_response(
+                alert("Number of weights must match number of tickers.", variant="error")
+            )
 
         if not weights:
             weights = [1.0 / len(tickers)] * len(tickers)
@@ -334,9 +308,9 @@ def analyze_etf_portfolio(tickers: List[str], weights: Optional[List[float]] = N
                 })
 
         if not valid_tickers:
-            return create_ui_response([
-                Alert(message="No valid tickers found in the database.", variant="error")
-            ])
+            return create_response(
+                alert("No valid tickers found in the database.", variant="error")
+            )
 
         table_rows = []
         for item in portfolio_data:
@@ -354,62 +328,49 @@ def analyze_etf_portfolio(tickers: List[str], weights: Optional[List[float]] = N
         sector_chart_data = [sector_breakdown[s] * 100 for s in sector_chart_labels]
 
         components = [
-            Card(
-                title="ETF Portfolio Analysis",
-                content=[
-                    Text(content=f"Analyzing portfolio with {len(portfolio_data)} holdings", variant="body"),
-                    Grid(
-                        columns=4,
-                        children=[
-                            MetricCard(title="Estimated Dividend Yield", value=f"{total_dividend_yield:.2f}%"),
-                            MetricCard(title="Portfolio Beta", value=f"{portfolio_beta:.2f}"),
-                            MetricCard(title="High Volatility" if portfolio_beta > 1.1 else "Low Volatility" if portfolio_beta < 0.9 else "Market Volatility", value="High" if portfolio_beta > 1.1 else "Low" if portfolio_beta < 0.9 else "Market"),
-                            MetricCard(title="Sectors", value=str(len(sector_breakdown))),
-                        ]
-                    ),
-                    Divider(variant="solid"),
-                    Table(
-                        headers=["Ticker", "Name", "Sector", "Weight", "Price", "Div Yield", "Beta"],
-                        rows=table_rows,
-                        variant="default"
-                    ),
-                ]
-            ),
-            Card(
-                title="Sector Allocation",
-                content=[
-                    PieChart(
-                        title="Portfolio Weight by Sector",
-                        labels=sector_chart_labels,
-                        data=sector_chart_data,
-                        colors=["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#84cc16"]
-                    )
-                ]
-            )
+            card("ETF Portfolio Analysis", [
+                text(f"Analyzing portfolio with {len(portfolio_data)} holdings", variant="body"),
+                row([
+                    metric_card("Estimated Dividend Yield", f"{total_dividend_yield:.2f}%"),
+                    metric_card("Portfolio Beta", f"{portfolio_beta:.2f}"),
+                    metric_card("High Volatility" if portfolio_beta > 1.1 else "Low Volatility" if portfolio_beta < 0.9 else "Market Volatility", "High" if portfolio_beta > 1.1 else "Low" if portfolio_beta < 0.9 else "Market"),
+                    metric_card("Sectors", str(len(sector_breakdown))),
+                ]),
+                divider(),
+                table(
+                    ["Ticker", "Name", "Sector", "Weight", "Price", "Div Yield", "Beta"],
+                    table_rows,
+                ),
+            ]),
+            card("Sector Allocation", [
+                pie_chart(
+                    "Portfolio Weight by Sector",
+                    sector_chart_labels,
+                    sector_chart_data,
+                    colors=["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#84cc16"],
+                )
+            ])
         ]
 
         if len(valid_tickers) < len(tickers):
-            components.insert(0, Alert(
-                message=f"Warning: {len(tickers) - len(valid_tickers)} ticker(s) not found in database. Analysis based on {len(valid_tickers)} valid tickers.",
+            components.insert(0, alert(
+                f"Warning: {len(tickers) - len(valid_tickers)} ticker(s) not found in database. Analysis based on {len(valid_tickers)} valid tickers.",
                 variant="warning"
             ))
 
-        return {
-            "_ui_components": [c.to_json() for c in components],
-            "_data": {
-                "tickers": tickers,
-                "weights": normalized_weights,
-                "portfolio_data": portfolio_data,
-                "sector_breakdown": sector_breakdown,
-                "estimated_dividend_yield": total_dividend_yield,
-                "portfolio_beta": portfolio_beta,
-                "valid_tickers": valid_tickers
-            }
-        }
+        return create_response(components, data={
+            "tickers": tickers,
+            "weights": normalized_weights,
+            "portfolio_data": portfolio_data,
+            "sector_breakdown": sector_breakdown,
+            "estimated_dividend_yield": total_dividend_yield,
+            "portfolio_beta": portfolio_beta,
+            "valid_tickers": valid_tickers
+        })
     except Exception as e:
-        return create_ui_response([
-            Alert(message=f"Failed to analyze ETF portfolio: {str(e)}", variant="error")
-        ])
+        return create_response(
+            alert(f"Failed to analyze ETF portfolio: {str(e)}", variant="error")
+        )
 
 TOOL_REGISTRY = {
     "search_stocks_by_criteria": {

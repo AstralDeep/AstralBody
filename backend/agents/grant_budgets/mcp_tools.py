@@ -18,10 +18,10 @@ from typing import Dict, Any, List, Optional
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from shared.primitives import (
-    Text, Card, Table, Alert, MetricCard, Grid, Grids,
-    BarChart, PieChart, List_, Collapsible, Tabs, TabItem,
-    create_ui_response,
+from shared.a2ui_builders import (
+    text, card, table, alert, metric_card, row, column,
+    pie_chart, list_component, tabs, divider,
+    create_response, Node,
 )
 from agents.grant_budgets.budget_knowledge import (
     CGS_BUDGET_CATEGORIES, NSF_PAPPG_RULES, NIH_BUDGET_RULES,
@@ -87,13 +87,10 @@ def analyze_cover_letter(
     travel indicators, equipment mentions, and other budget signals.
     """
     if not cover_letter_text or not cover_letter_text.strip():
-        return create_ui_response([
-            Alert(
-                message="No cover letter text provided. Please paste the cover letter content.",
-                variant="error",
-                title="Missing Input",
-            )
-        ])
+        return create_response(
+            alert("No cover letter text provided. Please paste the cover letter content.",
+                  variant="error", title="Missing Input")
+        )
 
     text = cover_letter_text.strip()
     agency = agency.upper()
@@ -136,25 +133,15 @@ def analyze_cover_letter(
 
     # Build UI
     components = [
-        Alert(
-            message="Cover letter analyzed securely — content was processed in-memory only and not stored.",
-            variant="info",
-            title="Security Notice",
-        ),
-        Card(
-            title="Cover Letter Budget Signal Analysis",
-            content=[
-                Text(content=f"Agency: {agency} | Duration: {duration_years} year(s)", variant="caption"),
-                Text(
-                    content=f"Document length: {len(text)} characters, ~{len(text.split())} words",
-                    variant="caption",
-                ),
-            ],
-        ),
-        Table(
-            headers=["Category", "Signal Strength", "Keyword Hits", "Keywords Found"],
-            rows=signal_rows,
-        ),
+        alert("Cover letter analyzed securely — content was processed in-memory only and not stored.",
+              variant="info", title="Security Notice"),
+        card("Cover Letter Budget Signal Analysis", [
+            text(f"Agency: {agency} | Duration: {duration_years} year(s)", variant="caption"),
+            text(f"Document length: {len(text)} characters, ~{len(text.split())} words",
+                 variant="caption"),
+        ]),
+        table(["Category", "Signal Strength", "Keyword Hits", "Keywords Found"],
+              signal_rows),
     ]
 
     # Add extracted amounts if found
@@ -168,10 +155,7 @@ def analyze_cover_letter(
             extraction_items.append(f"Personnel count hints: {', '.join(set(personnel_count_hints))}")
 
         components.append(
-            Card(
-                title="Extracted Values",
-                content=[Text(content=item) for item in extraction_items],
-            )
+            card("Extracted Values", [text(item) for item in extraction_items])
         )
 
     # Recommendations
@@ -194,42 +178,30 @@ def analyze_cover_letter(
 
     if recommendations:
         components.append(
-            Card(
-                title="Budget Recommendations",
-                content=[Text(content=r) for r in recommendations],
-            )
+            card("Budget Recommendations", [text(r) for r in recommendations])
         )
 
     # Agency-specific alerts
     if agency == "NSF":
         components.append(
-            Alert(
-                message="NSF 2-month salary rule applies. Senior personnel limited to 2 months salary across all NSF awards.",
-                variant="warning",
-                title="NSF Rule Reminder",
-            )
+            alert("NSF 2-month salary rule applies. Senior personnel limited to 2 months salary across all NSF awards.",
+                  variant="warning", title="NSF Rule Reminder")
         )
     elif agency == "NIH":
         cap = NIH_BUDGET_RULES["salary_cap"]["current_cap"]
         components.append(
-            Alert(
-                message=f"NIH salary cap: ${cap:,}/year. Salaries above this cap must be cost-shared by the institution.",
-                variant="warning",
-                title="NIH Salary Cap",
-            )
+            alert(f"NIH salary cap: ${cap:,}/year. Salaries above this cap must be cost-shared by the institution.",
+                  variant="warning", title="NIH Salary Cap")
         )
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {
-            "categories": {k: {"confidence": v["confidence"], "label": v["label"]}
-                          for k, v in categories.items()},
-            "dollar_amounts": dollar_amounts,
-            "personnel_hints": personnel_count_hints,
-            "agency": agency,
-            "duration_years": duration_years,
-        },
-    }
+    return create_response(components, data={
+        "categories": {k: {"confidence": v["confidence"], "label": v["label"]}
+                      for k, v in categories.items()},
+        "dollar_amounts": dollar_amounts,
+        "personnel_hints": personnel_count_hints,
+        "agency": agency,
+        "duration_years": duration_years,
+    })
 
 
 # ── Tool 2: Suggest Budget Items ──────────────────────────────────────
@@ -348,60 +320,42 @@ def suggest_budget_items(
     ]
 
     # Build tabbed UI
-    tab_items = []
+    tab_labels = []
+    tab_children = []
     for cat_name, items in suggestions.items():
         rows = [[i["item"], i["typical"], i["notes"]] for i in items]
-        tab_items.append(
-            TabItem(
-                label=cat_name,
-                content=[
-                    Table(
-                        headers=["Line Item", "Typical Range", "Notes"],
-                        rows=rows,
-                    ),
-                ],
-            )
-        )
+        tab_labels.append(cat_name)
+        tab_children.append([
+            table(["Line Item", "Typical Range", "Notes"], rows),
+        ])
 
     components = [
-        Card(
-            title="Suggested Budget Line Items",
-            content=[
-                Text(
-                    content=(
-                        f"Project: {project_type.title()} | Agency: {agency} | "
-                        f"Duration: {duration_years}yr | Team: {personnel_count} personnel"
-                    ),
-                    variant="caption",
-                ),
-            ],
-        ),
-        Tabs(tabs=tab_items),
+        card("Suggested Budget Line Items", [
+            text(
+                f"Project: {project_type.title()} | Agency: {agency} | "
+                f"Duration: {duration_years}yr | Team: {personnel_count} personnel",
+                variant="caption",
+            ),
+        ]),
+        tabs(tab_labels, tab_children),
     ]
 
     # Add agency-specific guidance
     if agency == "NSF":
         components.append(
-            Alert(
-                message=NSF_PAPPG_RULES["general"]["budget_justification"],
-                variant="info",
-                title="NSF Budget Justification Requirement",
-            )
+            alert(NSF_PAPPG_RULES["general"]["budget_justification"],
+                  variant="info", title="NSF Budget Justification Requirement")
         )
     elif agency == "NIH":
         threshold = NIH_BUDGET_RULES["modular_budget"]["threshold"]
         components.append(
-            Alert(
-                message=f"Direct costs under ${threshold:,}/year? Use modular budget ($25K modules). Above? Detailed categorical budget required.",
-                variant="info",
-                title="NIH Budget Format",
-            )
+            alert(f"Direct costs under ${threshold:,}/year? Use modular budget ($25K modules). Above? Detailed categorical budget required.",
+                  variant="info", title="NIH Budget Format")
         )
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {"suggestions": suggestions, "agency": agency, "duration_years": duration_years},
-    }
+    return create_response(components, data={
+        "suggestions": suggestions, "agency": agency, "duration_years": duration_years,
+    })
 
 
 # ── Tool 3: Calculate Salary & FTE ────────────────────────────────────
@@ -493,21 +447,16 @@ def calculate_salary_fte(
     grand_total = total_salary + total_fringe
 
     components = [
-        Grids(
-            columns=3,
-            children=[
-                MetricCard(title="Total Salary", value=_fmt_currency(total_salary)),
-                MetricCard(title="Total Fringe", value=_fmt_currency(total_fringe)),
-                MetricCard(title="Personnel Total", value=_fmt_currency(grand_total)),
-            ],
-        ),
-        Table(
-            headers=[
-                "Name", "Role", "Base Salary", "Appointment",
-                "Effort", "Salary Requested", "Fringe Rate",
-                "Fringe Amount", "Total Cost",
-            ],
-            rows=rows,
+        row([
+            metric_card("Total Salary", _fmt_currency(total_salary)),
+            metric_card("Total Fringe", _fmt_currency(total_fringe)),
+            metric_card("Personnel Total", _fmt_currency(grand_total)),
+        ]),
+        table(
+            ["Name", "Role", "Base Salary", "Appointment",
+             "Effort", "Salary Requested", "Fringe Rate",
+             "Fringe Amount", "Total Cost"],
+            rows,
         ),
     ]
 
@@ -517,23 +466,17 @@ def calculate_salary_fte(
     if over_cap:
         names = ", ".join(p.get("name", "?") for p in over_cap)
         components.append(
-            Alert(
-                message=f"Personnel with salary above NIH cap (${nih_cap:,}): {names}. "
-                        f"For NIH proposals, cap the charged salary at ${nih_cap:,}.",
-                variant="warning",
-                title="NIH Salary Cap Alert",
-            )
+            alert(f"Personnel with salary above NIH cap (${nih_cap:,}): {names}. "
+                  f"For NIH proposals, cap the charged salary at ${nih_cap:,}.",
+                  variant="warning", title="NIH Salary Cap Alert")
         )
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {
-            "total_salary": total_salary,
-            "total_fringe": total_fringe,
-            "grand_total": grand_total,
-            "personnel_count": len(personnel),
-        },
-    }
+    return create_response(components, data={
+        "total_salary": total_salary,
+        "total_fringe": total_fringe,
+        "grand_total": grand_total,
+        "personnel_count": len(personnel),
+    })
 
 
 # ── Tool 4: Calculate Travel Costs ────────────────────────────────────
@@ -562,10 +505,10 @@ def calculate_travel_costs(
              "travelers": 1, "days": 3, "airfare_estimate": 400},
         ]
     elif not trips:
-        return create_ui_response([
-            Alert(message="No trips specified. Provide trip details or set include_defaults=true.",
+        return create_response(
+            alert("No trips specified. Provide trip details or set include_defaults=true.",
                   variant="error", title="Missing Input")
-        ])
+        )
 
     gsa = DEFAULT_RATES["gsa_per_diem"]
 
@@ -607,27 +550,21 @@ def calculate_travel_costs(
         ])
 
     components = [
-        MetricCard(title="Total Travel Budget", value=_fmt_currency(total_travel)),
-        Table(
-            headers=["Trip", "Type", "Travelers", "Days", "Per Diem/Day", "Airfare/Person", "Total"],
-            rows=rows,
-        ),
-        Alert(
-            message=(
-                f"Per diem defaults based on GSA averages: "
-                f"Domestic ${gsa['domestic_lodging_avg']+gsa['domestic_meals_avg']}/day, "
-                f"International ${gsa['international_lodging_avg']+gsa['international_meals_avg']}/day. "
-                f"Check gsa.gov for location-specific rates."
-            ),
-            variant="info",
-            title="GSA Per Diem Rates",
+        metric_card("Total Travel Budget", _fmt_currency(total_travel)),
+        table(["Trip", "Type", "Travelers", "Days", "Per Diem/Day", "Airfare/Person", "Total"],
+              rows),
+        alert(
+            f"Per diem defaults based on GSA averages: "
+            f"Domestic ${gsa['domestic_lodging_avg']+gsa['domestic_meals_avg']}/day, "
+            f"International ${gsa['international_lodging_avg']+gsa['international_meals_avg']}/day. "
+            f"Check gsa.gov for location-specific rates.",
+            variant="info", title="GSA Per Diem Rates",
         ),
     ]
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {"total_travel": total_travel, "trips": len(trips)},
-    }
+    return create_response(components, data={
+        "total_travel": total_travel, "trips": len(trips),
+    })
 
 
 # ── Tool 5: Estimate Equipment Costs ──────────────────────────────────
@@ -673,84 +610,51 @@ def estimate_equipment_costs(
             total_supplies += total
 
     components = [
-        Grids(
-            columns=3,
-            children=[
-                MetricCard(
-                    title="Equipment (>=threshold)",
-                    value=_fmt_currency(total_equipment),
-                    subtitle="Excluded from F&A base",
-                ),
-                MetricCard(
-                    title="Supplies (<threshold)",
-                    value=_fmt_currency(total_supplies),
-                    subtitle="Included in F&A base",
-                ),
-                MetricCard(
-                    title="Total",
-                    value=_fmt_currency(total_equipment + total_supplies),
-                ),
-            ],
-        ),
+        row([
+            metric_card("Equipment (>=threshold)", _fmt_currency(total_equipment),
+                        subtitle="Excluded from F&A base"),
+            metric_card("Supplies (<threshold)", _fmt_currency(total_supplies),
+                        subtitle="Included in F&A base"),
+            metric_card("Total", _fmt_currency(total_equipment + total_supplies)),
+        ]),
     ]
 
     if equipment_rows:
         components.append(
-            Card(
-                title=f"Equipment (unit cost >= {_fmt_currency(equipment_threshold)})",
-                content=[
-                    Table(
-                        headers=["Description", "Unit Cost", "Qty", "Total"],
-                        rows=equipment_rows,
-                    ),
-                ],
-            )
+            card(f"Equipment (unit cost >= {_fmt_currency(equipment_threshold)})", [
+                table(["Description", "Unit Cost", "Qty", "Total"], equipment_rows),
+            ])
         )
 
     if supply_rows:
         components.append(
-            Card(
-                title=f"Supplies (unit cost < {_fmt_currency(equipment_threshold)})",
-                content=[
-                    Table(
-                        headers=["Description", "Unit Cost", "Qty", "Total"],
-                        rows=supply_rows,
-                    ),
-                ],
-            )
+            card(f"Supplies (unit cost < {_fmt_currency(equipment_threshold)})", [
+                table(["Description", "Unit Cost", "Qty", "Total"], supply_rows),
+            ])
         )
 
     components.append(
-        Alert(
-            message=(
-                f"Federal equipment threshold: {_fmt_currency(equipment_threshold)}. "
-                f"Items at or above this cost with a useful life >1 year are classified "
-                f"as equipment and excluded from the F&A (MTDC) base."
-            ),
-            variant="info",
-            title="Equipment Classification",
+        alert(
+            f"Federal equipment threshold: {_fmt_currency(equipment_threshold)}. "
+            f"Items at or above this cost with a useful life >1 year are classified "
+            f"as equipment and excluded from the F&A (MTDC) base.",
+            variant="info", title="Equipment Classification",
         )
     )
 
     if total_equipment > 0:
         components.append(
-            Alert(
-                message="Equipment items require justification in the budget narrative explaining why they are essential to the project.",
-                variant="warning",
-                title="Justification Required",
-            )
+            alert("Equipment items require justification in the budget narrative explaining why they are essential to the project.",
+                  variant="warning", title="Justification Required")
         )
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {
-            "total_equipment": total_equipment,
-            "total_supplies": total_supplies,
-            "total": total_equipment + total_supplies,
-            "equipment_count": len(equipment_rows),
-            "supply_count": len(supply_rows),
-        },
-    }
+    return create_response(components, data={
+        "total_equipment": total_equipment,
+        "total_supplies": total_supplies,
+        "total": total_equipment + total_supplies,
+        "equipment_count": len(equipment_rows),
+        "supply_count": len(supply_rows),
+    })
 
 
 # ── Tool 6: Calculate F&A Costs ───────────────────────────────────────
@@ -821,44 +725,28 @@ def calculate_fa_costs(
     total_costs = total_direct + fa_amount
 
     components = [
-        Grids(
-            columns=4,
-            children=[
-                MetricCard(title="Total Direct Costs", value=_fmt_currency(total_direct)),
-                MetricCard(title="MTDC Base", value=_fmt_currency(mtdc_base),
-                           subtitle=f"After ${excluded_total:,.0f} exclusions"),
-                MetricCard(title=f"F&A ({fa_rate:.0%})", value=_fmt_currency(fa_amount),
-                           subtitle=f"Rate: {fa_rate:.0%} on {fa_base}"),
-                MetricCard(title="Total Project Cost", value=_fmt_currency(total_costs)),
-            ],
-        ),
-        Card(
-            title="MTDC Base Calculation",
-            content=[
-                Table(
-                    headers=["Cost Category", "Amount", "MTDC Treatment"],
-                    rows=breakdown_rows,
-                ),
-            ],
-        ),
-        Alert(
-            message=FA_EXCLUSION_RULES["description"],
-            variant="info",
-            title="MTDC Exclusion Rules",
-        ),
+        row([
+            metric_card("Total Direct Costs", _fmt_currency(total_direct)),
+            metric_card("MTDC Base", _fmt_currency(mtdc_base),
+                        subtitle=f"After ${excluded_total:,.0f} exclusions"),
+            metric_card(f"F&A ({fa_rate:.0%})", _fmt_currency(fa_amount),
+                        subtitle=f"Rate: {fa_rate:.0%} on {fa_base}"),
+            metric_card("Total Project Cost", _fmt_currency(total_costs)),
+        ]),
+        card("MTDC Base Calculation", [
+            table(["Cost Category", "Amount", "MTDC Treatment"], breakdown_rows),
+        ]),
+        alert(FA_EXCLUSION_RULES["description"], variant="info", title="MTDC Exclusion Rules"),
     ]
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {
-            "total_direct": total_direct,
-            "mtdc_base": mtdc_base,
-            "excluded_total": excluded_total,
-            "fa_rate": fa_rate,
-            "fa_amount": fa_amount,
-            "total_costs": total_costs,
-        },
-    }
+    return create_response(components, data={
+        "total_direct": total_direct,
+        "mtdc_base": mtdc_base,
+        "excluded_total": excluded_total,
+        "fa_rate": fa_rate,
+        "fa_amount": fa_amount,
+        "total_costs": total_costs,
+    })
 
 
 # ── Tool 7: Generate CGS Budget ───────────────────────────────────────
@@ -1048,52 +936,36 @@ def generate_cgs_budget(
     pie_colors = ["#2563eb", "#7c3aed", "#059669", "#d97706", "#dc2626", "#6366f1", "#94a3b8"]
 
     components = [
-        Card(
-            title="CGS Budget Summary",
-            content=[
-                Text(content=f"Project: {project_title}", variant="h3"),
-                Text(content=f"PI: {pi_name} | Agency: {agency} | Duration: {duration_years} years", variant="caption"),
-            ],
-        ),
-        Grids(
-            columns=3,
-            children=[
-                MetricCard(title="Total Direct Costs", value=_fmt_currency(cumulative_direct)),
-                MetricCard(title=f"F&A ({fa_rate:.0%} MTDC)", value=_fmt_currency(cumulative_fa)),
-                MetricCard(title="Total Project Cost", value=_fmt_currency(cumulative_total)),
-            ],
-        ),
-        Table(headers=headers, rows=rows),
-        PieChart(
-            title="Budget Distribution",
-            labels=pie_labels,
-            data=pie_data,
-            colors=pie_colors[:len(pie_labels)],
-        ),
+        card("CGS Budget Summary", [
+            text(f"Project: {project_title}", variant="h3"),
+            text(f"PI: {pi_name} | Agency: {agency} | Duration: {duration_years} years", variant="caption"),
+        ]),
+        row([
+            metric_card("Total Direct Costs", _fmt_currency(cumulative_direct)),
+            metric_card(f"F&A ({fa_rate:.0%} MTDC)", _fmt_currency(cumulative_fa)),
+            metric_card("Total Project Cost", _fmt_currency(cumulative_total)),
+        ]),
+        table(headers, rows),
+        pie_chart("Budget Distribution", pie_labels, pie_data,
+                  colors=pie_colors[:len(pie_labels)]),
     ]
 
     if escalation > 0:
         components.append(
-            Alert(
-                message=f"Budget includes {escalation:.0%} annual escalation for salary and recurring costs starting Year 2.",
-                variant="info",
-                title="Annual Escalation",
-            )
+            alert(f"Budget includes {escalation:.0%} annual escalation for salary and recurring costs starting Year 2.",
+                  variant="info", title="Annual Escalation")
         )
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {
-            "project_title": project_title,
-            "pi_name": pi_name,
-            "agency": agency,
-            "duration_years": duration_years,
-            "cumulative_direct": cumulative_direct,
-            "cumulative_fa": cumulative_fa,
-            "cumulative_total": cumulative_total,
-            "yearly_budgets": yearly_budgets,
-        },
-    }
+    return create_response(components, data={
+        "project_title": project_title,
+        "pi_name": pi_name,
+        "agency": agency,
+        "duration_years": duration_years,
+        "cumulative_direct": cumulative_direct,
+        "cumulative_fa": cumulative_fa,
+        "cumulative_total": cumulative_total,
+        "yearly_budgets": yearly_budgets,
+    })
 
 
 # ── Tool 8: Get Budget Guidelines ─────────────────────────────────────
@@ -1116,99 +988,67 @@ def get_budget_guidelines(
     def _add_nsf_guidelines():
         if topic in ("all", "salary_caps"):
             components.append(
-                Card(
-                    title="NSF Salary Rules",
-                    content=[
-                        Text(content=NSF_PAPPG_RULES["salary"]["two_month_rule"]),
-                        Text(content=NSF_PAPPG_RULES["salary"]["academic_year"], variant="caption"),
-                        Alert(
-                            message=NSF_PAPPG_RULES["salary"]["voluntary_committed_cost_sharing"],
-                            variant="warning",
-                            title="Cost Sharing",
-                        ),
-                    ],
-                )
+                card("NSF Salary Rules", [
+                    text(NSF_PAPPG_RULES["salary"]["two_month_rule"]),
+                    text(NSF_PAPPG_RULES["salary"]["academic_year"], variant="caption"),
+                    alert(NSF_PAPPG_RULES["salary"]["voluntary_committed_cost_sharing"],
+                          variant="warning", title="Cost Sharing"),
+                ])
             )
 
         if topic in ("all", "equipment"):
             components.append(
-                Card(
-                    title="NSF Equipment Rules",
-                    content=[
-                        Text(content=NSF_PAPPG_RULES["equipment"]["definition"]),
-                        Text(content=f"Threshold: ${NSF_PAPPG_RULES['equipment']['threshold']:,}"),
-                        Text(content=NSF_PAPPG_RULES["equipment"]["f_and_a"], variant="caption"),
-                    ],
-                )
+                card("NSF Equipment Rules", [
+                    text(NSF_PAPPG_RULES["equipment"]["definition"]),
+                    text(f"Threshold: ${NSF_PAPPG_RULES['equipment']['threshold']:,}"),
+                    text(NSF_PAPPG_RULES["equipment"]["f_and_a"], variant="caption"),
+                ])
             )
 
         if topic in ("all", "travel"):
             components.append(
-                Card(
-                    title="NSF Travel Rules",
-                    content=[
-                        Text(content=NSF_PAPPG_RULES["travel"]["domestic_requirement"]),
-                        Text(content=NSF_PAPPG_RULES["travel"]["international"]),
-                        Alert(
-                            message=NSF_PAPPG_RULES["travel"]["fly_america"],
-                            variant="warning",
-                            title="Fly America Act",
-                        ),
-                    ],
-                )
+                card("NSF Travel Rules", [
+                    text(NSF_PAPPG_RULES["travel"]["domestic_requirement"]),
+                    text(NSF_PAPPG_RULES["travel"]["international"]),
+                    alert(NSF_PAPPG_RULES["travel"]["fly_america"],
+                          variant="warning", title="Fly America Act"),
+                ])
             )
 
         if topic in ("all", "participant_support"):
             components.append(
-                Card(
-                    title="NSF Participant Support",
-                    content=[
-                        Text(content=NSF_PAPPG_RULES["participant_support"]["definition"]),
-                        Alert(
-                            message=NSF_PAPPG_RULES["participant_support"]["restrictions"],
-                            variant="warning",
-                            title="Restrictions",
-                        ),
-                    ],
-                )
+                card("NSF Participant Support", [
+                    text(NSF_PAPPG_RULES["participant_support"]["definition"]),
+                    alert(NSF_PAPPG_RULES["participant_support"]["restrictions"],
+                          variant="warning", title="Restrictions"),
+                ])
             )
 
     def _add_nih_guidelines():
         if topic in ("all", "salary_caps"):
             cap = NIH_BUDGET_RULES["salary_cap"]
             components.append(
-                Card(
-                    title="NIH Salary Cap",
-                    content=[
-                        Text(content=cap["description"]),
-                        MetricCard(
-                            title="Current Cap",
-                            value=f"${cap['current_cap']:,}",
-                            subtitle=f"Effective: {cap['effective_date']}",
-                        ),
-                    ],
-                )
+                card("NIH Salary Cap", [
+                    text(cap["description"]),
+                    metric_card("Current Cap", f"${cap['current_cap']:,}",
+                                subtitle=f"Effective: {cap['effective_date']}"),
+                ])
             )
 
         if topic in ("all", "equipment", "fa_rates"):
             mod = NIH_BUDGET_RULES["modular_budget"]
             components.append(
-                Card(
-                    title="NIH Budget Format",
-                    content=[
-                        Text(content=mod["description"]),
-                        Text(
-                            content=f"Modular threshold: ${mod['threshold']:,}/year | Module size: ${mod['module_size']:,}",
-                            variant="caption",
-                        ),
-                    ],
-                )
+                card("NIH Budget Format", [
+                    text(mod["description"]),
+                    text(f"Modular threshold: ${mod['threshold']:,}/year | Module size: ${mod['module_size']:,}",
+                         variant="caption"),
+                ])
             )
 
     def _add_rate_guidelines():
         if topic in ("all", "fringe"):
             fringe = DEFAULT_RATES["fringe"]
-            rows = [
+            fringe_rows = [
                 ["Faculty", f"{fringe['faculty']:.0%}"],
                 ["Staff", f"{fringe['staff']:.0%}"],
                 ["Postdoc", f"{fringe['postdoc']:.0%}"],
@@ -1216,49 +1056,35 @@ def get_budget_guidelines(
                 ["Undergraduate", f"{fringe['undergraduate']:.0%}"],
             ]
             components.append(
-                Card(
-                    title="Fringe Benefit Rates (Representative)",
-                    content=[
-                        Table(headers=["Category", "Rate"], rows=rows),
-                        Alert(
-                            message=fringe["description"],
-                            variant="info",
-                        ),
-                    ],
-                )
+                card("Fringe Benefit Rates (Representative)", [
+                    table(["Category", "Rate"], fringe_rows),
+                    alert(fringe["description"], variant="info"),
+                ])
             )
 
         if topic in ("all", "fa_rates"):
             fa = DEFAULT_RATES["f_and_a"]
-            rows = [
+            fa_rows = [
                 ["On-Campus Research", f"{fa['on_campus_research']:.0%}"],
                 ["Off-Campus Research", f"{fa['off_campus_research']:.0%}"],
                 ["Instruction", f"{fa['instruction']:.0%}"],
                 ["Other Sponsored", f"{fa['other_sponsored']:.0%}"],
             ]
             components.append(
-                Card(
-                    title="F&A (Indirect Cost) Rates (Representative)",
-                    content=[
-                        Table(headers=["Activity Type", "Rate"], rows=rows),
-                        Text(content=f"Base: {fa['base']} (Modified Total Direct Costs)", variant="caption"),
-                        Alert(message=fa["description"], variant="info"),
-                    ],
-                )
+                card("F&A (Indirect Cost) Rates (Representative)", [
+                    table(["Activity Type", "Rate"], fa_rows),
+                    text(f"Base: {fa['base']} (Modified Total Direct Costs)", variant="caption"),
+                    alert(fa["description"], variant="info"),
+                ])
             )
             components.append(
-                Card(
-                    title="MTDC Exclusion Rules",
-                    content=[
-                        Text(content=FA_EXCLUSION_RULES["description"]),
-                        List_(
-                            items=[
-                                f"Always excluded: {', '.join(FA_EXCLUSION_RULES['always_excluded'])}",
-                                f"Subawards: {FA_EXCLUSION_RULES['partially_excluded']['subawards']['description']}",
-                            ],
-                        ),
-                    ],
-                )
+                card("MTDC Exclusion Rules", [
+                    text(FA_EXCLUSION_RULES["description"]),
+                    list_component(items=[
+                        f"Always excluded: {', '.join(FA_EXCLUSION_RULES['always_excluded'])}",
+                        f"Subawards: {FA_EXCLUSION_RULES['partially_excluded']['subawards']['description']}",
+                    ]),
+                ])
             )
 
     # Build response based on agency
@@ -1275,30 +1101,19 @@ def get_budget_guidelines(
             for cat in CGS_BUDGET_CATEGORIES.values()
         ]
         components.append(
-            Collapsible(
-                title="CGS Budget Categories Reference (A-J)",
-                content=[
-                    Table(
-                        headers=["Code", "Category", "Description"],
-                        rows=cgs_rows,
-                    ),
-                ],
-            )
+            card("CGS Budget Categories Reference (A-J)", [
+                table(["Code", "Category", "Description"], cgs_rows),
+            ], collapsible=True, default_open=False)
         )
 
     if not components:
         components.append(
-            Alert(
-                message=f"No guidelines found for agency='{agency}', topic='{topic}'. "
-                        f"Try topic='all' or agency='NSF'/'NIH'.",
-                variant="warning",
-            )
+            alert(f"No guidelines found for agency='{agency}', topic='{topic}'. "
+                  f"Try topic='all' or agency='NSF'/'NIH'.",
+                  variant="warning")
         )
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {"agency": agency, "topic": topic},
-    }
+    return create_response(components, data={"agency": agency, "topic": topic})
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1322,9 +1137,9 @@ def search_research_admin(
     This is the primary Q&A tool for UKy research administration.
     """
     if not query or not query.strip():
-        return create_ui_response([
-            Alert(message="Please provide a search query.", variant="error", title="Missing Query")
-        ])
+        return create_response(
+            alert("Please provide a search query.", variant="error", title="Missing Query")
+        )
 
     query_lower = query.lower().strip()
     query_words = set(query_lower.split())
@@ -1381,86 +1196,62 @@ def search_research_admin(
 
         if routing_match:
             office_data = OFFICES.get(routing_match["office"].split("/")[0], {})
-            return create_ui_response([
-                Alert(
-                    message=routing_match["detail"],
-                    variant="info",
-                    title=f"→ Contact: {routing_match['office']}",
-                ),
-                Card(
-                    title=f"{routing_match['office']} Contact Info",
-                    content=[
-                        Text(content=f"Email: {office_data.get('email', 'N/A')}"),
-                        Text(content=f"Phone: {office_data.get('phone', 'N/A')}"),
-                        Text(content=f"URL: {office_data.get('url', 'N/A')}"),
-                    ],
-                ),
+            return create_response([
+                alert(routing_match["detail"], variant="info",
+                      title=f"-> Contact: {routing_match['office']}"),
+                card(f"{routing_match['office']} Contact Info", [
+                    text(f"Email: {office_data.get('email', 'N/A')}"),
+                    text(f"Phone: {office_data.get('phone', 'N/A')}"),
+                    text(f"URL: {office_data.get('url', 'N/A')}"),
+                ]),
             ])
 
-        return create_ui_response([
-            Alert(
-                message=f"No results found for '{query}'. Try different keywords or a broader search.",
-                variant="warning",
-                title="No Results",
-            ),
-            Card(
-                title="Suggestions",
-                content=[
-                    Text(content="Try searching for:"),
-                    List_(items=[
-                        "budget, iaf, pif, cost transfer, f&a",
-                        "submit proposal, award setup, closeout",
-                        "funding search, proposal review, biosketch",
-                        "compliance, export control, conflict of interest",
-                    ]),
-                ],
-            ),
+        return create_response([
+            alert(f"No results found for '{query}'. Try different keywords or a broader search.",
+                  variant="warning", title="No Results"),
+            card("Suggestions", [
+                text("Try searching for:"),
+                list_component(items=[
+                    "budget, iaf, pif, cost transfer, f&a",
+                    "submit proposal, award setup, closeout",
+                    "funding search, proposal review, biosketch",
+                    "compliance, export control, conflict of interest",
+                ]),
+            ]),
         ])
 
     # Build results UI
     result_cards = []
     for score, entry in top_results:
         card_content = [
-            Text(content=entry["content"]),
+            text(entry["content"]),
         ]
         if entry.get("url"):
             card_content.append(
-                Text(content=f"Link: {entry['url']}", variant="caption")
+                text(f"Link: {entry['url']}", variant="caption")
             )
         if entry.get("email"):
             card_content.append(
-                Text(content=f"Contact: {entry['email']}", variant="caption")
+                text(f"Contact: {entry['email']}", variant="caption")
             )
-        office_label = entry.get("office", "")
-        cat_label = entry.get("category", "").title()
 
         result_cards.append(
-            Card(
-                title=f"[{office_label}] {entry['title']}",
-                content=card_content,
-                variant="default",
-            )
+            card(f"[{entry.get('office', '')}] {entry['title']}", card_content)
         )
 
     components = [
-        Alert(
-            message=f"Found {len(top_results)} results for '{query}'",
-            variant="success",
-            title="Search Results",
-        ),
+        alert(f"Found {len(top_results)} results for '{query}'",
+              variant="success", title="Search Results"),
     ] + result_cards
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {
-            "query": query,
-            "result_count": len(top_results),
-            "results": [
-                {"title": e["title"], "office": e.get("office"), "score": s}
-                for s, e in top_results
-            ],
-        },
-    }
+    return create_response(components, data={
+        "query": query,
+        "result_count": len(top_results),
+        "results": [
+            {"title": e["title"], "office": e.get("office"), "score": s}
+            for s, e in top_results
+        ],
+    })
 
 
 # ── Tool 10: Route Question to Office ─────────────────────────────────
@@ -1475,9 +1266,9 @@ def find_office_contact(
     contact about X?'
     """
     if not topic or not topic.strip():
-        return create_ui_response([
-            Alert(message="Please describe your topic or question.", variant="error")
-        ])
+        return create_response(
+            alert("Please describe your topic or question.", variant="error")
+        )
 
     topic_lower = topic.lower().strip()
 
@@ -1499,23 +1290,18 @@ def find_office_contact(
     if not matches:
         # No match — show all offices
         components = [
-            Alert(
-                message=f"Could not determine the right office for '{topic}'. Here are all three offices:",
-                variant="warning",
-            ),
+            alert(f"Could not determine the right office for '{topic}'. Here are all three offices:",
+                  variant="warning"),
         ]
         for abbr, office in OFFICES.items():
             components.append(
-                Card(
-                    title=f"{abbr} — {office['full_name']}",
-                    content=[
-                        Text(content=office["role_summary"]),
-                        Text(content=f"Email: {office.get('email', 'N/A')} | Phone: {office.get('phone', 'N/A')}", variant="caption"),
-                        Text(content=f"URL: {office.get('url', 'N/A')}", variant="caption"),
-                    ],
-                )
+                card(f"{abbr} -- {office['full_name']}", [
+                    text(office["role_summary"]),
+                    text(f"Email: {office.get('email', 'N/A')} | Phone: {office.get('phone', 'N/A')}", variant="caption"),
+                    text(f"URL: {office.get('url', 'N/A')}", variant="caption"),
+                ])
             )
-        return create_ui_response(components)
+        return create_response(components)
 
     # Deduplicate by office
     seen_offices = set()
@@ -1527,11 +1313,8 @@ def find_office_contact(
             unique_matches.append((key, routing))
 
     components = [
-        Alert(
-            message=f"For '{topic}', contact the following office(s):",
-            variant="success",
-            title="Office Routing",
-        ),
+        alert(f"For '{topic}', contact the following office(s):",
+              variant="success", title="Office Routing"),
     ]
 
     for key, routing in unique_matches:
@@ -1539,24 +1322,22 @@ def find_office_contact(
         office_data = OFFICES.get(primary_office, {})
 
         detail_content = [
-            Text(content=routing["detail"]),
+            text(routing["detail"]),
         ]
         if office_data:
             detail_content.extend([
-                Text(content=f"Email: {office_data.get('email', 'N/A')}", variant="caption"),
-                Text(content=f"Phone: {office_data.get('phone', 'N/A')}", variant="caption"),
-                Text(content=f"Location: {office_data.get('location', 'N/A')}", variant="caption"),
+                text(f"Email: {office_data.get('email', 'N/A')}", variant="caption"),
+                text(f"Phone: {office_data.get('phone', 'N/A')}", variant="caption"),
+                text(f"Location: {office_data.get('location', 'N/A')}", variant="caption"),
             ])
             if office_data.get("url"):
                 detail_content.append(
-                    Text(content=f"Website: {office_data['url']}", variant="caption")
+                    text(f"Website: {office_data['url']}", variant="caption")
                 )
 
         components.append(
-            Card(
-                title=f"{routing['office']} — {office_data.get('full_name', routing['office'])}",
-                content=detail_content,
-            )
+            card(f"{routing['office']} -- {office_data.get('full_name', routing['office'])}",
+                 detail_content)
         )
 
     # Add "what they DON'T handle" to avoid confusion
@@ -1566,19 +1347,15 @@ def find_office_contact(
         does_not = office_data.get("does_not_handle", [])
         if does_not:
             components.append(
-                Collapsible(
-                    title=f"What {primary_office} does NOT handle",
-                    content=[List_(items=does_not)],
-                )
+                card(f"What {primary_office} does NOT handle", [
+                    list_component(items=does_not),
+                ], collapsible=True, default_open=False)
             )
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {
-            "topic": topic,
-            "routed_to": [r["office"] for _, r in unique_matches],
-        },
-    }
+    return create_response(components, data={
+        "topic": topic,
+        "routed_to": [r["office"] for _, r in unique_matches],
+    })
 
 
 # ── Tool 11: Calculate Submission Deadlines ────────────────────────────
@@ -1598,9 +1375,9 @@ def calculate_submission_deadlines(
     from datetime import datetime, timedelta
 
     if not sponsor_deadline:
-        return create_ui_response([
-            Alert(message="Please provide the sponsor deadline date (YYYY-MM-DD).", variant="error")
-        ])
+        return create_response(
+            alert("Please provide the sponsor deadline date (YYYY-MM-DD).", variant="error")
+        )
 
     # Parse date
     parsed = None
@@ -1612,12 +1389,10 @@ def calculate_submission_deadlines(
             continue
 
     if not parsed:
-        return create_ui_response([
-            Alert(
-                message=f"Could not parse date '{sponsor_deadline}'. Use YYYY-MM-DD format.",
-                variant="error",
-            )
-        ])
+        return create_response(
+            alert(f"Could not parse date '{sponsor_deadline}'. Use YYYY-MM-DD format.",
+                  variant="error")
+        )
 
     def _subtract_business_days(start: datetime, days: int) -> datetime:
         """Subtract N business days from a date."""
@@ -1661,90 +1436,54 @@ def calculate_submission_deadlines(
     days_to_ospa = (ospa_deadline - today).days
 
     components = [
-        Card(
-            title="Submission Deadline Timeline",
-            content=[
-                Text(content=f"Sponsor Deadline: {parsed.strftime(date_fmt)}", variant="h3"),
-                Text(
-                    content=f"{days_to_sponsor} calendar days from today" if days_to_sponsor > 0 else "DEADLINE HAS PASSED",
-                    variant="caption",
-                ),
-            ],
-        ),
-        Grids(
-            columns=3,
-            children=[
-                MetricCard(
-                    title="Days to PIF",
-                    value=str(max(days_to_pif, 0)),
-                    subtitle=pif_deadline.strftime("%b %d"),
-                    variant="default" if days_to_pif > 5 else "default",
-                ),
-                MetricCard(
-                    title="Days to OSPA",
-                    value=str(max(days_to_ospa, 0)),
-                    subtitle=ospa_deadline.strftime("%b %d"),
-                ),
-                MetricCard(
-                    title="Days to Sponsor",
-                    value=str(max(days_to_sponsor, 0)),
-                    subtitle=parsed.strftime("%b %d"),
-                ),
-            ],
-        ),
-        Table(
-            headers=["Milestone", "Date", "Rule", "Details"],
-            rows=rows,
-        ),
+        card("Submission Deadline Timeline", [
+            text(f"Sponsor Deadline: {parsed.strftime(date_fmt)}", variant="h3"),
+            text(f"{days_to_sponsor} calendar days from today" if days_to_sponsor > 0 else "DEADLINE HAS PASSED",
+                 variant="caption"),
+        ]),
+        row([
+            metric_card("Days to PIF", str(max(days_to_pif, 0)),
+                        subtitle=pif_deadline.strftime("%b %d")),
+            metric_card("Days to OSPA", str(max(days_to_ospa, 0)),
+                        subtitle=ospa_deadline.strftime("%b %d")),
+            metric_card("Days to Sponsor", str(max(days_to_sponsor, 0)),
+                        subtitle=parsed.strftime("%b %d")),
+        ]),
+        table(["Milestone", "Date", "Rule", "Details"], rows),
     ]
 
     # Urgency alerts
     if days_to_pif < 0:
         components.append(
-            Alert(
-                message="PIF deadline has PASSED. Contact CGS immediately to discuss options.",
-                variant="error",
-                title="PIF Overdue",
-            )
+            alert("PIF deadline has PASSED. Contact CGS immediately to discuss options.",
+                  variant="error", title="PIF Overdue")
         )
     elif days_to_pif <= 5:
         components.append(
-            Alert(
-                message=f"PIF deadline is in {days_to_pif} days! Submit the Proposal Initiation Form to CGS ASAP.",
-                variant="warning",
-                title="PIF Due Soon",
-            )
+            alert(f"PIF deadline is in {days_to_pif} days! Submit the Proposal Initiation Form to CGS ASAP.",
+                  variant="warning", title="PIF Due Soon")
         )
 
     if days_to_ospa < 0:
         components.append(
-            Alert(
-                message="OSPA 3-day deadline has PASSED. VPR Late Policy may apply. Contact OSPA immediately.",
-                variant="error",
-                title="OSPA Deadline Overdue",
-            )
+            alert("OSPA 3-day deadline has PASSED. VPR Late Policy may apply. Contact OSPA immediately.",
+                  variant="error", title="OSPA Deadline Overdue")
         )
 
     if college:
         components.append(
-            Alert(
-                message=f"College '{college}' — check with your department for the exact college-level IAF deadline (typically 5-14 business days before OSPA deadline).",
-                variant="info",
-                title="College-Specific Deadline",
-            )
+            alert(f"College '{college}' -- check with your department for the exact college-level IAF deadline (typically 5-14 business days before OSPA deadline).",
+                  variant="info", title="College-Specific Deadline")
         )
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {
-            "sponsor_deadline": parsed.isoformat(),
-            "pif_deadline": pif_deadline.isoformat(),
-            "ospa_deadline": ospa_deadline.isoformat(),
-            "days_to_sponsor": days_to_sponsor,
-            "days_to_pif": days_to_pif,
-            "days_to_ospa": days_to_ospa,
-        },
-    }
+    return create_response(components, data={
+        "sponsor_deadline": parsed.isoformat(),
+        "pif_deadline": pif_deadline.isoformat(),
+        "ospa_deadline": ospa_deadline.isoformat(),
+        "days_to_sponsor": days_to_sponsor,
+        "days_to_pif": days_to_pif,
+        "days_to_ospa": days_to_ospa,
+    })
 
 
 # ── Tool 12: Get Institutional Info ────────────────────────────────────
@@ -1765,47 +1504,35 @@ def get_institutional_info(
 
     if info_type in ("all", "identifiers"):
         components.append(
-            Card(
-                title="Institutional Identifiers",
-                content=[
-                    Table(
-                        headers=["Field", "Value"],
-                        rows=[
-                            ["Legal Name", INSTITUTIONAL_INFO["legal_name"]],
-                            ["UEI (SAM)", INSTITUTIONAL_INFO["uei_number"]],
-                            ["DUNS", INSTITUTIONAL_INFO["duns_number"]],
-                            ["EIN", INSTITUTIONAL_INFO["ein"]],
-                            ["CAGE Code", INSTITUTIONAL_INFO["cage_code"]],
-                            ["SAM Status", INSTITUTIONAL_INFO["sam_status"]],
-                            ["Congressional District", INSTITUTIONAL_INFO["congressional_district"]],
-                            ["Institution Type", INSTITUTIONAL_INFO["institution_type"]],
-                            ["Fiscal Year", INSTITUTIONAL_INFO["fiscal_year"]],
-                        ],
-                    ),
-                ],
-            )
+            card("Institutional Identifiers", [
+                table(["Field", "Value"], [
+                    ["Legal Name", INSTITUTIONAL_INFO["legal_name"]],
+                    ["UEI (SAM)", INSTITUTIONAL_INFO["uei_number"]],
+                    ["DUNS", INSTITUTIONAL_INFO["duns_number"]],
+                    ["EIN", INSTITUTIONAL_INFO["ein"]],
+                    ["CAGE Code", INSTITUTIONAL_INFO["cage_code"]],
+                    ["SAM Status", INSTITUTIONAL_INFO["sam_status"]],
+                    ["Congressional District", INSTITUTIONAL_INFO["congressional_district"]],
+                    ["Institution Type", INSTITUTIONAL_INFO["institution_type"]],
+                    ["Fiscal Year", INSTITUTIONAL_INFO["fiscal_year"]],
+                ]),
+            ])
         )
 
     if info_type in ("all", "address"):
         addr = INSTITUTIONAL_INFO["address"]
         components.append(
-            Card(
-                title="Institutional Address",
-                content=[
-                    Text(content=INSTITUTIONAL_INFO["legal_name"], variant="h3"),
-                    Text(content=addr["street"]),
-                    Text(content=f"{addr['city']}, {addr['state']} {addr['zip']}"),
-                    Text(content=addr["country"]),
-                ],
-            )
+            card("Institutional Address", [
+                text(INSTITUTIONAL_INFO["legal_name"], variant="h3"),
+                text(addr["street"]),
+                text(f"{addr['city']}, {addr['state']} {addr['zip']}"),
+                text(addr["country"]),
+            ])
         )
         aor = INSTITUTIONAL_INFO["authorized_organizational_representative"]
         components.append(
-            Alert(
-                message=aor["note"],
-                variant="warning",
-                title="Authorized Organizational Representative (AOR)",
-            )
+            alert(aor["note"], variant="warning",
+                  title="Authorized Organizational Representative (AOR)")
         )
 
     if info_type in ("all", "f_and_a"):
@@ -1819,58 +1546,34 @@ def get_institutional_info(
                     info["description"],
                 ])
         components.append(
-            Card(
-                title="F&A (Indirect Cost) Rates",
-                content=[
-                    Table(
-                        headers=["Activity", "Rate", "Description"],
-                        rows=rate_rows,
-                    ),
-                    Text(content=f"Base: {fa_rates.get('base', 'MTDC')}", variant="caption"),
-                    Alert(
-                        message=fa_rates.get("note", ""),
-                        variant="info",
-                        title="Note",
-                    ),
-                ],
-            )
+            card("F&A (Indirect Cost) Rates", [
+                table(["Activity", "Rate", "Description"], rate_rows),
+                text(f"Base: {fa_rates.get('base', 'MTDC')}", variant="caption"),
+                alert(fa_rates.get("note", ""), variant="info", title="Note"),
+            ])
         )
         cog = INSTITUTIONAL_INFO["cognizant_agency"]
         components.append(
-            Text(
-                content=f"Cognizant Agency: {cog['agency']} — {cog['description']}",
-                variant="caption",
-            )
+            text(f"Cognizant Agency: {cog['agency']} -- {cog['description']}",
+                 variant="caption")
         )
 
     if info_type in ("all", "cayuse"):
         cay = INSTITUTIONAL_INFO["cayuse_info"]
         components.append(
-            Card(
-                title="Cayuse (Electronic Submission System)",
-                content=[
-                    Text(content=cay["description"]),
-                    Alert(
-                        message=cay["access_note"],
-                        variant="warning",
-                        title="Access Note",
-                    ),
-                ],
-            )
+            card("Cayuse (Electronic Submission System)", [
+                text(cay["description"]),
+                alert(cay["access_note"], variant="warning", title="Access Note"),
+            ])
         )
 
     if not components:
         components.append(
-            Alert(
-                message=f"Unknown info_type '{info_type}'. Use: identifiers, f_and_a, address, cayuse, or all.",
-                variant="warning",
-            )
+            alert(f"Unknown info_type '{info_type}'. Use: identifiers, f_and_a, address, cayuse, or all.",
+                  variant="warning")
         )
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {"info_type": info_type},
-    }
+    return create_response(components, data={"info_type": info_type})
 
 
 # ── Tool 13: Lookup Forms & Templates ─────────────────────────────────
@@ -1905,22 +1608,17 @@ def lookup_forms_templates(
         filtered.append(form)
 
     if not filtered:
-        return create_ui_response([
-            Alert(
-                message=f"No forms found matching '{query}' (office={office}). Try a broader search.",
-                variant="warning",
-            ),
-            Card(
-                title="Available Form Categories",
-                content=[
-                    List_(items=[
-                        "Pre-award: IAF, PIF, IP waivers, Safe Work Plan",
-                        "Post-award: Request for Action, Cost Transfer, Closeout",
-                        "Templates: Budget, Contract, Clinical Trial, SBIR/STTR",
-                        "PDO: Data Management Plan, Facilities Description, Funding Search",
-                    ]),
-                ],
-            ),
+        return create_response([
+            alert(f"No forms found matching '{query}' (office={office}). Try a broader search.",
+                  variant="warning"),
+            card("Available Form Categories", [
+                list_component(items=[
+                    "Pre-award: IAF, PIF, IP waivers, Safe Work Plan",
+                    "Post-award: Request for Action, Cost Transfer, Closeout",
+                    "Templates: Budget, Contract, Clinical Trial, SBIR/STTR",
+                    "PDO: Data Management Plan, Facilities Description, Funding Search",
+                ]),
+            ]),
         ])
 
     rows = []
@@ -1935,40 +1633,28 @@ def lookup_forms_templates(
         ])
 
     components = [
-        Alert(
-            message=f"Found {len(filtered)} form(s)/template(s)" + (f" matching '{query}'" if query else ""),
-            variant="success",
-        ),
-        Table(
-            headers=["Form/Template", "Office", "Purpose", "Deadline/Rule"],
-            rows=rows,
-        ),
+        alert(f"Found {len(filtered)} form(s)/template(s)" + (f" matching '{query}'" if query else ""),
+              variant="success"),
+        table(["Form/Template", "Office", "Purpose", "Deadline/Rule"], rows),
     ]
 
     # Add detail cards for forms with URLs
     forms_with_urls = [f for f in filtered if f.get("url")]
     if forms_with_urls:
         components.append(
-            Collapsible(
-                title="Direct Links",
-                content=[
-                    List_(items=[
-                        f"{f['name']} ({f['office']}): {f['url']}"
-                        for f in forms_with_urls
-                    ]),
-                ],
-                default_open=True,
-            )
+            card("Direct Links", [
+                list_component(items=[
+                    f"{f['name']} ({f['office']}): {f['url']}"
+                    for f in forms_with_urls
+                ]),
+            ], collapsible=True, default_open=True)
         )
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {
-            "query": query,
-            "result_count": len(filtered),
-            "forms": [{"name": f["name"], "office": f["office"]} for f in filtered],
-        },
-    }
+    return create_response(components, data={
+        "query": query,
+        "result_count": len(filtered),
+        "forms": [{"name": f["name"], "office": f["office"]} for f in filtered],
+    })
 
 
 # ── Tool Registry ─────────────────────────────────────────────────────

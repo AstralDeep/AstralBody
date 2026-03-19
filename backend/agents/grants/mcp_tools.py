@@ -19,10 +19,10 @@ import requests
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from shared.primitives import (
-    Text, Card, Table, Alert, MetricCard, Grid, Grids,
-    BarChart, PieChart, LineChart, List_, Collapsible, Tabs, TabItem,
-    create_ui_response,
+from shared.a2ui_builders import (
+    card, text, table, metric_card, alert, row, tabs,
+    bar_chart, pie_chart, line_chart, list_component,
+    create_response,
 )
 from agents.grants.caai_knowledge import (
     CAAI_MISSION, EXPERTISE_AREAS, KEY_PERSONNEL, PROJECT_HISTORY,
@@ -223,29 +223,20 @@ def search_grants(
     try:
         hits = _search_grants_raw(keyword, agency, status, max_results)
     except requests.exceptions.Timeout:
-        return create_ui_response([
-            Alert(
-                message="Grant search timed out. The grants.gov API may be slow — please try again.",
-                variant="warning",
-                title="Search Timeout",
-            )
+        return create_response([
+            alert("Grant search timed out. The grants.gov API may be slow — please try again.",
+                  variant="warning", title="Search Timeout")
         ])
     except requests.exceptions.RequestException as exc:
-        return create_ui_response([
-            Alert(
-                message=f"Failed to search grants.gov: {exc}",
-                variant="error",
-                title="API Error",
-            )
+        return create_response([
+            alert(f"Failed to search grants.gov: {exc}",
+                  variant="error", title="API Error")
         ])
 
     if not hits:
-        return create_ui_response([
-            Alert(
-                message=f"No funding opportunities found for '{keyword}'.",
-                variant="info",
-                title="No Results",
-            )
+        return create_response([
+            alert(f"No funding opportunities found for '{keyword}'.",
+                  variant="info", title="No Results")
         ])
 
     # Aggregate stats
@@ -273,45 +264,35 @@ def search_grants(
         ])
 
     components = [
-        Card(
-            title=f"Grant Search Results — '{keyword}'",
-            id="search-results",
-            content=[
-                Grid(
-                    columns=4,
-                    children=[
-                        MetricCard(title="Total Found", value=str(len(hits)), id="total-metric"),
-                        MetricCard(title="Open Now", value=str(open_count), id="open-metric"),
-                        MetricCard(title="Forecasted", value=str(forecast_count), id="forecast-metric"),
-                        MetricCard(title="Agencies", value=str(len(agencies_seen)), id="agency-metric"),
-                    ],
-                ),
-                Text(
-                    content=f"Showing {len(hits)} results" + (f" for agency: {agency}" if agency.upper() != "ALL" else ""),
-                    variant="caption",
-                ),
-                Table(
-                    headers=["Opp #", "Title", "Agency", "Open Date", "Close Date", "Status", "Link"],
-                    rows=rows,
-                    id="grants-table",
-                ),
-            ],
-        )
+        card(f"Grant Search Results — '{keyword}'", [
+            row([
+                metric_card("Total Found", str(len(hits)), id="total-metric"),
+                metric_card("Open Now", str(open_count), id="open-metric"),
+                metric_card("Forecasted", str(forecast_count), id="forecast-metric"),
+                metric_card("Agencies", str(len(agencies_seen)), id="agency-metric"),
+            ]),
+            text(
+                f"Showing {len(hits)} results" + (f" for agency: {agency}" if agency.upper() != "ALL" else ""),
+                variant="caption",
+            ),
+            table(
+                ["Opp #", "Title", "Agency", "Open Date", "Close Date", "Status", "Link"],
+                rows,
+                id="grants-table",
+            ),
+        ], id="search-results")
     ]
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {
-            "total": len(hits),
-            "open": open_count,
-            "forecasted": forecast_count,
-            "agencies": dict(agencies_seen),
-            "hits": [
-                {**h, "url": _grant_url(h.get("id", ""))}
-                for h in hits
-            ],
-        },
-    }
+    return create_response(components, data={
+        "total": len(hits),
+        "open": open_count,
+        "forecasted": forecast_count,
+        "agencies": dict(agencies_seen),
+        "hits": [
+            {**h, "url": _grant_url(h.get("id", ""))}
+            for h in hits
+        ],
+    })
 
 
 def _strip_html(text: str) -> str:
@@ -367,20 +348,14 @@ def get_grant_details(
             if found:
                 numeric_id = str(found.get("id", ""))
             else:
-                return create_ui_response([
-                    Alert(
-                        message=f"Opportunity '{opportunity_id}' not found in grants.gov.",
-                        variant="warning",
-                        title="Not Found",
-                    )
+                return create_response([
+                    alert(f"Opportunity '{opportunity_id}' not found in grants.gov.",
+                          variant="warning", title="Not Found")
                 ])
         except requests.exceptions.RequestException as exc:
-            return create_ui_response([
-                Alert(
-                    message=f"Failed to look up opportunity number: {exc}",
-                    variant="error",
-                    title="API Error",
-                )
+            return create_response([
+                alert(f"Failed to look up opportunity number: {exc}",
+                      variant="error", title="API Error")
             ])
 
     # Fetch full opportunity details using numeric ID
@@ -394,32 +369,23 @@ def get_grant_details(
         resp.raise_for_status()
         data = resp.json()
     except requests.exceptions.Timeout:
-        return create_ui_response([
-            Alert(
-                message=f"Request for '{opportunity_id}' timed out.",
-                variant="warning",
-                title="Timeout",
-            )
+        return create_response([
+            alert(f"Request for '{opportunity_id}' timed out.",
+                  variant="warning", title="Timeout")
         ])
     except requests.exceptions.RequestException as exc:
-        return create_ui_response([
-            Alert(
-                message=f"Failed to fetch opportunity details: {exc}",
-                variant="error",
-                title="API Error",
-            )
+        return create_response([
+            alert(f"Failed to fetch opportunity details: {exc}",
+                  variant="error", title="API Error")
         ])
 
     opp = data.get("data", {})
     if not opp or isinstance(opp.get("message"), str):
         # Backend service may be unavailable
         error_msg = opp.get("message", "No data returned") if isinstance(opp, dict) else "No data"
-        return create_ui_response([
-            Alert(
-                message=f"grants.gov detail service unavailable: {error_msg}",
-                variant="warning",
-                title="Service Unavailable",
-            )
+        return create_response([
+            alert(f"grants.gov detail service unavailable: {error_msg}",
+                  variant="warning", title="Service Unavailable")
         ])
 
     # Parse the nested response structure
@@ -474,33 +440,24 @@ def get_grant_details(
     alert_components = []
     if is_forecast:
         alert_components.append(
-            Alert(
-                message=(
-                    "This is a forecasted opportunity. Full details (description, "
-                    "award amounts, eligibility) are not yet available on grants.gov. "
-                    "Check back when the opportunity is officially posted."
-                ),
-                variant="info",
-                title="Forecasted — Limited Details",
+            alert(
+                "This is a forecasted opportunity. Full details (description, "
+                "award amounts, eligibility) are not yet available on grants.gov. "
+                "Check back when the opportunity is officially posted.",
+                variant="info", title="Forecasted — Limited Details",
             )
         )
 
     days_left = _days_until(close_date_raw)
     if days_left is not None and 0 <= days_left <= 30:
         alert_components.append(
-            Alert(
-                message=f"Deadline in {days_left} day{'s' if days_left != 1 else ''}!",
-                variant="warning",
-                title="Approaching Deadline",
-            )
+            alert(f"Deadline in {days_left} day{'s' if days_left != 1 else ''}!",
+                  variant="warning", title="Approaching Deadline")
         )
     elif days_left is not None and days_left < 0:
         alert_components.append(
-            Alert(
-                message="This opportunity has closed.",
-                variant="info",
-                title="Closed",
-            )
+            alert("This opportunity has closed.",
+                  variant="info", title="Closed")
         )
 
     info_rows = [
@@ -520,74 +477,38 @@ def get_grant_details(
         info_rows.append(["Agency Listing", funding_url])
 
     components = [
-        Card(
-            title=f"{number}: {title}",
-            id="grant-detail",
-            content=[
-                *alert_components,
-                Grid(
-                    columns=4,
-                    children=[
-                        MetricCard(
-                            title="Award Ceiling",
-                            value=_format_currency(award_ceiling),
-                            id="ceiling-metric",
-                        ),
-                        MetricCard(
-                            title="Award Floor",
-                            value=_format_currency(award_floor),
-                            id="floor-metric",
-                        ),
-                        MetricCard(
-                            title="Close Date",
-                            value=_format_date(close_date_raw),
-                            id="close-metric",
-                        ),
-                        MetricCard(
-                            title="Agency",
-                            value=str(agency),
-                            id="agency-metric",
-                        ),
-                    ],
-                ),
-                Table(
-                    headers=["Field", "Value"],
-                    rows=info_rows,
-                    id="detail-table",
-                ),
-                Collapsible(
-                    title="Description",
-                    content=[Text(content=desc_display, variant="body")],
-                    default_open=True,
-                ),
-                Collapsible(
-                    title="Eligibility",
-                    content=[Text(content=eligibility, variant="body")],
-                    default_open=False,
-                ),
-            ],
-        )
+        card(f"{number}: {title}", [
+            *alert_components,
+            row([
+                metric_card("Award Ceiling", _format_currency(award_ceiling), id="ceiling-metric"),
+                metric_card("Award Floor", _format_currency(award_floor), id="floor-metric"),
+                metric_card("Close Date", _format_date(close_date_raw), id="close-metric"),
+                metric_card("Agency", str(agency), id="agency-metric"),
+            ]),
+            table(["Field", "Value"], info_rows, id="detail-table"),
+            card("Description", [text(desc_display, variant="body")],
+                 collapsible=True, default_open=True),
+            card("Eligibility", [text(eligibility, variant="body")],
+                 collapsible=True, default_open=False),
+        ], id="grant-detail")
     ]
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {
-            "opportunity_id": number,
-            "numeric_id": numeric_id,
-            "title": title,
-            "agency": agency,
-            "agency_name": agency_name,
-            "award_ceiling": str(award_ceiling) if award_ceiling else None,
-            "award_floor": str(award_floor) if award_floor else None,
-            "close_date": _format_date(close_date_raw),
-            "open_date": _format_date(open_date_raw),
-            "description": description,
-            "eligibility": eligibility,
-            "url": detail_url,
-            "funding_url": funding_url,
-            "contact_email": contact_email,
-        },
-    }
+    return create_response(components, data={
+        "opportunity_id": number,
+        "numeric_id": numeric_id,
+        "title": title,
+        "agency": agency,
+        "agency_name": agency_name,
+        "award_ceiling": str(award_ceiling) if award_ceiling else None,
+        "award_floor": str(award_floor) if award_floor else None,
+        "close_date": _format_date(close_date_raw),
+        "open_date": _format_date(open_date_raw),
+        "description": description,
+        "eligibility": eligibility,
+        "url": detail_url,
+        "funding_url": funding_url,
+        "contact_email": contact_email,
+    })
 
 
 def match_grants_to_caai(
@@ -608,21 +529,15 @@ def match_grants_to_caai(
     try:
         hits = _search_grants_raw(keyword, agency, "posted|forecasted", max_results)
     except requests.exceptions.RequestException as exc:
-        return create_ui_response([
-            Alert(
-                message=f"Failed to search grants.gov: {exc}",
-                variant="error",
-                title="API Error",
-            )
+        return create_response([
+            alert(f"Failed to search grants.gov: {exc}",
+                  variant="error", title="API Error")
         ])
 
     if not hits:
-        return create_ui_response([
-            Alert(
-                message=f"No opportunities found for '{keyword}'.",
-                variant="info",
-                title="No Results",
-            )
+        return create_response([
+            alert(f"No opportunities found for '{keyword}'.",
+                  variant="info", title="No Results")
         ])
 
     # Score each opportunity.
@@ -676,24 +591,24 @@ def match_grants_to_caai(
         opp_id = s.get("id", "")
         detail_items = []
         if m["matching_expertise_areas"]:
-            detail_items.append(f"Expertise: {', '.join(m['matching_expertise_areas'])}")
+            detail_items.append(text(f"Expertise: {', '.join(m['matching_expertise_areas'])}"))
         if m["matching_projects"]:
-            detail_items.append(f"Related Projects: {', '.join(m['matching_projects'])}")
+            detail_items.append(text(f"Related Projects: {', '.join(m['matching_projects'])}"))
         if m["strong_keyword_matches"]:
-            detail_items.append(f"Keywords: {', '.join(m['strong_keyword_matches'][:8])}")
-        detail_items.append(f"View: {_grant_url(opp_id)}")
+            detail_items.append(text(f"Keywords: {', '.join(m['strong_keyword_matches'][:8])}"))
+        detail_items.append(text(f"View: {_grant_url(opp_id)}"))
 
         top_details.append(
-            Collapsible(
-                title=f"#{idx + 1}: {s.get('title', 'Untitled')[:60]} (Score: {m['score']})",
-                content=[
-                    List_(items=detail_items, id=f"match-detail-{idx}"),
-                    Text(
-                        content=f"Opportunity: {s.get('number', 'N/A')} | Agency: {s.get('agencyCode', 'N/A')}",
+            card(
+                f"#{idx + 1}: {s.get('title', 'Untitled')[:60]} (Score: {m['score']})",
+                [
+                    list_component(detail_items, id=f"match-detail-{idx}"),
+                    text(
+                        f"Opportunity: {s.get('number', 'N/A')} | Agency: {s.get('agencyCode', 'N/A')}",
                         variant="caption",
                     ),
                 ],
-                default_open=idx == 0,
+                collapsible=True, default_open=idx == 0,
             )
         )
 
@@ -710,63 +625,49 @@ def match_grants_to_caai(
             buckets["75-100"] += 1
 
     components = [
-        Card(
-            title="CAAI Grant Match Analysis",
-            id="match-analysis",
-            content=[
-                Grid(
-                    columns=4,
-                    children=[
-                        MetricCard(title="Analyzed", value=str(total_analyzed), id="analyzed-metric"),
-                        MetricCard(title="Matched", value=str(total_matched), id="matched-metric"),
-                        MetricCard(title="Excellent", value=str(excellent), id="excellent-metric"),
-                        MetricCard(title="Avg Score", value=str(avg_score), id="avg-metric"),
-                    ],
-                ),
-                Table(
-                    headers=["Score", "Tier", "Title", "Agency", "Close Date", "Link"],
-                    rows=rows,
-                    id="match-table",
-                ),
-                BarChart(
-                    title="Match Score Distribution",
-                    labels=list(buckets.keys()),
-                    datasets=[{
-                        "label": "Opportunities",
-                        "data": list(buckets.values()),
-                        "color": "#4f46e5",
-                    }],
-                    id="score-chart",
-                ),
-                *top_details,
-            ],
-        )
+        card("CAAI Grant Match Analysis", [
+            row([
+                metric_card("Analyzed", str(total_analyzed), id="analyzed-metric"),
+                metric_card("Matched", str(total_matched), id="matched-metric"),
+                metric_card("Excellent", str(excellent), id="excellent-metric"),
+                metric_card("Avg Score", str(avg_score), id="avg-metric"),
+            ]),
+            table(
+                ["Score", "Tier", "Title", "Agency", "Close Date", "Link"],
+                rows,
+                id="match-table",
+            ),
+            bar_chart(
+                "Match Score Distribution",
+                list(buckets.keys()),
+                [{"label": "Opportunities", "data": list(buckets.values()), "color": "#4f46e5"}],
+                id="score-chart",
+            ),
+            *top_details,
+        ], id="match-analysis")
     ]
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {
-            "total_analyzed": total_analyzed,
-            "total_matched": total_matched,
-            "average_score": avg_score,
-            "excellent_matches": excellent,
-            "strong_matches": strong,
-            "scored_results": [
-                {
-                    "number": s.get("number"),
-                    "title": s.get("title"),
-                    "agency": s.get("agencyCode"),
-                    "close_date": s.get("closeDate"),
-                    "match_score": s["_match"]["score"],
-                    "match_tier": s["_match"]["tier"],
-                    "matching_areas": s["_match"]["matching_expertise_areas"],
-                    "matching_projects": s["_match"]["matching_projects"],
-                    "url": _grant_url(s.get("id", "")),
-                }
-                for s in scored
-            ],
-        },
-    }
+    return create_response(components, data={
+        "total_analyzed": total_analyzed,
+        "total_matched": total_matched,
+        "average_score": avg_score,
+        "excellent_matches": excellent,
+        "strong_matches": strong,
+        "scored_results": [
+            {
+                "number": s.get("number"),
+                "title": s.get("title"),
+                "agency": s.get("agencyCode"),
+                "close_date": s.get("closeDate"),
+                "match_score": s["_match"]["score"],
+                "match_tier": s["_match"]["tier"],
+                "matching_areas": s["_match"]["matching_expertise_areas"],
+                "matching_projects": s["_match"]["matching_projects"],
+                "url": _grant_url(s.get("id", "")),
+            }
+            for s in scored
+        ],
+    })
 
 
 def get_caai_profile(
@@ -782,30 +683,27 @@ def get_caai_profile(
 
     # ── Mission tab ────────────────────────────────────────────────
     mission_content = [
-        Text(content=CAAI_MISSION["mission"], variant="body"),
-        Grid(
-            columns=3,
-            children=[
-                MetricCard(
-                    title="Award Participation",
-                    value=CAAI_MISSION["stats"]["total_award_participation"],
-                    id="awards-metric",
-                ),
-                MetricCard(
-                    title="Funded Projects",
-                    value=str(CAAI_MISSION["stats"]["funded_projects"]),
-                    id="funded-metric",
-                ),
-                MetricCard(
-                    title="Collaborators",
-                    value=f"{CAAI_MISSION['stats']['collaborators']}+",
-                    id="collab-metric",
-                ),
-            ],
-        ),
-        Table(
-            headers=["Field", "Value"],
-            rows=[
+        text(CAAI_MISSION["mission"], variant="body"),
+        row([
+            metric_card(
+                "Award Participation",
+                CAAI_MISSION["stats"]["total_award_participation"],
+                id="awards-metric",
+            ),
+            metric_card(
+                "Funded Projects",
+                str(CAAI_MISSION["stats"]["funded_projects"]),
+                id="funded-metric",
+            ),
+            metric_card(
+                "Collaborators",
+                f"{CAAI_MISSION['stats']['collaborators']}+",
+                id="collab-metric",
+            ),
+        ]),
+        table(
+            ["Field", "Value"],
+            [
                 ["Director", CAAI_MISSION["director"]],
                 ["Parent Org", CAAI_MISSION["parent_org"]],
                 ["University", CAAI_MISSION["university"]],
@@ -828,11 +726,7 @@ def get_caai_profile(
         ])
 
     expertise_content = [
-        Table(
-            headers=["Area", "Description", "Tools Built"],
-            rows=expertise_rows,
-            id="expertise-table",
-        ),
+        table(["Area", "Description", "Tools Built"], expertise_rows, id="expertise-table"),
     ]
 
     # ── Personnel tab ──────────────────────────────────────────────
@@ -848,11 +742,7 @@ def get_caai_profile(
         ])
 
     personnel_content = [
-        Table(
-            headers=["Name", "Title", "Expertise", "Notable"],
-            rows=personnel_rows,
-            id="personnel-table",
-        ),
+        table(["Name", "Title", "Expertise", "Notable"], personnel_rows, id="personnel-table"),
     ]
 
     # ── Projects tab ───────────────────────────────────────────────
@@ -866,59 +756,41 @@ def get_caai_profile(
         ])
 
     projects_content = [
-        Table(
-            headers=["Project", "Domain", "Agency", "Description"],
-            rows=project_rows,
-            id="projects-table",
-        ),
+        table(["Project", "Domain", "Agency", "Description"], project_rows, id="projects-table"),
     ]
 
     # Build response based on requested section
     if section == "all":
         components = [
-            Card(
-                title=f"{CAAI_MISSION['full_name']}",
-                id="caai-profile",
-                content=[
-                    Tabs(
-                        tabs=[
-                            TabItem(label="Mission", content=mission_content),
-                            TabItem(label="Expertise", content=expertise_content),
-                            TabItem(label="Personnel", content=personnel_content),
-                            TabItem(label="Projects", content=projects_content),
-                        ],
-                        id="profile-tabs",
-                    ),
-                ],
-            )
+            card(f"{CAAI_MISSION['full_name']}", [
+                tabs(
+                    ["Mission", "Expertise", "Personnel", "Projects"],
+                    [mission_content, expertise_content, personnel_content, projects_content],
+                    id="profile-tabs",
+                ),
+            ], id="caai-profile")
         ]
     elif section == "mission":
-        components = [Card(title="CAAI Mission", id="caai-mission", content=mission_content)]
+        components = [card("CAAI Mission", mission_content, id="caai-mission")]
     elif section == "expertise":
-        components = [Card(title="CAAI Expertise Areas", id="caai-expertise", content=expertise_content)]
+        components = [card("CAAI Expertise Areas", expertise_content, id="caai-expertise")]
     elif section == "personnel":
-        components = [Card(title="CAAI Key Personnel", id="caai-personnel", content=personnel_content)]
+        components = [card("CAAI Key Personnel", personnel_content, id="caai-personnel")]
     elif section == "projects":
-        components = [Card(title="CAAI Project History", id="caai-projects", content=projects_content)]
+        components = [card("CAAI Project History", projects_content, id="caai-projects")]
     else:
-        return create_ui_response([
-            Alert(
-                message=f"Unknown section '{section}'. Use: all, mission, expertise, personnel, projects.",
-                variant="warning",
-                title="Invalid Section",
-            )
+        return create_response([
+            alert(f"Unknown section '{section}'. Use: all, mission, expertise, personnel, projects.",
+                  variant="warning", title="Invalid Section")
         ])
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {
-            "name": CAAI_MISSION["name"],
-            "mission": CAAI_MISSION["mission"],
-            "expertise_areas": [a["area"] for a in EXPERTISE_AREAS],
-            "project_count": len(PROJECT_HISTORY),
-            "personnel_count": len(KEY_PERSONNEL),
-        },
-    }
+    return create_response(components, data={
+        "name": CAAI_MISSION["name"],
+        "mission": CAAI_MISSION["mission"],
+        "expertise_areas": [a["area"] for a in EXPERTISE_AREAS],
+        "project_count": len(PROJECT_HISTORY),
+        "personnel_count": len(KEY_PERSONNEL),
+    })
 
 
 def analyze_funding_trends(
@@ -936,21 +808,15 @@ def analyze_funding_trends(
     try:
         hits = _search_grants_raw(keyword, "ALL", "posted|forecasted|closed", 100)
     except requests.exceptions.RequestException as exc:
-        return create_ui_response([
-            Alert(
-                message=f"Failed to search grants.gov: {exc}",
-                variant="error",
-                title="API Error",
-            )
+        return create_response([
+            alert(f"Failed to search grants.gov: {exc}",
+                  variant="error", title="API Error")
         ])
 
     if not hits:
-        return create_ui_response([
-            Alert(
-                message=f"No opportunities found for '{keyword}'.",
-                variant="info",
-                title="No Results",
-            )
+        return create_response([
+            alert(f"No opportunities found for '{keyword}'.",
+                  variant="info", title="No Results")
         ])
 
     # Aggregate stats
@@ -970,34 +836,25 @@ def analyze_funding_trends(
         "#7c3aed", "#0891b2", "#be185d", "#65a30d",
     ]
 
-    tab_items = [
-        TabItem(
-            label="By Agency",
-            content=[
-                PieChart(
-                    title=f"Opportunities by Agency — '{keyword}'",
-                    labels=agency_labels,
-                    data=agency_data,
-                    colors=pie_colors[: len(agency_labels)],
-                    id="agency-pie",
-                ),
-            ],
-        ),
-        TabItem(
-            label="By Status",
-            content=[
-                BarChart(
-                    title="Opportunities by Status",
-                    labels=list(status_counts.keys()),
-                    datasets=[{
-                        "label": "Count",
-                        "data": [float(v) for v in status_counts.values()],
-                        "color": "#4f46e5",
-                    }],
-                    id="status-bar",
-                ),
-            ],
-        ),
+    tab_labels = ["By Agency", "By Status"]
+    tab_children = [
+        [
+            pie_chart(
+                f"Opportunities by Agency — '{keyword}'",
+                agency_labels,
+                agency_data,
+                colors=pie_colors[: len(agency_labels)],
+                id="agency-pie",
+            ),
+        ],
+        [
+            bar_chart(
+                "Opportunities by Status",
+                list(status_counts.keys()),
+                [{"label": "Count", "data": [float(v) for v in status_counts.values()], "color": "#4f46e5"}],
+                id="status-bar",
+            ),
+        ],
     ]
 
     # Optional NIH Reporter historical data
@@ -1027,33 +884,21 @@ def analyze_funding_trends(
             amount_data = [year_totals[y] / 1_000_000 for y in sorted_years]  # In millions
             count_data = [float(year_counts[y]) for y in sorted_years]
 
-            tab_items.append(
-                TabItem(
-                    label="NIH History",
-                    content=[
-                        LineChart(
-                            title="NIH Funding Over Time (USD millions)",
-                            labels=year_labels,
-                            datasets=[{
-                                "label": "Total Funding (USD millions)",
-                                "data": amount_data,
-                                "color": "#059669",
-                            }],
-                            id="nih-funding-line",
-                        ),
-                        BarChart(
-                            title="NIH Projects by Year",
-                            labels=year_labels,
-                            datasets=[{
-                                "label": "Projects",
-                                "data": count_data,
-                                "color": "#4f46e5",
-                            }],
-                            id="nih-count-bar",
-                        ),
-                    ],
-                )
-            )
+            tab_labels.append("NIH History")
+            tab_children.append([
+                line_chart(
+                    "NIH Funding Over Time (USD millions)",
+                    year_labels,
+                    [{"label": "Total Funding (USD millions)", "data": amount_data, "color": "#059669"}],
+                    id="nih-funding-line",
+                ),
+                bar_chart(
+                    "NIH Projects by Year",
+                    year_labels,
+                    [{"label": "Projects", "data": count_data, "color": "#4f46e5"}],
+                    id="nih-count-bar",
+                ),
+            ])
 
             nih_data_section = {
                 "nih_years": year_labels,
@@ -1061,49 +906,32 @@ def analyze_funding_trends(
                 "nih_project_counts": {str(y): year_counts[y] for y in sorted_years},
             }
         else:
-            tab_items.append(
-                TabItem(
-                    label="NIH History",
-                    content=[
-                        Alert(
-                            message="No NIH Reporter data found for this keyword.",
-                            variant="info",
-                        ),
-                    ],
-                )
-            )
+            tab_labels.append("NIH History")
+            tab_children.append([
+                alert("No NIH Reporter data found for this keyword.", variant="info"),
+            ])
 
     most_active = top_agencies[0][0] if top_agencies else "N/A"
 
     components = [
-        Card(
-            title=f"Funding Trend Analysis — '{keyword}'",
-            id="trend-analysis",
-            content=[
-                Grid(
-                    columns=4,
-                    children=[
-                        MetricCard(title="Total Opportunities", value=str(len(hits)), id="total-trend"),
-                        MetricCard(title="Most Active", value=most_active, id="active-trend"),
-                        MetricCard(title="Open Now", value=str(open_count), id="open-trend"),
-                        MetricCard(title="Forecasted", value=str(forecast_count), id="forecast-trend"),
-                    ],
-                ),
-                Tabs(tabs=tab_items, id="trend-tabs"),
-            ],
-        )
+        card(f"Funding Trend Analysis — '{keyword}'", [
+            row([
+                metric_card("Total Opportunities", str(len(hits)), id="total-trend"),
+                metric_card("Most Active", most_active, id="active-trend"),
+                metric_card("Open Now", str(open_count), id="open-trend"),
+                metric_card("Forecasted", str(forecast_count), id="forecast-trend"),
+            ]),
+            tabs(tab_labels, tab_children, id="trend-tabs"),
+        ], id="trend-analysis")
     ]
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {
-            "total_opportunities": len(hits),
-            "agency_distribution": dict(agency_counts),
-            "status_distribution": dict(status_counts),
-            "most_active_agency": most_active,
-            **nih_data_section,
-        },
-    }
+    return create_response(components, data={
+        "total_opportunities": len(hits),
+        "agency_distribution": dict(agency_counts),
+        "status_distribution": dict(status_counts),
+        "most_active_agency": most_active,
+        **nih_data_section,
+    })
 
 
 # ═══════════════════════════════════════════════════════════════════════

@@ -9,12 +9,9 @@ from urllib.parse import urlencode
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from shared.primitives import (
-    Text, Card, Table, Container, MetricCard, ProgressBar,
-    Alert, Grid, BarChart, LineChart, PieChart, PlotlyChart, List_,
-    Collapsible, Divider, CodeBlock, Image, Tabs,
-    FileDownload, FileUpload, Button, Input, ColorPicker,
-    create_ui_response
+from shared.a2ui_builders import (
+    card, text, table, metric_card, alert, row, column,
+    divider, create_response, Node,
 )
 
 try:
@@ -274,73 +271,60 @@ def get_auth_status(**kwargs) -> Dict[str, Any]:
         status_color = "success" if auth_status == "Connected" else "error"
         
         components = [
-            Card(
-                title="Microsoft Graph Authentication Status",
-                content=[
-                    Grid(
-                        columns=2,
-                        children=[
-                            MetricCard(
-                                title="Connection Status",
-                                value=auth_status,
-                                variant=status_color
-                            ),
-                            MetricCard(
-                                title="Credentials Configured",
-                                value=f"{sum([has_client_id, has_tenant_id, has_client_secret])}/3",
-                                subtitle="Client ID, Tenant ID, Client Secret"
-                            )
-                        ]
-                    ),
-                    Divider(),
-                    Table(
-                        headers=["Credential", "Status"],
-                        rows=[
-                            ["Client ID", "✓ Configured" if has_client_id else "✗ Missing"],
-                            ["Tenant ID", "✓ Configured" if has_tenant_id else "✗ Missing"],
-                            ["Client Secret", "✓ Configured" if has_client_secret else "✗ Missing"]
-                        ]
-                    ),
-                    Alert(
-                        message="Using client credentials flow. Ensure your Azure App has 'Application' permissions (not delegated) for Microsoft Graph.",
-                        variant="info"
+            card("Microsoft Graph Authentication Status", [
+                row([
+                    metric_card("Connection Status", auth_status, variant=status_color),
+                    metric_card(
+                        "Credentials Configured",
+                        f"{sum([has_client_id, has_tenant_id, has_client_secret])}/3",
+                        subtitle="Client ID, Tenant ID, Client Secret"
                     )
-                ]
-            )
+                ]),
+                divider(),
+                table(
+                    ["Credential", "Status"],
+                    [
+                        ["Client ID", "✓ Configured" if has_client_id else "✗ Missing"],
+                        ["Tenant ID", "✓ Configured" if has_tenant_id else "✗ Missing"],
+                        ["Client Secret", "✓ Configured" if has_client_secret else "✗ Missing"]
+                    ]
+                ),
+                alert(
+                    "Using client credentials flow. Ensure your Azure App has 'Application' permissions (not delegated) for Microsoft Graph.",
+                    variant="info"
+                )
+            ])
         ]
-        
-        return {
-            "_ui_components": [c.to_json() for c in components],
-            "_data": {
-                "auth_status": auth_status,
-                "has_client_id": has_client_id,
-                "has_tenant_id": has_tenant_id,
-                "has_client_secret": has_client_secret
-            }
-        }
+
+        return create_response(components, data={
+            "auth_status": auth_status,
+            "has_client_id": has_client_id,
+            "has_tenant_id": has_tenant_id,
+            "has_client_secret": has_client_secret
+        })
     except Exception as e:
-        return create_ui_response([
-            Alert(message=f"Failed to check auth status: {str(e)}", variant="error")
-        ])
+        return create_response(
+            alert(f"Failed to check auth status: {str(e)}", variant="error")
+        )
 
 def fetch_recent_emails(days: int = 7, limit: int = 20, **kwargs) -> Dict[str, Any]:
     """Fetch recent emails from Outlook inbox with optional filtering."""
     try:
         if requests is None:
-            return create_ui_response([
-                Alert(message="The 'requests' package is required. Please install it: pip install requests", variant="error")
-            ])
-        
+            return create_response(
+                alert("The 'requests' package is required. Please install it: pip install requests", variant="error")
+            )
+
         credentials = kwargs.get("_credentials", {})
         client = GraphAPIClient(credentials)
-        
+
         emails = client.get_recent_emails(days=days, top=limit)
-        
+
         if not emails:
-            return create_ui_response([
-                Alert(message=f"No emails found from the past {days} days.", variant="info")
-            ])
-        
+            return create_response(
+                alert(f"No emails found from the past {days} days.", variant="info")
+            )
+
         email_rows = []
         for email in emails[:10]:
             from_info = email.get("from", {}).get("emailAddress", {}).get("address", "Unknown")
@@ -352,79 +336,66 @@ def fetch_recent_emails(days: int = 7, limit: int = 20, **kwargs) -> Dict[str, A
                     received = dt.strftime("%Y-%m-%d %H:%M")
                 except:
                     pass
-            
+
             email_rows.append([
                 from_info[:30] + ("..." if len(from_info) > 30 else ""),
                 subject[:50] + ("..." if len(subject) > 50 else ""),
                 received,
                 str(len(email.get("bodyPreview", "")))
             ])
-        
+
         components = [
-            Card(
-                title=f"Recent Emails (Past {days} days)",
-                content=[
-                    MetricCard(
-                        title="Total Emails",
-                        value=str(len(emails)),
-                        subtitle=f"Showing first {min(10, len(emails))}"
-                    ),
-                    Table(
-                        headers=["From", "Subject", "Received", "Preview Length"],
-                        rows=email_rows
-                    ),
-                    Text(content=f"Fetched {len(emails)} emails from the past {days} days.", variant="caption")
-                ]
-            )
+            card(f"Recent Emails (Past {days} days)", [
+                metric_card("Total Emails", str(len(emails)), subtitle=f"Showing first {min(10, len(emails))}"),
+                table(["From", "Subject", "Received", "Preview Length"], email_rows),
+                text(f"Fetched {len(emails)} emails from the past {days} days.", variant="caption")
+            ])
         ]
-        
-        return {
-            "_ui_components": [c.to_json() for c in components],
-            "_data": {
-                "total_emails": len(emails),
-                "sample_emails": emails[:5],
-                "fetch_date": datetime.now().isoformat()
-            }
-        }
+
+        return create_response(components, data={
+            "total_emails": len(emails),
+            "sample_emails": emails[:5],
+            "fetch_date": datetime.now().isoformat()
+        })
     except Exception as e:
-        return create_ui_response([
-            Alert(message=f"Failed to fetch emails: {str(e)}", variant="error")
-        ])
+        return create_response(
+            alert(f"Failed to fetch emails: {str(e)}", variant="error")
+        )
 
 def analyze_email_for_tasks(email_id: str = "latest", **kwargs) -> Dict[str, Any]:
     """Analyze a specific email or the latest email to extract actionable tasks."""
     try:
         if requests is None:
-            return create_ui_response([
-                Alert(message="The 'requests' package is required. Please install it: pip install requests", variant="error")
-            ])
-        
+            return create_response(
+                alert("The 'requests' package is required. Please install it: pip install requests", variant="error")
+            )
+
         credentials = kwargs.get("_credentials", {})
         client = GraphAPIClient(credentials)
-        
+
         if email_id == "latest":
             emails = client.get_recent_emails(days=1, top=1)
             if not emails:
-                return create_ui_response([
-                    Alert(message="No recent emails found.", variant="info")
-                ])
+                return create_response(
+                    alert("No recent emails found.", variant="info")
+                )
             email = emails[0]
         else:
             email_result = client._make_request("GET", f"/me/messages/{email_id}")
             if not email_result:
-                return create_ui_response([
-                    Alert(message=f"Email with ID {email_id} not found.", variant="error")
-                ])
+                return create_response(
+                    alert(f"Email with ID {email_id} not found.", variant="error")
+                )
             email = email_result
-        
+
         subject = email.get("subject", "No Subject")
         body_content = email.get("body", {}).get("content", "")
         if not body_content:
             body_content = email.get("bodyPreview", "")
-        
+
         processor = LLMProcessor()
         extracted_tasks = processor.extract_tasks_from_email(body_content, subject)
-        
+
         task_rows = []
         for i, task in enumerate(extracted_tasks, 1):
             deadline = task.get("deadline", "Not specified")
@@ -436,80 +407,60 @@ def analyze_email_for_tasks(email_id: str = "latest", **kwargs) -> Dict[str, Any
                 deadline,
                 priority
             ])
-        
+
         components = [
-            Card(
-                title="Email Task Analysis",
-                content=[
-                    Text(content=f"Subject: {subject}", variant="subtitle"),
-                    Collapsible(
-                        title="Email Preview",
-                        content=[
-                            Text(content=body_content[:500] + ("..." if len(body_content) > 500 else ""), variant="body"),
-                            Divider(),
-                            Text(content=f"Full length: {len(body_content)} characters", variant="caption")
-                        ],
-                        default_open=False
-                    ),
-                    Divider(),
-                    MetricCard(
-                        title="Tasks Extracted",
-                        value=str(len(extracted_tasks)),
-                        subtitle="Actionable items found"
-                    )
-                ]
-            )
+            card("Email Task Analysis", [
+                text(f"Subject: {subject}", variant="subtitle"),
+                card("Email Preview", [
+                    text(body_content[:500] + ("..." if len(body_content) > 500 else ""), variant="body"),
+                    divider(),
+                    text(f"Full length: {len(body_content)} characters", variant="caption")
+                ], collapsible=True, default_open=False),
+                divider(),
+                metric_card("Tasks Extracted", str(len(extracted_tasks)), subtitle="Actionable items found")
+            ])
         ]
-        
+
         if extracted_tasks:
             components.append(
-                Card(
-                    title="Extracted Tasks",
-                    content=[
-                        Table(
-                            headers=["#", "Title", "Description", "Deadline", "Priority"],
-                            rows=task_rows
-                        )
-                    ]
-                )
+                card("Extracted Tasks", [
+                    table(["#", "Title", "Description", "Deadline", "Priority"], task_rows)
+                ])
             )
         else:
             components.append(
-                Alert(message="No actionable tasks were found in this email.", variant="info")
+                alert("No actionable tasks were found in this email.", variant="info")
             )
-        
-        return {
-            "_ui_components": [c.to_json() for c in components],
-            "_data": {
-                "email_id": email.get("id"),
-                "email_subject": subject,
-                "tasks_extracted": extracted_tasks,
-                "analysis_date": datetime.now().isoformat()
-            }
-        }
+
+        return create_response(components, data={
+            "email_id": email.get("id"),
+            "email_subject": subject,
+            "tasks_extracted": extracted_tasks,
+            "analysis_date": datetime.now().isoformat()
+        })
     except Exception as e:
-        return create_ui_response([
-            Alert(message=f"Failed to analyze email: {str(e)}", variant="error")
-        ])
+        return create_response(
+            alert(f"Failed to analyze email: {str(e)}", variant="error")
+        )
 
 def get_current_todo_tasks(list_name: str = "Tasks", **kwargs) -> Dict[str, Any]:
     """Fetch current active tasks from Microsoft To Do."""
     try:
         if requests is None:
-            return create_ui_response([
-                Alert(message="The 'requests' package is required. Please install it: pip install requests", variant="error")
-            ])
-        
+            return create_response(
+                alert("The 'requests' package is required. Please install it: pip install requests", variant="error")
+            )
+
         credentials = kwargs.get("_credentials", {})
         client = GraphAPIClient(credentials)
-        
+
         tasks = client.get_todo_tasks(list_name)
-        
+
         if not tasks:
-            return create_ui_response([
-                Alert(message=f"No active tasks found in '{list_name}' list.", variant="info")
-            ])
-        
+            return create_response(
+                alert(f"No active tasks found in '{list_name}' list.", variant="info")
+            )
+
         task_rows = []
         for task in tasks:
             title = task.get("title", "Untitled")
@@ -521,134 +472,115 @@ def get_current_todo_tasks(list_name: str = "Tasks", **kwargs) -> Dict[str, Any]
                     created = dt.strftime("%Y-%m-%d")
                 except:
                     pass
-            
+
             body_content = task.get("body", {}).get("content", "")
             preview = body_content[:40] + ("..." if len(body_content) > 40 else "") if body_content else ""
-            
+
             task_rows.append([
                 title[:50] + ("..." if len(title) > 50 else ""),
                 status,
                 created,
                 preview
             ])
-        
+
         components = [
-            Card(
-                title=f"Microsoft To Do Tasks ({list_name})",
-                content=[
-                    MetricCard(
-                        title="Active Tasks",
-                        value=str(len(tasks)),
-                        subtitle="Not completed"
-                    ),
-                    Table(
-                        headers=["Title", "Status", "Created", "Notes Preview"],
-                        rows=task_rows
-                    ),
-                    Text(content=f"Showing {len(tasks)} active tasks from '{list_name}' list.", variant="caption")
-                ]
-            )
+            card(f"Microsoft To Do Tasks ({list_name})", [
+                metric_card("Active Tasks", str(len(tasks)), subtitle="Not completed"),
+                table(["Title", "Status", "Created", "Notes Preview"], task_rows),
+                text(f"Showing {len(tasks)} active tasks from '{list_name}' list.", variant="caption")
+            ])
         ]
-        
-        return {
-            "_ui_components": [c.to_json() for c in components],
-            "_data": {
-                "total_tasks": len(tasks),
-                "tasks": tasks[:10],
-                "list_name": list_name,
-                "fetch_date": datetime.now().isoformat()
-            }
-        }
+
+        return create_response(components, data={
+            "total_tasks": len(tasks),
+            "tasks": tasks[:10],
+            "list_name": list_name,
+            "fetch_date": datetime.now().isoformat()
+        })
     except Exception as e:
-        return create_ui_response([
-            Alert(message=f"Failed to fetch To Do tasks: {str(e)}", variant="error")
-        ])
+        return create_response(
+            alert(f"Failed to fetch To Do tasks: {str(e)}", variant="error")
+        )
 
 def triage_inbox_automated(days: int = 7, email_limit: int = 10, **kwargs) -> Dict[str, Any]:
     """Automated inbox triage: fetch emails, extract tasks, deduplicate, and add to To Do."""
     try:
         if requests is None:
-            return create_ui_response([
-                Alert(message="The 'requests' package is required. Please install it: pip install requests", variant="error")
-            ])
-        
+            return create_response(
+                alert("The 'requests' package is required. Please install it: pip install requests", variant="error")
+            )
+
         credentials = kwargs.get("_credentials", {})
         client = GraphAPIClient(credentials)
         processor = LLMProcessor()
         deduplicator = TaskDeduplicator()
-        
+
         progress_components = []
-        
-        progress_components.append(Text(content="Step 1: Fetching recent emails...", variant="subtitle"))
+
+        progress_components.append(text("Step 1: Fetching recent emails...", variant="subtitle"))
         emails = client.get_recent_emails(days=days, top=email_limit)
-        progress_components.append(Alert(message=f"Found {len(emails)} emails from past {days} days", variant="info"))
-        
-        progress_components.append(Divider())
-        progress_components.append(Text(content="Step 2: Extracting tasks from emails...", variant="subtitle"))
-        
+        progress_components.append(alert(f"Found {len(emails)} emails from past {days} days", variant="info"))
+
+        progress_components.append(divider())
+        progress_components.append(text("Step 2: Extracting tasks from emails...", variant="subtitle"))
+
         all_extracted_tasks = []
         for i, email in enumerate(emails[:5], 1):
             subject = email.get("subject", "No Subject")
             body = email.get("body", {}).get("content", "") or email.get("bodyPreview", "")
             tasks = processor.extract_tasks_from_email(body, subject)
             all_extracted_tasks.extend(tasks)
-            progress_components.append(Text(content=f"Email {i}: '{subject[:30]}...' → {len(tasks)} tasks", variant="body"))
-        
-        progress_components.append(Alert(message=f"Total tasks extracted: {len(all_extracted_tasks)}", variant="info"))
-        
-        progress_components.append(Divider())
-        progress_components.append(Text(content="Step 3: Checking existing To Do tasks...", variant="subtitle"))
-        
+            progress_components.append(text(f"Email {i}: '{subject[:30]}...' → {len(tasks)} tasks", variant="body"))
+
+        progress_components.append(alert(f"Total tasks extracted: {len(all_extracted_tasks)}", variant="info"))
+
+        progress_components.append(divider())
+        progress_components.append(text("Step 3: Checking existing To Do tasks...", variant="subtitle"))
+
         existing_tasks = client.get_todo_tasks()
-        progress_components.append(Alert(message=f"Found {len(existing_tasks)} existing active tasks", variant="info"))
-        
-        progress_components.append(Divider())
-        progress_components.append(Text(content="Step 4: Deduplicating and creating new tasks...", variant="subtitle"))
-        
+        progress_components.append(alert(f"Found {len(existing_tasks)} existing active tasks", variant="info"))
+
+        progress_components.append(divider())
+        progress_components.append(text("Step 4: Deduplicating and creating new tasks...", variant="subtitle"))
+
         new_tasks_created = []
         duplicate_tasks = []
-        
+
         for task in all_extracted_tasks:
             if deduplicator.is_duplicate(task, existing_tasks):
                 duplicate_tasks.append(task)
-                progress_components.append(Text(content=f"Duplicate skipped: '{task.get('title', '')[:40]}...'", variant="caption"))
+                progress_components.append(text(f"Duplicate skipped: '{task.get('title', '')[:40]}...'", variant="caption"))
             else:
                 notes = f"Extracted from email. Details: {task.get('description', '')}"
                 if task.get('deadline'):
                     notes += f"\nDeadline: {task.get('deadline')}"
-                
+
                 created_task = client.create_todo_task(
                     title=task.get('title', 'New Task'),
                     notes=notes
                 )
-                
+
                 if created_task:
                     new_tasks_created.append(task)
-                    progress_components.append(Text(content=f"Created: '{task.get('title', '')[:40]}...'", variant="body"))
+                    progress_components.append(text(f"Created: '{task.get('title', '')[:40]}...'", variant="body"))
                 else:
-                    progress_components.append(Text(content=f"Failed to create: '{task.get('title', '')[:40]}...'", variant="caption"))
-        
-        summary_grid = Grid(
-            columns=4,
-            children=[
-                MetricCard(title="Emails Processed", value=str(min(5, len(emails)))),
-                MetricCard(title="Tasks Extracted", value=str(len(all_extracted_tasks))),
-                MetricCard(title="Duplicates Found", value=str(len(duplicate_tasks))),
-                MetricCard(title="New Tasks Created", value=str(len(new_tasks_created)), variant="success" if new_tasks_created else "default")
-            ]
-        )
-        
+                    progress_components.append(text(f"Failed to create: '{task.get('title', '')[:40]}...'", variant="caption"))
+
+        summary_row = row([
+            metric_card("Emails Processed", str(min(5, len(emails)))),
+            metric_card("Tasks Extracted", str(len(all_extracted_tasks))),
+            metric_card("Duplicates Found", str(len(duplicate_tasks))),
+            metric_card("New Tasks Created", str(len(new_tasks_created)), variant="success" if new_tasks_created else "default")
+        ])
+
         components = [
-            Card(
-                title="Inbox Triage Results",
-                content=[
-                    summary_grid,
-                    Divider(),
-                    Container(children=progress_components)
-                ]
-            )
+            card("Inbox Triage Results", [
+                summary_row,
+                divider(),
+                column(progress_components)
+            ])
         ]
-        
+
         if new_tasks_created:
             new_task_rows = []
             for i, task in enumerate(new_tasks_created, 1):
@@ -658,19 +590,13 @@ def triage_inbox_automated(days: int = 7, email_limit: int = 10, **kwargs) -> Di
                     task.get('priority', 'medium').capitalize(),
                     task.get('deadline', 'Not specified')
                 ])
-            
+
             components.append(
-                Card(
-                    title="New Tasks Added to To Do",
-                    content=[
-                        Table(
-                            headers=["#", "Title", "Priority", "Deadline"],
-                            rows=new_task_rows
-                        )
-                    ]
-                )
+                card("New Tasks Added to To Do", [
+                    table(["#", "Title", "Priority", "Deadline"], new_task_rows)
+                ])
             )
-        
+
         if duplicate_tasks:
             duplicate_task_rows = []
             for i, task in enumerate(duplicate_tasks[:5], 1):
@@ -679,89 +605,70 @@ def triage_inbox_automated(days: int = 7, email_limit: int = 10, **kwargs) -> Di
                     task.get('title', '')[:50],
                     "Already exists in To Do"
                 ])
-            
+
             components.append(
-                Card(
-                    title="Duplicate Tasks (Not Added)",
-                    content=[
-                        Table(
-                            headers=["#", "Title", "Reason"],
-                            rows=duplicate_task_rows
-                        )
-                    ]
-                )
+                card("Duplicate Tasks (Not Added)", [
+                    table(["#", "Title", "Reason"], duplicate_task_rows)
+                ])
             )
-        
-        return {
-            "_ui_components": [c.to_json() for c in components],
-            "_data": {
-                "emails_processed": len(emails[:5]),
-                "tasks_extracted": len(all_extracted_tasks),
-                "duplicates_found": len(duplicate_tasks),
-                "new_tasks_created": len(new_tasks_created),
-                "new_tasks": new_tasks_created,
-                "duplicate_tasks": duplicate_tasks,
-                "triage_date": datetime.now().isoformat()
-            }
-        }
+
+        return create_response(components, data={
+            "emails_processed": len(emails[:5]),
+            "tasks_extracted": len(all_extracted_tasks),
+            "duplicates_found": len(duplicate_tasks),
+            "new_tasks_created": len(new_tasks_created),
+            "new_tasks": new_tasks_created,
+            "duplicate_tasks": duplicate_tasks,
+            "triage_date": datetime.now().isoformat()
+        })
     except Exception as e:
-        return create_ui_response([
-            Alert(message=f"Failed to triage inbox: {str(e)}", variant="error")
-        ])
+        return create_response(
+            alert(f"Failed to triage inbox: {str(e)}", variant="error")
+        )
 
 def get_inbox_todo_items(days: int = 7, email_limit: int = 10, **kwargs) -> Dict[str, Any]:
     """Analyze inbox emails and return a list of actionable todo items found."""
     try:
         if requests is None:
-            return create_ui_response([
-                Alert(message="The 'requests' package is required. Please install it: pip install requests", variant="error")
-            ])
-        
+            return create_response(
+                alert("The 'requests' package is required. Please install it: pip install requests", variant="error")
+            )
+
         credentials = kwargs.get("_credentials", {})
         client = GraphAPIClient(credentials)
         processor = LLMProcessor()
-        
+
         emails = client.get_recent_emails(days=days, top=email_limit)
-        
+
         if not emails:
-            return create_ui_response([
-                Alert(message=f"No emails found from the past {days} days.", variant="info")
-            ])
-        
+            return create_response(
+                alert(f"No emails found from the past {days} days.", variant="info")
+            )
+
         all_tasks = []
         email_task_map = {}
-        
+
         for email in emails[:email_limit]:
             subject = email.get("subject", "No Subject")
             body = email.get("body", {}).get("content", "") or email.get("bodyPreview", "")
             tasks = processor.extract_tasks_from_email(body, subject)
-            
+
             if tasks:
                 for task in tasks:
                     task["source_email"] = subject
                     task["email_link"] = email.get("webLink", "")
                     all_tasks.append(task)
                 email_task_map[subject] = len(tasks)
-        
+
         if not all_tasks:
-            return create_ui_response([
-                Card(
-                    title="Inbox Todo Analysis",
-                    content=[
-                        MetricCard(
-                            title="No Tasks Found",
-                            value="0",
-                            subtitle=f"Analyzed {min(email_limit, len(emails))} emails"
-                        ),
-                        Alert(
-                            message="No actionable todo items were found in the analyzed emails.",
-                            variant="info"
-                        ),
-                        Text(content=f"Scanned {min(email_limit, len(emails))} emails from the past {days} days.", variant="caption")
-                    ]
-                )
-            ])
-        
+            return create_response(
+                card("Inbox Todo Analysis", [
+                    metric_card("No Tasks Found", "0", subtitle=f"Analyzed {min(email_limit, len(emails))} emails"),
+                    alert("No actionable todo items were found in the analyzed emails.", variant="info"),
+                    text(f"Scanned {min(email_limit, len(emails))} emails from the past {days} days.", variant="caption")
+                ])
+            )
+
         task_rows = []
         for i, task in enumerate(all_tasks, 1):
             title = task.get("title", "Untitled")
@@ -769,7 +676,7 @@ def get_inbox_todo_items(days: int = 7, email_limit: int = 10, **kwargs) -> Dict
             priority = task.get("priority", "medium").capitalize()
             deadline = task.get("deadline", "Not specified")
             source = task.get("source_email", "")[:40] + ("..." if len(task.get("source_email", "")) > 40 else "")
-            
+
             task_rows.append([
                 str(i),
                 title[:60] + ("..." if len(title) > 60 else ""),
@@ -778,117 +685,66 @@ def get_inbox_todo_items(days: int = 7, email_limit: int = 10, **kwargs) -> Dict
                 deadline,
                 source
             ])
-        
+
         email_summary_rows = []
         for subject, count in list(email_task_map.items())[:5]:
             email_summary_rows.append([
                 subject[:50] + ("..." if len(subject) > 50 else ""),
                 str(count)
             ])
-        
+
         components = [
-            Card(
-                title="Inbox Todo Items Analysis",
-                content=[
-                    Grid(
-                        columns=3,
-                        children=[
-                            MetricCard(
-                                title="Emails Analyzed",
-                                value=str(min(email_limit, len(emails))),
-                                subtitle=f"Past {days} days"
-                            ),
-                            MetricCard(
-                                title="Tasks Found",
-                                value=str(len(all_tasks)),
-                                subtitle="Actionable items"
-                            ),
-                            MetricCard(
-                                title="Emails with Tasks",
-                                value=str(len(email_task_map)),
-                                subtitle="Containing actionable items"
-                            )
-                        ]
-                    ),
-                    Divider(),
-                    Card(
-                        title="Extracted Todo Items",
-                        content=[
-                            Table(
-                                headers=["#", "Title", "Description", "Priority", "Deadline", "Source Email"],
-                                rows=task_rows
-                            ),
-                            Text(content=f"Showing {len(all_tasks)} actionable items found in emails.", variant="caption")
-                        ],
-                        variant="outlined"
-                    )
-                ]
-            )
+            card("Inbox Todo Items Analysis", [
+                row([
+                    metric_card("Emails Analyzed", str(min(email_limit, len(emails))), subtitle=f"Past {days} days"),
+                    metric_card("Tasks Found", str(len(all_tasks)), subtitle="Actionable items"),
+                    metric_card("Emails with Tasks", str(len(email_task_map)), subtitle="Containing actionable items")
+                ]),
+                divider(),
+                card("Extracted Todo Items", [
+                    table(["#", "Title", "Description", "Priority", "Deadline", "Source Email"], task_rows),
+                    text(f"Showing {len(all_tasks)} actionable items found in emails.", variant="caption")
+                ])
+            ])
         ]
-        
+
         if email_summary_rows:
             components.append(
-                Card(
-                    title="Email Task Summary",
-                    content=[
-                        Table(
-                            headers=["Email Subject", "Tasks Found"],
-                            rows=email_summary_rows
-                        ),
-                        Text(content=f"Top {len(email_summary_rows)} emails with the most tasks.", variant="caption")
-                    ]
-                )
+                card("Email Task Summary", [
+                    table(["Email Subject", "Tasks Found"], email_summary_rows),
+                    text(f"Top {len(email_summary_rows)} emails with the most tasks.", variant="caption")
+                ])
             )
-        
+
         priority_counts = {"High": 0, "Medium": 0, "Low": 0}
         for task in all_tasks:
             priority = task.get("priority", "medium").capitalize()
             if priority in priority_counts:
                 priority_counts[priority] += 1
-        
+
         components.append(
-            Card(
-                title="Task Priority Distribution",
-                content=[
-                    Grid(
-                        columns=3,
-                        children=[
-                            MetricCard(
-                                title="High Priority",
-                                value=str(priority_counts["High"]),
-                                variant="error" if priority_counts["High"] > 0 else "default"
-                            ),
-                            MetricCard(
-                                title="Medium Priority",
-                                value=str(priority_counts["Medium"]),
-                                variant="warning"
-                            ),
-                            MetricCard(
-                                title="Low Priority",
-                                value=str(priority_counts["Low"]),
-                                variant="success"
-                            )
-                        ]
-                    )
-                ]
-            )
+            card("Task Priority Distribution", [
+                row([
+                    metric_card("High Priority", str(priority_counts["High"]),
+                                variant="error" if priority_counts["High"] > 0 else "default"),
+                    metric_card("Medium Priority", str(priority_counts["Medium"]), variant="warning"),
+                    metric_card("Low Priority", str(priority_counts["Low"]), variant="success")
+                ])
+            ])
         )
-        
-        return {
-            "_ui_components": [c.to_json() for c in components],
-            "_data": {
-                "total_emails_analyzed": min(email_limit, len(emails)),
-                "total_tasks_found": len(all_tasks),
-                "tasks": all_tasks,
-                "email_task_map": email_task_map,
-                "priority_distribution": priority_counts,
-                "analysis_date": datetime.now().isoformat()
-            }
-        }
+
+        return create_response(components, data={
+            "total_emails_analyzed": min(email_limit, len(emails)),
+            "total_tasks_found": len(all_tasks),
+            "tasks": all_tasks,
+            "email_task_map": email_task_map,
+            "priority_distribution": priority_counts,
+            "analysis_date": datetime.now().isoformat()
+        })
     except Exception as e:
-        return create_ui_response([
-            Alert(message=f"Failed to analyze inbox for todo items: {str(e)}", variant="error")
-        ])
+        return create_response(
+            alert(f"Failed to analyze inbox for todo items: {str(e)}", variant="error")
+        )
 
 TOOL_REGISTRY = {
     "get_auth_status": {

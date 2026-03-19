@@ -216,7 +216,7 @@ class HistoryManager:
         
         # Update chat flag
         self.db.execute(
-            "UPDATE chats SET has_saved_components = 1 WHERE id = ? AND user_id = ?",
+            "UPDATE chats SET has_saved_components = TRUE WHERE id = ? AND user_id = ?",
             (chat_id, user_id)
         )
         
@@ -283,7 +283,7 @@ class HistoryManager:
         if count_row['count'] == 0:
             # Update chat flag
             self.db.execute(
-                "UPDATE chats SET has_saved_components = 0 WHERE id = ? AND user_id = ?",
+                "UPDATE chats SET has_saved_components = FALSE WHERE id = ? AND user_id = ?",
                 (chat_id, user_id)
             )
         
@@ -354,7 +354,7 @@ class HistoryManager:
         has_components = count_row and count_row['count'] > 0
         self.db.execute(
             "UPDATE chats SET has_saved_components = ? WHERE id = ? AND user_id = ?",
-            (1 if has_components else 0, chat_id, user_id)
+            (has_components, chat_id, user_id)
         )
         
         return created

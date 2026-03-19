@@ -285,6 +285,20 @@ function renderComponent(comp: AnyProps, index: number, onSaveComponent?: (compo
             return <RenderFileDownload key={index} {...baseProps} />;
         case "color_picker":
             return <RenderColorPicker key={index} {...baseProps} />;
+        case "slider":
+            return <RenderSlider key={index} {...baseProps} />;
+        case "choice_picker":
+            return <RenderChoicePicker key={index} {...baseProps} />;
+        case "datetime_input":
+            return <RenderDateTimeInput key={index} {...baseProps} />;
+        case "checkbox":
+            return <RenderCheckBox key={index} {...baseProps} />;
+        case "modal":
+            return <RenderModal key={index} {...baseProps} />;
+        case "video":
+            return <RenderVideo key={index} {...baseProps} />;
+        case "audio_player":
+            return <RenderAudioPlayer key={index} {...baseProps} />;
         default:
             console.warn(`Unknown component type: ${type}`);
             return null;
@@ -1044,6 +1058,205 @@ function RenderFileUpload({ label, accept, onSendMessage }: AnyProps) {
                 <span>{isProcessing ? "Processing..." : (label || "Upload File")}</span>
                 <input type="file" className="hidden" accept={accept} onChange={handleFileChange} disabled={isProcessing} />
             </label>
+        </div>
+    );
+}
+
+// ── Slider ─────────────────────────────────────────────────────────
+function RenderSlider({ min = 0, max = 100, value: initialValue = 50, step = 1, name, label, onA2UIAction }: AnyProps) {
+    const [val, setVal] = useState(initialValue);
+    return (
+        <div className="flex flex-col gap-1.5 py-1">
+            {label && (
+                <div className="flex justify-between text-xs text-astral-muted">
+                    <span>{label}</span>
+                    <span className="font-mono tabular-nums">{val}</span>
+                </div>
+            )}
+            <input
+                type="range"
+                min={min}
+                max={max}
+                step={step}
+                value={val}
+                onChange={(e) => {
+                    const v = Number(e.target.value);
+                    setVal(v);
+                    if (onA2UIAction) onA2UIAction(name || "slider_change", { value: v });
+                }}
+                className="w-full h-2 rounded-full appearance-none bg-white/10 accent-astral-primary cursor-pointer
+                    [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4
+                    [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-astral-primary [&::-webkit-slider-thumb]:shadow-md"
+            />
+            {!label && (
+                <div className="flex justify-between text-[10px] text-astral-muted/60">
+                    <span>{min}</span>
+                    <span>{max}</span>
+                </div>
+            )}
+        </div>
+    );
+}
+
+// ── ChoicePicker ───────────────────────────────────────────────────
+function RenderChoicePicker({ options, maxSelections = 1, selected: initialSelected, name, label, onA2UIAction }: AnyProps) {
+    const [selected, setSelected] = useState<string[]>(initialSelected || []);
+    const opts: { label: string; value: string }[] = (options || []).map((o: string | { label: string; value: string }) =>
+        typeof o === "string" ? { label: o, value: o } : o
+    );
+    const isMulti = maxSelections !== 1;
+
+    const toggle = (value: string) => {
+        let next: string[];
+        if (isMulti) {
+            next = selected.includes(value)
+                ? selected.filter((v) => v !== value)
+                : [...selected, value].slice(0, maxSelections > 0 ? maxSelections : undefined);
+        } else {
+            next = selected.includes(value) ? [] : [value];
+        }
+        setSelected(next);
+        if (onA2UIAction) onA2UIAction(name || "choice_change", { selected: next });
+    };
+
+    return (
+        <div className="flex flex-col gap-2 py-1">
+            {label && <span className="text-xs text-astral-muted font-medium">{label}</span>}
+            <div className="flex flex-wrap gap-2">
+                {opts.map((opt) => {
+                    const active = selected.includes(opt.value);
+                    return (
+                        <button
+                            key={opt.value}
+                            onClick={() => toggle(opt.value)}
+                            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors border ${
+                                active
+                                    ? "bg-astral-primary/20 border-astral-primary/40 text-astral-primary"
+                                    : "bg-white/5 border-white/10 text-astral-text hover:bg-white/10"
+                            }`}
+                        >
+                            {opt.label}
+                        </button>
+                    );
+                })}
+            </div>
+        </div>
+    );
+}
+
+// ── DateTimeInput ──────────────────────────────────────────────────
+function RenderDateTimeInput({ mode = "date", value: initialValue = "", name, label, onA2UIAction }: AnyProps) {
+    const [val, setVal] = useState(initialValue);
+    const inputType = mode === "time" ? "time" : mode === "dateTime" ? "datetime-local" : "date";
+
+    return (
+        <div className="flex flex-col gap-1.5 py-1">
+            {label && <span className="text-xs text-astral-muted font-medium">{label}</span>}
+            <input
+                type={inputType}
+                value={val}
+                onChange={(e) => {
+                    setVal(e.target.value);
+                    if (onA2UIAction) onA2UIAction(name || "datetime_change", { value: e.target.value });
+                }}
+                className="px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm text-astral-text
+                    focus:outline-none focus:border-astral-primary/50 transition-colors
+                    [color-scheme:dark]"
+            />
+        </div>
+    );
+}
+
+// ── CheckBox ──────────────────────────────────────────────────────
+function RenderCheckBox({ label, checked: initialChecked = false, name, onA2UIAction }: AnyProps) {
+    const [checked, setChecked] = useState(initialChecked);
+
+    return (
+        <label className="flex items-center gap-2.5 py-1 cursor-pointer group">
+            <div className="relative flex items-center justify-center">
+                <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={(e) => {
+                        setChecked(e.target.checked);
+                        if (onA2UIAction) onA2UIAction(name || "checkbox_change", { checked: e.target.checked });
+                    }}
+                    className="w-4 h-4 rounded border-white/20 bg-white/5 text-astral-primary
+                        focus:ring-astral-primary/30 focus:ring-2 transition-colors accent-astral-primary"
+                />
+            </div>
+            {label && <span className="text-sm text-astral-text group-hover:text-astral-text/80">{label}</span>}
+        </label>
+    );
+}
+
+// ── Modal ─────────────────────────────────────────────────────────
+function RenderModal({ title, children, content, trigger, onSaveComponent, onSendMessage, onTablePaginate }: AnyProps) {
+    const [isOpen, setIsOpen] = useState(false);
+    const kids = children || content || [];
+    // Separate trigger (first child) from content
+    const triggerNode = trigger || (Array.isArray(kids) && kids.length > 0 ? kids[0] : null);
+    const contentNodes = trigger ? kids : (Array.isArray(kids) ? kids.slice(1) : []);
+
+    return (
+        <>
+            <div onClick={() => setIsOpen(true)} className="cursor-pointer inline-block">
+                {triggerNode && renderComponent(triggerNode, 0, onSaveComponent, onSendMessage, onTablePaginate)}
+            </div>
+            <AnimatePresence>
+                {isOpen && (
+                    <motion.div
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+                        onClick={() => setIsOpen(false)}
+                    >
+                        <motion.div
+                            initial={{ opacity: 0, scale: 0.95, y: 10 }}
+                            animate={{ opacity: 1, scale: 1, y: 0 }}
+                            exit={{ opacity: 0, scale: 0.95, y: 10 }}
+                            onClick={(e) => e.stopPropagation()}
+                            className="glass-card p-5 max-w-lg w-full max-h-[80vh] overflow-y-auto"
+                        >
+                            <div className="flex items-center justify-between mb-4">
+                                {title && <h3 className="text-base font-semibold text-astral-text">{title}</h3>}
+                                <button onClick={() => setIsOpen(false)} className="text-astral-muted hover:text-astral-text text-lg">
+                                    &times;
+                                </button>
+                            </div>
+                            <div className="space-y-3">
+                                {renderChildren(contentNodes, onSaveComponent, onSendMessage, onTablePaginate)}
+                            </div>
+                        </motion.div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+        </>
+    );
+}
+
+// ── Video ─────────────────────────────────────────────────────────
+function RenderVideo({ url, autoplay = false }: AnyProps) {
+    return (
+        <div className="rounded-lg overflow-hidden border border-white/5">
+            <video
+                src={url}
+                controls
+                autoPlay={autoplay}
+                className="w-full"
+                playsInline
+            />
+        </div>
+    );
+}
+
+// ── AudioPlayer ──────────────────────────────────────────────────
+function RenderAudioPlayer({ url, description }: AnyProps) {
+    return (
+        <div className="flex flex-col gap-1.5 p-3 rounded-lg bg-white/5 border border-white/5">
+            {description && <span className="text-xs text-astral-muted">{description}</span>}
+            <audio src={url} controls className="w-full h-8" />
         </div>
     );
 }

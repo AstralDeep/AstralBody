@@ -45,6 +45,9 @@ from shared.primitives import (
     Container, Text, Card, Grid, Alert, MetricCard, ProgressBar,
     Collapsible, create_ui_response
 )
+from shared.a2ui_primitives import flatten_tree, A2UIComponent
+from shared.a2ui_surface import SurfaceManager
+from shared.a2ui_protocol import A2UIActionMessage, is_a2ui_message, parse_a2ui_message
 from rote.rote import ROTE
 
 load_dotenv(override=False)
@@ -80,6 +83,10 @@ class Orchestrator:
         self.cancelled_sessions: Dict[str, bool] = {}  # websocket id -> cancelled flag
         self._chat_locks: Dict[int, asyncio.Lock] = {}  # per-websocket lock for chat serialization
         self._registered_events: Dict[int, asyncio.Event] = {}  # gate non-register messages until auth completes
+
+        # A2UI surface manager and per-client protocol version tracking
+        self.surface_manager = SurfaceManager()
+        self._protocol_versions: Dict[int, str] = {}  # id(websocket) → "legacy" | "a2ui"
 
         # A2A external agent connections (JSON-RPC transport)
         self.a2a_clients: Dict[str, Any] = {}  # agent_id -> A2A client
@@ -414,6 +421,9 @@ class Orchestrator:
 
                     # Persist user profile to database
                     self._save_user_profile(user_data)
+
+                    # A2UI: store client protocol version
+                    self._protocol_versions[id(websocket)] = getattr(msg, 'protocol_version', 'legacy')
 
                     # ROTE: register device capabilities and send profile back
                     device_info = msg.device or {}
@@ -887,6 +897,87 @@ class Orchestrator:
                         await self._safe_send(websocket, json.dumps({
                             "type": "chat_status", "status": "done", "message": ""
                         }))
+
+            # --- A2UI action messages ---
+            elif isinstance(msg, A2UIActionMessage):
+                if websocket not in self.ui_sessions:
+                    await self.send_ui_render(websocket, [
+                        Alert(message="Unauthorized. Please refresh.", variant="error").to_json()
+                    ])
+                    return
+
+                user_id = self._get_user_id(websocket)
+
+                # Translate A2UI action to existing internal handlers
+                action_name = msg.name
+                ctx = msg.context
+
+                if action_name == "chat_message":
+                    user_message = ctx.get("message", "")
+                    chat_id = ctx.get("chat_id")
+                    draft_agent_id = ctx.get("draft_agent_id")
+
+                    if not chat_id:
+                        chat_id = self.history.create_chat(user_id=user_id)
+                        await self._safe_send(websocket, json.dumps({
+                            "type": "chat_created",
+                            "payload": {"chat_id": chat_id, "from_message": True}
+                        }))
+                    else:
+                        if not self.history.get_chat(chat_id, user_id=user_id):
+                            self.history.create_chat(chat_id, user_id=user_id)
+                            await self._safe_send(websocket, json.dumps({
+                                "type": "chat_created",
+                                "payload": {"chat_id": chat_id, "from_message": True}
+                            }))
+
+                    display_message = ctx.get("display_message")
+                    self.cancelled_sessions[id(websocket)] = False
+                    await self._serialized_chat(
+                        websocket, user_message, chat_id, display_message,
+                        user_id=user_id, draft_agent_id=draft_agent_id,
+                    )
+
+                elif action_name == "table_paginate":
+                    tool_name = ctx.get("tool_name")
+                    agent_id = ctx.get("agent_id")
+                    params = ctx.get("params", {})
+                    if not tool_name or not agent_id:
+                        await self.send_ui_render(websocket, [
+                            Alert(message="Missing tool_name or agent_id for pagination", variant="error").to_json()
+                        ])
+                        await self._safe_send(websocket, json.dumps({
+                            "type": "chat_status", "status": "done", "message": ""
+                        }))
+                        return
+                    args = dict(params)
+                    if user_id and agent_id:
+                        creds = self.credential_manager.get_agent_credentials(user_id, agent_id)
+                        if creds:
+                            args["_credentials"] = creds
+                    try:
+                        result = await self._execute_with_retry(websocket, agent_id, tool_name, args)
+                        if result and result.ui_components:
+                            await self.send_ui_render(websocket, result.ui_components)
+                        elif result and result.error:
+                            await self.send_ui_render(websocket, [
+                                Alert(message=result.error.get("message", "Pagination failed"), variant="error").to_json()
+                            ])
+                    except Exception as e:
+                        logger.error(f"A2UI table_paginate failed: {e}", exc_info=True)
+                        await self.send_ui_render(websocket, [
+                            Alert(message=f"Pagination failed: {e}", variant="error").to_json()
+                        ])
+                    finally:
+                        await self._safe_send(websocket, json.dumps({
+                            "type": "chat_status", "status": "done", "message": ""
+                        }))
+
+                elif action_name == "cancel_task":
+                    self.cancelled_sessions[id(websocket)] = True
+
+                else:
+                    logger.warning(f"Unknown A2UI action: {action_name}")
 
         except Exception as e:
             import traceback
@@ -1427,27 +1518,49 @@ CRITICAL RULES:
                                 for child in nested:
                                     _tag_source(child, agent_id, tool_name)
 
+                    # Build tool labels for attribution
+                    tool_labels = []
+                    for tn in tool_names:
+                        agent_id = tool_to_agent.get(tn, "")
+                        agent_name = self.agent_cards[agent_id].name if agent_id in self.agent_cards else ""
+                        label = tn.replace('_', ' ').title()
+                        if agent_name:
+                            label = f"{agent_name}: {label}"
+                        tool_labels.append(label)
+                    tool_label = ', '.join(tool_labels)
+
                     tool_ui_components = []
+                    a2ui_surfaces = []  # (components, root_id) tuples
                     for i_tc, res in enumerate(tool_results):
                         if res and res.ui_components and not res.error:
                             tc = llm_msg.tool_calls[i_tc] if i_tc < len(llm_msg.tool_calls) else None
                             t_name = tc.function.name if tc else ""
                             a_id = tool_to_agent.get(t_name, "")
-                            for comp in res.ui_components:
-                                _tag_source(comp, a_id, t_name)
-                                tool_ui_components.append(comp)
+                            if res.a2ui_root_id:
+                                # Native A2UI — send as surface directly
+                                a2ui_surfaces.append((res.ui_components, res.a2ui_root_id))
+                            else:
+                                for comp in res.ui_components:
+                                    _tag_source(comp, a_id, t_name)
+                                    tool_ui_components.append(comp)
+
+                    # Send native A2UI surfaces and persist to history
+                    for a2ui_comps, a2ui_root in a2ui_surfaces:
+                        surface_msg = await self.send_a2ui_surface(websocket, a2ui_comps, a2ui_root)
+                        # Store as _a2ui_surface so frontend routes to A2UIRenderer on reload
+                        if chat_id and surface_msg:
+                            surface_dict = surface_msg.to_dict()
+                            a2ui_history = {
+                                "_a2ui_surface": {
+                                    "surfaceId": surface_dict.get("surfaceId", ""),
+                                    "catalogId": surface_dict.get("catalogId", "astral-default"),
+                                    "components": surface_dict.get("components", []),
+                                    "rootComponentId": surface_dict.get("rootComponentId", ""),
+                                }
+                            }
+                            self.history.add_message(chat_id, "assistant", a2ui_history, user_id=user_id)
 
                     if tool_ui_components:
-                        # Build label with agent attribution
-                        tool_labels = []
-                        for tn in tool_names:
-                            agent_id = tool_to_agent.get(tn, "")
-                            agent_name = self.agent_cards[agent_id].name if agent_id in self.agent_cards else ""
-                            label = tn.replace('_', ' ').title()
-                            if agent_name:
-                                label = f"{agent_name}: {label}"
-                            tool_labels.append(label)
-                        tool_label = ', '.join(tool_labels)
                         collapsible = Collapsible(
                             title=f"Tool Results — {tool_label}",
                             content=[
@@ -2371,11 +2484,46 @@ CRITICAL RULES:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
+    async def send_a2ui_surface(self, websocket, components: List[dict], root_id: str):
+        """Send native A2UI components directly as a surface (no flatten needed).
+
+        Returns the CreateSurfaceMessage for callers that need the surface data
+        (e.g. for history persistence).
+        """
+        a2ui_comps = [
+            A2UIComponent(**c) if isinstance(c, dict) else c
+            for c in components
+        ]
+        surface_msg = self.surface_manager.create_surface(
+            ws_id=id(websocket),
+            components=a2ui_comps,
+            root_id=root_id,
+        )
+        await self._safe_send(websocket, surface_msg.to_json())
+        return surface_msg
+
     async def send_ui_render(self, websocket, components: List):
-        """Send a UIRender message to a UI client, adapted via ROTE."""
+        """Send a UIRender message to a UI client, adapted via ROTE.
+
+        When the client uses A2UI protocol, components are flattened into
+        an adjacency list and wrapped in a CreateSurfaceMessage.
+        Legacy clients receive a UIRender as before.
+        """
         adapted = self.rote.adapt(websocket, components)
-        msg = UIRender(components=adapted)
-        await self._safe_send(websocket, msg.to_json())
+
+        proto = self._protocol_versions.get(id(websocket), "legacy")
+        if proto == "a2ui":
+            # Convert adapted legacy components to flat A2UI adjacency list
+            flat_components, root_id = flatten_tree(adapted)
+            surface_msg = self.surface_manager.create_surface(
+                ws_id=id(websocket),
+                components=flat_components,
+                root_id=root_id,
+            )
+            await self._safe_send(websocket, surface_msg.to_json())
+        else:
+            msg = UIRender(components=adapted)
+            await self._safe_send(websocket, msg.to_json())
 
     @staticmethod
     def _sanitize_tool_schema(schema: dict) -> dict:
@@ -2543,6 +2691,8 @@ CRITICAL RULES:
                 del self.ui_sessions[websocket]
             self._chat_locks.pop(id(websocket), None)
             self._registered_events.pop(id(websocket), None)
+            self._protocol_versions.pop(id(websocket), None)
+            self.surface_manager.cleanup(id(websocket))
             self.rote.cleanup(websocket)
             logger.info(f"UI client session cleaned up (total: {len(self.ui_clients)})")
 
@@ -2563,6 +2713,8 @@ CRITICAL RULES:
                 del self.ui_sessions[websocket]
             self._chat_locks.pop(id(websocket), None)
             self._registered_events.pop(id(websocket), None)
+            self._protocol_versions.pop(id(websocket), None)
+            self.surface_manager.cleanup(id(websocket))
             self.rote.cleanup(websocket)
             logger.info(f"UI client session cleaned up (total: {len(self.ui_clients)})")
 

@@ -10,12 +10,9 @@ from typing import Dict, Any, List, Optional
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from shared.primitives import (
-    Text, Card, Table, Container, MetricCard, ProgressBar,
-    Alert, Grid, BarChart, LineChart, PieChart, PlotlyChart, List_,
-    Collapsible, Divider, CodeBlock, Image, Tabs,
-    FileDownload, FileUpload, Button, Input, ColorPicker,
-    create_ui_response
+from shared.a2ui_builders import (
+    card, text, table, metric_card, alert, row, divider,
+    create_response, Node,
 )
 
 try:
@@ -122,47 +119,46 @@ def _records_to_table(
     source_params: Optional[Dict] = None,
     limit: Optional[int] = None,
     offset: Optional[int] = None,
-) -> Optional[Table]:
-    """Convert a list of record dicts into a Table component with optional pagination."""
+) -> Optional[Node]:
+    """Convert a list of record dicts into a table Node with optional pagination."""
     if not records:
         return None
     headers = list(records[0].keys())
     rows = []
     for rec in records:
-        row = []
+        row_data = []
         for h in headers:
             val = rec.get(h, "")
             if isinstance(val, (dict, list)):
-                row.append(json.dumps(val, default=str)[:200])
+                row_data.append(json.dumps(val, default=str)[:200])
             else:
-                row.append(str(val) if val is not None else "")
-        rows.append(row)
+                row_data.append(str(val) if val is not None else "")
+        rows.append(row_data)
 
-    tbl = Table(headers=headers, rows=rows)
-
-    # Attach pagination metadata if we have page info
+    # Build pagination kwargs
+    tbl_kwargs: Dict[str, Any] = {}
     if page_info and page_info.get("totalRows") is not None:
-        tbl.total_rows = page_info.get("totalRows", 0)
-        tbl.page_size = limit or page_info.get("pageSize", 25)
-        tbl.page_offset = offset or 0
-        tbl.page_sizes = DEFAULT_PAGE_SIZES
+        tbl_kwargs["total_rows"] = page_info.get("totalRows", 0)
+        tbl_kwargs["page_size"] = limit or page_info.get("pageSize", 25)
+        tbl_kwargs["page_offset"] = offset or 0
+        tbl_kwargs["page_sizes"] = DEFAULT_PAGE_SIZES
         if source_tool:
-            tbl.source_tool = source_tool
-            tbl.source_agent = AGENT_ID
-            tbl.source_params = source_params or {}
+            tbl_kwargs["source_tool"] = source_tool
+            tbl_kwargs["source_agent"] = AGENT_ID
+            tbl_kwargs["source_params"] = source_params or {}
 
-    return tbl
+    return table(headers, rows, **tbl_kwargs)
 
 
-def _page_info_metrics(page_info: Dict) -> List:
-    """Build MetricCard list from NocoDB pageInfo."""
+def _page_info_metrics(page_info: Dict) -> List[Node]:
+    """Build metric_card list from NocoDB pageInfo."""
     metrics = []
     if "totalRows" in page_info:
-        metrics.append(MetricCard(title="Total Rows", value=str(page_info["totalRows"])))
+        metrics.append(metric_card("Total Rows", str(page_info["totalRows"])))
     if "page" in page_info:
-        metrics.append(MetricCard(title="Page", value=str(page_info["page"])))
+        metrics.append(metric_card("Page", str(page_info["page"])))
     if "pageSize" in page_info:
-        metrics.append(MetricCard(title="Page Size", value=str(page_info["pageSize"])))
+        metrics.append(metric_card("Page Size", str(page_info["pageSize"])))
     return metrics
 
 
@@ -180,37 +176,34 @@ def check_connection(**kwargs) -> Dict[str, Any]:
         url_ok = bool(client.base_url)
 
         status_items = [
-            MetricCard(title="API Token", value="Configured" if token_ok else "Missing"),
-            MetricCard(title="Base URL", value=client.base_url if url_ok else "Missing"),
+            metric_card("API Token", "Configured" if token_ok else "Missing"),
+            metric_card("Base URL", client.base_url if url_ok else "Missing"),
         ]
 
         if token_ok and url_ok:
             try:
                 client.get("/api/v1/health")
-                status_items.append(MetricCard(title="Connection", value="OK"))
+                status_items.append(metric_card("Connection", "OK"))
             except Exception:
                 # Health endpoint may not exist on all versions; try a lightweight call
                 try:
                     client.get("/api/v1/version")
-                    status_items.append(MetricCard(title="Connection", value="OK"))
+                    status_items.append(metric_card("Connection", "OK"))
                 except Exception as inner:
-                    status_items.append(MetricCard(title="Connection", value=f"Error: {inner}"))
+                    status_items.append(metric_card("Connection", f"Error: {inner}"))
 
         components = [
-            Card(
-                title="NocoDB Connection Status",
-                content=[
-                    Grid(columns=3, children=status_items),
-                ]
+            card(
+                "NocoDB Connection Status",
+                [
+                    row(status_items),
+                ],
             )
         ]
 
-        return {
-            "_ui_components": [c.to_json() for c in components],
-            "_data": {"token_configured": token_ok, "url_configured": url_ok}
-        }
+        return create_response(components, data={"token_configured": token_ok, "url_configured": url_ok})
     except Exception as e:
-        return create_ui_response([Alert(message=f"Connection check failed: {e}", variant="error")])
+        return create_response([alert(f"Connection check failed: {e}", variant="error")])
 
 
 # ---------------------------------------------------------------------------
@@ -231,8 +224,8 @@ def list_tables(base_id: str = "", **kwargs) -> Dict[str, Any]:
         if not base_id:
             base_id = credentials.get("NOCODB_BASE_ID", "")
         if not base_id:
-            return create_ui_response([
-                Alert(message="No base_id provided and NOCODB_BASE_ID credential is not configured.", variant="error")
+            return create_response([
+                alert("No base_id provided and NOCODB_BASE_ID credential is not configured.", variant="error")
             ])
 
         data = client.get(f"/api/v2/meta/bases/{base_id}/tables")
@@ -251,21 +244,18 @@ def list_tables(base_id: str = "", **kwargs) -> Dict[str, Any]:
             table_map[title] = tid
 
         content = [
-            MetricCard(title="Tables Found", value=str(len(rows))),
-            Divider(),
+            metric_card("Tables Found", str(len(rows))),
+            divider(),
         ]
         if rows:
-            content.append(Table(headers=["Table Name", "Table ID", "Type"], rows=rows))
+            content.append(table(["Table Name", "Table ID", "Type"], rows))
         else:
-            content.append(Text(content="No tables found in this base.", variant="caption"))
+            content.append(text("No tables found in this base.", variant="caption"))
 
-        components = [Card(title=f"Tables in Base {base_id}", content=content)]
-        return {
-            "_ui_components": [c.to_json() for c in components],
-            "_data": {"tables": tables, "table_map": table_map}
-        }
+        components = [card(f"Tables in Base {base_id}", content)]
+        return create_response(components, data={"tables": tables, "table_map": table_map})
     except Exception as e:
-        return create_ui_response([Alert(message=f"Failed to list tables: {e}", variant="error")])
+        return create_response([alert(f"Failed to list tables: {e}", variant="error")])
 
 
 # ---------------------------------------------------------------------------
@@ -300,8 +290,8 @@ def list_records(table_id: str, fields: str = "", sort: str = "",
         content = []
         metrics = _page_info_metrics(page_info)
         if metrics:
-            content.append(Grid(columns=len(metrics), children=metrics))
-            content.append(Divider())
+            content.append(row(metrics))
+            content.append(divider())
 
         tool_params = {"table_id": table_id, "fields": fields, "sort": sort,
                        "view_id": view_id, "limit": limit, "offset": offset}
@@ -309,15 +299,12 @@ def list_records(table_id: str, fields: str = "", sort: str = "",
         if tbl:
             content.append(tbl)
         else:
-            content.append(Text(content="No records found.", variant="caption"))
+            content.append(text("No records found.", variant="caption"))
 
-        components = [Card(title=f"Records — {table_id}", content=content)]
-        return {
-            "_ui_components": [c.to_json() for c in components],
-            "_data": {"records": records, "pageInfo": page_info}
-        }
+        components = [card(f"Records — {table_id}", content)]
+        return create_response(components, data={"records": records, "pageInfo": page_info})
     except Exception as e:
-        return create_ui_response([Alert(message=f"Failed to list records: {e}", variant="error")])
+        return create_response([alert(f"Failed to list records: {e}", variant="error")])
 
 
 # ---------------------------------------------------------------------------
@@ -347,20 +334,17 @@ def get_record(table_id: str, record_id: str, fields: str = "", **kwargs) -> Dic
             rows.append([str(key), display_val])
 
         components = [
-            Card(
-                title=f"Record {record_id}",
-                content=[
-                    Table(headers=["Field", "Value"], rows=rows)
-                ]
+            card(
+                f"Record {record_id}",
+                [
+                    table(["Field", "Value"], rows),
+                ],
             )
         ]
 
-        return {
-            "_ui_components": [c.to_json() for c in components],
-            "_data": {"record": record}
-        }
+        return create_response(components, data={"record": record})
     except Exception as e:
-        return create_ui_response([Alert(message=f"Failed to get record: {e}", variant="error")])
+        return create_response([alert(f"Failed to get record: {e}", variant="error")])
 
 
 # ---------------------------------------------------------------------------
@@ -380,17 +364,14 @@ def count_records(table_id: str, where: str = "", view_id: str = "", **kwargs) -
         data = client.get(f"/api/v2/tables/{table_id}/records/count", params=params)
         count = data.get("count", 0)
 
-        content = [MetricCard(title="Record Count", value=str(count))]
+        content = [metric_card("Record Count", str(count))]
         if where:
-            content.append(Text(content=f"Filter: {where}", variant="caption"))
+            content.append(text(f"Filter: {where}", variant="caption"))
 
-        components = [Card(title=f"Count — {table_id}", content=content)]
-        return {
-            "_ui_components": [c.to_json() for c in components],
-            "_data": {"count": count}
-        }
+        components = [card(f"Count — {table_id}", content)]
+        return create_response(components, data={"count": count})
     except Exception as e:
-        return create_ui_response([Alert(message=f"Failed to count records: {e}", variant="error")])
+        return create_response([alert(f"Failed to count records: {e}", variant="error")])
 
 
 # ---------------------------------------------------------------------------
@@ -420,12 +401,12 @@ def search_records(table_id: str, where: str, fields: str = "", sort: str = "",
         page_info = data.get("pageInfo", {})
 
         content = [
-            Alert(message=f"Filter: {where}", variant="info"),
+            alert(f"Filter: {where}", variant="info"),
         ]
         metrics = _page_info_metrics(page_info)
         if metrics:
-            content.append(Grid(columns=len(metrics), children=metrics))
-            content.append(Divider())
+            content.append(row(metrics))
+            content.append(divider())
 
         tool_params = {"table_id": table_id, "where": where, "fields": fields,
                        "sort": sort, "limit": limit, "offset": offset}
@@ -433,15 +414,12 @@ def search_records(table_id: str, where: str, fields: str = "", sort: str = "",
         if tbl:
             content.append(tbl)
         else:
-            content.append(Text(content="No matching records.", variant="caption"))
+            content.append(text("No matching records.", variant="caption"))
 
-        components = [Card(title=f"Search Results — {table_id}", content=content)]
-        return {
-            "_ui_components": [c.to_json() for c in components],
-            "_data": {"records": records, "pageInfo": page_info}
-        }
+        components = [card(f"Search Results — {table_id}", content)]
+        return create_response(components, data={"records": records, "pageInfo": page_info})
     except Exception as e:
-        return create_ui_response([Alert(message=f"Search failed: {e}", variant="error")])
+        return create_response([alert(f"Search failed: {e}", variant="error")])
 
 
 # ---------------------------------------------------------------------------
@@ -474,9 +452,9 @@ def search_records_simple(table_id: str, field_name: str, operator: str, value: 
         page_info = data.get("pageInfo", {})
 
         content = [
-            Alert(message=f"{field_name} {operator} {value}", variant="info"),
-            MetricCard(title="Matches", value=str(page_info.get("totalRows", len(records)))),
-            Divider(),
+            alert(f"{field_name} {operator} {value}", variant="info"),
+            metric_card("Matches", str(page_info.get("totalRows", len(records)))),
+            divider(),
         ]
 
         tool_params = {"table_id": table_id, "field_name": field_name,
@@ -485,15 +463,12 @@ def search_records_simple(table_id: str, field_name: str, operator: str, value: 
         if tbl:
             content.append(tbl)
         else:
-            content.append(Text(content="No matching records.", variant="caption"))
+            content.append(text("No matching records.", variant="caption"))
 
-        components = [Card(title=f"Search — {table_id}", content=content)]
-        return {
-            "_ui_components": [c.to_json() for c in components],
-            "_data": {"records": records, "pageInfo": page_info, "filter": where}
-        }
+        components = [card(f"Search — {table_id}", content)]
+        return create_response(components, data={"records": records, "pageInfo": page_info, "filter": where})
     except Exception as e:
-        return create_ui_response([Alert(message=f"Search failed: {e}", variant="error")])
+        return create_response([alert(f"Search failed: {e}", variant="error")])
 
 
 # ---------------------------------------------------------------------------
@@ -534,11 +509,11 @@ def get_assigned_tasks(table_id: str, assignee: str, status: str = "",
                 for rec in data.get("list", []):
                     raw = rec.get("Assignee", "")
                     # User fields can be a string, dict, or list of dicts
-                    text = ""
+                    text_val = ""
                     if isinstance(raw, str):
-                        text = raw
+                        text_val = raw
                     elif isinstance(raw, dict):
-                        text = f"{raw.get('display_name', '')} {raw.get('email', '')}"
+                        text_val = f"{raw.get('display_name', '')} {raw.get('email', '')}"
                     elif isinstance(raw, list):
                         parts = []
                         for u in raw:
@@ -546,10 +521,10 @@ def get_assigned_tasks(table_id: str, assignee: str, status: str = "",
                                 parts.append(f"{u.get('display_name', '')} {u.get('email', '')}")
                             else:
                                 parts.append(str(u))
-                        text = " ".join(parts)
+                        text_val = " ".join(parts)
                     else:
-                        text = str(raw)
-                    if assignee_lower in text.lower():
+                        text_val = str(raw)
+                    if assignee_lower in text_val.lower():
                         filtered.append(rec)
                 data["list"] = filtered
                 if "pageInfo" in data:
@@ -562,14 +537,14 @@ def get_assigned_tasks(table_id: str, assignee: str, status: str = "",
         total = page_info.get("totalRows", len(records))
 
         content = [
-            Grid(columns=2, children=[
-                MetricCard(title="Assigned To", value=assignee),
-                MetricCard(title="Tasks Found", value=str(total)),
+            row([
+                metric_card("Assigned To", assignee),
+                metric_card("Tasks Found", str(total)),
             ]),
         ]
         if status:
-            content.append(Alert(message=f"Filtered by status: {status}", variant="info"))
-        content.append(Divider())
+            content.append(alert(f"Filtered by status: {status}", variant="info"))
+        content.append(divider())
 
         tool_params = {"table_id": table_id, "assignee": assignee,
                        "status": status, "limit": limit}
@@ -577,15 +552,12 @@ def get_assigned_tasks(table_id: str, assignee: str, status: str = "",
         if tbl:
             content.append(tbl)
         else:
-            content.append(Text(content=f"No tasks found assigned to {assignee}.", variant="caption"))
+            content.append(text(f"No tasks found assigned to {assignee}.", variant="caption"))
 
-        components = [Card(title=f"Tasks — {assignee}", content=content)]
-        return {
-            "_ui_components": [c.to_json() for c in components],
-            "_data": {"records": records, "pageInfo": page_info, "assignee": assignee}
-        }
+        components = [card(f"Tasks — {assignee}", content)]
+        return create_response(components, data={"records": records, "pageInfo": page_info, "assignee": assignee})
     except Exception as e:
-        return create_ui_response([Alert(message=f"Failed to get assigned tasks: {e}", variant="error")])
+        return create_response([alert(f"Failed to get assigned tasks: {e}", variant="error")])
 
 
 # ---------------------------------------------------------------------------
@@ -607,24 +579,21 @@ def create_record(table_id: str, data: str, **kwargs) -> Dict[str, Any]:
             rows.append([str(key), str(val)])
 
         components = [
-            Card(
-                title="Record Created",
-                content=[
-                    Alert(message=f"Successfully created record (ID: {new_id})", variant="success"),
-                    MetricCard(title="New Record ID", value=str(new_id)),
-                    Divider(),
-                    Table(headers=["Field", "Value"], rows=rows),
-                ]
+            card(
+                "Record Created",
+                [
+                    alert(f"Successfully created record (ID: {new_id})", variant="success"),
+                    metric_card("New Record ID", str(new_id)),
+                    divider(),
+                    table(["Field", "Value"], rows),
+                ],
             )
         ]
-        return {
-            "_ui_components": [c.to_json() for c in components],
-            "_data": {"created": result}
-        }
+        return create_response(components, data={"created": result})
     except json.JSONDecodeError as e:
-        return create_ui_response([Alert(message=f"Invalid JSON in data parameter: {e}", variant="error")])
+        return create_response([alert(f"Invalid JSON in data parameter: {e}", variant="error")])
     except Exception as e:
-        return create_ui_response([Alert(message=f"Failed to create record: {e}", variant="error")])
+        return create_response([alert(f"Failed to create record: {e}", variant="error")])
 
 
 # ---------------------------------------------------------------------------
@@ -638,7 +607,7 @@ def create_records_batch(table_id: str, records: str, **kwargs) -> Dict[str, Any
         records_data = json.loads(records) if isinstance(records, str) else records
 
         if not isinstance(records_data, list):
-            return create_ui_response([Alert(message="records must be a JSON array of objects.", variant="error")])
+            return create_response([alert("records must be a JSON array of objects.", variant="error")])
 
         result = client.post(f"/api/v2/tables/{table_id}/records", json_body=records_data)
 
@@ -646,24 +615,21 @@ def create_records_batch(table_id: str, records: str, **kwargs) -> Dict[str, Any
         rows = [[str(r.get("Id", r.get("id", "?")))] for r in created_ids]
 
         components = [
-            Card(
-                title="Batch Create Complete",
-                content=[
-                    Alert(message=f"Successfully created {len(created_ids)} record(s)", variant="success"),
-                    MetricCard(title="Records Created", value=str(len(created_ids))),
-                    Divider(),
-                    Table(headers=["Created ID"], rows=rows),
-                ]
+            card(
+                "Batch Create Complete",
+                [
+                    alert(f"Successfully created {len(created_ids)} record(s)", variant="success"),
+                    metric_card("Records Created", str(len(created_ids))),
+                    divider(),
+                    table(["Created ID"], rows),
+                ],
             )
         ]
-        return {
-            "_ui_components": [c.to_json() for c in components],
-            "_data": {"created": created_ids}
-        }
+        return create_response(components, data={"created": created_ids})
     except json.JSONDecodeError as e:
-        return create_ui_response([Alert(message=f"Invalid JSON in records parameter: {e}", variant="error")])
+        return create_response([alert(f"Invalid JSON in records parameter: {e}", variant="error")])
     except Exception as e:
-        return create_ui_response([Alert(message=f"Failed to batch create records: {e}", variant="error")])
+        return create_response([alert(f"Failed to batch create records: {e}", variant="error")])
 
 
 # ---------------------------------------------------------------------------
@@ -686,24 +652,21 @@ def update_record(table_id: str, record_id: str, data: str, **kwargs) -> Dict[st
             rows.append([str(key), str(val)])
 
         components = [
-            Card(
-                title="Record Updated",
-                content=[
-                    Alert(message=f"Successfully updated record {record_id}", variant="success"),
-                    MetricCard(title="Record ID", value=str(record_id)),
-                    Divider(),
-                    Table(headers=["Updated Field", "New Value"], rows=rows),
-                ]
+            card(
+                "Record Updated",
+                [
+                    alert(f"Successfully updated record {record_id}", variant="success"),
+                    metric_card("Record ID", str(record_id)),
+                    divider(),
+                    table(["Updated Field", "New Value"], rows),
+                ],
             )
         ]
-        return {
-            "_ui_components": [c.to_json() for c in components],
-            "_data": {"updated": result}
-        }
+        return create_response(components, data={"updated": result})
     except json.JSONDecodeError as e:
-        return create_ui_response([Alert(message=f"Invalid JSON in data parameter: {e}", variant="error")])
+        return create_response([alert(f"Invalid JSON in data parameter: {e}", variant="error")])
     except Exception as e:
-        return create_ui_response([Alert(message=f"Failed to update record: {e}", variant="error")])
+        return create_response([alert(f"Failed to update record: {e}", variant="error")])
 
 
 # ---------------------------------------------------------------------------
@@ -717,11 +680,11 @@ def update_records_batch(table_id: str, records: str, **kwargs) -> Dict[str, Any
         records_data = json.loads(records) if isinstance(records, str) else records
 
         if not isinstance(records_data, list):
-            return create_ui_response([Alert(message="records must be a JSON array of objects, each with an Id field.", variant="error")])
+            return create_response([alert("records must be a JSON array of objects, each with an Id field.", variant="error")])
 
         missing_ids = [i for i, r in enumerate(records_data) if "Id" not in r and "id" not in r]
         if missing_ids:
-            return create_ui_response([Alert(message=f"Records at indices {missing_ids} are missing the required Id field.", variant="error")])
+            return create_response([alert(f"Records at indices {missing_ids} are missing the required Id field.", variant="error")])
 
         result = client.patch(f"/api/v2/tables/{table_id}/records", json_body=records_data)
 
@@ -729,24 +692,21 @@ def update_records_batch(table_id: str, records: str, **kwargs) -> Dict[str, Any
         rows = [[str(r.get("Id", r.get("id", "?")))] for r in updated]
 
         components = [
-            Card(
-                title="Batch Update Complete",
-                content=[
-                    Alert(message=f"Successfully updated {len(updated)} record(s)", variant="success"),
-                    MetricCard(title="Records Updated", value=str(len(updated))),
-                    Divider(),
-                    Table(headers=["Updated ID"], rows=rows),
-                ]
+            card(
+                "Batch Update Complete",
+                [
+                    alert(f"Successfully updated {len(updated)} record(s)", variant="success"),
+                    metric_card("Records Updated", str(len(updated))),
+                    divider(),
+                    table(["Updated ID"], rows),
+                ],
             )
         ]
-        return {
-            "_ui_components": [c.to_json() for c in components],
-            "_data": {"updated": updated}
-        }
+        return create_response(components, data={"updated": updated})
     except json.JSONDecodeError as e:
-        return create_ui_response([Alert(message=f"Invalid JSON in records parameter: {e}", variant="error")])
+        return create_response([alert(f"Invalid JSON in records parameter: {e}", variant="error")])
     except Exception as e:
-        return create_ui_response([Alert(message=f"Failed to batch update records: {e}", variant="error")])
+        return create_response([alert(f"Failed to batch update records: {e}", variant="error")])
 
 
 # ---------------------------------------------------------------------------
@@ -763,7 +723,7 @@ def delete_records(table_id: str, record_ids: str, **kwargs) -> Dict[str, Any]:
         ids = json.loads(record_ids) if isinstance(record_ids, str) else record_ids
 
         if not isinstance(ids, list) or len(ids) == 0:
-            return create_ui_response([Alert(message="record_ids must be a non-empty JSON array of IDs.", variant="error")])
+            return create_response([alert("record_ids must be a non-empty JSON array of IDs.", variant="error")])
 
         body = [{"Id": rid} for rid in ids]
         result = client.delete(f"/api/v2/tables/{table_id}/records", json_body=body)
@@ -772,27 +732,24 @@ def delete_records(table_id: str, record_ids: str, **kwargs) -> Dict[str, Any]:
         rows = [[str(r.get("Id", r.get("id", "?")))] for r in deleted]
 
         components = [
-            Card(
-                title="Records Deleted",
-                content=[
-                    Alert(
-                        message=f"Permanently deleted {len(deleted)} record(s). This action cannot be undone.",
-                        variant="warning"
+            card(
+                "Records Deleted",
+                [
+                    alert(
+                        f"Permanently deleted {len(deleted)} record(s). This action cannot be undone.",
+                        variant="warning",
                     ),
-                    MetricCard(title="Records Deleted", value=str(len(deleted))),
-                    Divider(),
-                    Table(headers=["Deleted ID"], rows=rows),
-                ]
+                    metric_card("Records Deleted", str(len(deleted))),
+                    divider(),
+                    table(["Deleted ID"], rows),
+                ],
             )
         ]
-        return {
-            "_ui_components": [c.to_json() for c in components],
-            "_data": {"deleted": deleted}
-        }
+        return create_response(components, data={"deleted": deleted})
     except json.JSONDecodeError as e:
-        return create_ui_response([Alert(message=f"Invalid JSON in record_ids parameter: {e}", variant="error")])
+        return create_response([alert(f"Invalid JSON in record_ids parameter: {e}", variant="error")])
     except Exception as e:
-        return create_ui_response([Alert(message=f"Failed to delete records: {e}", variant="error")])
+        return create_response([alert(f"Failed to delete records: {e}", variant="error")])
 
 
 # ---------------------------------------------------------------------------
@@ -814,8 +771,8 @@ def list_linked_records(table_id: str, link_field_id: str, record_id: str,
         page_info = data.get("pageInfo", {})
 
         content = [
-            MetricCard(title="Linked Records", value=str(page_info.get("totalRows", len(records)))),
-            Divider(),
+            metric_card("Linked Records", str(page_info.get("totalRows", len(records)))),
+            divider(),
         ]
 
         tool_params = {"table_id": table_id, "link_field_id": link_field_id,
@@ -824,15 +781,12 @@ def list_linked_records(table_id: str, link_field_id: str, record_id: str,
         if tbl:
             content.append(tbl)
         else:
-            content.append(Text(content="No linked records found.", variant="caption"))
+            content.append(text("No linked records found.", variant="caption"))
 
-        components = [Card(title=f"Linked Records — {record_id}", content=content)]
-        return {
-            "_ui_components": [c.to_json() for c in components],
-            "_data": {"records": records, "pageInfo": page_info}
-        }
+        components = [card(f"Linked Records — {record_id}", content)]
+        return create_response(components, data={"records": records, "pageInfo": page_info})
     except Exception as e:
-        return create_ui_response([Alert(message=f"Failed to list linked records: {e}", variant="error")])
+        return create_response([alert(f"Failed to list linked records: {e}", variant="error")])
 
 
 # ---------------------------------------------------------------------------
@@ -850,7 +804,7 @@ def link_records(table_id: str, link_field_id: str, record_id: str,
         ids = json.loads(linked_record_ids) if isinstance(linked_record_ids, str) else linked_record_ids
 
         if not isinstance(ids, list) or len(ids) == 0:
-            return create_ui_response([Alert(message="linked_record_ids must be a non-empty JSON array of IDs.", variant="error")])
+            return create_response([alert("linked_record_ids must be a non-empty JSON array of IDs.", variant="error")])
 
         body = [{"Id": rid} for rid in ids]
         client.post(
@@ -859,25 +813,22 @@ def link_records(table_id: str, link_field_id: str, record_id: str,
         )
 
         components = [
-            Card(
-                title="Records Linked",
-                content=[
-                    Alert(
-                        message=f"Successfully linked {len(ids)} record(s) to record {record_id}.",
-                        variant="success"
+            card(
+                "Records Linked",
+                [
+                    alert(
+                        f"Successfully linked {len(ids)} record(s) to record {record_id}.",
+                        variant="success",
                     ),
-                    MetricCard(title="Links Created", value=str(len(ids))),
-                ]
+                    metric_card("Links Created", str(len(ids))),
+                ],
             )
         ]
-        return {
-            "_ui_components": [c.to_json() for c in components],
-            "_data": {"linked": ids, "source_record": record_id}
-        }
+        return create_response(components, data={"linked": ids, "source_record": record_id})
     except json.JSONDecodeError as e:
-        return create_ui_response([Alert(message=f"Invalid JSON in linked_record_ids: {e}", variant="error")])
+        return create_response([alert(f"Invalid JSON in linked_record_ids: {e}", variant="error")])
     except Exception as e:
-        return create_ui_response([Alert(message=f"Failed to link records: {e}", variant="error")])
+        return create_response([alert(f"Failed to link records: {e}", variant="error")])
 
 
 # ---------------------------------------------------------------------------
@@ -895,7 +846,7 @@ def unlink_records(table_id: str, link_field_id: str, record_id: str,
         ids = json.loads(linked_record_ids) if isinstance(linked_record_ids, str) else linked_record_ids
 
         if not isinstance(ids, list) or len(ids) == 0:
-            return create_ui_response([Alert(message="linked_record_ids must be a non-empty JSON array of IDs.", variant="error")])
+            return create_response([alert("linked_record_ids must be a non-empty JSON array of IDs.", variant="error")])
 
         body = [{"Id": rid} for rid in ids]
         client.delete(
@@ -904,25 +855,22 @@ def unlink_records(table_id: str, link_field_id: str, record_id: str,
         )
 
         components = [
-            Card(
-                title="Records Unlinked",
-                content=[
-                    Alert(
-                        message=f"Removed {len(ids)} link(s) from record {record_id}. This cannot be undone.",
-                        variant="warning"
+            card(
+                "Records Unlinked",
+                [
+                    alert(
+                        f"Removed {len(ids)} link(s) from record {record_id}. This cannot be undone.",
+                        variant="warning",
                     ),
-                    MetricCard(title="Links Removed", value=str(len(ids))),
-                ]
+                    metric_card("Links Removed", str(len(ids))),
+                ],
             )
         ]
-        return {
-            "_ui_components": [c.to_json() for c in components],
-            "_data": {"unlinked": ids, "source_record": record_id}
-        }
+        return create_response(components, data={"unlinked": ids, "source_record": record_id})
     except json.JSONDecodeError as e:
-        return create_ui_response([Alert(message=f"Invalid JSON in linked_record_ids: {e}", variant="error")])
+        return create_response([alert(f"Invalid JSON in linked_record_ids: {e}", variant="error")])
     except Exception as e:
-        return create_ui_response([Alert(message=f"Failed to unlink records: {e}", variant="error")])
+        return create_response([alert(f"Failed to unlink records: {e}", variant="error")])
 
 
 # ---------------------------------------------------------------------------
@@ -935,7 +883,7 @@ def upload_attachment(file_path: str, storage_path: str = "", **kwargs) -> Dict[
         client = _build_client(kwargs)
 
         if not os.path.isfile(file_path):
-            return create_ui_response([Alert(message=f"File not found: {file_path}", variant="error")])
+            return create_response([alert(f"File not found: {file_path}", variant="error")])
 
         result = client.upload("/api/v2/storage/upload", file_path, storage_path)
 
@@ -943,23 +891,20 @@ def upload_attachment(file_path: str, storage_path: str = "", **kwargs) -> Dict[
         file_size = os.path.getsize(file_path)
 
         components = [
-            Card(
-                title="Attachment Uploaded",
-                content=[
-                    Alert(message=f"Successfully uploaded {file_name}", variant="success"),
-                    Grid(columns=2, children=[
-                        MetricCard(title="File Name", value=file_name),
-                        MetricCard(title="File Size", value=f"{file_size:,} bytes"),
+            card(
+                "Attachment Uploaded",
+                [
+                    alert(f"Successfully uploaded {file_name}", variant="success"),
+                    row([
+                        metric_card("File Name", file_name),
+                        metric_card("File Size", f"{file_size:,} bytes"),
                     ]),
-                ]
+                ],
             )
         ]
-        return {
-            "_ui_components": [c.to_json() for c in components],
-            "_data": {"upload_result": result}
-        }
+        return create_response(components, data={"upload_result": result})
     except Exception as e:
-        return create_ui_response([Alert(message=f"Upload failed: {e}", variant="error")])
+        return create_response([alert(f"Upload failed: {e}", variant="error")])
 
 
 # ---------------------------------------------------------------------------

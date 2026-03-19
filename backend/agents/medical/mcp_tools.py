@@ -12,9 +12,9 @@ from typing import Dict, Any, List
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from shared.primitives import (
-    Card, Table, Grid, MetricCard, Alert, BarChart, Text,
-    FileUpload, FileDownload, create_ui_response
+from shared.a2ui_builders import (
+    card, text, table, metric_card, alert, row,
+    file_upload, file_download, create_response, Node,
 )
 
 # =============================================================================
@@ -44,7 +44,7 @@ def search_patients(min_age: int = 0, max_age: int = 200, condition: str = "", s
         condition: Condition keyword to filter by (case-insensitive, partial match)
 
     Returns:
-        Dict with _ui_components and _data keys.
+        Dict with _a2ui_components and _data keys.
     """
     try:
         min_age = int(min_age)
@@ -61,8 +61,8 @@ def search_patients(min_age: int = 0, max_age: int = 200, condition: str = "", s
         results.append(p)
 
     if not results:
-        return create_ui_response([
-            Alert(message="No patients found matching your criteria.", variant="info", title="Search Results")
+        return create_response([
+            alert("No patients found matching your criteria.", variant="info", title="Search Results")
         ])
 
     headers = ["ID", "Name", "Age", "Condition", "Status"]
@@ -73,36 +73,32 @@ def search_patients(min_age: int = 0, max_age: int = 200, condition: str = "", s
         status_summary[p["status"]] = status_summary.get(p["status"], 0) + 1
 
     components = [
-        Card(
-            title=f"Patient Search Results ({len(results)} found)",
-            id="patient-results-card",
-            content=[
-                Text(content=f"Showing patients aged {min_age}+" +
+        card(
+            f"Patient Search Results ({len(results)} found)",
+            [
+                text(f"Showing patients aged {min_age}+" +
                      (f" with condition matching '{condition}'" if condition else ""),
                      variant="caption"),
-                Table(headers=headers, rows=rows, id="patient-table"),
-            ]
+                table(headers, rows, id="patient-table"),
+            ],
+            id="patient-results-card",
         ),
-        Grid(
-            columns=len(status_summary),
-            id="patient-metrics",
-            children=[
-                MetricCard(
-                    title=status,
-                    value=str(count),
+        row(
+            [
+                metric_card(
+                    status,
+                    str(count),
                     subtitle="patients",
                     variant="warning" if status == "Severe" else "error" if status == "Critical" else "default",
                     id=f"metric-{status.lower()}"
                 )
                 for status, count in status_summary.items()
-            ]
+            ],
+            id="patient-metrics",
         )
     ]
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {"patients": results, "total": len(results)}
-    }
+    return create_response(components, data={"patients": results, "total": len(results)})
 
 
 def generate_synthetic_patients(count: int = 50, session_id: str = "default", user_id: str = "legacy", **kwargs) -> Dict[str, Any]:
@@ -113,7 +109,7 @@ def generate_synthetic_patients(count: int = 50, session_id: str = "default", us
     """
     conditions = ["Hypertension", "Type 2 Diabetes", "Asthma", "Osteoarthritis", "Healthy"]
     statuses = ["Stable", "Monitoring", "Critical", "Recovered"]
-    
+
     patients = []
     for i in range(count):
         patients.append({
@@ -126,12 +122,12 @@ def generate_synthetic_patients(count: int = 50, session_id: str = "default", us
 
     # Save to CSV
     filename = f"synthetic_patients_{count}.csv"
-    
+
     backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
     download_dir = os.path.join(backend_dir, "tmp", user_id, session_id)
     os.makedirs(download_dir, exist_ok=True)
     file_path = os.path.join(download_dir, filename)
-    
+
     with open(file_path, mode='w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=["id", "age", "condition", "status", "heart_rate"])
         writer.writeheader()
@@ -147,86 +143,74 @@ def generate_synthetic_patients(count: int = 50, session_id: str = "default", us
     download_url = f"{bff_url}/api/download/{session_id}/{filename}"
 
     components = [
-        Card(
-            title="Synthetic Patient Data Generated",
-            id="synth-data-card",
-            content=[
-                Alert(message=f"Successfully generated {count} synthetic patient records.", variant="success"),
-                FileDownload(
+        card(
+            "Synthetic Patient Data Generated",
+            [
+                alert(f"Successfully generated {count} synthetic patient records.", variant="success"),
+                file_download(
+                    download_url,
                     label=f"Download {filename}",
-                    url=download_url,
-                    filename=filename
+                    filename=filename,
                 ),
-                Table(headers=headers, rows=rows, id="synth-data-preview"),
-            ]
+                table(headers, rows, id="synth-data-preview"),
+            ],
+            id="synth-data-card",
         )
     ]
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {"generated_count": count, "preview": patients[:5], "file_path": file_path}
-    }
+    return create_response(components, data={"generated_count": count, "preview": patients[:5], "file_path": file_path})
 
 
 def analyze_patient_data() -> Dict[str, Any]:
     """Analyze patient data and ask the user to upload a file if more data is needed."""
-    
+
     components = [
-        Card(
-            title="Patient Data Analysis",
-            id="analysis-card",
-            content=[
-                Alert(message="Provide a patient dataset for comprehensive analysis.", variant="info"),
-                FileUpload(
+        card(
+            "Patient Data Analysis",
+            [
+                alert("Provide a patient dataset for comprehensive analysis.", variant="info"),
+                file_upload(
                     label="Upload Dataset CSV",
                     accept=".csv,.json",
-                    action="analyze_uploaded_data"
+                    action="analyze_uploaded_data",
                 ),
-                Grid(
-                    columns=2,
-                    children=[
-                        MetricCard(title="Analysis Ready", value="Yes", variant="success"),
-                        MetricCard(title="Supported Formats", value="CSV, JSON", variant="default")
-                    ]
-                )
-            ]
+                row([
+                    metric_card("Analysis Ready", "Yes", variant="success"),
+                    metric_card("Supported Formats", "CSV, JSON", variant="default"),
+                ]),
+            ],
+            id="analysis-card",
         )
     ]
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {"status": "waiting_for_upload"}
-    }
+    return create_response(components, data={"status": "waiting_for_upload"})
 
 
 def _process_csv_data(rows: List[Dict[str, str]], fieldnames: List[str], missing_strategy: str = 'ask') -> Dict[str, Any]:
     """Internal helper to process CSV data rows and fieldnames."""
     missing_counts = {f: 0 for f in fieldnames}
     rows_with_missing = set()
-    
-    for i, row in enumerate(rows):
+
+    for i, row_data in enumerate(rows):
         for f in fieldnames:
-            val = row.get(f, "").strip()
+            val = row_data.get(f, "").strip()
             if not val:
                 missing_counts[f] += 1
                 rows_with_missing.add(i)
 
     total_missing = sum(missing_counts.values())
     components = []
-    
+
     if total_missing > 0:
         if missing_strategy == 'ask':
-            components.append(Alert(message=f"Detected {total_missing} missing values across {len(rows_with_missing)} rows.", variant="warning", title="Missing Data Detected"))
+            components.append(alert(f"Detected {total_missing} missing values across {len(rows_with_missing)} rows.", variant="warning", title="Missing Data Detected"))
             missing_stats_rows = [[f, str(count)] for f, count in missing_counts.items() if count > 0]
-            components.append(Table(headers=["Column", "Missing Count"], rows=missing_stats_rows))
-            components.append(Text(content="How would you like to handle the missing data? You can tell me to 'drop' the rows with missing data or 'fill' them with synthetic averages/defaults.", variant="body"))
-            return {
-                "_ui_components": [c.to_json() for c in components],
-                "_data": {"status": "waiting_for_missing_strategy", "missing_counts": missing_counts}
-            }
+            components.append(table(["Column", "Missing Count"], missing_stats_rows))
+            components.append(text("How would you like to handle the missing data? You can tell me to 'drop' the rows with missing data or 'fill' them with synthetic averages/defaults.", variant="body"))
+            return create_response(components, data={"status": "waiting_for_missing_strategy", "missing_counts": missing_counts})
         elif missing_strategy == 'drop':
             rows = [r for i, r in enumerate(rows) if i not in rows_with_missing]
-            components.append(Alert(message=f"Dropped {len(rows_with_missing)} rows containing missing data.", variant="info"))
+            components.append(alert(f"Dropped {len(rows_with_missing)} rows containing missing data.", variant="info"))
         elif missing_strategy == 'fill_synthetic':
             for f in fieldnames:
                 if missing_counts[f] > 0:
@@ -248,10 +232,10 @@ def _process_csv_data(rows: List[Dict[str, str]], fieldnames: List[str], missing
                         for r in rows:
                             if not r.get(f, "").strip():
                                 r[f] = "Unknown"
-            components.append(Alert(message=f"Filled missing data with synthetic averages or defaults.", variant="success"))
+            components.append(alert("Filled missing data with synthetic averages or defaults.", variant="success"))
 
     if not rows:
-        return create_ui_response(components + [Alert(message="No data remaining after applying missing data strategy.", variant="error")])
+        return create_response(components + [alert("No data remaining after applying missing data strategy.", variant="error")])
 
     numeric_cols = []
     for f in fieldnames:
@@ -272,29 +256,26 @@ def _process_csv_data(rows: List[Dict[str, str]], fieldnames: List[str], missing
         vals = [float(r[f]) for r in rows if r.get(f, "").strip()]
         if vals:
             avg = sum(vals) / len(vals)
-            metrics.append(MetricCard(title=f"Avg {f}", value=f"{avg:.2f}", variant="default"))
+            metrics.append(metric_card(f"Avg {f}", f"{avg:.2f}", variant="default"))
 
     if metrics:
-        components.append(Grid(columns=len(metrics), children=metrics, id="generic-metrics"))
+        components.append(row(metrics, id="generic-metrics"))
 
     preview_rows = []
     for r in rows[:5]:
         preview_rows.append([str(r.get(f, "")) for f in fieldnames])
-        
-    components.append(Card(
-        title=f"Data Analysis ({len(rows)} rows)",
-        content=[Table(headers=fieldnames, rows=preview_rows)]
+
+    components.append(card(
+        f"Data Analysis ({len(rows)} rows)",
+        [table(fieldnames, preview_rows)],
     ))
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {"processed_rows": len(rows), "columns": fieldnames, "stats_computed": True}
-    }
+    return create_response(components, data={"processed_rows": len(rows), "columns": fieldnames, "stats_computed": True})
 
 
 def analyze_generic_data(csv_data: str, missing_strategy: str = 'ask', session_id: str = "default", **kwargs) -> Dict[str, Any]:
     """Analyze a generic CSV dataset.
-    
+
     Args:
         csv_data: Raw CSV string data.
         missing_strategy: Strategy to handle missing data ('ask', 'drop', 'fill_synthetic').
@@ -312,33 +293,33 @@ def analyze_generic_data(csv_data: str, missing_strategy: str = 'ask', session_i
         reader = csv.DictReader(io.StringIO(csv_data))
         rows = list(reader)
         if not rows:
-            return create_ui_response([Alert(message="CSV contains no data rows.", variant="error")])
+            return create_response([alert("CSV contains no data rows.", variant="error")])
         fieldnames = reader.fieldnames or []
         return _process_csv_data(rows, fieldnames, missing_strategy)
     except Exception as e:
-        return create_ui_response([Alert(message=f"Failed to parse CSV: {e}", variant="error")])
+        return create_response([alert(f"Failed to parse CSV: {e}", variant="error")])
 
 
 def analyze_csv_file(file_path: str, missing_strategy: str = 'ask', session_id: str = "default", **kwargs) -> Dict[str, Any]:
     """Analyze a CSV file stored on the backend.
-    
+
     Args:
         file_path: Absolute path to the CSV file.
         missing_strategy: Strategy for missing data ('ask', 'drop', 'fill_synthetic').
     """
     if not os.path.exists(file_path):
-        return create_ui_response([Alert(message=f"File not found: {file_path}", variant="error")])
+        return create_response([alert(f"File not found: {file_path}", variant="error")])
 
     try:
         with open(file_path, mode='r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
             rows = list(reader)
             if not rows:
-                return create_ui_response([Alert(message="CSV file contains no data rows.", variant="error")])
+                return create_response([alert("CSV file contains no data rows.", variant="error")])
             fieldnames = reader.fieldnames or []
             return _process_csv_data(rows, fieldnames, missing_strategy)
     except Exception as e:
-        return create_ui_response([Alert(message=f"Failed to read CSV file: {e}", variant="error")])
+        return create_response([alert(f"Failed to read CSV file: {e}", variant="error")])
 
 
 TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {

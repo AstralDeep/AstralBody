@@ -13,9 +13,10 @@ import { Send, Bot, User, Sparkles, Loader2, ChevronLeft, Paperclip, UploadCloud
 import { toast } from "sonner";
 import DynamicRenderer from "./DynamicRenderer";
 import type { TablePaginateEvent } from "./DynamicRenderer";
+import A2UIRenderer from "./A2UIRenderer";
 import UISavedDrawer from "./UISavedDrawer";
 import { BFF_URL } from "../config";
-import type { ChatStatus, DeviceCapabilityFlags } from "../hooks/useWebSocket";
+import type { ChatStatus, DeviceCapabilityFlags, A2UISurface } from "../hooks/useWebSocket";
 
 interface ChatInterfaceProps {
     messages: { role: string; content: unknown }[];
@@ -777,6 +778,13 @@ export default function ChatInterface({
                                 <div className="space-y-2">
                                     {renderUserMessage(msg.content as string)}
                                 </div>
+                            ) : (msg.content as Record<string, unknown>)?._a2ui_surface ? (
+                                <A2UIRenderer
+                                    surface={(msg.content as Record<string, unknown>)._a2ui_surface as A2UISurface}
+                                    onSaveComponent={onSaveComponent}
+                                    onSendMessage={onSendMessage}
+                                    onTablePaginate={onTablePaginate}
+                                />
                             ) : (
                                 <DynamicRenderer
                                     components={msg.content as unknown[]}

@@ -1,5 +1,5 @@
 """
-MCP Tools — tool functions that return UI Primitives.
+MCP Tools — tool functions that return A2UI components.
 
 Includes:
 - Patient tools (mock): search_patients, graph_patient_data
@@ -35,10 +35,10 @@ from shared.expression_evaluator import ExpressionEvaluator, safe_eval
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from shared.primitives import (
-    Text, Card, Table, Container, MetricCard, ProgressBar,
-    Alert, Grid, BarChart, LineChart, PieChart, PlotlyChart, List_,
-    FileDownload, create_ui_response, ColorPicker, Button, Divider
+from shared.a2ui_builders import (
+    card, text, button, table, metric_card, alert, row, column,
+    plotly_chart, list_component, color_picker, divider,
+    file_download, create_response, Node,
 )
 
 
@@ -69,16 +69,16 @@ def generate_dynamic_chart(
         try:
             data = json.loads(data)
         except json.JSONDecodeError:
-            return {
-                "_ui_components": [Alert(message="Invalid data format provided. Expected JSON array.", variant="error").to_json()],
-                "_data": {}
-            }
+            return create_response(
+                alert("Invalid data format provided. Expected JSON array.", variant="error"),
+                data={},
+            )
 
     if not data:
-        return {
-            "_ui_components": [Alert(message="No data provided to graph.", variant="warning").to_json()],
-            "_data": {}
-        }
+        return create_response(
+            alert("No data provided to graph.", variant="warning"),
+            data={},
+        )
 
     # --- THE FIX ---
     # Normalize y_key (LLMs sometimes pass the string "null", "None", or "")
@@ -156,32 +156,23 @@ def generate_dynamic_chart(
                 "categoryorder": "category ascending" # This forces the X-axis to sort neatly!
             }
 
-    # 5. Build UI Primitives
-    chart = PlotlyChart(
+    # 5. Build A2UI components
+    chart_node = plotly_chart(
         title=title,
         data=chart_data,
         layout=layout_update,
-        id="dynamic-chart"
+        id="dynamic-chart",
     )
 
-    components = [
-        Card(
-            title=title,
-            id="chart-card",
-            content=[chart]
-        )
-    ]
+    ui = card(title, [chart_node], id="chart-card")
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {
-            "labels": labels, 
-            "values": values, 
-            "x_key": x_key, 
-            "y_key": y_key, 
-            "rendered_chart_type": chart_type
-        }
-    }
+    return create_response(ui, data={
+        "labels": labels,
+        "values": values,
+        "x_key": x_key,
+        "y_key": y_key,
+        "rendered_chart_type": chart_type,
+    })
 
 
 
@@ -221,7 +212,7 @@ def modify_data(
         input_format = None
         if file_path:
             if not os.path.exists(file_path):
-                return create_ui_response([Alert(message=f"File not found: {file_path}", variant="error")])
+                return create_response(alert(f"File not found: {file_path}", variant="error"))
             # Detect format from extension
             if file_path.lower().endswith('.csv'):
                 input_format = 'csv'
@@ -265,7 +256,7 @@ def modify_data(
                 fieldnames = list(reader.fieldnames) if reader.fieldnames else []
                 rows = list(reader)
             else:
-                return create_ui_response([Alert(message="Neither csv_data nor file_path provided.", variant="error")])
+                return create_response(alert("Neither csv_data nor file_path provided.", variant="error"))
 
         # Process each modification
         for mod in modifications:
@@ -304,7 +295,7 @@ def modify_data(
                     try:
                         evaluator = ExpressionEvaluator(expression)
                     except Exception as e:
-                        return create_ui_response([Alert(message=f"Invalid expression '{expression}': {e}", variant="error")])
+                        return create_response(alert(f"Invalid expression '{expression}': {e}", variant="error"))
                     
                     filtered_rows = []
                     for row in rows:
@@ -344,9 +335,7 @@ def modify_data(
                 try:
                     evaluator = ExpressionEvaluator(expression)
                 except Exception as e:
-                    return create_ui_response([
-                        Alert(message=f"Invalid expression '{expression}': {e}", variant="error")
-                    ])
+                    return create_response(alert(f"Invalid expression '{expression}': {e}", variant="error"))
             
             # Apply modification row by row
             for i, row in enumerate(rows):
@@ -429,42 +418,29 @@ def modify_data(
         preview_headers = fieldnames[:5]
         preview_rows = [[str(row.get(f, "")) for f in preview_headers] for row in rows[:5]]
 
-        components = [
-            Card(
-                title="Data Modified Successfully",
-                id="modify-data-card",
-                content=[
-                    Alert(
-                        message=f"Applied {len(modifications)} modifications to {len(rows)} rows. Output format: {output_format.upper()}.",
-                        variant="success"
-                    ),
-                    FileDownload(
-                        label=f"Download {filename}",
-                        url=download_url,
-                        filename=filename
-                    ),
-                    Table(
-                        headers=preview_headers,
-                        rows=preview_rows,
-                        id="modify-data-preview"
-                    )
-                ]
-            )
-        ]
+        ui = card("Data Modified Successfully", [
+            alert(
+                f"Applied {len(modifications)} modifications to {len(rows)} rows. Output format: {output_format.upper()}.",
+                variant="success",
+            ),
+            file_download(
+                download_url,
+                label=f"Download {filename}",
+                filename=filename,
+            ),
+            table(preview_headers, preview_rows, id="modify-data-preview"),
+        ], id="modify-data-card")
 
-        return {
-            "_ui_components": [c.to_json() for c in components],
-            "_data": {
-                "filename": filename,
-                "file_path": out_file_path,
-                "rows_count": len(rows),
-                "output_format": output_format,
-                "modifications_applied": len(modifications)
-            }
-        }
+        return create_response(ui, data={
+            "filename": filename,
+            "file_path": out_file_path,
+            "rows_count": len(rows),
+            "output_format": output_format,
+            "modifications_applied": len(modifications),
+        })
 
     except Exception as e:
-        return create_ui_response([Alert(message=f"Failed to modify data: {e}", variant="error")])
+        return create_response(alert(f"Failed to modify data: {e}", variant="error"))
 
 
 # =============================================================================
@@ -485,54 +461,27 @@ def get_system_status(session_id: str = "default", **kwargs) -> Dict[str, Any]:
         if percent > 70: return "warning"
         return "default"
 
-    components = [
-        Card(
-            title="System Status",
-            id="system-status-card",
-            content=[
-                Grid(
-                    columns=3,
-                    children=[
-                        MetricCard(
-                            title="CPU Usage",
-                            value=f"{cpu_percent}%",
-                            progress=cpu_percent / 100,
-                            variant=get_variant(cpu_percent),
-                            id="cpu-metric"
-                        ),
-                        MetricCard(
-                            title="Memory Usage",
-                            value=f"{mem.percent}%",
-                            subtitle=f"{mem.used // (1024**3):.1f} / {mem.total // (1024**3):.1f} GB",
-                            progress=mem.percent / 100,
-                            variant=get_variant(mem.percent),
-                            id="mem-metric"
-                        ),
-                        MetricCard(
-                            title="Disk Usage",
-                            value=f"{disk.percent}%",
-                            subtitle=f"{disk.used // (1024**3):.1f} / {disk.total // (1024**3):.1f} GB",
-                            progress=disk.percent / 100,
-                            variant=get_variant(disk.percent),
-                            id="disk-metric"
-                        ),
-                    ]
-                ),
-                Text(content=f"Platform: {platform.system()} {platform.release()}", variant="caption"),
-                Text(content=f"Hostname: {platform.node()}", variant="caption"),
-            ]
-        )
-    ]
+    ui = card("System Status", [
+        row([
+            metric_card("CPU Usage", f"{cpu_percent}%",
+                        progress=cpu_percent / 100, id="cpu-metric"),
+            metric_card("Memory Usage", f"{mem.percent}%",
+                        subtitle=f"{mem.used // (1024**3):.1f} / {mem.total // (1024**3):.1f} GB",
+                        progress=mem.percent / 100, id="mem-metric"),
+            metric_card("Disk Usage", f"{disk.percent}%",
+                        subtitle=f"{disk.used // (1024**3):.1f} / {disk.total // (1024**3):.1f} GB",
+                        progress=disk.percent / 100, id="disk-metric"),
+        ]),
+        text(f"Platform: {platform.system()} {platform.release()}", variant="caption"),
+        text(f"Hostname: {platform.node()}", variant="caption"),
+    ], id="system-status-card")
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {
-            "cpu_percent": cpu_percent,
-            "memory_percent": mem.percent,
-            "disk_percent": disk.percent,
-            "platform": platform.system(),
-        }
-    }
+    return create_response(ui, data={
+        "cpu_percent": cpu_percent,
+        "memory_percent": mem.percent,
+        "disk_percent": disk.percent,
+        "platform": platform.system(),
+    })
 
 
 def get_cpu_info(session_id: str = "default", **kwargs) -> Dict[str, Any]:
@@ -544,28 +493,20 @@ def get_cpu_info(session_id: str = "default", **kwargs) -> Dict[str, Any]:
     headers = ["Core", "Usage %"]
     rows = [[f"Core {i}", f"{p}%"] for i, p in enumerate(cpu_percent_per_core)]
 
-    components = [
-        Card(
-            title="CPU Information",
-            id="cpu-info-card",
-            content=[
-                Grid(columns=2, children=[
-                    MetricCard(title="Total Cores", value=str(cpu_count), id="cpu-cores"),
-                    MetricCard(
-                        title="Frequency",
-                        value=f"{cpu_freq.current:.0f} MHz" if cpu_freq else "N/A",
-                        id="cpu-freq"
-                    ),
-                ]),
-                Table(headers=headers, rows=rows, id="cpu-table"),
-            ]
-        )
-    ]
+    ui = card("CPU Information", [
+        row([
+            metric_card("Total Cores", str(cpu_count), id="cpu-cores"),
+            metric_card("Frequency",
+                        f"{cpu_freq.current:.0f} MHz" if cpu_freq else "N/A",
+                        id="cpu-freq"),
+        ]),
+        table(headers, rows, id="cpu-table"),
+    ], id="cpu-info-card")
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {"cores": cpu_count, "frequency": cpu_freq.current if cpu_freq else 0}
-    }
+    return create_response(ui, data={
+        "cores": cpu_count,
+        "frequency": cpu_freq.current if cpu_freq else 0,
+    })
 
 
 def get_memory_info(session_id: str = "default", **kwargs) -> Dict[str, Any]:
@@ -573,35 +514,21 @@ def get_memory_info(session_id: str = "default", **kwargs) -> Dict[str, Any]:
     mem = psutil.virtual_memory()
     swap = psutil.swap_memory()
 
-    components = [
-        Card(
-            title="Memory Information",
-            id="memory-info-card",
-            content=[
-                Grid(columns=2, children=[
-                    MetricCard(
-                        title="RAM Usage",
-                        value=f"{mem.percent}%",
+    ui = card("Memory Information", [
+        row([
+            metric_card("RAM Usage", f"{mem.percent}%",
                         subtitle=f"{mem.used // (1024**3):.1f} / {mem.total // (1024**3):.1f} GB",
-                        progress=mem.percent / 100,
-                        id="ram-metric"
-                    ),
-                    MetricCard(
-                        title="Swap Usage",
-                        value=f"{swap.percent}%",
+                        progress=mem.percent / 100, id="ram-metric"),
+            metric_card("Swap Usage", f"{swap.percent}%",
                         subtitle=f"{swap.used // (1024**3):.1f} / {swap.total // (1024**3):.1f} GB",
-                        progress=swap.percent / 100,
-                        id="swap-metric"
-                    ),
-                ]),
-            ]
-        )
-    ]
+                        progress=swap.percent / 100, id="swap-metric"),
+        ]),
+    ], id="memory-info-card")
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {"ram_percent": mem.percent, "swap_percent": swap.percent}
-    }
+    return create_response(ui, data={
+        "ram_percent": mem.percent,
+        "swap_percent": swap.percent,
+    })
 
 
 def get_disk_info(session_id: str = "default", **kwargs) -> Dict[str, Any]:
@@ -625,20 +552,11 @@ def get_disk_info(session_id: str = "default", **kwargs) -> Dict[str, Any]:
         except PermissionError:
             rows.append([p.device, p.mountpoint, p.fstype, "N/A", "N/A", "N/A", "N/A"])
 
-    components = [
-        Card(
-            title="Disk Information",
-            id="disk-info-card",
-            content=[
-                Table(headers=headers, rows=rows, id="disk-table"),
-            ]
-        )
-    ]
+    ui = card("Disk Information", [
+        table(headers, rows, id="disk-table"),
+    ], id="disk-info-card")
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {"partitions": len(rows)}
-    }
+    return create_response(ui, data={"partitions": len(rows)})
 
 
 # =============================================================================
@@ -676,35 +594,28 @@ def search_wikipedia(query: str, language: str = "en", session_id: str = "defaul
         results = data.get("query", {}).get("search", [])
 
         if not results:
-            return create_ui_response([
-                Alert(message=f"No Wikipedia results for '{query}'", variant="info")
-            ])
+            return create_response(
+                alert(f"No Wikipedia results for '{query}'", variant="info"),
+            )
 
-        items = []
+        item_nodes = []
         for r in results:
             # Clean HTML from snippet
             snippet = r.get("snippet", "").replace("<span class=\"searchmatch\">", "").replace("</span>", "")
-            items.append(f"**{r['title']}** — {snippet}")
+            item_nodes.append(text(f"**{r['title']}** — {snippet}", variant="markdown"))
 
-        components = [
-            Card(
-                title=f"Wikipedia: {query}",
-                id="wiki-results",
-                content=[
-                    List_(items=items, id="wiki-list"),
-                ]
-            )
-        ]
+        ui = card(f"Wikipedia: {query}", [
+            list_component(item_nodes, id="wiki-list"),
+        ], id="wiki-results")
 
-        return {
-            "_ui_components": [c.to_json() for c in components],
-            "_data": {"results": [{"title": r["title"], "pageid": r["pageid"]} for r in results]}
-        }
+        return create_response(ui, data={
+            "results": [{"title": r["title"], "pageid": r["pageid"]} for r in results],
+        })
 
     except Exception as e:
-        return create_ui_response([
-            Alert(message=f"Wikipedia search failed: {str(e)}", variant="error", title="Error")
-        ])
+        return create_response(
+            alert(f"Wikipedia search failed: {str(e)}", variant="error", title="Error"),
+        )
 
 
 # =============================================================================
@@ -776,85 +687,47 @@ def search_arxiv(query: str, max_results: int = 10, session_id: str = "default",
         
         # Create UI components
         if not results:
-            components = [
-                Alert(
-                    title="No Results",
-                    message=f"No papers found for '{query}' on arXiv.",
-                    variant="warning"
-                )
-            ]
-        else:
-            # Calculate metrics
-            total_papers = len(results)
-            latest_date = max(r["published"] for r in results) if results else "N/A"
-            # Find most common author
-            all_authors = [a for r in results for a in r["authors"]]
-            top_author = max(set(all_authors), key=all_authors.count) if all_authors else "N/A"
+            return create_response(
+                alert(f"No papers found for '{query}' on arXiv.", variant="warning", title="No Results"),
+                data=results,
+            )
 
-            # Create list items with paper details
-            list_items = []
-            for paper in results:
-                authors_str = ", ".join(paper["authors"][:2])
-                if len(paper["authors"]) > 2:
-                    authors_str += f" +{len(paper['authors'])-2}"
-                
-                list_items.append({
-                    "title": paper["title"],
-                    "subtitle": f"{authors_str} • {paper['published']}",
-                    "description": paper["summary"][:200] + "..." if len(paper['summary']) > 200 else paper['summary'],
-                    "url": paper["url"]
-                })
-            
-            # Cohesive UI: Card with Metrics + List
-            components = [
-                Card(
-                    title=f"ArXiv Research: {clean_query}",
-                    id="arxiv-results-card",
-                    content=[
-                        Grid(
-                            columns=3,
-                            children=[
-                                MetricCard(
-                                    title="Total Papers",
-                                    value=str(total_papers),
-                                    id="metric-total"
-                                ),
-                                MetricCard(
-                                    title="Latest Paper",
-                                    value=latest_date,
-                                    id="metric-date"
-                                ),
-                                MetricCard(
-                                    title="Top Author",
-                                    value=top_author,
-                                    id="metric-author"
-                                ),
-                            ]
-                        ),
-                        Text(content="Most relevant papers found:", variant="body"),
-                        List_(
-                            items=list_items,
-                            variant="detailed",
-                            id="arxiv-list"
-                        )
-                    ]
-                )
-            ]
-        
-        return {
-            "_ui_components": [c.to_json() if hasattr(c, 'to_json') else c for c in components],
-            "_data": results
-        }
+        # Calculate metrics
+        total_papers = len(results)
+        latest_date = max(r["published"] for r in results) if results else "N/A"
+        # Find most common author
+        all_authors = [a for r in results for a in r["authors"]]
+        top_author = max(set(all_authors), key=all_authors.count) if all_authors else "N/A"
+
+        # Create list item nodes with paper details
+        item_nodes = []
+        for paper in results:
+            authors_str = ", ".join(paper["authors"][:2])
+            if len(paper["authors"]) > 2:
+                authors_str += f" +{len(paper['authors'])-2}"
+            summary = paper["summary"][:200] + "..." if len(paper["summary"]) > 200 else paper["summary"]
+            item_nodes.append(
+                text(f"**{paper['title']}**\n{authors_str} - {paper['published']}\n{summary}", variant="markdown")
+            )
+
+        # Cohesive UI: Card with Metrics + List
+        ui = card(f"ArXiv Research: {clean_query}", [
+            row([
+                metric_card("Total Papers", str(total_papers), id="metric-total"),
+                metric_card("Latest Paper", latest_date, id="metric-date"),
+                metric_card("Top Author", top_author, id="metric-author"),
+            ]),
+            text("Most relevant papers found:", variant="body"),
+            list_component(item_nodes, id="arxiv-list"),
+        ], id="arxiv-results-card")
+
+        return create_response(ui, data=results)
+
     except Exception as e:
         logger.error(f"Error searching arXiv: {e}")
-        components = [
-            Alert(
-                title="Search Error",
-                message=f"Error searching arXiv: {str(e)}",
-                variant="error"
-            )
-        ]
-        return create_ui_response(components)
+        return create_response(
+            alert(f"Error searching arXiv: {str(e)}", variant="error", title="Search Error"),
+        )
 
 
 # =============================================================================
@@ -900,55 +773,37 @@ def change_theme(preset: str = None, **kwargs) -> Dict[str, Any]:
 
     # Build preset buttons
     preset_buttons = []
-    for name, colors in THEME_PRESETS.items():
+    for preset_name, colors in THEME_PRESETS.items():
         preset_buttons.append(
-            Button(
-                label=name.title(),
-                action="theme_preset",
-                payload={"name": name, "colors": colors},
+            button(
+                preset_name.title(),
+                action_name="theme_preset",
+                context={"name": preset_name, "colors": colors},
                 variant="secondary",
-                id=f"theme-preset-{name}",
+                id=f"theme-preset-{preset_name}",
             )
         )
 
     # Build color pickers for each aspect
     default_colors = THEME_PRESETS.get(preset, THEME_PRESETS["midnight"])
-    color_pickers = []
-    for key, label in THEME_COLOR_LABELS.items():
-        color_pickers.append(
-            ColorPicker(
-                label=label,
-                color_key=key,
-                value=default_colors[key],
-                id=f"theme-color-{key}",
-            )
+    picker_nodes = []
+    for key, lbl in THEME_COLOR_LABELS.items():
+        picker_nodes.append(
+            color_picker(lbl, key, value=default_colors[key], id=f"theme-color-{key}")
         )
 
-    components = [
-        Card(
-            title="Theme Customization",
-            id="theme-card",
-            content=[
-                Text(content="Choose a preset theme:", variant="body"),
-                Grid(
-                    columns=5,
-                    children=preset_buttons,
-                    gap=8,
-                ),
-                Divider(),
-                Text(content="Or customize individual colors:", variant="body"),
-                Container(children=color_pickers),
-            ],
-        )
-    ]
+    ui = card("Theme Customization", [
+        text("Choose a preset theme:", variant="body"),
+        row(preset_buttons),
+        divider(),
+        text("Or customize individual colors:", variant="body"),
+        column(picker_nodes),
+    ], id="theme-card")
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {
-            "message": "Theme customization panel rendered. Use the preset buttons or color pickers to change colors.",
-            "presets": list(THEME_PRESETS.keys()),
-        },
-    }
+    return create_response(ui, data={
+        "message": "Theme customization panel rendered. Use the preset buttons or color pickers to change colors.",
+        "presets": list(THEME_PRESETS.keys()),
+    })
 
 
 # =============================================================================

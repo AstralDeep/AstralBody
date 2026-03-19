@@ -10,6 +10,8 @@ from dataclasses import dataclass, asdict, field
 from typing import Optional, Dict, Any, List
 import json
 
+from shared.a2ui_protocol import parse_a2ui_message, is_a2ui_message
+
 # --- Base Message ---
 @dataclass
 class Message:
@@ -38,6 +40,11 @@ class Message:
             return RegisterAgent.from_json(json_str)
         elif msg_type == 'register_ui':
             return RegisterUI.from_json(json_str)
+        # A2UI protocol messages
+        elif is_a2ui_message(msg_type):
+            a2ui_msg = parse_a2ui_message(data)
+            if a2ui_msg is not None:
+                return a2ui_msg
         return Message(**data)
 
 # --- MCP Protocol Wrappers ---
@@ -55,6 +62,7 @@ class MCPResponse(Message):
     result: Optional[Any] = None
     error: Optional[Dict[str, Any]] = None
     ui_components: Optional[List[Dict[str, Any]]] = None
+    a2ui_root_id: Optional[str] = None
 
 # --- UI Protocol ---
 @dataclass
@@ -163,6 +171,7 @@ class RegisterUI(Message):
     session_id: Optional[str] = None
     token: Optional[str] = None
     device: Optional[Dict[str, Any]] = None  # ROTE: frontend device capabilities
+    protocol_version: str = "legacy"  # "legacy" | "a2ui"
 
     def to_json(self) -> str:
         return json.dumps(asdict(self))

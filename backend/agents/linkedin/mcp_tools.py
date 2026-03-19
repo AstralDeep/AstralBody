@@ -15,10 +15,9 @@ from typing import Dict, Any, List, Optional
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from shared.primitives import (
-    Text, Card, Table, Alert, MetricCard, Grid,
-    BarChart, PieChart, LineChart, List_, Collapsible, Tabs, TabItem,
-    create_ui_response,
+from shared.a2ui_builders import (
+    card, text, table, metric_card, alert, row, tabs,
+    list_component, create_response, Node,
 )
 from agents.linkedin.linkedin_api import LinkedInClient, REACTION_TYPES
 from agents.linkedin.caai_linkedin_knowledge import (
@@ -40,14 +39,12 @@ def _get_client(**kwargs) -> LinkedInClient:
     return LinkedInClient(credentials=creds)
 
 
-def _no_token_alert() -> List:
+def _no_token_alert() -> List[Node]:
     """Standard alert when API token is missing."""
     return [
-        Alert(
-            message=(
-                "LinkedIn API not connected. Open the agent's settings panel "
-                "and click 'Authorize with LinkedIn' to connect your account."
-            ),
+        alert(
+            "LinkedIn API not connected. Open the agent's settings panel "
+            "and click 'Authorize with LinkedIn' to connect your account.",
             variant="warning",
             title="Authorization Required",
         ),
@@ -69,20 +66,16 @@ def get_my_profile(
     client = _get_client(**kwargs)
 
     if not client.api_available:
-        return {
-            "_ui_components": [c.to_json() for c in _no_token_alert()],
-            "_data": {"status": "not_connected"},
-        }
+        return create_response(_no_token_alert(), data={"status": "not_connected"})
 
     profile = client.get_my_profile()
     if not profile:
-        return {
-            "_ui_components": [Alert(
-                message="Failed to fetch profile. Your token may have expired — try re-authorizing.",
+        return create_response([
+            alert(
+                "Failed to fetch profile. Your token may have expired — try re-authorizing.",
                 variant="error", title="API Error",
-            ).to_json()],
-            "_data": {"status": "error"},
-        }
+            ),
+        ], data={"status": "error"})
 
     name = profile.get("name", "Unknown")
     email = profile.get("email", "N/A")
@@ -91,18 +84,18 @@ def get_my_profile(
     verified = profile.get("email_verified", False)
 
     components = [
-        Card(title="LinkedIn Profile", content=[
-            Grid(columns=3, children=[
-                MetricCard(title="Name", value=name),
-                MetricCard(title="Email", value=email),
-                MetricCard(title="Member ID", value=person_id or "N/A"),
+        card("LinkedIn Profile", [
+            row([
+                metric_card("Name", name),
+                metric_card("Email", email),
+                metric_card("Member ID", person_id or "N/A"),
             ]),
-            Text(
-                content=f"Email verified: {'Yes' if verified else 'No'}",
+            text(
+                f"Email verified: {'Yes' if verified else 'No'}",
                 variant="caption",
             ),
-            Text(
-                content=f"Person URN: urn:li:person:{person_id}" if person_id else "Person URN: N/A",
+            text(
+                f"Person URN: urn:li:person:{person_id}" if person_id else "Person URN: N/A",
                 variant="caption",
             ),
         ]),
@@ -111,24 +104,21 @@ def get_my_profile(
     org_id = client.org_id
     if org_id:
         components.append(
-            Alert(
-                message=f"Organization ID configured: {org_id} (urn:li:organization:{org_id})",
+            alert(
+                f"Organization ID configured: {org_id} (urn:li:organization:{org_id})",
                 variant="info",
                 title="Linked Organization",
             )
         )
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {
-            "name": name,
-            "email": email,
-            "person_id": person_id,
-            "person_urn": f"urn:li:person:{person_id}" if person_id else None,
-            "email_verified": verified,
-            "org_id": org_id,
-        },
-    }
+    return create_response(components, data={
+        "name": name,
+        "email": email,
+        "person_id": person_id,
+        "person_urn": f"urn:li:person:{person_id}" if person_id else None,
+        "email_verified": verified,
+        "org_id": org_id,
+    })
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -155,23 +145,23 @@ def publish_post(
         article_title: Optional title for the article card.
         article_description: Optional description for the article card.
     """
+    # Import the builder 'text' is shadowed by the parameter name
+    from shared.a2ui_builders import text as text_node
+
     client = _get_client(**kwargs)
 
     if not client.api_available:
-        return {
-            "_ui_components": [c.to_json() for c in _no_token_alert()],
-            "_data": {"status": "not_connected"},
-        }
+        return create_response(_no_token_alert(), data={"status": "not_connected"})
 
     if not text or not text.strip():
-        return create_ui_response([
-            Alert(message="Post text cannot be empty.", variant="error", title="Validation Error"),
+        return create_response([
+            alert("Post text cannot be empty.", variant="error", title="Validation Error"),
         ])
 
     if len(text) > 3000:
-        return create_ui_response([
-            Alert(
-                message=f"Post text is {len(text)} characters — LinkedIn allows a maximum of 3000.",
+        return create_response([
+            alert(
+                f"Post text is {len(text)} characters — LinkedIn allows a maximum of 3000.",
                 variant="error",
                 title="Too Long",
             ),
@@ -186,50 +176,46 @@ def publish_post(
     )
 
     if result is None:
-        return create_ui_response([
-            Alert(message="Failed to create post — no response from LinkedIn.", variant="error"),
+        return create_response([
+            alert("Failed to create post — no response from LinkedIn.", variant="error"),
         ])
 
     if not result.get("success"):
-        return {
-            "_ui_components": [Alert(
-                message=f"Post failed: {result.get('error', 'Unknown error')}",
+        return create_response([
+            alert(
+                f"Post failed: {result.get('error', 'Unknown error')}",
                 variant="error",
                 title="Publish Failed",
-            ).to_json()],
-            "_data": result,
-        }
+            ),
+        ], data=result)
 
     post_urn = result.get("post_urn", "")
     components = [
-        Alert(message="Post published successfully!", variant="success", title="Published"),
-        Card(title="Post Details", content=[
-            Text(content=text[:500] + ("..." if len(text) > 500 else ""), variant="body"),
-            Grid(columns=3, children=[
-                MetricCard(title="Visibility", value=visibility),
-                MetricCard(title="Characters", value=str(len(text))),
-                MetricCard(title="Words", value=str(len(text.split()))),
+        alert("Post published successfully!", variant="success", title="Published"),
+        card("Post Details", [
+            text_node(text[:500] + ("..." if len(text) > 500 else ""), variant="body"),
+            row([
+                metric_card("Visibility", visibility),
+                metric_card("Characters", str(len(text))),
+                metric_card("Words", str(len(text.split()))),
             ]),
         ]),
     ]
     if article_url:
         components.append(
-            Text(content=f"Article: {article_title or article_url}", variant="caption")
+            text_node(f"Article: {article_title or article_url}", variant="caption")
         )
     if post_urn:
         components.append(
-            Text(content=f"Post URN: {post_urn}", variant="caption")
+            text_node(f"Post URN: {post_urn}", variant="caption")
         )
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {
-            "success": True,
-            "post_urn": post_urn,
-            "visibility": visibility,
-            "character_count": len(text),
-        },
-    }
+    return create_response(components, data={
+        "success": True,
+        "post_urn": post_urn,
+        "visibility": visibility,
+        "character_count": len(text),
+    })
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -253,31 +239,27 @@ def react_to_post(
     client = _get_client(**kwargs)
 
     if not client.api_available:
-        return {
-            "_ui_components": [c.to_json() for c in _no_token_alert()],
-            "_data": {"status": "not_connected"},
-        }
+        return create_response(_no_token_alert(), data={"status": "not_connected"})
 
     if not post_urn or not post_urn.strip():
-        return create_ui_response([
-            Alert(message="post_urn is required. Provide the URN of the post to react to.", variant="error"),
+        return create_response([
+            alert("post_urn is required. Provide the URN of the post to react to.", variant="error"),
         ])
 
     result = client.react_to_post(post_urn.strip(), reaction_type.upper())
 
     if result is None:
-        return create_ui_response([
-            Alert(message="Failed to react — no response from LinkedIn.", variant="error"),
+        return create_response([
+            alert("Failed to react — no response from LinkedIn.", variant="error"),
         ])
 
     if not result.get("success"):
-        return {
-            "_ui_components": [Alert(
-                message=f"Reaction failed: {result.get('error', 'Unknown error')}",
+        return create_response([
+            alert(
+                f"Reaction failed: {result.get('error', 'Unknown error')}",
                 variant="error",
-            ).to_json()],
-            "_data": result,
-        }
+            ),
+        ], data=result)
 
     reaction_labels = {
         "LIKE": "Like", "PRAISE": "Celebrate", "EMPATHY": "Support",
@@ -285,13 +267,10 @@ def react_to_post(
     }
     label = reaction_labels.get(reaction_type.upper(), reaction_type)
 
-    return {
-        "_ui_components": [
-            Alert(message=f"Reacted with '{label}' on the post.", variant="success", title="Reaction Added"),
-            Text(content=f"Post: {post_urn}", variant="caption"),
-        ],
-        "_data": result,
-    }
+    return create_response([
+        alert(f"Reacted with '{label}' on the post.", variant="success", title="Reaction Added"),
+        text(f"Post: {post_urn}", variant="caption"),
+    ], data=result)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -311,49 +290,44 @@ def comment_on_post(
         post_urn: The URN of the post to comment on.
         text: The comment text.
     """
+    from shared.a2ui_builders import text as text_node
+
     client = _get_client(**kwargs)
 
     if not client.api_available:
-        return {
-            "_ui_components": [c.to_json() for c in _no_token_alert()],
-            "_data": {"status": "not_connected"},
-        }
+        return create_response(_no_token_alert(), data={"status": "not_connected"})
 
     if not post_urn or not post_urn.strip():
-        return create_ui_response([
-            Alert(message="post_urn is required.", variant="error"),
+        return create_response([
+            alert("post_urn is required.", variant="error"),
         ])
     if not text or not text.strip():
-        return create_ui_response([
-            Alert(message="Comment text cannot be empty.", variant="error"),
+        return create_response([
+            alert("Comment text cannot be empty.", variant="error"),
         ])
 
     result = client.comment_on_post(post_urn.strip(), text.strip())
 
     if result is None:
-        return create_ui_response([
-            Alert(message="Failed to comment — no response from LinkedIn.", variant="error"),
+        return create_response([
+            alert("Failed to comment — no response from LinkedIn.", variant="error"),
         ])
 
     if not result.get("success"):
-        return {
-            "_ui_components": [Alert(
-                message=f"Comment failed: {result.get('error', 'Unknown error')}",
+        return create_response([
+            alert(
+                f"Comment failed: {result.get('error', 'Unknown error')}",
                 variant="error",
-            ).to_json()],
-            "_data": result,
-        }
+            ),
+        ], data=result)
 
-    return {
-        "_ui_components": [
-            Alert(message="Comment posted successfully!", variant="success", title="Comment Added"),
-            Card(title="Comment", content=[
-                Text(content=text.strip(), variant="body"),
-                Text(content=f"On post: {post_urn}", variant="caption"),
-            ]),
-        ],
-        "_data": result,
-    }
+    return create_response([
+        alert("Comment posted successfully!", variant="success", title="Comment Added"),
+        card("Comment", [
+            text_node(text.strip(), variant="body"),
+            text_node(f"On post: {post_urn}", variant="caption"),
+        ]),
+    ], data=result)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -387,8 +361,8 @@ def draft_linkedin_post(
     target_frame = CONTENT_FRAME_BY_ID.get(frame)
     if not target_frame:
         valid = ", ".join(f'"{f["id"]}"' for f in CONTENT_FRAMES)
-        return create_ui_response([
-            Alert(message=f"Unknown content frame: '{frame}'. Valid: {valid}", variant="error", title="Invalid Frame")
+        return create_response([
+            alert(f"Unknown content frame: '{frame}'. Valid: {valid}", variant="error", title="Invalid Frame")
         ])
 
     structures = target_frame.get("post_structures", [])
@@ -398,8 +372,8 @@ def draft_linkedin_post(
     if not target_struct and structures:
         target_struct = structures[0]
     if not target_struct:
-        return create_ui_response([
-            Alert(message=f"No post structures defined for frame '{frame}'", variant="error")
+        return create_response([
+            alert(f"No post structures defined for frame '{frame}'", variant="error")
         ])
 
     template = target_struct.get("template", "")
@@ -473,31 +447,29 @@ def draft_linkedin_post(
     ]
 
     # Build UI
-    draft_tabs = []
+    draft_tab_labels = [d["variant"] for d in drafts]
+    draft_tab_children = []
     for d in drafts:
-        draft_tabs.append(TabItem(
-            label=d["variant"],
-            content=[
-                Text(content=d["text"], variant="body"),
-                Text(content=f"Words: {d['word_count']} | Characters: {d['char_count']}", variant="caption"),
-            ],
-        ))
+        draft_tab_children.append([
+            text(d["text"], variant="body"),
+            text(f"Words: {d['word_count']} | Characters: {d['char_count']}", variant="caption"),
+        ])
 
     card_content = [
-        Text(content=f"Frame: {target_frame['name']} | Structure: {target_struct['name']} | Topic: {topic}", variant="caption"),
-        Alert(message=f"Brand voice: {tone_note}", variant="info", title="Tone Guide"),
-        Tabs(tabs=draft_tabs),
-        Alert(
-            message="These are drafts. Use the 'publish_post' tool to send one to LinkedIn.",
+        text(f"Frame: {target_frame['name']} | Structure: {target_struct['name']} | Topic: {topic}", variant="caption"),
+        alert(f"Brand voice: {tone_note}", variant="info", title="Tone Guide"),
+        tabs(draft_tab_labels, draft_tab_children),
+        alert(
+            "These are drafts. Use the 'publish_post' tool to send one to LinkedIn.",
             variant="info",
             title="Next Step",
         ),
-        Collapsible(title="Post Checklist", content=[
-            List_(items=checklist, variant="default"),
-        ]),
-        Collapsible(title=f"Best Practices: {target_frame['name']}", content=[
-            List_(items=target_frame.get("best_practices", []), variant="default"),
-        ]),
+        card("Post Checklist", [
+            list_component([text(item) for item in checklist]),
+        ], collapsible=True),
+        card(f"Best Practices: {target_frame['name']}", [
+            list_component([text(item) for item in target_frame.get("best_practices", [])]),
+        ], collapsible=True),
     ]
 
     if relevant_projects or relevant_expertise:
@@ -507,24 +479,21 @@ def draft_linkedin_post(
         for proj in relevant_projects[:2]:
             context_items.append(f"Project: {proj.get('name', '')} — {proj.get('description', '')[:100]}")
         card_content.append(
-            Collapsible(title="Relevant CAAI Context", content=[
-                List_(items=context_items, variant="default"),
-            ])
+            card("Relevant CAAI Context", [
+                list_component([text(item) for item in context_items]),
+            ], collapsible=True)
         )
 
-    components = [Card(title="LinkedIn Post Draft", content=card_content)]
+    components = [card("LinkedIn Post Draft", card_content)]
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {
-            "frame": target_frame["name"],
-            "structure": target_struct["name"],
-            "topic": topic,
-            "drafts": drafts,
-            "hashtags": hashtags,
-            "checklist": checklist,
-        },
-    }
+    return create_response(components, data={
+        "frame": target_frame["name"],
+        "structure": target_struct["name"],
+        "topic": topic,
+        "drafts": drafts,
+        "hashtags": hashtags,
+        "checklist": checklist,
+    })
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -555,8 +524,8 @@ def get_content_suggestions(
         target_frame = CONTENT_FRAME_BY_ID.get(frame)
         if not target_frame:
             valid = ", ".join(f'"{f["id"]}"' for f in CONTENT_FRAMES)
-            return create_ui_response([
-                Alert(message=f"Unknown content frame: '{frame}'. Valid: {valid}", variant="error", title="Invalid Frame")
+            return create_response([
+                alert(f"Unknown content frame: '{frame}'. Valid: {valid}", variant="error", title="Invalid Frame")
             ])
         target_frames = [target_frame]
 
@@ -594,36 +563,30 @@ def get_content_suggestions(
 
         all_suggestions.extend(suggestions)
 
-        tab_items = []
+        tab_labels = [s["structure"] for s in suggestions]
+        tab_children = []
         for s in suggestions:
-            tab_items.append(TabItem(
-                label=s["structure"],
-                content=[
-                    Text(content=s["outline"], variant="body"),
-                    Text(content=f"Suggested hashtags: {' '.join(s['hashtags'])}", variant="caption"),
-                ],
-            ))
+            tab_children.append([
+                text(s["outline"], variant="body"),
+                text(f"Suggested hashtags: {' '.join(s['hashtags'])}", variant="caption"),
+            ])
 
-        practices_list = List_(items=fr.get("best_practices", []), variant="default")
+        practices = list_component([text(p) for p in fr.get("best_practices", [])])
 
-        frame_card = Card(
-            title=fr["name"],
-            content=[
-                Text(content=fr["description"], variant="caption"),
-                Text(content=f"Suggested cadence: {fr.get('suggested_cadence', 'N/A')}", variant="caption"),
-                Tabs(tabs=tab_items) if tab_items else Text(content="No templates for this frame.", variant="body"),
-                Collapsible(title="Best Practices", content=[practices_list]),
-            ],
-        )
+        frame_content = [
+            text(fr["description"], variant="caption"),
+            text(f"Suggested cadence: {fr.get('suggested_cadence', 'N/A')}", variant="caption"),
+            tabs(tab_labels, tab_children) if tab_labels else text("No templates for this frame.", variant="body"),
+            card("Best Practices", [practices], collapsible=True),
+        ]
+
+        frame_card = card(fr["name"], frame_content)
         frame_components.append(frame_card)
 
-    return {
-        "_ui_components": [c.to_json() for c in frame_components],
-        "_data": {
-            "frames_covered": [fr["id"] for fr in target_frames],
-            "suggestions": all_suggestions,
-        },
-    }
+    return create_response(frame_components, data={
+        "frames_covered": [fr["id"] for fr in target_frames],
+        "suggestions": all_suggestions,
+    })
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -699,55 +662,55 @@ def suggest_engagement_actions(
         hour = best_hours[i % len(best_hours)]
         calendar.append([day, hour, fr.get("name", frame_id), f"{weight:.0%}", "High" if weight >= 0.20 else "Medium"])
 
-    metrics_grid = Grid(columns=3, children=[
-        MetricCard(title="Current Followers", value=f"{followers:,}" if followers > 0 else "Not set"),
-        MetricCard(title="Engagement Rate", value=f"{eng_rate:.1%}" if eng_rate > 0 else "Not set"),
-        MetricCard(title="Engagement Rating", value=eng_rating.upper() if eng_rate > 0 else "N/A"),
+    metrics_grid = row([
+        metric_card("Current Followers", f"{followers:,}" if followers > 0 else "Not set"),
+        metric_card("Engagement Rate", f"{eng_rate:.1%}" if eng_rate > 0 else "Not set"),
+        metric_card("Engagement Rating", eng_rating.upper() if eng_rate > 0 else "N/A"),
     ])
 
-    tabs = Tabs(tabs=[
-        TabItem(label="Quick Wins", content=[
-            Text(content="Actions you can take in under an hour:", variant="caption"),
-            List_(items=quick_wins, variant="default"),
-        ]),
-        TabItem(label="This Week", content=[
-            Text(content="Tactical moves for this week:", variant="caption"),
-            List_(items=weekly_actions, variant="default"),
-        ]),
-        TabItem(label="Strategic", content=[
-            Text(content="Longer-term initiatives for sustained growth:", variant="caption"),
-            List_(items=strategic_actions, variant="default"),
-        ]),
-        TabItem(label="Content Calendar", content=[
-            Text(content="Suggested weekly posting schedule:", variant="caption"),
-            Table(
-                headers=["Day", "Time (ET)", "Content Frame", "Mix Weight", "Priority"],
-                rows=calendar,
-            ),
-        ]),
-    ])
+    engagement_tabs = tabs(
+        ["Quick Wins", "This Week", "Strategic", "Content Calendar"],
+        [
+            [
+                text("Actions you can take in under an hour:", variant="caption"),
+                list_component([text(item) for item in quick_wins]),
+            ],
+            [
+                text("Tactical moves for this week:", variant="caption"),
+                list_component([text(item) for item in weekly_actions]),
+            ],
+            [
+                text("Longer-term initiatives for sustained growth:", variant="caption"),
+                list_component([text(item) for item in strategic_actions]),
+            ],
+            [
+                text("Suggested weekly posting schedule:", variant="caption"),
+                table(
+                    ["Day", "Time (ET)", "Content Frame", "Mix Weight", "Priority"],
+                    calendar,
+                ),
+            ],
+        ],
+    )
 
     components = [
-        Card(title="Engagement Growth Recommendations", content=[
-            Text(content=f"Focus: {focus.title()}", variant="caption"),
+        card("Engagement Growth Recommendations", [
+            text(f"Focus: {focus.title()}", variant="caption"),
             metrics_grid,
-            tabs,
+            engagement_tabs,
         ]),
     ]
 
-    return {
-        "_ui_components": [c.to_json() for c in components],
-        "_data": {
-            "focus": focus,
-            "current_followers": followers,
-            "current_engagement_rate": eng_rate,
-            "engagement_rating": eng_rating,
-            "quick_wins": quick_wins,
-            "weekly_actions": weekly_actions,
-            "strategic_actions": strategic_actions,
-            "calendar": [{"day": c[0], "time": c[1], "frame": c[2], "priority": c[4]} for c in calendar],
-        },
-    }
+    return create_response(components, data={
+        "focus": focus,
+        "current_followers": followers,
+        "current_engagement_rate": eng_rate,
+        "engagement_rating": eng_rating,
+        "quick_wins": quick_wins,
+        "weekly_actions": weekly_actions,
+        "strategic_actions": strategic_actions,
+        "calendar": [{"day": c[0], "time": c[1], "frame": c[2], "priority": c[4]} for c in calendar],
+    })
 
 
 # ═══════════════════════════════════════════════════════════════════════

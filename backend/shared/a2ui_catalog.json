@@ -1,0 +1,317 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "catalogId": "astral-default",
+  "version": "v0.10",
+  "description": "AstralBody A2UI catalog — standard A2UI components plus x-astral-* custom extensions.",
+  "components": {
+    "standard": {
+      "Row": {
+        "description": "Horizontal layout container",
+        "properties": {
+          "mainAxisAlignment": { "type": "string", "enum": ["start", "center", "end", "spaceBetween", "spaceAround", "spaceEvenly"] },
+          "crossAxisAlignment": { "type": "string", "enum": ["start", "center", "end", "stretch"] }
+        },
+        "supportsChildren": true
+      },
+      "Column": {
+        "description": "Vertical layout container",
+        "properties": {
+          "mainAxisAlignment": { "type": "string", "enum": ["start", "center", "end", "spaceBetween", "spaceAround", "spaceEvenly"] },
+          "crossAxisAlignment": { "type": "string", "enum": ["start", "center", "end", "stretch"] }
+        },
+        "supportsChildren": true
+      },
+      "List": {
+        "description": "Scrollable list of items",
+        "properties": {
+          "ordered": { "type": "boolean" },
+          "items": { "type": "array", "items": { "type": ["string", "object"] } }
+        },
+        "supportsChildren": true
+      },
+      "Card": {
+        "description": "Container with optional title and elevation",
+        "properties": {
+          "title": { "type": "string" },
+          "isCollapsible": { "type": "boolean" },
+          "defaultOpen": { "type": "boolean" }
+        },
+        "supportsChildren": true
+      },
+      "Tabs": {
+        "description": "Tabbed interface with labeled sections",
+        "properties": {
+          "tabs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "label": { "type": "string" },
+                "children": { "type": "array", "items": { "type": "string" } }
+              }
+            }
+          }
+        },
+        "supportsChildren": true
+      },
+      "Modal": {
+        "description": "Overlay dialog triggered by a component",
+        "properties": {
+          "title": { "type": "string" },
+          "triggerId": { "type": "string" }
+        },
+        "supportsChildren": true
+      },
+      "Text": {
+        "description": "Renders text content",
+        "properties": {
+          "text": { "type": "string" },
+          "textStyle": { "type": "string", "enum": ["h1", "h2", "h3", "h4", "h5", "body", "caption"] },
+          "markdown": { "type": "boolean" }
+        },
+        "supportsChildren": false
+      },
+      "Image": {
+        "description": "Displays an image from a URL",
+        "properties": {
+          "url": { "type": "string", "format": "uri" },
+          "alt": { "type": "string" },
+          "width": { "type": "string" },
+          "height": { "type": "string" },
+          "fit": { "type": "string", "enum": ["contain", "cover", "fill", "none", "scaleDown"] }
+        },
+        "supportsChildren": false
+      },
+      "Icon": {
+        "description": "Displays a named icon or custom SVG",
+        "properties": {
+          "icon": { "type": "string" },
+          "svgPath": { "type": "string" },
+          "size": { "type": "number" }
+        },
+        "supportsChildren": false
+      },
+      "Video": {
+        "description": "Embeds video content",
+        "properties": {
+          "url": { "type": "string", "format": "uri" },
+          "autoplay": { "type": "boolean" }
+        },
+        "supportsChildren": false
+      },
+      "AudioPlayer": {
+        "description": "Audio playback component",
+        "properties": {
+          "url": { "type": "string", "format": "uri" },
+          "description": { "type": "string" }
+        },
+        "supportsChildren": false
+      },
+      "Divider": {
+        "description": "Visual separator",
+        "properties": {
+          "variant": { "type": "string", "enum": ["horizontal", "vertical"] }
+        },
+        "supportsChildren": false
+      },
+      "Button": {
+        "description": "Clickable button",
+        "properties": {
+          "text": { "type": "string" },
+          "variant": { "type": "string", "enum": ["default", "primary", "borderless"] },
+          "action": {
+            "type": "object",
+            "properties": {
+              "event": {
+                "type": "object",
+                "properties": {
+                  "name": { "type": "string" },
+                  "context": { "type": "object" }
+                }
+              },
+              "functionCall": {
+                "type": "object",
+                "properties": {
+                  "name": { "type": "string" },
+                  "args": { "type": "object" }
+                }
+              }
+            }
+          }
+        },
+        "supportsChildren": false
+      },
+      "TextField": {
+        "description": "Text input field",
+        "properties": {
+          "placeholder": { "type": "string" },
+          "name": { "type": "string" },
+          "value": { "type": "string" },
+          "inputType": { "type": "string", "enum": ["shortText", "longText", "number", "obscured", "date"] }
+        },
+        "supportsChildren": false
+      },
+      "CheckBox": {
+        "description": "Boolean toggle with label",
+        "properties": {
+          "label": { "type": "string" },
+          "checked": { "type": "boolean" }
+        },
+        "supportsChildren": false
+      },
+      "ChoicePicker": {
+        "description": "Single or multiple selection from options",
+        "properties": {
+          "options": { "type": "array", "items": { "type": "object" } },
+          "maxSelections": { "type": "integer" },
+          "selected": { "type": "array", "items": { "type": "string" } }
+        },
+        "supportsChildren": false
+      },
+      "Slider": {
+        "description": "Numeric range input",
+        "properties": {
+          "min": { "type": "number" },
+          "max": { "type": "number" },
+          "step": { "type": "number" },
+          "value": { "type": "number" }
+        },
+        "supportsChildren": false
+      },
+      "DateTimeInput": {
+        "description": "Date and/or time selection",
+        "properties": {
+          "mode": { "type": "string", "enum": ["date", "time", "dateTime"] },
+          "value": { "type": "string" }
+        },
+        "supportsChildren": false
+      }
+    },
+    "custom": {
+      "x-astral-table": {
+        "description": "Data table with pagination and tool re-invocation",
+        "properties": {
+          "headers": { "type": "array", "items": { "type": "string" } },
+          "rows": { "type": "array", "items": { "type": "array" } },
+          "totalRows": { "type": "integer" },
+          "pageSize": { "type": "integer" },
+          "pageOffset": { "type": "integer" },
+          "pageSizes": { "type": "array", "items": { "type": "integer" } },
+          "sourceTool": { "type": "string" },
+          "sourceAgent": { "type": "string" },
+          "sourceParams": { "type": "object" }
+        },
+        "supportsChildren": false
+      },
+      "x-astral-metric-card": {
+        "description": "KPI display with title, value, optional icon and progress",
+        "properties": {
+          "title": { "type": "string" },
+          "value": { "type": "string" },
+          "subtitle": { "type": "string" },
+          "icon": { "type": "string" },
+          "progress": { "type": "number" }
+        },
+        "supportsChildren": false
+      },
+      "x-astral-code": {
+        "description": "Code block with syntax highlighting",
+        "properties": {
+          "code": { "type": "string" },
+          "language": { "type": "string" },
+          "showLineNumbers": { "type": "boolean" }
+        },
+        "supportsChildren": false
+      },
+      "x-astral-alert": {
+        "description": "Alert/notification banner",
+        "properties": {
+          "message": { "type": "string" },
+          "variant": { "type": "string", "enum": ["info", "success", "warning", "error"] },
+          "title": { "type": "string" }
+        },
+        "supportsChildren": false
+      },
+      "x-astral-progress-bar": {
+        "description": "Progress indicator",
+        "properties": {
+          "value": { "type": "number" },
+          "label": { "type": "string" },
+          "showPercentage": { "type": "boolean" }
+        },
+        "supportsChildren": false
+      },
+      "x-astral-bar-chart": {
+        "description": "Bar chart visualization",
+        "properties": {
+          "title": { "type": "string" },
+          "labels": { "type": "array", "items": { "type": "string" } },
+          "datasets": { "type": "array", "items": { "type": "object" } }
+        },
+        "supportsChildren": false
+      },
+      "x-astral-line-chart": {
+        "description": "Line chart visualization",
+        "properties": {
+          "title": { "type": "string" },
+          "labels": { "type": "array", "items": { "type": "string" } },
+          "datasets": { "type": "array", "items": { "type": "object" } }
+        },
+        "supportsChildren": false
+      },
+      "x-astral-pie-chart": {
+        "description": "Pie chart visualization",
+        "properties": {
+          "title": { "type": "string" },
+          "labels": { "type": "array", "items": { "type": "string" } },
+          "data": { "type": "array", "items": { "type": "number" } },
+          "colors": { "type": "array", "items": { "type": "string" } }
+        },
+        "supportsChildren": false
+      },
+      "x-astral-plotly-chart": {
+        "description": "Generic Plotly chart",
+        "properties": {
+          "title": { "type": "string" },
+          "data": { "type": "array", "items": { "type": "object" } },
+          "layout": { "type": "object" },
+          "config": { "type": "object" }
+        },
+        "supportsChildren": false
+      },
+      "x-astral-color-picker": {
+        "description": "Color selector for theme customization",
+        "properties": {
+          "label": { "type": "string" },
+          "colorKey": { "type": "string" },
+          "value": { "type": "string" }
+        },
+        "supportsChildren": false
+      },
+      "x-astral-file-upload": {
+        "description": "File upload control",
+        "properties": {
+          "label": { "type": "string" },
+          "accept": { "type": "string" },
+          "action": { "type": "string" }
+        },
+        "supportsChildren": false
+      },
+      "x-astral-file-download": {
+        "description": "File download link",
+        "properties": {
+          "label": { "type": "string" },
+          "url": { "type": "string" },
+          "filename": { "type": "string" }
+        },
+        "supportsChildren": false
+      }
+    }
+  },
+  "themes": {
+    "default": {
+      "description": "AstralBody default dark theme"
+    }
+  },
+  "functions": {}
+}

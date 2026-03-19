@@ -84,6 +84,16 @@ class MCPServer:
                 tool_fn = self.tools[tool_name]["function"]
                 result = tool_fn(**arguments)
 
+                # A2UI component responses (new flat adjacency-list format)
+                if isinstance(result, dict) and "_a2ui_components" in result:
+                    data = result.get("_data")
+                    return MCPResponse(
+                        request_id=request.request_id,
+                        result=data,
+                        ui_components=result["_a2ui_components"],
+                        a2ui_root_id=result.get("_a2ui_root_id", ""),
+                    )
+
                 # Check if the tool itself returned an error via UI components
                 if isinstance(result, dict) and "_ui_components" in result:
                     ui_comps = result["_ui_components"]

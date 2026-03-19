@@ -124,6 +124,19 @@ function detectDeviceCapabilities(): Record<string, unknown> {
 
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// A2UI Surface types
+// ---------------------------------------------------------------------------
+
+export interface A2UISurface {
+    surfaceId: string;
+    catalogId: string;
+    components: Record<string, unknown>[];
+    rootComponentId: string;
+    dataModel?: Record<string, unknown>;
+    theme?: Record<string, unknown>;
+}
+
 export type ConnectionState = "disconnected" | "connecting" | "connected" | "reconnecting";
 
 const MAX_RECONNECT_ATTEMPTS = 10;
@@ -189,6 +202,9 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         hasGeolocation: false,
         speechServerAvailable: false,
     });
+    // A2UI surface state
+    const [surfaces, setSurfaces] = useState<Map<string, A2UISurface>>(new Map());
+
     const wsRef = useRef<WebSocket | null>(null);
     const reconnectTimer = useRef<number | null>(null);
     const pendingSaveResolveRef = useRef<((value: boolean) => void) | null>(null);
@@ -328,6 +344,15 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                 }
                 break;
 
+            case "component_save_error":
+                console.error("Failed to save component:", data.error);
+                if (pendingSaveRejectRef.current) {
+                    pendingSaveRejectRef.current(new Error(data.error as string || "Failed to save component"));
+                    pendingSaveRejectRef.current = null;
+                    pendingSaveResolveRef.current = null;
+                }
+                break;
+
             case "component_deleted":
                 if (data.component_id) {
                     setSavedComponents((prev) => prev.filter(c => c.id !== data.component_id));
@@ -427,6 +452,77 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                 // This prevents WebSocket timeout during long operations.
                 break;
 
+            // ── A2UI Surface messages ─────────────────────────────────────
+            case "a2ui_create_surface": {
+                const surface: A2UISurface = {
+                    surfaceId: data.surfaceId as string,
+                    catalogId: data.catalogId as string,
+                    components: (data.components as Record<string, unknown>[]) || [],
+                    rootComponentId: data.rootComponentId as string,
+                    dataModel: data.dataModel as Record<string, unknown> | undefined,
+                    theme: data.theme as Record<string, unknown> | undefined,
+                };
+                setSurfaces(prev => {
+                    const next = new Map(prev);
+                    next.set(surface.surfaceId, surface);
+                    return next;
+                });
+                // Also append to messages for conversation history
+                setMessages(prev => [
+                    ...prev,
+                    { role: "assistant", content: { _a2ui_surface: surface } }
+                ]);
+                break;
+            }
+
+            case "a2ui_update_components": {
+                const sid = data.surfaceId as string;
+                setSurfaces(prev => {
+                    const next = new Map(prev);
+                    const existing = next.get(sid);
+                    if (existing) {
+                        next.set(sid, {
+                            ...existing,
+                            components: (data.components as Record<string, unknown>[]) || existing.components,
+                            rootComponentId: (data.rootComponentId as string) || existing.rootComponentId,
+                        });
+                    }
+                    return next;
+                });
+                break;
+            }
+
+            case "a2ui_update_data_model": {
+                const sid = data.surfaceId as string;
+                setSurfaces(prev => {
+                    const next = new Map(prev);
+                    const existing = next.get(sid);
+                    if (existing) {
+                        const dm = { ...(existing.dataModel || {}) };
+                        const path = data.path as string;
+                        if (path && data.value !== undefined) {
+                            // Simple top-level set for now
+                            // Full JSON Pointer resolution can be added later
+                            const key = path.startsWith("/") ? path.slice(1) : path;
+                            dm[key] = data.value;
+                        }
+                        next.set(sid, { ...existing, dataModel: dm });
+                    }
+                    return next;
+                });
+                break;
+            }
+
+            case "a2ui_delete_surface": {
+                const sid = data.surfaceId as string;
+                setSurfaces(prev => {
+                    const next = new Map(prev);
+                    next.delete(sid);
+                    return next;
+                });
+                break;
+            }
+
             default:
             // console.log("Unknown message type:", data.type, data);
         }
@@ -454,13 +550,14 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                 reconnectAttemptsRef.current = 0;
 
                 setChatStatus({ status: "idle", message: "" });
-                // Send RegisterUI with token and ROTE device capabilities
+                // Send RegisterUI with token, ROTE device capabilities, and A2UI protocol
                 ws.send(JSON.stringify({
                     type: "register_ui",
                     token: currentToken,
                     capabilities: ["render", "stream"],
                     session_id: `ui-${Date.now()}`,
                     device: detectDeviceCapabilities(),
+                    protocol_version: "a2ui",
                 }));
                 // Fetch history
                 ws.send(JSON.stringify({
@@ -964,6 +1061,25 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
     }, []);
 
     // ── Agent Visibility ──────────────────────────────────────────────
+    // ── A2UI Action dispatch ─────────────────────────────────────────
+    const sendA2UIAction = useCallback((
+        name: string,
+        surfaceId: string,
+        sourceComponentId: string,
+        context: Record<string, unknown> = {},
+    ) => {
+        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+        wsRef.current.send(JSON.stringify({
+            type: "a2ui_action",
+            version: "v0.10",
+            name,
+            surfaceId,
+            sourceComponentId,
+            timestamp: new Date().toISOString(),
+            context,
+        }));
+    }, []);
+
     const sendTablePaginate = useCallback((event: { source_tool: string; source_agent: string; source_params: Record<string, unknown>; limit: number; offset: number }) => {
         if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
         wsRef.current.send(JSON.stringify({
@@ -1040,5 +1156,7 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         setAgentVisibility,
         sendTablePaginate,
         deviceCapabilities,
+        surfaces,
+        sendA2UIAction,
     };
 }
