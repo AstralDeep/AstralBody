@@ -1,4 +1,5 @@
-import sqlite3
+import psycopg2
+from psycopg2.extras import RealDictCursor
 import logging
 import os
 import json
@@ -6,23 +7,44 @@ from typing import List, Dict, Optional, Any, Tuple
 
 logger = logging.getLogger('Database')
 
+def _build_database_url() -> str:
+    """Build a PostgreSQL connection URL from individual DB_* env vars."""
+    host = os.getenv("DB_HOST", "localhost")
+    port = os.getenv("DB_PORT", "5432")
+    name = os.getenv("DB_NAME", "astralbody")
+    user = os.getenv("DB_USER", "astral")
+    password = os.getenv("DB_PASSWORD", "astral_dev")
+    return f"postgresql://{user}:{password}@{host}:{port}/{name}"
+
+
 class Database:
-    def __init__(self, db_path: str = "data/astral.db"):
-        self.db_path = db_path
-        self._ensure_data_dir()
+    def __init__(self, database_url: str = None):
+        self.database_url = database_url or os.getenv("DATABASE_URL") or _build_database_url()
         self._init_db()
 
-    def _ensure_data_dir(self):
-        """Ensure the data directory exists."""
-        dirname = os.path.dirname(self.db_path)
-        if dirname and not os.path.exists(dirname):
-            os.makedirs(dirname)
-
-    def _get_connection(self) -> sqlite3.Connection:
-        """Get a database connection with row factory."""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
+    def _get_connection(self):
+        """Get a database connection with dict-like row factory."""
+        conn = psycopg2.connect(self.database_url, cursor_factory=RealDictCursor)
         return conn
+
+    def _translate_query(self, query: str) -> str:
+        """Convert SQLite ? placeholders to PostgreSQL %s placeholders.
+
+        Also escapes literal % (e.g. in LIKE patterns) to %% so psycopg2
+        doesn't interpret them as parameter placeholders.
+        """
+        # First escape any existing % that aren't parameter placeholders
+        query = query.replace('%', '%%')
+        # Then convert ? placeholders to %s
+        return query.replace('?', '%s')
+
+    def _column_exists(self, cursor, table_name: str, column_name: str) -> bool:
+        """Check if a column exists on a table via information_schema."""
+        cursor.execute(
+            "SELECT 1 FROM information_schema.columns WHERE table_name = %s AND column_name = %s",
+            (table_name, column_name)
+        )
+        return cursor.fetchone() is not None
 
     def _init_db(self):
         """Initialize the database schema."""
@@ -35,35 +57,35 @@ class Database:
                 id TEXT PRIMARY KEY,
                 user_id TEXT,
                 title TEXT,
-                created_at INTEGER,
-                updated_at INTEGER
+                created_at BIGINT,
+                updated_at BIGINT
             )
         ''')
 
         # Messages table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 chat_id TEXT NOT NULL,
                 user_id TEXT,
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
-                timestamp INTEGER,
+                timestamp BIGINT,
                 FOREIGN KEY (chat_id) REFERENCES chats (id) ON DELETE CASCADE
             )
         ''')
-        
+
         # Logs table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 level TEXT,
                 component TEXT,
                 message TEXT,
-                timestamp INTEGER
+                timestamp BIGINT
             )
         ''')
-        
+
         # Saved UI components table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS saved_components (
@@ -73,47 +95,42 @@ class Database:
                 component_data TEXT NOT NULL,
                 component_type TEXT NOT NULL,
                 title TEXT,
-                created_at INTEGER,
+                created_at BIGINT,
                 FOREIGN KEY (chat_id) REFERENCES chats (id) ON DELETE CASCADE
             )
         ''')
-        
-        # Add has_saved_components flag to chats table
-        try:
-            cursor.execute("ALTER TABLE chats ADD COLUMN has_saved_components BOOLEAN DEFAULT 0")
-        except sqlite3.OperationalError:
-            # Column already exists, ignore
-            pass
-
-        # Auto-migrate user_id column for all tables
-        for table in ['chats', 'messages', 'saved_components', 'chat_files']:
-            try:
-                cursor.execute(f"ALTER TABLE {table} ADD COLUMN user_id TEXT DEFAULT 'legacy'")
-            except sqlite3.OperationalError:
-                pass
 
         # Chat files mapping table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS chat_files (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 chat_id TEXT NOT NULL,
                 user_id TEXT,
                 original_name TEXT NOT NULL,
                 backend_path TEXT NOT NULL,
-                uploaded_at INTEGER,
+                uploaded_at BIGINT,
                 FOREIGN KEY (chat_id) REFERENCES chats (id) ON DELETE CASCADE
             )
         ''')
 
+        # Add has_saved_components flag to chats table
+        if not self._column_exists(cursor, 'chats', 'has_saved_components'):
+            cursor.execute("ALTER TABLE chats ADD COLUMN has_saved_components BOOLEAN DEFAULT FALSE")
+
+        # Auto-migrate user_id column for all tables
+        for table in ['chats', 'messages', 'saved_components', 'chat_files']:
+            if not self._column_exists(cursor, table, 'user_id'):
+                cursor.execute(f"ALTER TABLE {table} ADD COLUMN user_id TEXT DEFAULT 'legacy'")
+
         # Tool permissions table (per-user, per-agent, per-tool)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS tool_permissions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 user_id TEXT NOT NULL,
                 agent_id TEXT NOT NULL,
                 tool_name TEXT NOT NULL,
-                allowed BOOLEAN NOT NULL DEFAULT 1,
-                updated_at INTEGER,
+                allowed BOOLEAN NOT NULL DEFAULT TRUE,
+                updated_at BIGINT,
                 UNIQUE(user_id, agent_id, tool_name)
             )
         ''')
@@ -121,13 +138,13 @@ class Database:
         # Per-user credentials for agents requiring external API keys
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS user_credentials (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 user_id TEXT NOT NULL,
                 agent_id TEXT NOT NULL,
                 credential_key TEXT NOT NULL,
                 encrypted_value TEXT NOT NULL,
-                created_at INTEGER,
-                updated_at INTEGER,
+                created_at BIGINT,
+                updated_at BIGINT,
                 UNIQUE(user_id, agent_id, credential_key)
             )
         ''')
@@ -135,12 +152,12 @@ class Database:
         # Agent ownership and visibility
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS agent_ownership (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 agent_id TEXT NOT NULL UNIQUE,
                 owner_email TEXT NOT NULL,
-                is_public BOOLEAN NOT NULL DEFAULT 0,
-                created_at INTEGER,
-                updated_at INTEGER
+                is_public BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at BIGINT,
+                updated_at BIGINT
             )
         ''')
 
@@ -148,12 +165,12 @@ class Database:
         # Replaces per-tool permissions with 4 scopes: tools:read, tools:write, tools:search, tools:system
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS agent_scopes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 user_id TEXT NOT NULL,
                 agent_id TEXT NOT NULL,
                 scope TEXT NOT NULL,
-                enabled BOOLEAN NOT NULL DEFAULT 0,
-                updated_at INTEGER,
+                enabled BOOLEAN NOT NULL DEFAULT FALSE,
+                updated_at BIGINT,
                 UNIQUE(user_id, agent_id, scope)
             )
         ''')
@@ -162,12 +179,12 @@ class Database:
         # When a scope is enabled but a specific tool should be disabled
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS tool_overrides (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 user_id TEXT NOT NULL,
                 agent_id TEXT NOT NULL,
                 tool_name TEXT NOT NULL,
-                enabled BOOLEAN NOT NULL DEFAULT 1,
-                updated_at INTEGER,
+                enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                updated_at BIGINT,
                 UNIQUE(user_id, agent_id, tool_name)
             )
         ''')
@@ -180,9 +197,9 @@ class Database:
                 username TEXT,
                 display_name TEXT,
                 roles TEXT,
-                last_login_at INTEGER,
-                created_at INTEGER,
-                updated_at INTEGER
+                last_login_at BIGINT,
+                created_at BIGINT,
+                updated_at BIGINT
             )
         ''')
 
@@ -191,7 +208,7 @@ class Database:
             CREATE TABLE IF NOT EXISTS user_preferences (
                 user_id TEXT PRIMARY KEY,
                 preferences TEXT NOT NULL DEFAULT '{}',
-                updated_at INTEGER
+                updated_at BIGINT
             )
         ''')
 
@@ -215,34 +232,11 @@ class Database:
                 reviewed_by TEXT,
                 refinement_history TEXT,
                 validation_report TEXT,
-                created_at INTEGER,
-                updated_at INTEGER
+                required_credentials TEXT,
+                created_at BIGINT,
+                updated_at BIGINT
             )
         ''')
-
-        # Add validation_report column if missing (migration for existing DBs)
-        try:
-            cursor.execute("ALTER TABLE draft_agents ADD COLUMN validation_report TEXT")
-        except Exception:
-            pass
-
-        # Add required_credentials column if missing (migration for existing DBs)
-        try:
-            cursor.execute("ALTER TABLE draft_agents ADD COLUMN required_credentials TEXT")
-        except Exception:
-            pass
-
-        # Add status column if missing (migration for existing DBs)
-        try:
-            cursor.execute("ALTER TABLE draft_agents ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'")
-        except Exception:
-            pass
-
-        # Add agent_slug column if missing (migration for existing DBs)
-        try:
-            cursor.execute("ALTER TABLE draft_agents ADD COLUMN agent_slug TEXT NOT NULL DEFAULT ''")
-        except Exception:
-            pass
 
         # Indexes on user_id for query performance
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_chats_user_id ON chats(user_id)')
@@ -257,12 +251,12 @@ class Database:
         conn.commit()
         conn.close()
 
-    def execute(self, query: str, params: Tuple = ()) -> sqlite3.Cursor:
+    def execute(self, query: str, params: Tuple = ()):
         """Execute a write operation (INSERT, UPDATE, DELETE)."""
         conn = self._get_connection()
         try:
             cursor = conn.cursor()
-            cursor.execute(query, params)
+            cursor.execute(self._translate_query(query), params)
             conn.commit()
             return cursor
         except Exception as e:
@@ -272,22 +266,22 @@ class Database:
         finally:
             conn.close()
 
-    def fetch_one(self, query: str, params: Tuple = ()) -> Optional[sqlite3.Row]:
+    def fetch_one(self, query: str, params: Tuple = ()) -> Optional[Dict]:
         """Fetch a single row."""
         conn = self._get_connection()
         try:
             cursor = conn.cursor()
-            cursor.execute(query, params)
+            cursor.execute(self._translate_query(query), params)
             return cursor.fetchone()
         finally:
             conn.close()
 
-    def fetch_all(self, query: str, params: Tuple = ()) -> List[sqlite3.Row]:
+    def fetch_all(self, query: str, params: Tuple = ()) -> List[Dict]:
         """Fetch all rows."""
         conn = self._get_connection()
         try:
             cursor = conn.cursor()
-            cursor.execute(query, params)
+            cursor.execute(self._translate_query(query), params)
             return cursor.fetchall()
         finally:
             conn.close()
@@ -475,5 +469,5 @@ class Database:
         return cursor.rowcount > 0
 
     def close(self):
-        """Close connection (not strictly needed as we open/close per request for thread safety in simple sqlite usage)."""
+        """No-op for compatibility — connections are opened/closed per request."""
         pass

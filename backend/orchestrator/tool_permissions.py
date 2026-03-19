@@ -11,7 +11,7 @@ client scopes on the astral-agent-service client:
   - tools:system — Access system resources (CPU, memory, disk)
 
 By default, all scopes are DISABLED. Users must explicitly grant scopes.
-Persists to SQLite via the agent_scopes table.
+Persists to PostgreSQL via the agent_scopes table.
 
 Part of the RFC 8693 Delegated Authorization framework.
 """
@@ -28,7 +28,7 @@ VALID_SCOPES = ["tools:read", "tools:write", "tools:search", "tools:system"]
 
 
 class ToolPermissionManager:
-    """Manages per-user, per-agent scope-based permissions backed by SQLite.
+    """Manages per-user, per-agent scope-based permissions backed by PostgreSQL.
 
     Structure (logical):
         {
@@ -45,17 +45,16 @@ class ToolPermissionManager:
     Default: all scopes DISABLED for new agents (user must explicitly grant).
     """
 
-    def __init__(self, db=None, data_dir: str = None):
+    def __init__(self, db=None, data_dir: str = None, database_url: str = None):
         if db is not None:
             self.db = db
-        elif data_dir is not None:
+        elif data_dir is not None or database_url is not None:
             import sys
             sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
             from shared.database import Database
-            db_path = os.path.join(data_dir, "astral.db")
-            self.db = Database(db_path)
+            self.db = Database(database_url)
         else:
-            raise ValueError("Either db or data_dir must be provided")
+            raise ValueError("Either db, data_dir, or database_url must be provided")
 
         self.data_dir = data_dir
         # In-memory tool→scope mapping populated by orchestrator on agent registration
@@ -64,7 +63,7 @@ class ToolPermissionManager:
         self._migrate_from_json()
 
     def _migrate_from_json(self):
-        """One-time migration from legacy JSON file to SQLite."""
+        """One-time migration from legacy JSON file to database."""
         if not self.data_dir:
             return
         json_path = os.path.join(self.data_dir, "tool_permissions.json")
@@ -147,9 +146,11 @@ class ToolPermissionManager:
                 logger.warning(f"Ignoring invalid scope: {scope}")
                 continue
             self.db.execute(
-                """INSERT OR REPLACE INTO agent_scopes
+                """INSERT INTO agent_scopes
                    (user_id, agent_id, scope, enabled, updated_at)
-                   VALUES (?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT (user_id, agent_id, scope)
+                   DO UPDATE SET enabled = EXCLUDED.enabled, updated_at = EXCLUDED.updated_at""",
                 (user_id, agent_id, scope, 1 if enabled else 0, now)
             )
         logger.info(
@@ -189,9 +190,11 @@ class ToolPermissionManager:
             else:
                 # Store disable override
                 self.db.execute(
-                    """INSERT OR REPLACE INTO tool_overrides
+                    """INSERT INTO tool_overrides
                        (user_id, agent_id, tool_name, enabled, updated_at)
-                       VALUES (?, ?, ?, 0, ?)""",
+                       VALUES (?, ?, ?, 0, ?)
+                       ON CONFLICT (user_id, agent_id, tool_name)
+                       DO UPDATE SET enabled = EXCLUDED.enabled, updated_at = EXCLUDED.updated_at""",
                     (user_id, agent_id, tool_name, now)
                 )
         logger.info(

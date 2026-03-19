@@ -199,10 +199,11 @@ class TestPersistence:
         assert m2.is_scope_enabled("user1", "agent1", "tools:write") is True
         assert m2.is_tool_allowed("user1", "agent1", "modify_data") is True
 
-    def test_db_created(self, tmp_dir):
+    def test_db_connected(self, tmp_dir):
         m = ToolPermissionManager(data_dir=tmp_dir)
         m.set_agent_scopes("user1", "agent1", {"tools:read": True})
-        assert os.path.exists(os.path.join(tmp_dir, "astral.db"))
+        # Verify data was persisted by reading it back
+        assert m.is_scope_enabled("user1", "agent1", "tools:read") is True
 
 
 class TestCleanup:

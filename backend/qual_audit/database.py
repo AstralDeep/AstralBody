@@ -1,8 +1,9 @@
-"""SQLite storage layer for the test audit trail."""
+"""PostgreSQL storage layer for the test audit trail."""
 
 import json
 import os
-import sqlite3
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from datetime import datetime
 from typing import List, Optional
 
@@ -34,7 +35,7 @@ CREATE TABLE IF NOT EXISTS test_case_results (
     suite TEXT NOT NULL,
     test_name TEXT NOT NULL,
     outcome TEXT NOT NULL,
-    duration_ms REAL DEFAULT 0.0,
+    duration_ms DOUBLE PRECISION DEFAULT 0.0,
     metrics TEXT,
     qualitative TEXT DEFAULT '',
     evidence_hash TEXT DEFAULT '',
@@ -65,7 +66,7 @@ CREATE TABLE IF NOT EXISTS latex_artifacts (
     run_id TEXT NOT NULL REFERENCES test_runs(id),
     filename TEXT NOT NULL,
     generated_from TEXT NOT NULL,
-    verification_complete INTEGER NOT NULL DEFAULT 0,
+    verification_complete BOOLEAN NOT NULL DEFAULT FALSE,
     generated_at TEXT NOT NULL
 );
 
@@ -85,26 +86,39 @@ def _parse_iso(s: str) -> datetime:
     return datetime.fromisoformat(s)
 
 
-class AuditDatabase:
-    """CRUD layer for the test audit trail backed by SQLite."""
+def _build_database_url() -> str:
+    """Build a PostgreSQL connection URL from individual DB_* env vars."""
+    host = os.getenv("DB_HOST", "localhost")
+    port = os.getenv("DB_PORT", "5432")
+    name = os.getenv("DB_NAME", "astralbody")
+    user = os.getenv("DB_USER", "astral")
+    password = os.getenv("DB_PASSWORD", "astral_dev")
+    return f"postgresql://{user}:{password}@{host}:{port}/{name}"
 
-    def __init__(self, db_path: str = "data/test_audit.db"):
-        self.db_path = db_path
-        dirname = os.path.dirname(db_path)
-        if dirname and not os.path.exists(dirname):
-            os.makedirs(dirname)
+
+class AuditDatabase:
+    """CRUD layer for the test audit trail backed by PostgreSQL."""
+
+    def __init__(self, database_url: str = None):
+        self.database_url = database_url or os.getenv("DATABASE_URL") or _build_database_url()
         self._init()
 
-    def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
+    def _conn(self):
+        conn = psycopg2.connect(self.database_url, cursor_factory=RealDictCursor)
         return conn
+
+    def _translate_query(self, query: str) -> str:
+        """Convert SQLite ? placeholders to PostgreSQL %s placeholders."""
+        return query.replace('?', '%s')
 
     def _init(self):
         conn = self._conn()
-        conn.executescript(_SCHEMA)
+        cursor = conn.cursor()
+        # Execute each statement separately for reliability
+        for statement in _SCHEMA.split(';'):
+            statement = statement.strip()
+            if statement:
+                cursor.execute(statement)
         conn.commit()
         conn.close()
 
@@ -112,9 +126,11 @@ class AuditDatabase:
 
     def insert_run(self, run: TestRun) -> None:
         conn = self._conn()
-        conn.execute(
-            "INSERT INTO test_runs (id, started_at, finished_at, system_state, categories, status) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+        conn.cursor().execute(
+            self._translate_query(
+                "INSERT INTO test_runs (id, started_at, finished_at, system_state, categories, status) "
+                "VALUES (?, ?, ?, ?, ?, ?)"
+            ),
             (
                 run.id,
                 _iso(run.started_at),
@@ -129,8 +145,10 @@ class AuditDatabase:
 
     def finish_run(self, run_id: str, status: RunStatus) -> None:
         conn = self._conn()
-        conn.execute(
-            "UPDATE test_runs SET finished_at = ?, status = ? WHERE id = ?",
+        conn.cursor().execute(
+            self._translate_query(
+                "UPDATE test_runs SET finished_at = ?, status = ? WHERE id = ?"
+            ),
             (_iso(datetime.now()), status.value, run_id),
         )
         conn.commit()
@@ -138,7 +156,12 @@ class AuditDatabase:
 
     def get_run(self, run_id: str) -> Optional[TestRun]:
         conn = self._conn()
-        row = conn.execute("SELECT * FROM test_runs WHERE id = ?", (run_id,)).fetchone()
+        row = conn.cursor()
+        row.execute(
+            self._translate_query("SELECT * FROM test_runs WHERE id = ?"),
+            (run_id,),
+        )
+        row = row.fetchone()
         conn.close()
         if not row:
             return None
@@ -153,9 +176,11 @@ class AuditDatabase:
 
     def get_latest_run(self) -> Optional[TestRun]:
         conn = self._conn()
-        row = conn.execute(
+        cursor = conn.cursor()
+        cursor.execute(
             "SELECT * FROM test_runs ORDER BY started_at DESC LIMIT 1"
-        ).fetchone()
+        )
+        row = cursor.fetchone()
         conn.close()
         if not row:
             return None
@@ -172,10 +197,12 @@ class AuditDatabase:
 
     def insert_case(self, case: TestCaseResult) -> None:
         conn = self._conn()
-        conn.execute(
-            "INSERT INTO test_case_results "
-            "(id, run_id, suite, test_name, outcome, duration_ms, metrics, qualitative, evidence_hash, verification_status) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        conn.cursor().execute(
+            self._translate_query(
+                "INSERT INTO test_case_results "
+                "(id, run_id, suite, test_name, outcome, duration_ms, metrics, qualitative, evidence_hash, verification_status) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            ),
             (
                 case.id,
                 case.run_id,
@@ -196,24 +223,35 @@ class AuditDatabase:
         self, run_id: str, suite: Optional[str] = None
     ) -> List[TestCaseResult]:
         conn = self._conn()
+        cursor = conn.cursor()
         if suite:
-            rows = conn.execute(
-                "SELECT * FROM test_case_results WHERE run_id = ? AND suite = ? ORDER BY test_name",
+            cursor.execute(
+                self._translate_query(
+                    "SELECT * FROM test_case_results WHERE run_id = ? AND suite = ? ORDER BY test_name"
+                ),
                 (run_id, suite),
-            ).fetchall()
+            )
         else:
-            rows = conn.execute(
-                "SELECT * FROM test_case_results WHERE run_id = ? ORDER BY suite, test_name",
+            cursor.execute(
+                self._translate_query(
+                    "SELECT * FROM test_case_results WHERE run_id = ? ORDER BY suite, test_name"
+                ),
                 (run_id,),
-            ).fetchall()
+            )
+        rows = cursor.fetchall()
         conn.close()
         return [self._row_to_case(r) for r in rows]
 
     def get_case(self, case_id: str) -> Optional[TestCaseResult]:
         conn = self._conn()
-        row = conn.execute(
-            "SELECT * FROM test_case_results WHERE id = ?", (case_id,)
-        ).fetchone()
+        cursor = conn.cursor()
+        cursor.execute(
+            self._translate_query(
+                "SELECT * FROM test_case_results WHERE id = ?"
+            ),
+            (case_id,),
+        )
+        row = cursor.fetchone()
         conn.close()
         return self._row_to_case(row) if row else None
 
@@ -221,8 +259,10 @@ class AuditDatabase:
         self, case_id: str, status: VerificationStatus
     ) -> None:
         conn = self._conn()
-        conn.execute(
-            "UPDATE test_case_results SET verification_status = ? WHERE id = ?",
+        conn.cursor().execute(
+            self._translate_query(
+                "UPDATE test_case_results SET verification_status = ? WHERE id = ?"
+            ),
             (status.value, case_id),
         )
         conn.commit()
@@ -247,9 +287,11 @@ class AuditDatabase:
 
     def insert_evidence(self, ev: TestEvidence) -> None:
         conn = self._conn()
-        conn.execute(
-            "INSERT INTO test_evidence (id, case_id, evidence_type, data, sha256, captured_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+        conn.cursor().execute(
+            self._translate_query(
+                "INSERT INTO test_evidence (id, case_id, evidence_type, data, sha256, captured_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)"
+            ),
             (ev.id, ev.case_id, ev.evidence_type, json.dumps(ev.data), ev.sha256, _iso(ev.captured_at)),
         )
         conn.commit()
@@ -257,10 +299,14 @@ class AuditDatabase:
 
     def get_evidence_for_case(self, case_id: str) -> List[TestEvidence]:
         conn = self._conn()
-        rows = conn.execute(
-            "SELECT * FROM test_evidence WHERE case_id = ? ORDER BY captured_at",
+        cursor = conn.cursor()
+        cursor.execute(
+            self._translate_query(
+                "SELECT * FROM test_evidence WHERE case_id = ? ORDER BY captured_at"
+            ),
             (case_id,),
-        ).fetchall()
+        )
+        rows = cursor.fetchall()
         conn.close()
         return [
             TestEvidence(
@@ -278,9 +324,11 @@ class AuditDatabase:
 
     def insert_audit(self, entry: AuditEntry) -> None:
         conn = self._conn()
-        conn.execute(
-            "INSERT INTO audit_entries (id, case_id, action, reviewer, rationale, timestamp, previous_hash) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        conn.cursor().execute(
+            self._translate_query(
+                "INSERT INTO audit_entries (id, case_id, action, reviewer, rationale, timestamp, previous_hash) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)"
+            ),
             (
                 entry.id,
                 entry.case_id,
@@ -296,29 +344,39 @@ class AuditDatabase:
 
     def get_audits_for_case(self, case_id: str) -> List[AuditEntry]:
         conn = self._conn()
-        rows = conn.execute(
-            "SELECT * FROM audit_entries WHERE case_id = ? ORDER BY timestamp",
+        cursor = conn.cursor()
+        cursor.execute(
+            self._translate_query(
+                "SELECT * FROM audit_entries WHERE case_id = ? ORDER BY timestamp"
+            ),
             (case_id,),
-        ).fetchall()
+        )
+        rows = cursor.fetchall()
         conn.close()
         return [self._row_to_audit(r) for r in rows]
 
     def get_latest_audit(self) -> Optional[AuditEntry]:
         conn = self._conn()
-        row = conn.execute(
+        cursor = conn.cursor()
+        cursor.execute(
             "SELECT * FROM audit_entries ORDER BY timestamp DESC LIMIT 1"
-        ).fetchone()
+        )
+        row = cursor.fetchone()
         conn.close()
         return self._row_to_audit(row) if row else None
 
     def get_all_audits_for_run(self, run_id: str) -> List[AuditEntry]:
         conn = self._conn()
-        rows = conn.execute(
-            "SELECT a.* FROM audit_entries a "
-            "JOIN test_case_results c ON a.case_id = c.id "
-            "WHERE c.run_id = ? ORDER BY a.timestamp, a.rowid",
+        cursor = conn.cursor()
+        cursor.execute(
+            self._translate_query(
+                "SELECT a.* FROM audit_entries a "
+                "JOIN test_case_results c ON a.case_id = c.id "
+                "WHERE c.run_id = ? ORDER BY a.timestamp, a.id"
+            ),
             (run_id,),
-        ).fetchall()
+        )
+        rows = cursor.fetchall()
         conn.close()
         return [self._row_to_audit(r) for r in rows]
 
@@ -338,15 +396,17 @@ class AuditDatabase:
 
     def insert_artifact(self, art: LatexArtifact) -> None:
         conn = self._conn()
-        conn.execute(
-            "INSERT INTO latex_artifacts (id, run_id, filename, generated_from, verification_complete, generated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+        conn.cursor().execute(
+            self._translate_query(
+                "INSERT INTO latex_artifacts (id, run_id, filename, generated_from, verification_complete, generated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)"
+            ),
             (
                 art.id,
                 art.run_id,
                 art.filename,
                 json.dumps(art.generated_from),
-                1 if art.verification_complete else 0,
+                art.verification_complete,
                 _iso(art.generated_at),
             ),
         )
@@ -355,10 +415,14 @@ class AuditDatabase:
 
     def get_artifacts_for_run(self, run_id: str) -> List[LatexArtifact]:
         conn = self._conn()
-        rows = conn.execute(
-            "SELECT * FROM latex_artifacts WHERE run_id = ? ORDER BY filename",
+        cursor = conn.cursor()
+        cursor.execute(
+            self._translate_query(
+                "SELECT * FROM latex_artifacts WHERE run_id = ? ORDER BY filename"
+            ),
             (run_id,),
-        ).fetchall()
+        )
+        rows = cursor.fetchall()
         conn.close()
         return [
             LatexArtifact(

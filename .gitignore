@@ -6,6 +6,7 @@ docs/*
 CLAUDE.md
 /.ruff_cache/
 Qualifying_Exam/
+.docker-cache/
 
 .claude/
 

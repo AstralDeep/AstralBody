@@ -13,11 +13,10 @@ from shared.database import Database
 logger = logging.getLogger('HistoryManager')
 
 class HistoryManager:
-    def __init__(self, data_dir: str = "data"):
+    def __init__(self, data_dir: str = "data", database_url: str = None):
         self.data_dir = data_dir
-        self.db_path = os.path.join(data_dir, "astral.db")
         self.json_file = os.path.join(data_dir, "chats.json")
-        self.db = Database(self.db_path)
+        self.db = Database(database_url)
         self._ensure_data_dir()
         self._migrate_from_json()
 
@@ -26,7 +25,7 @@ class HistoryManager:
             os.makedirs(self.data_dir)
 
     def _migrate_from_json(self):
-        """Migrate existing JSON history to SQLite."""
+        """Migrate existing JSON history to the database."""
         if not os.path.exists(self.json_file):
             return
 
@@ -40,7 +39,7 @@ class HistoryManager:
             logger.error(f"Error checking DB state: {e}")
             return
 
-        logger.info("Migrating JSON history to SQLite...")
+        logger.info("Migrating JSON history to database...")
         try:
             with open(self.json_file, 'r') as f:
                 chats = json.load(f)

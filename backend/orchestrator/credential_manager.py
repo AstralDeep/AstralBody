@@ -18,7 +18,7 @@ logger = logging.getLogger("CredentialManager")
 
 
 class CredentialManager:
-    """Manages per-user, per-agent encrypted credentials backed by SQLite.
+    """Manages per-user, per-agent encrypted credentials backed by PostgreSQL.
 
     Structure (logical):
         {
@@ -31,17 +31,16 @@ class CredentialManager:
         }
     """
 
-    def __init__(self, db=None, data_dir: str = None):
+    def __init__(self, db=None, data_dir: str = None, database_url: str = None):
         if db is not None:
             self.db = db
-        elif data_dir is not None:
+        elif data_dir is not None or database_url is not None:
             import sys
             sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
             from shared.database import Database
-            db_path = os.path.join(data_dir, "astral.db")
-            self.db = Database(db_path)
+            self.db = Database(database_url)
         else:
-            raise ValueError("Either db or data_dir must be provided")
+            raise ValueError("Either db, data_dir, or database_url must be provided")
 
         self.data_dir = data_dir
         self._fernet = self._init_encryption()
@@ -74,9 +73,11 @@ class CredentialManager:
         encrypted = self._fernet.encrypt(value.encode()).decode()
         now = int(time.time() * 1000)
         self.db.execute(
-            """INSERT OR REPLACE INTO user_credentials
+            """INSERT INTO user_credentials
                (user_id, agent_id, credential_key, encrypted_value, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT (user_id, agent_id, credential_key)
+               DO UPDATE SET encrypted_value = EXCLUDED.encrypted_value, updated_at = EXCLUDED.updated_at""",
             (user_id, agent_id, key, encrypted, now, now)
         )
         logger.info(f"Credential set: user={user_id} agent={agent_id} key={key}")
