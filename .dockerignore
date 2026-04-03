@@ -4,11 +4,12 @@
 node_modules
 .venv
 backend/.venv
-frontend/node_modules
-frontend/dist
+frontend-archive-react/
+astralprojection-flutter/
 backend/data
 backend/tmp
 data
+specs/
 *.pyc
 __pycache__
 .pytest_cache

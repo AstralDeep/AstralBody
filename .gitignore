@@ -45,7 +45,7 @@ htmlcov/
 venv/
 ENV/
 
-# Node.js
+# Node.js (archived React frontend)
 node_modules/
 npm-debug.log*
 yarn-debug.log*
@@ -53,6 +53,15 @@ yarn-error.log*
 .pnpm-debug.log*
 dist/
 coverage/
+
+# Flutter / Dart
+.dart_tool/
+.packages
+*.iml
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
 
 # Environment Variables
 .env

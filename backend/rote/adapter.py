@@ -244,9 +244,13 @@ class ComponentAdapter:
 
     @classmethod
     def _adapt_button(cls, comp: Dict, profile: DeviceProfile) -> Optional[Dict]:
-        # TV and voice: remove interactive inputs
-        if profile.device_type in (DeviceType.TV, DeviceType.VOICE):
+        # Voice: remove all buttons (no visual UI)
+        if profile.device_type == DeviceType.VOICE:
             return None
+        # TV: keep only primary buttons (user can select with remote/D-pad)
+        if profile.device_type == DeviceType.TV:
+            if comp.get("variant", "primary") != "primary":
+                return None
         # Watch: keep only primary buttons
         if profile.device_type == DeviceType.WATCH:
             if comp.get("variant", "primary") != "primary":
