@@ -1,17 +1,21 @@
 <!--
   Sync Impact Report
   ==================
-  Version change: N/A → 1.0.0 (initial creation)
+  Version change: 1.0.0 → 2.0.0 (MAJOR — principle redefinition)
 
-  Principles added:
-    1. Primary Language (Python)
-    2. Frontend Framework (Vite + React/TypeScript)
-    3. Testing Standards (90% coverage, unit + integration)
-    4. Code Quality (PEP 8, ESLint)
-    5. Dependency Management (approval required)
-    6. Documentation (docstrings, /docs endpoint)
-    7. Security (Keycloak, RFC 8693 delegated tokens)
-    8. User Experience (consistent UI, dynamic generation)
+  Modified principles:
+    II. Frontend Framework (Vite + React/TypeScript) →
+        II. Frontend Client (Flutter SDUI Renderer)
+    IV. Code Quality — removed TypeScript/ESLint rules,
+        added Dart/Flutter lint rules
+    VI. Documentation — removed TypeScript JSDoc requirement,
+        added Dart doc-comment requirement
+    VIII. User Experience — reframed around SDUI thin-client
+          architecture; backend is sole layout authority
+
+  Technology Stack changes:
+    - Removed: Vite, React, TypeScript
+    - Added: Flutter (Dart), Backend-Driven SDUI
 
   Templates requiring updates:
     ✅ .specify/templates/plan-template.md — generic, compatible
@@ -36,15 +40,22 @@ All backend code MUST be written in Python.
 - Python version MUST be kept current with the project's
   declared minimum (see `pyproject.toml` or equivalent).
 
-### II. Frontend Framework
+### II. Frontend Client
 
-The frontend MUST be built using Vite with React and
-TypeScript.
+The frontend MUST be built using Flutter (Dart) as a
+device-agnostic thin client that renders Server-Driven UI
+(SDUI) components produced by the backend.
 
-- All frontend source files MUST use TypeScript (`.ts`/`.tsx`),
-  not plain JavaScript.
-- Vite MUST remain the build tool; no migration to other
-  bundlers without a constitution amendment.
+- The Flutter client MUST act as a passive renderer: it
+  receives SDUI component trees from the backend and renders
+  them without embedding business logic or layout decisions.
+- All UI layout composition and business logic MUST reside in
+  the backend. The client MUST NOT make autonomous layout or
+  navigation decisions.
+- Flutter MUST target all required platforms (mobile, web,
+  desktop) from a single codebase.
+- No migration to another frontend framework without a
+  constitution amendment.
 
 ### III. Testing Standards
 
@@ -62,8 +73,9 @@ All code MUST adhere to established style standards.
 
 - Python code MUST comply with PEP 8. Linting MUST be enforced
   via tooling (e.g., ruff, flake8).
-- TypeScript code MUST pass standard ESLint rules. Linting
-  MUST be enforced in CI.
+- Dart code MUST pass Flutter/Dart analyzer rules with no
+  errors or warnings. Linting MUST be enforced in CI via
+  `dart analyze` or equivalent.
 - No linting exceptions without inline justification comments.
 
 ### V. Dependency Management
@@ -82,9 +94,13 @@ All public APIs and complex functions MUST be documented.
 
 - Python functions MUST have docstrings following Google or
   NumPy style.
-- TypeScript exports MUST have JSDoc comments.
+- Dart public members MUST have `///` doc comments following
+  Effective Dart documentation guidelines.
 - Backend APIs MUST expose interactive documentation at the
   `/docs` URL (e.g., via FastAPI's built-in Swagger UI).
+- The SDUI component contract (JSON schema or equivalent) MUST
+  be documented and versioned so the Flutter client and backend
+  stay in sync.
 
 ### VII. Security
 
@@ -102,22 +118,31 @@ system boundaries.
   security; users MAY override or set scopes explicitly.
 - Secrets MUST NOT be committed to version control.
 
-### VIII. User Experience
+### VIII. User Experience & SDUI Architecture
 
-The UI MUST maintain a consistent design language while
-supporting backend-driven dynamic generation.
+The backend MUST be the sole authority for UI composition.
+The Flutter client MUST render backend-produced SDUI component
+trees faithfully and consistently across all target platforms.
 
-- The frontend MUST use the predefined set of primitive
-  components for all UI rendering.
-- The backend MAY dynamically generate frontend layouts by
-  composing these primitive components.
-- New primitive components MUST be approved and documented
+- The backend MUST define a finite set of SDUI primitive
+  components (e.g., text, button, list, form, card, layout
+  containers). New primitives MUST be approved and documented
   before use.
+- The Flutter client MUST implement a renderer for every
+  registered SDUI primitive. Unknown component types MUST
+  degrade gracefully (e.g., render a placeholder or skip).
+- The backend MAY dynamically compose screens, navigation
+  flows, and layouts by assembling these primitives.
+- The Flutter client MUST NOT contain hard-coded screens or
+  page layouts; all screens MUST be driven by backend
+  responses.
 
 ## Technology Stack
 
 - **Backend**: Python (FastAPI or equivalent ASGI framework)
-- **Frontend**: Vite + React + TypeScript
+- **Frontend**: Flutter (Dart) — device-agnostic thin client
+- **UI Architecture**: Server-Driven UI (SDUI); backend
+  composes component trees, client renders them
 - **Authentication**: Keycloak IAM
 - **Agent Auth**: RFC 8693 token exchange with attenuated scopes
 - **Containerization**: Docker / Docker Compose
@@ -151,4 +176,4 @@ guidance when conflicts arise.
   adherence to these principles. Violations MUST be resolved
   before merge.
 
-**Version**: 1.0.0 | **Ratified**: 2026-03-11 | **Last Amended**: 2026-03-11
+**Version**: 2.0.0 | **Ratified**: 2026-03-11 | **Last Amended**: 2026-04-03
