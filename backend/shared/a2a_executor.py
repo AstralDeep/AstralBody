@@ -25,6 +25,7 @@ from a2a.types import (
 
 from shared.a2a_bridge import a2a_message_to_mcp_request, mcp_response_to_a2a_message, extract_text_from_a2a_message
 from shared.a2a_security import A2ASecurityValidator
+from shared.crypto import decrypt_from_orchestrator, is_e2e_encrypted
 
 logger = logging.getLogger("MCPAgentExecutor")
 
@@ -39,14 +40,16 @@ class MCPAgentExecutor(AgentExecutor):
     4. Converts the MCPResponse to A2A events and publishes them
     """
 
-    def __init__(self, mcp_server, security_validator: Optional[A2ASecurityValidator] = None):
+    def __init__(self, mcp_server, security_validator: Optional[A2ASecurityValidator] = None, private_key=None):
         """
         Args:
             mcp_server: The agent's MCPServer instance (has .process_request() and .tools).
             security_validator: Optional A2ASecurityValidator for token validation.
+            private_key: Optional EC private key for E2E credential decryption.
         """
         self.mcp_server = mcp_server
         self.security_validator = security_validator or A2ASecurityValidator()
+        self._private_key = private_key
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         """Execute an incoming A2A request by dispatching to MCP tools."""
@@ -66,6 +69,8 @@ class MCPAgentExecutor(AgentExecutor):
             mcp_request = a2a_message_to_mcp_request(message)
 
             if mcp_request:
+                # Decrypt E2E credentials if present
+                self._decrypt_credentials_if_needed(mcp_request)
                 # Tool call: dispatch via MCP server
                 await self._execute_tool_call(mcp_request, updater, context)
             else:
@@ -137,6 +142,29 @@ class MCPAgentExecutor(AgentExecutor):
             task_id=context.task_id,
         )
         await updater.complete(message=msg)
+
+    def _decrypt_credentials_if_needed(self, mcp_request):
+        """Decrypt E2E-encrypted credentials in-place before tool dispatch."""
+        if not self._private_key:
+            return
+        args = mcp_request.params.get("arguments") if mcp_request.params else None
+        if not args or not args.get("_credentials_encrypted"):
+            return
+
+        encrypted_creds = args.get("_credentials", {})
+        plaintext_creds = {}
+        for key, value in encrypted_creds.items():
+            try:
+                if is_e2e_encrypted(value):
+                    plaintext_creds[key] = decrypt_from_orchestrator(value, self._private_key)
+                else:
+                    logger.warning(f"Credential '{key}' is not E2E-encrypted, skipping")
+                    plaintext_creds[key] = value
+            except Exception as e:
+                logger.error(f"Failed to decrypt credential '{key}': {e}")
+
+        args["_credentials"] = plaintext_creds
+        args.pop("_credentials_encrypted", None)
 
     @staticmethod
     def _error_message(error_text: str, task_id: str) -> A2AMessage:

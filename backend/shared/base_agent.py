@@ -30,6 +30,10 @@ from shared.protocol import (
 from shared.a2a_bridge import custom_card_to_a2a
 from shared.a2a_executor import MCPAgentExecutor
 from shared.a2a_security import A2ASecurityValidator
+from shared.crypto import (
+    generate_ec_keypair, build_jwk, save_private_key, load_private_key,
+    decrypt_from_orchestrator, is_e2e_encrypted,
+)
 
 
 logger = logging.getLogger("BaseA2AAgent")
@@ -99,7 +103,10 @@ class BaseA2AAgent:
         else:
             self.port = find_available_port(BASE_PORT)
 
-        # Build agent cards
+        # ECIES key pair for end-to-end credential encryption (must init before card build)
+        self._init_crypto()
+
+        # Build agent cards (includes public key JWK in metadata)
         self.card = self._build_agent_card()
 
         # Peer connections for agent-to-agent communication
@@ -111,6 +118,34 @@ class BaseA2AAgent:
         self._security_validator = A2ASecurityValidator()
 
         self._logger = logging.getLogger(self.__class__.__name__)
+
+    def _init_crypto(self):
+        """Initialize EC P-256 key pair for end-to-end credential decryption.
+
+        Key persistence order: file on disk > auto-generate.
+        The key file lives alongside the agent code in a data/ subdirectory.
+        """
+        # Determine key path: prefer AGENT_KEY_PATH env var, else <agent_module>/data/agent_key.pem
+        key_path = os.getenv("AGENT_KEY_PATH")
+        if not key_path:
+            # Derive from the agent subclass's module location
+            agent_module = sys.modules.get(self.__class__.__module__)
+            if agent_module and hasattr(agent_module, "__file__") and agent_module.__file__:
+                agent_dir = os.path.dirname(os.path.abspath(agent_module.__file__))
+            else:
+                agent_dir = os.path.dirname(os.path.abspath(__file__))
+            key_path = os.path.join(agent_dir, "data", "agent_key.pem")
+
+        if os.path.exists(key_path):
+            self._private_key = load_private_key(key_path)
+            logger.info(f"Loaded agent ECIES key from {key_path}")
+        else:
+            self._private_key, _ = generate_ec_keypair()
+            save_private_key(self._private_key, key_path)
+            logger.info(f"Generated new agent ECIES key at {key_path}")
+
+        self._public_key = self._private_key.public_key()
+        self._public_key_jwk = build_jwk(self._public_key)
 
     def _build_agent_card(self) -> AgentCard:
         """Build custom AgentCard from registered MCP tools."""
@@ -127,13 +162,16 @@ class BaseA2AAgent:
                 scope=info.get("scope", "tools:read"),
             ))
 
+        metadata = dict(self.card_metadata) if self.card_metadata else {}
+        metadata["public_key_jwk"] = self._public_key_jwk
+
         return AgentCard(
             name=self.service_name,
             description=self.description,
             agent_id=self.agent_id,
             version="1.0.0",
             skills=skills,
-            metadata=dict(self.card_metadata) if self.card_metadata else {},
+            metadata=metadata,
         )
 
     def _build_a2a_card(self):
@@ -172,11 +210,38 @@ class BaseA2AAgent:
             self.orchestrator_connections.discard(websocket)
 
     async def handle_mcp_request(self, ws: WebSocket, msg: MCPRequest):
-        """Handle MCP request by dispatching to MCP server."""
+        """Handle MCP request by dispatching to MCP server.
+
+        If the orchestrator sent E2E-encrypted credentials, decrypt them
+        transparently before tool dispatch so individual tools see plaintext.
+        """
         self._logger.info(f"Processing MCP Request: {msg.method}")
+        self._decrypt_credentials_if_needed(msg)
         response = await asyncio.to_thread(self.mcp_server.process_request, msg)
         await ws.send_text(response.to_json())
         self._logger.info(f"Sent response for {msg.request_id}")
+
+    def _decrypt_credentials_if_needed(self, msg: MCPRequest):
+        """Decrypt E2E-encrypted credentials in-place before tool dispatch."""
+        args = msg.params.get("arguments") if msg.params else None
+        if not args or not args.get("_credentials_encrypted"):
+            return
+
+        encrypted_creds = args.get("_credentials", {})
+        plaintext_creds = {}
+        for key, value in encrypted_creds.items():
+            try:
+                if is_e2e_encrypted(value):
+                    plaintext_creds[key] = decrypt_from_orchestrator(value, self._private_key)
+                else:
+                    # Legacy Fernet value — agent cannot decrypt, pass through as-is
+                    self._logger.warning(f"Credential '{key}' is not E2E-encrypted, skipping")
+                    plaintext_creds[key] = value
+            except Exception as e:
+                self._logger.error(f"Failed to decrypt credential '{key}': {e}")
+
+        args["_credentials"] = plaintext_creds
+        args.pop("_credentials_encrypted", None)
 
     # =========================================================================
     # Agent-to-Agent Communication
@@ -386,7 +451,7 @@ class BaseA2AAgent:
             from a2a.server.tasks.inmemory_task_store import InMemoryTaskStore
 
             a2a_card = self._build_a2a_card()
-            executor = MCPAgentExecutor(self.mcp_server, self._security_validator)
+            executor = MCPAgentExecutor(self.mcp_server, self._security_validator, private_key=self._private_key)
             task_store = InMemoryTaskStore()
             handler = DefaultRequestHandler(
                 agent_executor=executor,

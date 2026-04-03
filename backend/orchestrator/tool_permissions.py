@@ -151,7 +151,7 @@ class ToolPermissionManager:
                    VALUES (?, ?, ?, ?, ?)
                    ON CONFLICT (user_id, agent_id, scope)
                    DO UPDATE SET enabled = EXCLUDED.enabled, updated_at = EXCLUDED.updated_at""",
-                (user_id, agent_id, scope, 1 if enabled else 0, now)
+                (user_id, agent_id, scope, bool(enabled), now)
             )
         logger.info(
             f"Scopes updated: user={user_id} agent={agent_id} "
@@ -192,10 +192,10 @@ class ToolPermissionManager:
                 self.db.execute(
                     """INSERT INTO tool_overrides
                        (user_id, agent_id, tool_name, enabled, updated_at)
-                       VALUES (?, ?, ?, 0, ?)
+                       VALUES (?, ?, ?, ?, ?)
                        ON CONFLICT (user_id, agent_id, tool_name)
                        DO UPDATE SET enabled = EXCLUDED.enabled, updated_at = EXCLUDED.updated_at""",
-                    (user_id, agent_id, tool_name, now)
+                    (user_id, agent_id, tool_name, False, now)
                 )
         logger.info(
             f"Tool overrides updated: user={user_id} agent={agent_id} "

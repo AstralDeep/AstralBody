@@ -35,6 +35,9 @@ def tmp_dir():
 @pytest.fixture
 def manager(tmp_dir):
     m = ToolPermissionManager(data_dir=tmp_dir)
+    # Clean up any stale data from previous runs (shared Postgres DB)
+    for uid in ("user1", "user2"):
+        m.remove_user_permissions(uid)
     # Register tool→scope mapping for a test agent
     m.register_tool_scopes("agent1", {
         "get_system_status": "tools:system",
@@ -44,7 +47,10 @@ def manager(tmp_dir):
         "search_arxiv": "tools:search",
         "generate_chart": "tools:read",
     })
-    return m
+    yield m
+    # Tear down: remove test data
+    for uid in ("user1", "user2"):
+        m.remove_user_permissions(uid)
 
 
 TOOLS = ["get_system_status", "get_cpu_info", "modify_data", "search_wikipedia", "search_arxiv", "generate_chart"]
