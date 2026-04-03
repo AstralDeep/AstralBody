@@ -161,6 +161,12 @@ class Orchestrator:
         # Register tool→scope mapping in the permission manager
         self.tool_permissions.register_tool_scopes(card.agent_id, tool_scope_map)
 
+        # Extract agent's ECIES public key for E2E credential encryption
+        public_key_jwk = getattr(card, 'metadata', {}).get("public_key_jwk") if getattr(card, 'metadata', None) else None
+        if public_key_jwk:
+            self.credential_manager.register_agent_public_key(card.agent_id, public_key_jwk)
+            logger.info(f"Registered ECIES public key for agent '{card.agent_id}'")
+
         logger.info(f"Agent registered: {card.agent_id} ({card.name}) with {len(caps)} tools")
 
         # Proactive security review: analyze all tools for threats
@@ -863,12 +869,13 @@ class Orchestrator:
                         }))
                         return
 
-                    # Inject per-user credentials
+                    # Inject per-user credentials (E2E encrypted — only agent can decrypt)
                     args = dict(params)
                     if user_id and agent_id:
-                        creds = self.credential_manager.get_agent_credentials(user_id, agent_id)
+                        creds = self.credential_manager.get_agent_credentials_encrypted(user_id, agent_id)
                         if creds:
                             args["_credentials"] = creds
+                            args["_credentials_encrypted"] = True
 
                     try:
                         result = await self._execute_with_retry(websocket, agent_id, tool_name, args)
@@ -1897,11 +1904,12 @@ CRITICAL RULES:
             if user_id:
                 args["user_id"] = user_id
 
-        # Inject per-user credentials for this agent
+        # Inject per-user credentials (E2E encrypted — only agent can decrypt)
         if user_id and agent_id:
-            creds = self.credential_manager.get_agent_credentials(user_id, agent_id)
+            creds = self.credential_manager.get_agent_credentials_encrypted(user_id, agent_id)
             if creds:
                 args["_credentials"] = creds
+                args["_credentials_encrypted"] = True
 
         if not agent_id or (agent_id not in self.agents and agent_id not in self.a2a_clients):
             err_msg = f"No agent available for tool '{tool_name}'"
@@ -1977,11 +1985,12 @@ CRITICAL RULES:
 
             agent_id = tool_to_agent.get(tool_name)
 
-            # Inject per-user credentials for this agent
+            # Inject per-user credentials (E2E encrypted — only agent can decrypt)
             if user_id and agent_id:
-                creds = self.credential_manager.get_agent_credentials(user_id, agent_id)
+                creds = self.credential_manager.get_agent_credentials_encrypted(user_id, agent_id)
                 if creds:
                     args["_credentials"] = creds
+                    args["_credentials_encrypted"] = True
 
             # System-level security block for parallel tools
             agent_flags = self.security_flags.get(agent_id, {}) if agent_id else {}
@@ -2235,7 +2244,13 @@ CRITICAL RULES:
             parts=[Part(root=DataPart(data={
                 "method": "tools/call",
                 "name": tool_name,
-                "arguments": {k: v for k, v in args.items() if not k.startswith("_")},
+                "arguments": {
+                    **{k: v for k, v in args.items() if not k.startswith("_")},
+                    **({
+                        "_credentials": args["_credentials"],
+                        "_credentials_encrypted": args["_credentials_encrypted"],
+                    } if args.get("_credentials_encrypted") else {}),
+                },
             }))],
         )
 

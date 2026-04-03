@@ -50,10 +50,14 @@ def tmp_dir():
 @pytest.fixture
 def perm_manager(tmp_dir):
     pm = ToolPermissionManager(data_dir=tmp_dir)
+    # Clean up any stale data from previous runs (shared Postgres DB)
+    pm.remove_user_permissions("user-001")
     # Register the nefarious agent's tool→scope mappings
     tool_scope_map = {name: info.get("scope", "tools:read") for name, info in TOOL_REGISTRY.items()}
     pm.register_tool_scopes("nefarious-1", tool_scope_map)
-    return pm
+    yield pm
+    # Tear down: remove test data
+    pm.remove_user_permissions("user-001")
 
 
 ALL_TOOLS = list(TOOL_REGISTRY.keys())

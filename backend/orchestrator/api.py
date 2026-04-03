@@ -631,7 +631,7 @@ async def oauth_authorize(
     state_data = _json.dumps({"user_id": user_id, "agent_id": agent_id, "nonce": state_token})
 
     # Store state temporarily for validation
-    orch.credential_manager.set_credential(user_id, agent_id, "_oauth_state", state_data)
+    orch.credential_manager.set_credential(user_id, agent_id, "_oauth_state", state_data, e2e=False)
 
     from agents.linkedin.linkedin_api import build_authorization_url
     auth_url = build_authorization_url(client_id, redirect_uri, state=state_data)
@@ -716,7 +716,7 @@ async def oauth_callback(
     if token_data.get("refresh_token"):
         creds_to_store["LINKEDIN_REFRESH_TOKEN"] = token_data["refresh_token"]
 
-    orch.credential_manager.set_bulk_credentials(user_id, agent_id, creds_to_store)
+    orch.credential_manager.set_bulk_credentials(user_id, agent_id, creds_to_store, e2e=False)
 
     # Fetch and store LinkedIn profile name for display purposes
     try:
@@ -736,7 +736,7 @@ async def oauth_callback(
             if profile.get("sub"):
                 profile_meta["LINKEDIN_PROFILE_ID"] = profile["sub"]
             if profile_meta:
-                orch.credential_manager.set_bulk_credentials(user_id, agent_id, profile_meta)
+                orch.credential_manager.set_bulk_credentials(user_id, agent_id, profile_meta, e2e=False)
                 logger.info(f"Stored LinkedIn profile info: {profile.get('name')}")
     except Exception as e:
         logger.warning(f"Failed to fetch LinkedIn profile after OAuth: {e}")

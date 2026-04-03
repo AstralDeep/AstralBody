@@ -328,6 +328,14 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                 }
                 break;
 
+            case "component_save_error":
+                if (pendingSaveRejectRef.current) {
+                    pendingSaveRejectRef.current(new Error((data.error as string) || "Failed to save component"));
+                    pendingSaveResolveRef.current = null;
+                    pendingSaveRejectRef.current = null;
+                }
+                break;
+
             case "component_deleted":
                 if (data.component_id) {
                     setSavedComponents((prev) => prev.filter(c => c.id !== data.component_id));
@@ -499,6 +507,12 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
             };
 
             ws.onclose = () => {
+                // Reject any pending save operation so the UI doesn't hang
+                if (pendingSaveRejectRef.current) {
+                    pendingSaveRejectRef.current(new Error("Connection lost during save"));
+                    pendingSaveResolveRef.current = null;
+                    pendingSaveRejectRef.current = null;
+                }
                 setIsConnected(false);
                 reconnectAttemptsRef.current += 1;
 

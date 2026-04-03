@@ -27,6 +27,8 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
 
+from shared.crypto import build_jwk, compute_jwk_thumbprint
+
 logger = logging.getLogger("DelegationService")
 
 
@@ -60,8 +62,8 @@ class DelegationService:
             ec.SECP256R1(), default_backend()
         )
         self._dpop_public_key = self._dpop_private_key.public_key()
-        self._dpop_jwk = self._build_jwk(self._dpop_public_key)
-        self._dpop_thumbprint = self._compute_jwk_thumbprint(self._dpop_jwk)
+        self._dpop_jwk = build_jwk(self._dpop_public_key)
+        self._dpop_thumbprint = compute_jwk_thumbprint(self._dpop_jwk)
 
         if self.mock_auth:
             logger.info("DelegationService running in MOCK mode (DPoP enabled)")
@@ -73,34 +75,7 @@ class DelegationService:
     # -----------------------------------------------------------------
     # RFC 9449 DPoP — Demonstrating Proof of Possession
     # -----------------------------------------------------------------
-
-    @staticmethod
-    def _build_jwk(public_key) -> dict:
-        """Build a JWK dict from an EC public key (P-256)."""
-        numbers = public_key.public_numbers()
-        x_bytes = numbers.x.to_bytes(32, byteorder="big")
-        y_bytes = numbers.y.to_bytes(32, byteorder="big")
-        return {
-            "kty": "EC",
-            "crv": "P-256",
-            "x": base64.urlsafe_b64encode(x_bytes).rstrip(b"=").decode(),
-            "y": base64.urlsafe_b64encode(y_bytes).rstrip(b"=").decode(),
-        }
-
-    @staticmethod
-    def _compute_jwk_thumbprint(jwk: dict) -> str:
-        """Compute the JWK Thumbprint (RFC 7638) for DPoP token binding.
-
-        The thumbprint is the base64url-encoded SHA-256 hash of the canonical
-        JSON serialization of the JWK's required members (crv, kty, x, y for EC).
-        """
-        canonical = json.dumps(
-            {"crv": jwk["crv"], "kty": jwk["kty"], "x": jwk["x"], "y": jwk["y"]},
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        digest = hashlib.sha256(canonical.encode()).digest()
-        return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+    # JWK utilities (build_jwk, compute_jwk_thumbprint) are in shared.crypto
 
     def _create_dpop_proof(
         self, htm: str, htu: str, access_token: Optional[str] = None
