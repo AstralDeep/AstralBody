@@ -1,32 +1,9 @@
 # Dockerfile for AstralBody Multi-Agent System
 
 # ==========================================
-# Stage 1: Build Frontend
+# Single Stage: Backend Only
 # ==========================================
-FROM node:20-alpine AS frontend-builder
-WORKDIR /app/frontend
-
-# Copy .env to BOTH parent (for Vite envDir: '../') and current dir (as fallback)
-COPY .env /app/.env
-COPY .env ./.env
-
-# Copy frontend source
-COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci --no-audit --no-fund
-
-COPY frontend/ ./
-# Sanitize all .env files to remove Windows line endings (\r)
-RUN find /app -name ".env" -exec sed -i 's/\r$//' {} +
-
-# Set memory limit for Node to prevent swap thrashing during Vite build
-ENV NODE_OPTIONS="--max-old-space-size=4096"
-
-# Source .env before build to ensure Vite sees the variables
-RUN set -a && . /app/.env && set +a && npm run build
-
-# ==========================================
-# Stage 2: Final Image (Backend + Nginx)
-# ==========================================
+# Frontend is now a Flutter native app (built/distributed separately)
 FROM python:3.11-slim
 WORKDIR /app
 
@@ -45,16 +22,12 @@ COPY backend/ ./backend/
 COPY .env ./backend/.env
 RUN sed -i 's/\r$//' ./backend/.env
 
-# Copy compiled frontend from Stage 1
-COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
-
 # Setup entrypoint script
 COPY backend/start-docker.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/start-docker.sh
 
 # Expose ports
 # 8001: Orchestrator Gateway (WS + Auth API)
-# 5173: Static Frontend
-EXPOSE 8001 5173
+EXPOSE 8001
 
 CMD ["/usr/local/bin/start-docker.sh"]
