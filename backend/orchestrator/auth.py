@@ -30,6 +30,109 @@ logger = logging.getLogger("AuthProxy")
 auth_router = APIRouter()
 
 
+@auth_router.post(
+    "/auth/login",
+    tags=["Auth"],
+    summary="Username/password login",
+    description=(
+        "Authenticate using username and password. When MOCK_AUTH is enabled, "
+        "accepts test credentials and returns a mock JWT. When disabled, "
+        "validates against Keycloak using Resource Owner Password Credentials."
+    ),
+)
+async def login(request: Request):
+    """
+    Username/password login endpoint.
+
+    Returns access_token and user profile on success (200),
+    or 401 on invalid credentials.
+    """
+    body = await request.json()
+    username = body.get("username", "")
+    password = body.get("password", "")
+
+    if not username:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Invalid credentials"},
+        )
+
+    if os.getenv("VITE_USE_MOCK_AUTH", "false").lower() == "true":
+        # Mock auth: accept any credentials and return a dev token
+        import base64 as _b64
+        import time as _time
+        header = _b64.urlsafe_b64encode(json.dumps({"alg": "none", "typ": "JWT"}).encode()).rstrip(b"=").decode()
+        payload_data = {
+            "sub": "dev-user-id",
+            "preferred_username": username,
+            "realm_access": {"roles": ["admin", "user"]},
+            "resource_access": {"astral-frontend": {"roles": ["admin", "user"]}},
+            "exp": int(_time.time()) + 7200,
+            "iat": int(_time.time()),
+        }
+        payload = _b64.urlsafe_b64encode(json.dumps(payload_data).encode()).rstrip(b"=").decode()
+        mock_jwt = f"{header}.{payload}.mock-signature"
+        return JSONResponse(content={
+            "user": {
+                "id": "dev-user-id",
+                "username": username,
+                "roles": ["admin", "user"],
+            },
+            "access_token": mock_jwt,
+            "token_type": "Bearer",
+        })
+
+    # Real auth: use Keycloak Resource Owner Password Credentials grant
+    authority, client_id, client_secret = _get_keycloak_config()
+    if not authority or not client_id or not client_secret:
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Keycloak not configured"},
+        )
+
+    token_url = f"{authority}/protocol/openid-connect/token"
+    form_data = {
+        "grant_type": "password",
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "username": username,
+        "password": password,
+        "scope": "openid profile email",
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(token_url, data=form_data) as resp:
+            body = await resp.json()
+            if resp.status != 200:
+                logger.warning(f"Login failed for user {username}: {resp.status}")
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Invalid credentials"},
+                )
+            # Decode JWT for user info
+            access_token = body.get("access_token", "")
+            user_info = {"id": "", "username": username, "roles": []}
+            try:
+                parts = access_token.split(".")
+                if len(parts) == 3:
+                    import base64 as _b64
+                    pad = parts[1] + "=" * ((4 - len(parts[1]) % 4) % 4)
+                    jwt_payload = json.loads(_b64.urlsafe_b64decode(pad).decode())
+                    user_info = {
+                        "id": jwt_payload.get("sub", ""),
+                        "username": jwt_payload.get("preferred_username", username),
+                        "roles": jwt_payload.get("realm_access", {}).get("roles", []),
+                    }
+            except Exception:
+                pass
+            return JSONResponse(content={
+                "user": user_info,
+                "access_token": access_token,
+                "refresh_token": body.get("refresh_token"),
+                "token_type": "Bearer",
+            })
+
+
 def _get_keycloak_config():
     """Read Keycloak settings from environment."""
     authority = os.getenv("VITE_KEYCLOAK_AUTHORITY", "")
