@@ -38,6 +38,8 @@ class Message:
             return RegisterAgent.from_json(json_str)
         elif msg_type == 'register_ui':
             return RegisterUI.from_json(json_str)
+        elif msg_type == 'ui_action':
+            return UIAction(**data)
         return Message(**data)
 
 # --- MCP Protocol Wrappers ---
@@ -73,6 +75,13 @@ class UIRender(Message):
 class UIUpdate(Message):
     type: str = "ui_update"
     components: List[Dict[str, Any]] = field(default_factory=list)
+
+@dataclass
+class UIAction(Message):
+    """Backend-to-client action command (open_url, store_token, clear_token)."""
+    type: str = "ui_action"
+    action: str = ""
+    payload: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class UIAppend(Message):

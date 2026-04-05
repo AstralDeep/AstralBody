@@ -31,6 +31,7 @@ class Component:
             'plotly_chart': PlotlyChart, 'collapsible': Collapsible,
             'color_picker': ColorPicker,
             'file_upload': FileUpload, 'file_download': FileDownload,
+            'webview': WebView,
         }
         cls = type_map.get(comp_type, Component)
         if cls == Component:
@@ -77,6 +78,7 @@ class Input(Component):
     placeholder: str = ""
     name: str = ""
     value: str = ""
+    input_type: str = "text"  # "text" | "password"
 
 
 @dataclass
@@ -292,6 +294,14 @@ class FileDownload(Component):
     label: str = "Download File"
     url: str = ""
     filename: Optional[str] = None
+
+
+@dataclass
+class WebView(Component):
+    type: str = "webview"
+    url: str = ""
+    intercept_url: str = ""       # URL prefix to intercept navigation
+    intercept_action: str = ""    # ui_event action to fire when intercepted
 
 
 def create_ui_response(components: List[Component]) -> Dict[str, Any]:
