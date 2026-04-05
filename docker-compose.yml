@@ -24,12 +24,13 @@ services:
     image: astralbody:latest
     container_name: astralbody
     ports:
-      - "127.0.0.1:8001:8001"
+      - "8001:8001"
     env_file:
       - .env
     environment:
       DB_HOST: postgres
       DB_PORT: 5432
+      CORS_ORIGINS: "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8001,http://127.0.0.1:8001,*"
     volumes:
       - ./backend/data:/app/backend/data
       - ./backend/tmp:/app/backend/tmp
