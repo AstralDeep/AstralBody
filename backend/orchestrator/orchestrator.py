@@ -3105,7 +3105,10 @@ CRITICAL RULES:
                 ],
                 max_tokens=20
             )
-            title = response.choices[0].message.content.strip().strip('"')
+            raw = response.choices[0].message.content
+            if not raw:
+                return
+            title = raw.strip().strip('"')
             
             # Update history and notify UI
             self.history.update_chat_title(chat_id, title, user_id=user_id)

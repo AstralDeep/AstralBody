@@ -74,7 +74,7 @@ class HistoryManager:
             chat_id = str(uuid.uuid4())
         timestamp = int(time.time() * 1000)
         self.db.execute(
-            "INSERT INTO chats (id, user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO chats (id, user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
             (chat_id, user_id, "New Chat", timestamp, timestamp)
         )
         return chat_id
