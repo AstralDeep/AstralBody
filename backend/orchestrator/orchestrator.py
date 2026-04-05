@@ -38,9 +38,11 @@ from orchestrator.delegation import DelegationService
 from orchestrator.tool_security import ToolSecurityAnalyzer
 
 from shared.protocol import (
-    Message, MCPRequest, MCPResponse, UIEvent, UIRender, UIUpdate,
+    Message, MCPRequest, MCPResponse, UIEvent, UIRender, UIUpdate, UIAction,
     RegisterAgent, RegisterUI, AgentCard, AgentSkill
 )
+from orchestrator.login_ui import build_login_page
+from orchestrator.dashboard_ui import build_dashboard_page
 from shared.primitives import (
     Container, Text, Card, Grid, Alert, MetricCard, ProgressBar,
     Collapsible, create_ui_response
@@ -80,6 +82,7 @@ class Orchestrator:
         self.cancelled_sessions: Dict[str, bool] = {}  # websocket id -> cancelled flag
         self._chat_locks: Dict[int, asyncio.Lock] = {}  # per-websocket lock for chat serialization
         self._registered_events: Dict[int, asyncio.Event] = {}  # gate non-register messages until auth completes
+        self.pending_auth_sessions: Dict[str, Dict] = {}  # OAuth state nonce -> {"websocket": ws, "code_verifier": str, "created_at": float}
 
         # A2A external agent connections (JSON-RPC transport)
         self.a2a_clients: Dict[str, Any] = {}  # agent_id -> A2A client
@@ -449,20 +452,47 @@ class Orchestrator:
 
                     # Notify UI of success (optional, or just send dashboard)
                     await self.send_dashboard(websocket)
+
+                    # Schedule background token refresh if we have a refresh token
+                    if user_data.get("_refresh_token"):
+                        asyncio.create_task(self._schedule_token_refresh(websocket))
                 else:
-                    logger.warning("UI registration failed: Invalid or missing token")
-                    # Ungate waiting tasks so they hit the auth check naturally
+                    logger.info("UI registration: no valid token — sending SDUI login page")
+                    # Ungate waiting tasks so sso_login events can proceed
                     evt = self._registered_events.get(id(websocket))
                     if evt:
                         evt.set()
-                    await self.send_ui_render(websocket, [
-                        Alert(message="Authentication failed. Please log in again.", variant="error").to_json()
-                    ])
-                    # We might want to close, but let's let the UI handle the error alert
+                    # ROTE: register device capabilities even for unauthenticated sessions
+                    device_info = msg.device or {}
+                    rote_profile = self.rote.register_device(websocket, device_info)
+                    await self._safe_send(websocket, json.dumps({
+                        "type": "rote_config",
+                        "device_profile": rote_profile.to_dict(),
+                        "speech_server_available": bool(os.getenv("SPEACHES_URL", "").strip()),
+                    }))
+                    # Send SDUI login page
+                    await self.send_ui_render(websocket, build_login_page())
                     return
 
             elif isinstance(msg, UIEvent):
-                # Ensure authenticated
+                # Allow sso_login, sso_callback, credential_login, show_login, and logout from unauthenticated sessions
+                if msg.action == "sso_login":
+                    await self._handle_sso_login(websocket)
+                    return
+                if msg.action == "sso_callback":
+                    await self._handle_sso_callback(websocket, msg.payload)
+                    return
+                if msg.action == "credential_login":
+                    await self._handle_credential_login(websocket, msg.payload)
+                    return
+                if msg.action == "show_login":
+                    await self.send_ui_render(websocket, build_login_page())
+                    return
+                if msg.action == "logout":
+                    await self._handle_logout(websocket)
+                    return
+
+                # Ensure authenticated for all other actions
                 if websocket not in self.ui_sessions:
                     await self.send_ui_render(websocket, [
                         Alert(message="Unauthorized. Please refresh.", variant="error").to_json()
@@ -2345,6 +2375,358 @@ CRITICAL RULES:
             return None
 
     # =========================================================================
+    # SSO LOGIN / LOGOUT (SDUI-driven auth flow)
+    # =========================================================================
+
+    async def _handle_sso_login(self, websocket):
+        """Handle SSO login request from an unauthenticated SDUI client.
+
+        Generates a PKCE challenge + state nonce, stores the pending session,
+        and opens the Keycloak authorization URL in the system browser.
+        The backend /auth/callback endpoint handles the redirect and pushes
+        tokens + dashboard over the existing WebSocket connection.
+        """
+        import hashlib
+        import base64
+        import secrets
+        import uuid
+        import urllib.parse
+
+        authority = os.getenv("VITE_KEYCLOAK_AUTHORITY", "")
+        client_id = os.getenv("VITE_KEYCLOAK_CLIENT_ID", "")
+        backend_host = os.getenv("BACKEND_PUBLIC_URL", f"http://127.0.0.1:{PORT}")
+        redirect_uri = f"{backend_host}/auth/callback"
+
+        if not authority or not client_id:
+            # Mock auth mode — skip OAuth, authenticate directly
+            if os.getenv("VITE_USE_MOCK_AUTH", "false").lower() == "true":
+                await self._handle_mock_sso_login(websocket)
+                return
+            await self.send_ui_render(websocket, build_login_page(
+                error="SSO not configured. Set VITE_KEYCLOAK_AUTHORITY and VITE_KEYCLOAK_CLIENT_ID."
+            ))
+            return
+
+        # Generate PKCE code verifier + challenge
+        code_verifier = secrets.token_urlsafe(64)
+        code_challenge = base64.urlsafe_b64encode(
+            hashlib.sha256(code_verifier.encode()).digest()
+        ).rstrip(b"=").decode()
+
+        # Generate state nonce and store pending session
+        state = str(uuid.uuid4())
+        self.pending_auth_sessions[state] = {
+            "websocket": websocket,
+            "code_verifier": code_verifier,
+            "created_at": time.time(),
+        }
+
+        # Clean up stale pending sessions (>5 min old)
+        cutoff = time.time() - 300
+        stale = [k for k, v in self.pending_auth_sessions.items() if v["created_at"] < cutoff]
+        for k in stale:
+            del self.pending_auth_sessions[k]
+
+        # Build Keycloak authorization URL
+        params = urllib.parse.urlencode({
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "scope": "openid profile email",
+            "state": state,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+        })
+        auth_url = f"{authority}/protocol/openid-connect/auth?{params}"
+
+        # Open the Keycloak login page in the system browser.
+        # After the user authenticates, Keycloak redirects to /auth/callback
+        # which exchanges the code and pushes tokens + dashboard over this WS.
+        open_action = UIAction(action="open_url", payload={"url": auth_url})
+        await self._safe_send(websocket, open_action.to_json())
+        logger.info(f"SSO login initiated (external browser): state={state[:8]}...")
+
+    async def _handle_sso_callback(self, websocket, payload: dict):
+        """Handle the sso_callback event sent by the client when it intercepts
+        the Keycloak redirect URL in the embedded webview."""
+        from orchestrator.auth import exchange_and_authenticate
+        from orchestrator.login_ui import build_login_page
+
+        code = payload.get("code")
+        state = payload.get("state")
+
+        if not state or state not in self.pending_auth_sessions:
+            logger.warning("sso_callback with invalid/expired state")
+            await self.send_ui_render(websocket, build_login_page(
+                error="Login session expired. Please try again."
+            ))
+            return
+
+        pending = self.pending_auth_sessions[state]
+        code_verifier = pending["code_verifier"]
+
+        if not code:
+            # Keycloak returned an error via query params
+            del self.pending_auth_sessions[state]
+            err_msg = payload.get("error_description") or payload.get("error") or "No authorization code received."
+            logger.warning(f"sso_callback error: {err_msg}")
+            await self.send_ui_render(websocket, build_login_page(error=f"Login failed: {err_msg}"))
+            return
+
+        success, err_msg = await exchange_and_authenticate(self, websocket, code, code_verifier)
+        del self.pending_auth_sessions[state]
+
+        if not success:
+            logger.warning(f"sso_callback token exchange failed: {err_msg}")
+
+    async def _handle_credential_login(self, websocket, payload: dict):
+        """Handle credential_login event — authenticate via Keycloak ROPC grant."""
+        from orchestrator.login_ui import build_credential_login_page
+        from orchestrator.auth import _get_keycloak_config
+
+        fields = payload.get("fields", {})
+        username = fields.get("username", "").strip()
+        password = fields.get("password", "").strip()
+
+        if not username or not password:
+            await self.send_ui_render(websocket, build_credential_login_page(
+                error="Please enter both username and password."
+            ))
+            return
+
+        # Mock auth mode
+        if os.getenv("VITE_USE_MOCK_AUTH", "false").lower() == "true":
+            await self._handle_mock_sso_login(websocket)
+            return
+
+        authority, client_id, client_secret = _get_keycloak_config()
+        if not authority or not client_id or not client_secret:
+            await self.send_ui_render(websocket, build_credential_login_page(
+                error="Identity provider not configured."
+            ))
+            return
+
+        token_url = f"{authority}/protocol/openid-connect/token"
+        form_data = {
+            "grant_type": "password",
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "username": username,
+            "password": password,
+            "scope": "openid profile email",
+        }
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(token_url, data=form_data) as resp:
+                    body = await resp.json()
+                    if resp.status != 200:
+                        logger.warning(f"Credential login failed for {username}: {resp.status}")
+                        await self.send_ui_render(websocket, build_credential_login_page(
+                            error="Invalid username or password."
+                        ))
+                        return
+                    access_token = body.get("access_token", "")
+                    refresh_token = body.get("refresh_token", "")
+                    expires_in = body.get("expires_in", 300)
+        except Exception as e:
+            logger.error(f"Credential login request failed: {e}")
+            await self.send_ui_render(websocket, build_credential_login_page(
+                error="Could not reach identity provider. Please try again."
+            ))
+            return
+
+        # Validate token
+        user_data = await self.validate_token(access_token)
+        if not user_data:
+            await self.send_ui_render(websocket, build_credential_login_page(
+                error="Authentication succeeded but token validation failed."
+            ))
+            return
+
+        # Authenticate the WebSocket session
+        user_data["_raw_token"] = access_token
+        user_data["_refresh_token"] = refresh_token
+        user_data["_token_expires_at"] = time.time() + expires_in
+        self.ui_sessions[websocket] = user_data
+        self._save_user_profile(user_data)
+
+        # Send store_token action to the client
+        store_action = UIAction(action="store_token", payload={
+            "token": access_token,
+            "refresh_token": refresh_token,
+            "expires_in": expires_in,
+        })
+        await self._safe_send(websocket, store_action.to_json())
+
+        # Send dashboard
+        await self.send_dashboard(websocket)
+        asyncio.create_task(self._schedule_token_refresh(websocket))
+        logger.info(f"Credential login successful for user '{user_data.get('preferred_username', username)}'")
+
+    async def _handle_mock_sso_login(self, websocket):
+        """Simulate SSO login in mock auth mode — immediately authenticate."""
+        import base64 as _b64
+        mock_payload = {
+            "sub": "dev-user-id",
+            "preferred_username": "DevUser",
+            "email": "dev@local",
+            "realm_access": {"roles": ["admin", "user"]},
+            "resource_access": {"astral-frontend": {"roles": ["admin", "user"]}},
+            "exp": int(time.time()) + 7200,
+            "iat": int(time.time()),
+        }
+        header = _b64.urlsafe_b64encode(json.dumps({"alg": "none", "typ": "JWT"}).encode()).rstrip(b"=").decode()
+        payload_b64 = _b64.urlsafe_b64encode(json.dumps(mock_payload).encode()).rstrip(b"=").decode()
+        mock_jwt = f"{header}.{payload_b64}.mock-signature"
+
+        # Generate a mock refresh token
+        refresh_payload = {"sub": "dev-user-id", "type": "refresh", "exp": int(time.time()) + 86400}
+        refresh_b64 = _b64.urlsafe_b64encode(json.dumps(refresh_payload).encode()).rstrip(b"=").decode()
+        mock_refresh = f"{header}.{refresh_b64}.mock-refresh-sig"
+
+        # Authenticate the session
+        user_data = dict(mock_payload)
+        user_data["_raw_token"] = mock_jwt
+        user_data["_refresh_token"] = mock_refresh
+        user_data["_token_expires_at"] = time.time() + 7200
+        self.ui_sessions[websocket] = user_data
+        self._save_user_profile(user_data)
+
+        # Send store_token action
+        store_action = UIAction(action="store_token", payload={
+            "token": mock_jwt,
+            "refresh_token": mock_refresh,
+            "expires_in": 7200,
+        })
+        await self._safe_send(websocket, store_action.to_json())
+
+        # Send dashboard
+        await self.send_dashboard(websocket)
+        asyncio.create_task(self._schedule_token_refresh(websocket))
+        logger.info("Mock SSO login completed for DevUser")
+
+    async def _handle_logout(self, websocket):
+        """Handle logout from a SDUI client."""
+        if websocket in self.ui_sessions:
+            user = self.ui_sessions[websocket].get("preferred_username", "unknown")
+            del self.ui_sessions[websocket]
+            logger.info(f"User '{user}' logged out")
+
+        # Tell client to clear stored tokens
+        clear_action = UIAction(action="clear_token", payload={})
+        await self._safe_send(websocket, clear_action.to_json())
+
+        # Send login page
+        await self.send_ui_render(websocket, build_login_page())
+
+    async def _schedule_token_refresh(self, websocket):
+        """Schedule a background token refresh before the current token expires.
+
+        Runs as an asyncio task — automatically cancelled when the websocket disconnects.
+        """
+        session = self.ui_sessions.get(websocket)
+        if not session:
+            return
+
+        refresh_token = session.get("_refresh_token")
+        expires_at = session.get("_token_expires_at", 0)
+        if not refresh_token:
+            return
+
+        # Refresh 60 seconds before expiry (minimum 10s wait)
+        delay = max(expires_at - time.time() - 60, 10)
+        await asyncio.sleep(delay)
+
+        # Check session is still valid
+        if websocket not in self.ui_sessions:
+            return
+        session = self.ui_sessions[websocket]
+        refresh_token = session.get("_refresh_token")
+        if not refresh_token:
+            return
+
+        # Mock auth refresh — generate a new mock JWT without hitting Keycloak
+        if os.getenv("VITE_USE_MOCK_AUTH", "false").lower() == "true":
+            import base64 as _b64
+            mock_payload = {
+                "sub": session.get("sub", "dev-user-id"),
+                "preferred_username": session.get("preferred_username", "DevUser"),
+                "email": session.get("email", "dev@local"),
+                "realm_access": session.get("realm_access", {"roles": ["admin", "user"]}),
+                "resource_access": session.get("resource_access", {}),
+                "exp": int(time.time()) + 7200,
+                "iat": int(time.time()),
+            }
+            header = _b64.urlsafe_b64encode(json.dumps({"alg": "none", "typ": "JWT"}).encode()).rstrip(b"=").decode()
+            payload_b64 = _b64.urlsafe_b64encode(json.dumps(mock_payload).encode()).rstrip(b"=").decode()
+            new_token = f"{header}.{payload_b64}.mock-signature"
+
+            refresh_payload = {"sub": mock_payload["sub"], "type": "refresh", "exp": int(time.time()) + 86400}
+            refresh_b64 = _b64.urlsafe_b64encode(json.dumps(refresh_payload).encode()).rstrip(b"=").decode()
+            new_refresh = f"{header}.{refresh_b64}.mock-refresh-sig"
+
+            session["_raw_token"] = new_token
+            session["_refresh_token"] = new_refresh
+            session["_token_expires_at"] = time.time() + 7200
+
+            store_action = UIAction(action="store_token", payload={
+                "token": new_token,
+                "refresh_token": new_refresh,
+                "expires_in": 7200,
+            })
+            await self._safe_send(websocket, store_action.to_json())
+            logger.info(f"Mock token refreshed for '{session.get('preferred_username')}'")
+            asyncio.create_task(self._schedule_token_refresh(websocket))
+            return
+
+        authority = os.getenv("VITE_KEYCLOAK_AUTHORITY", "")
+        client_id = os.getenv("VITE_KEYCLOAK_CLIENT_ID", "")
+        client_secret = os.getenv("KEYCLOAK_CLIENT_SECRET", "")
+
+        if not authority or not client_id or not client_secret:
+            return
+
+        token_url = f"{authority}/protocol/openid-connect/token"
+        form_data = {
+            "grant_type": "refresh_token",
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
+        }
+
+        try:
+            async with aiohttp.ClientSession() as http_session:
+                async with http_session.post(token_url, data=form_data) as resp:
+                    if resp.status != 200:
+                        logger.warning(f"Token refresh failed: {resp.status}")
+                        return
+                    body = await resp.json()
+
+            new_token = body.get("access_token", "")
+            new_refresh = body.get("refresh_token", refresh_token)
+            new_expires = body.get("expires_in", 300)
+
+            # Update session
+            session["_raw_token"] = new_token
+            session["_refresh_token"] = new_refresh
+            session["_token_expires_at"] = time.time() + new_expires
+
+            # Push updated token to client
+            store_action = UIAction(action="store_token", payload={
+                "token": new_token,
+                "refresh_token": new_refresh,
+                "expires_in": new_expires,
+            })
+            await self._safe_send(websocket, store_action.to_json())
+            logger.info(f"Token refreshed for user '{session.get('preferred_username', 'unknown')}'")
+
+            # Schedule next refresh
+            asyncio.create_task(self._schedule_token_refresh(websocket))
+        except Exception as e:
+            logger.warning(f"Token refresh error: {e}")
+
+    # =========================================================================
     # UI HELPERS
     # =========================================================================
 
@@ -2490,6 +2872,16 @@ CRITICAL RULES:
             }
         }))
 
+        # Send SDUI dashboard home page
+        session = self.ui_sessions.get(websocket, {})
+        username = session.get("preferred_username", "")
+        dashboard_components = build_dashboard_page(
+            agents=agent_list,
+            total_tools=total_tools,
+            username=username,
+        )
+        await self.send_ui_render(websocket, dashboard_components)
+
     async def send_agent_list(self, websocket):
         """Send list of connected agents."""
         user_id = self._get_user_id(websocket)
@@ -2556,6 +2948,10 @@ CRITICAL RULES:
                 self.ui_clients.remove(websocket)
             if websocket in self.ui_sessions:
                 del self.ui_sessions[websocket]
+            # Clean up any pending auth sessions for this websocket
+            stale_states = [k for k, v in self.pending_auth_sessions.items() if v.get("websocket") is websocket]
+            for k in stale_states:
+                del self.pending_auth_sessions[k]
             self._chat_locks.pop(id(websocket), None)
             self._registered_events.pop(id(websocket), None)
             self.rote.cleanup(websocket)
@@ -2576,6 +2972,9 @@ CRITICAL RULES:
                 self.ui_clients.remove(websocket)
             if websocket in self.ui_sessions:
                 del self.ui_sessions[websocket]
+            stale_states = [k for k, v in self.pending_auth_sessions.items() if v.get("websocket") is websocket]
+            for k in stale_states:
+                del self.pending_auth_sessions[k]
             self._chat_locks.pop(id(websocket), None)
             self._registered_events.pop(id(websocket), None)
             self.rote.cleanup(websocket)
@@ -2749,6 +3148,11 @@ CRITICAL RULES:
                         payload_b64 += '=' * ((4 - len(payload_b64) % 4) % 4)
                         payload_json = base64.b64decode(payload_b64).decode('utf-8')
                         payload = json.loads(payload_json)
+                        # Check token expiry even in mock mode
+                        exp = payload.get("exp")
+                        if exp is not None and exp < time.time():
+                            logger.info("Mock Auth: Token expired")
+                            return None
                         return payload
                 except:
                     # If decoding fails, return default mock user

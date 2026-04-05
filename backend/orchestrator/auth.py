@@ -7,17 +7,21 @@ client_secret server-side so it never reaches the browser.
 Accepts requests in application/x-www-form-urlencoded format
 (as sent by oidc-client-ts) and forwards them to Keycloak with
 the client_secret appended.
+
+Also provides the /auth/callback endpoint for SDUI-driven OAuth flow
+where the backend handles the entire Keycloak redirect.
 """
 import os
 import logging
 import json
+import time
 from typing import Optional
 
 import aiohttp
 from fastapi import APIRouter, Request, UploadFile, File, Form
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from jose import jwt as jose_jwt
 import shutil
 
@@ -198,6 +202,155 @@ async def proxy_token(request: Request):
 
 
 # =============================================================================
+# Shared token exchange + session authentication logic
+# =============================================================================
+
+async def exchange_and_authenticate(orch, websocket, code: str, code_verifier: str) -> tuple:
+    """Exchange authorization code for tokens, authenticate the WS session, send dashboard.
+
+    Returns (success: bool, error_message: str | None).
+    On success, the websocket session is authenticated and the dashboard SDUI is sent.
+    """
+    import asyncio
+    from shared.protocol import UIAction
+    from orchestrator.login_ui import build_login_page
+
+    authority, client_id, client_secret = _get_keycloak_config()
+    backend_port = int(os.getenv("ORCHESTRATOR_PORT", 8001))
+    backend_host = os.getenv("BACKEND_PUBLIC_URL", f"http://127.0.0.1:{backend_port}")
+    redirect_uri = f"{backend_host}/auth/callback"
+    token_url = f"{authority}/protocol/openid-connect/token"
+
+    form_data = {
+        "grant_type": "authorization_code",
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "code_verifier": code_verifier,
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(token_url, data=form_data) as resp:
+                body = await resp.json()
+                if resp.status != 200:
+                    err_msg = body.get("error_description", body.get("error", "Token exchange failed"))
+                    logger.error(f"Token exchange failed: {resp.status} {body}")
+                    await orch.send_ui_render(websocket, build_login_page(error=err_msg))
+                    return False, err_msg
+
+                access_token = body.get("access_token", "")
+                refresh_token = body.get("refresh_token", "")
+                expires_in = body.get("expires_in", 300)
+    except Exception as e:
+        logger.error(f"Token exchange request failed: {e}")
+        await orch.send_ui_render(websocket, build_login_page(error="Failed to connect to identity provider."))
+        return False, "Could not reach identity provider."
+
+    # Validate the token and extract user data
+    user_data = await orch.validate_token(access_token)
+    if not user_data:
+        await orch.send_ui_render(websocket, build_login_page(error="Token validation failed."))
+        return False, "Token validation failed."
+
+    # Authenticate the WebSocket session
+    user_data["_raw_token"] = access_token
+    user_data["_refresh_token"] = refresh_token
+    user_data["_token_expires_at"] = time.time() + expires_in
+    orch.ui_sessions[websocket] = user_data
+    orch._save_user_profile(user_data)
+
+    # Send store_token action to the client
+    store_action = UIAction(action="store_token", payload={
+        "token": access_token,
+        "refresh_token": refresh_token,
+        "expires_in": expires_in,
+    })
+    await orch._safe_send(websocket, store_action.to_json())
+
+    # Send dashboard
+    await orch.send_dashboard(websocket)
+
+    # Schedule background token refresh
+    asyncio.create_task(orch._schedule_token_refresh(websocket))
+
+    logger.info(f"Auth successful for user '{user_data.get('preferred_username', 'unknown')}'")
+    return True, None
+
+
+# =============================================================================
+# SDUI OAuth Callback (backend-handled redirect from Keycloak — HTTP fallback)
+# =============================================================================
+
+@auth_router.get(
+    "/auth/callback",
+    tags=["Auth"],
+    summary="OAuth callback from Keycloak",
+    description=(
+        "Receives the authorization code from Keycloak after the user authenticates "
+        "in the browser. Exchanges the code for tokens, associates the session with "
+        "the originating WebSocket client, and pushes tokens + dashboard over WS. "
+        "This endpoint serves as a fallback — the primary flow intercepts the redirect "
+        "client-side and sends the code over WebSocket."
+    ),
+    response_class=HTMLResponse,
+)
+async def oauth_callback(request: Request, code: str = None, state: str = None, error: str = None, error_description: str = None):
+    """Handle Keycloak OAuth redirect back to the backend."""
+    from orchestrator.login_ui import build_login_page
+
+    orch = getattr(request.app.state, "orchestrator", None)
+    if not orch:
+        return HTMLResponse("<html><body><h2>Server error: orchestrator not available.</h2></body></html>", status_code=500)
+
+    # Validate state
+    if not state or state not in orch.pending_auth_sessions:
+        return HTMLResponse(
+            "<html><body><h2>Login failed</h2><p>Invalid or expired session. Please try again in the app.</p></body></html>",
+            status_code=400,
+        )
+
+    pending = orch.pending_auth_sessions[state]
+    websocket = pending["websocket"]
+    code_verifier = pending["code_verifier"]
+
+    # Handle Keycloak error
+    if error:
+        del orch.pending_auth_sessions[state]
+        err_msg = error_description or error
+        logger.warning(f"OAuth callback error: {err_msg}")
+        await orch.send_ui_render(websocket, build_login_page(error=f"Login failed: {err_msg}"))
+        return HTMLResponse(
+            f"<html><body><h2>Login failed</h2><p>{err_msg}</p><p>You can close this tab and try again.</p></body></html>"
+        )
+
+    if not code:
+        del orch.pending_auth_sessions[state]
+        return HTMLResponse(
+            "<html><body><h2>Login failed</h2><p>No authorization code received.</p></body></html>",
+            status_code=400,
+        )
+
+    # Use shared exchange logic
+    success, err_msg = await exchange_and_authenticate(orch, websocket, code, code_verifier)
+    del orch.pending_auth_sessions[state]
+
+    if not success:
+        return HTMLResponse(
+            f"<html><body><h2>Login failed</h2><p>{err_msg}</p><p>You can close this tab.</p></body></html>"
+        )
+
+    return HTMLResponse(
+        "<html><body style='font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #0F1221; color: #fff;'>"
+        "<div style='text-align: center;'>"
+        "<h2>Login successful</h2>"
+        "<p>You can close this tab and return to the app.</p>"
+        "</div></body></html>"
+    )
+
+
+# =============================================================================
 # Auth Dependencies (used by REST API and file endpoints)
 # =============================================================================
 
@@ -245,7 +398,17 @@ async def get_current_user_payload(request: Request, credentials: HTTPAuthorizat
                     payload_b64 += '=' * ((4 - len(payload_b64) % 4) % 4)
                     payload_json = base64.b64decode(payload_b64).decode('utf-8')
                     payload = json.loads(payload_json)
+                    # Check token expiry even in mock mode
+                    exp = payload.get("exp")
+                    if exp is not None and exp < time.time():
+                        raise HTTPException(
+                            status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Token expired",
+                            headers={"WWW-Authenticate": "Bearer"},
+                        )
                     return payload
+            except HTTPException:
+                raise
             except:
                 # If decoding fails, return default mock user
                 pass

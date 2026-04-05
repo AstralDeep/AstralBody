@@ -90,7 +90,7 @@ export default function LoginScreen() {
                 </div>
 
                 <p className="text-center text-[10px] text-astral-muted/50 mt-6">
-                    v1.0.0 — Orchestrator + Agent2Agent + MCP
+                    v1.0.0
                 </p>
             </motion.div>
         </div>
