@@ -1527,3 +1527,28 @@ async def voice_stream(ws: WebSocket):
             await ws.close()
         except Exception:
             pass
+
+
+# =============================================================================
+# Task Router — Re-Act task state inspection
+# =============================================================================
+
+task_router = APIRouter(prefix="/api/tasks", tags=["Tasks"])
+
+
+@task_router.get(
+    "/{chat_id}",
+    summary="Get active task state",
+    description="Returns the current Re-Act task state for a chat session.",
+)
+async def get_task_state(chat_id: str, request: Request):
+    orch = _get_orchestrator(request)
+    task = orch.task_manager.get_active_task(chat_id)
+    if task:
+        return task.to_dict()
+    # No active task — check for most recent completed task
+    all_tasks = orch.task_manager.get_chat_tasks(chat_id)
+    if all_tasks:
+        latest = max(all_tasks, key=lambda t: t.updated_at)
+        return latest.to_dict()
+    return {"state": "none", "chat_id": chat_id}
