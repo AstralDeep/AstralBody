@@ -36,16 +36,20 @@ from orchestrator.tool_permissions import ToolPermissionManager
 from orchestrator.credential_manager import CredentialManager
 from orchestrator.delegation import DelegationService
 from orchestrator.tool_security import ToolSecurityAnalyzer
+from orchestrator.compaction import compact_messages
+from orchestrator.hooks import HookManager, HookEvent, HookContext
+from orchestrator.task_state import TaskManager, TaskState
 
 from shared.protocol import (
     Message, MCPRequest, MCPResponse, UIEvent, UIRender, UIUpdate,
-    RegisterAgent, RegisterUI, AgentCard, AgentSkill
+    RegisterAgent, RegisterUI, AgentCard, AgentSkill, ToolProgress
 )
 from shared.primitives import (
     Container, Text, Card, Grid, Alert, MetricCard, ProgressBar,
     Collapsible, create_ui_response
 )
 from rote.rote import ROTE
+from shared.feature_flags import flags
 
 load_dotenv(override=False)
 
@@ -77,6 +81,7 @@ class Orchestrator:
         self.agent_cards: Dict[str, AgentCard] = {}
         self.agent_capabilities: Dict[str, List[Dict]] = {}
         self.pending_requests: Dict[str, asyncio.Future] = {}
+        self.pending_ui_sockets: Dict[str, Any] = {}  # request_id -> UI websocket (for progress forwarding)
         self.cancelled_sessions: Dict[str, bool] = {}  # websocket id -> cancelled flag
         self._chat_locks: Dict[int, asyncio.Lock] = {}  # per-websocket lock for chat serialization
         self._registered_events: Dict[int, asyncio.Event] = {}  # gate non-register messages until auth completes
@@ -95,7 +100,8 @@ class Orchestrator:
             self.llm_client = OpenAI(
                 api_key=api_key,
                 base_url=base_url,
-                timeout=Timeout(180.0, connect=10.0)  # 180s for large models (DeepSeek, etc.)
+                timeout=Timeout(90.0, connect=10.0),
+                max_retries=0,  # We handle retries in _call_llm — disable SDK-internal retries
             )
             logger.info(f"LLM configured: {base_url} model={self.llm_model}")
         else:
@@ -126,9 +132,35 @@ class Orchestrator:
         # ROTE — Response Output Translation Engine
         self.rote = ROTE()
 
+        # Hook/Event System — extensible lifecycle events
+        self.hooks = HookManager()
+
+        # Task State Machine — tracks Re-Act loop execution state
+        self.task_manager = TaskManager()
+
         # Agent Lifecycle Manager — handles user-created draft agents
         from orchestrator.agent_lifecycle import AgentLifecycleManager
         self.lifecycle_manager = AgentLifecycleManager(db=self.history.db, orchestrator=self)
+
+        # Knowledge Synthesis ("Dreamer") — learns from tool interactions
+        if flags.is_enabled("knowledge_synthesis"):
+            from orchestrator.knowledge_synthesis import (
+                InteractionCollector, KnowledgeSynthesizer, KnowledgeIndex,
+            )
+            knowledge_dir = os.path.join(
+                os.path.abspath(os.path.join(os.path.dirname(__file__), '..')),
+                "knowledge",
+            )
+            self.knowledge_index = KnowledgeIndex(knowledge_dir)
+            self._interaction_collector = InteractionCollector(db=self.history.db)
+            self._knowledge_synthesizer = KnowledgeSynthesizer(
+                db=self.history.db,
+                knowledge_dir=knowledge_dir,
+                knowledge_index=self.knowledge_index,
+            )
+            self.hooks.register(HookEvent.POST_TOOL_USE, self._interaction_collector.on_tool_use)
+            self.hooks.register(HookEvent.POST_TOOL_FAILURE, self._interaction_collector.on_tool_use)
+            logger.info("Knowledge synthesis system initialized")
 
     # =========================================================================
     # AGENT MANAGEMENT
@@ -193,6 +225,14 @@ class Orchestrator:
                 logger.info(f"Auto-assigned agent '{card.agent_id}' to {default_owner}")
             else:
                 ownership = {}
+
+        # Hook: AGENT_REGISTERED
+        if flags.is_enabled("hook_system"):
+            await self.hooks.emit(HookContext(
+                event=HookEvent.AGENT_REGISTERED,
+                agent_id=card.agent_id,
+                metadata={"agent_name": card.name, "tool_count": len(caps)},
+            ))
 
         # Don't broadcast draft agents to UI — they only appear in the Drafts tab
         if self._is_draft_agent(card.agent_id):
@@ -382,6 +422,20 @@ class Orchestrator:
                     self.pending_requests[req_id].set_result(msg)
                 else:
                     logger.warning(f"Received response for unknown request: {req_id}")
+
+            elif isinstance(msg, ToolProgress) and flags.is_enabled("progress_streaming"):
+                # Forward tool progress to the UI client that initiated the request
+                # The agent includes a request_id in metadata so we can route it
+                req_id = msg.metadata.get("request_id", "")
+                ui_ws = self.pending_ui_sockets.get(req_id)
+                if ui_ws:
+                    await self._safe_send(ui_ws, json.dumps({
+                        "type": "tool_progress",
+                        "tool_name": msg.tool_name,
+                        "agent_id": msg.agent_id,
+                        "message": msg.message,
+                        "percentage": msg.percentage,
+                    }))
 
         except Exception as e:
             logger.error(f"Error handling agent message: {e}")
@@ -1314,6 +1368,12 @@ CRITICAL RULES:
 - **VISUALIZATIONS**: If the user asks for a graph, YOU MUST call the graphing tool. Do not just describe the data.
 """
 
+            # Inject knowledge-based routing hints if available
+            if flags.is_enabled("knowledge_synthesis") and hasattr(self, 'knowledge_index'):
+                routing_hints = self.knowledge_index.get_routing_hints()
+                if routing_hints:
+                    system_prompt += f"\n{routing_hints}\n"
+
             # ------------------------------------------------------------------
             # MULTI-TURN LOOP
             # ------------------------------------------------------------------
@@ -1349,9 +1409,21 @@ CRITICAL RULES:
             turn_count = 0
             heartbeat_task = await self._start_heartbeat(websocket)
 
+            # Denial loop detection: track tools denied by permission checks
+            denial_tracker: Dict[str, int] = {}  # tool_name -> denial count
+            DENIAL_THRESHOLD = 2  # remove tool from prompt after this many denials
+
+            # Task state machine: create and track this Re-Act execution
+            task = None
+            if flags.is_enabled("task_state_machine"):
+                task = self.task_manager.create_task(chat_id, user_id or "", message=message)
+                task.transition(TaskState.RUNNING)
+
             while turn_count < MAX_TURNS:
                 # Check for cancellation
                 if self.cancelled_sessions.get(id(websocket)):
+                    if task:
+                        task.transition(TaskState.CANCELLED)
                     logger.info(f"Processing cancelled by user for chat_id {chat_id}")
                     await self.send_ui_render(websocket, [
                         Alert(message="Processing was cancelled.", variant="info").to_json()
@@ -1368,6 +1440,14 @@ CRITICAL RULES:
 
                 turn_count += 1
                 logger.info(f"--- Turn {turn_count}/{MAX_TURNS} ---")
+
+                # Message compaction: summarize older turns if context budget exceeded
+                if flags.is_enabled("message_compaction"):
+                    messages, was_compacted = await compact_messages(
+                        messages, self.llm_model, self._call_llm
+                    )
+                    if was_compacted:
+                        logger.info("Context compacted before LLM call")
 
                 # Call LLM
                 llm_msg, usage = await self._call_llm(websocket, messages, tools_desc)
@@ -1412,6 +1492,11 @@ CRITICAL RULES:
                     messages.append(llm_msg)
 
                     # Execute tools
+                    if task:
+                        tool_names_for_task = [tc.function.name for tc in llm_msg.tool_calls]
+                        task.transition(TaskState.AWAITING_TOOL,
+                                       current_tool=", ".join(tool_names_for_task),
+                                       turn_count=turn_count)
                     tool_results = []
                     if len(llm_msg.tool_calls) == 1:
                         tc = llm_msg.tool_calls[0]
@@ -1488,6 +1573,35 @@ CRITICAL RULES:
                             "content": content_str
                         })
 
+                    # Denial loop detection: track permission-denied tool results
+                    if flags.is_enabled("denial_loop_detection"):
+                        for i, tc in enumerate(llm_msg.tool_calls):
+                            res = tool_results[i] if i < len(tool_results) else None
+                            if res and res.error and "restricted" in res.error.get("message", "").lower():
+                                name = tc.function.name
+                                denial_tracker[name] = denial_tracker.get(name, 0) + 1
+                                if denial_tracker[name] >= DENIAL_THRESHOLD:
+                                    logger.info(f"Denial loop: removing '{name}' from tools after {denial_tracker[name]} denials")
+                                    tools_desc = [t for t in tools_desc if t["function"]["name"] != name]
+                                    # Inject a system hint so the LLM stops trying
+                                    messages.append({
+                                        "role": "system",
+                                        "content": f"IMPORTANT: The tool '{name}' is not available due to permission restrictions. Do NOT attempt to use it again. Find an alternative approach or inform the user."
+                                    })
+                        # If ALL tools have been removed, break early
+                        if not tools_desc:
+                            logger.warning("All tools denied — breaking Re-Act loop")
+                            await self.send_ui_render(websocket, [
+                                Alert(message="All available tools are restricted by your permission settings. Please update your agent permissions.", variant="warning").to_json()
+                            ])
+                            break
+
+                    # Update task state and track tool calls
+                    if task:
+                        for tc in llm_msg.tool_calls:
+                            task.tool_calls_made.append(tc.function.name)
+                        task.transition(TaskState.RUNNING, current_tool=None)
+
                     # Loop continues to next turn to let LLM analyze results
                     await self._safe_send(websocket, json.dumps({
                         "type": "chat_status",
@@ -1497,6 +1611,8 @@ CRITICAL RULES:
                 
                 else:
                     # No tool calls -> Final Response
+                    if task:
+                        task.transition(TaskState.COMPLETED, turn_count=turn_count)
                     content = llm_msg.content or "I'm not sure how to help with that."
                     
                     parsed_components = None
@@ -1861,8 +1977,8 @@ CRITICAL RULES:
     # CONSTANTS
     # =========================================================================
 
-    MAX_RETRIES = 5
-    RETRY_BACKOFF = [1.0, 2.0, 4.0, 8.0]  # exponential backoff
+    MAX_RETRIES = 3
+    RETRY_BACKOFF = [1.0, 2.0, 4.0]  # exponential backoff
 
     async def execute_single_tool(self, websocket, tool_call, tool_to_agent: Dict, chat_id: str = None, user_id: str = None) -> Optional[MCPResponse]:
         """Execute a single tool call and render its UI components. Returns the Result object."""
@@ -1925,7 +2041,37 @@ CRITICAL RULES:
             if delegation_token:
                 args["_delegation_token"] = delegation_token
 
+        # Hook: PRE_TOOL_USE — allows handlers to block or modify tool args
+        if flags.is_enabled("hook_system"):
+            hook_ctx = HookContext(
+                event=HookEvent.PRE_TOOL_USE,
+                user_id=user_id or "",
+                agent_id=agent_id or "",
+                tool_name=tool_name,
+                tool_args=args,
+            )
+            hook_resp = await self.hooks.emit(hook_ctx)
+            if hook_resp.action == "block":
+                err_msg = f"Tool '{tool_name}' blocked by hook: {hook_resp.reason or 'no reason given'}"
+                logger.info(f"Hook blocked tool: {tool_name}")
+                return MCPResponse(error={"message": err_msg, "retryable": False})
+            if hook_resp.action == "modify" and hook_resp.modified_args:
+                args = hook_resp.modified_args
+
         result = await self._execute_with_retry(websocket, agent_id, tool_name, args)
+
+        # Hook: POST_TOOL_USE or POST_TOOL_FAILURE
+        if flags.is_enabled("hook_system"):
+            post_event = HookEvent.POST_TOOL_FAILURE if (result and result.error) else HookEvent.POST_TOOL_USE
+            await self.hooks.emit(HookContext(
+                event=post_event,
+                user_id=user_id or "",
+                agent_id=agent_id or "",
+                tool_name=tool_name,
+                tool_args=args,
+                tool_result=result.result if result else None,
+                error=result.error.get("message") if (result and result.error) else None,
+            ))
 
         # Don't render tool results immediately — the caller (handle_chat_message)
         # batches all tool results into a single collapsible section.
@@ -1964,19 +2110,28 @@ CRITICAL RULES:
 
         return result
 
-    async def execute_parallel_tools(self, websocket, tool_calls, tool_to_agent: Dict, chat_id: str = None, user_id: str = None) -> List[Optional[MCPResponse]]:
-        """Execute multiple tool calls in parallel. Returns list of Results."""
-        tasks = []
-        tool_names = []
+    # Scopes considered safe for concurrent execution (read-only operations)
+    _PARALLEL_SAFE_SCOPES = frozenset({"tools:read", "tools:search"})
+    _MAX_PARALLEL_CONCURRENCY = 10
 
-        for tc in tool_calls:
+    async def execute_parallel_tools(self, websocket, tool_calls, tool_to_agent: Dict, chat_id: str = None, user_id: str = None) -> List[Optional[MCPResponse]]:
+        """Execute multiple tool calls with concurrency safety.
+
+        When tool_concurrency_safety is enabled, read-only tools (tools:read,
+        tools:search scopes) run in parallel while write/system tools run serially
+        after the parallel batch completes.  This prevents race conditions when
+        two write tools target the same agent.
+        """
+        # Phase 1: Prepare all tool calls (args, permissions, credentials)
+        prepared = []  # list of (index, tc, tool_name, agent_id, args | None, error_coro | None)
+
+        for idx, tc in enumerate(tool_calls):
             tool_name = tc.function.name
             try:
                 args = json.loads(tc.function.arguments) if tc.function.arguments else {}
             except json.JSONDecodeError:
                 args = {}
 
-            # Map file paths if chat_id provided
             if chat_id:
                 args = self._map_file_paths(chat_id, args, user_id=user_id)
                 args["session_id"] = chat_id
@@ -1985,57 +2140,99 @@ CRITICAL RULES:
 
             agent_id = tool_to_agent.get(tool_name)
 
-            # Inject per-user credentials (E2E encrypted — only agent can decrypt)
             if user_id and agent_id:
                 creds = self.credential_manager.get_agent_credentials_encrypted(user_id, agent_id)
                 if creds:
                     args["_credentials"] = creds
                     args["_credentials_encrypted"] = True
 
-            # System-level security block for parallel tools
+            # System-level security block
             agent_flags = self.security_flags.get(agent_id, {}) if agent_id else {}
             if agent_id and tool_name in agent_flags and agent_flags[tool_name].get("blocked"):
                 reason = agent_flags[tool_name].get("reason", "Security threat detected")
                 err_msg = f"Tool '{tool_name}' is system-blocked: {reason}"
                 logger.warning(f"Security block (parallel): agent={agent_id} tool={tool_name}")
-                async def _dummy_security_error(msg=err_msg):
-                    return MCPResponse(
-                        error={"message": msg, "retryable": False},
-                        ui_components=[Alert(message=msg, variant="error").to_json()]
-                    )
-                tasks.append(_dummy_security_error())
-                tool_names.append(tool_name)
+                async def _sec_err(msg=err_msg):
+                    return MCPResponse(error={"message": msg, "retryable": False},
+                                       ui_components=[Alert(message=msg, variant="error").to_json()])
+                prepared.append((idx, tc, tool_name, agent_id, None, _sec_err()))
                 continue
 
-            # Permission check for parallel tools
+            # Permission check
             if user_id and agent_id and not self.tool_permissions.is_tool_allowed(user_id, agent_id, tool_name):
                 err_msg = f"Tool '{tool_name}' is restricted for this agent. Update permissions in the sidebar to enable it."
                 logger.warning(f"Permission denied (parallel): user={user_id} agent={agent_id} tool={tool_name}")
-                async def _dummy_permission_error():
-                    # Return an MCPResponse with error but ALSO a UI component so it's visible in the result
-                    return MCPResponse(
-                        error={"message": err_msg, "retryable": False},
-                        ui_components=[Alert(message=err_msg, variant="error").to_json()]
-                    )
-                tasks.append(_dummy_permission_error())
-                tool_names.append(tool_name)
+                async def _perm_err(msg=err_msg):
+                    return MCPResponse(error={"message": msg, "retryable": False},
+                                       ui_components=[Alert(message=msg, variant="error").to_json()])
+                prepared.append((idx, tc, tool_name, agent_id, None, _perm_err()))
                 continue
 
-            if agent_id and (agent_id in self.agents or agent_id in self.a2a_clients):
-                tasks.append(self._execute_with_retry(websocket, agent_id, tool_name, args))
-                tool_names.append(tool_name)
-            else:
-                 # Create a dummy task that returns an error result
-                 async def _dummy_error():
-                     return MCPResponse(error={"message": f"No agent for {tool_name}"})
-                 tasks.append(_dummy_error())
-                 tool_names.append(tool_name)
+            if not agent_id or (agent_id not in self.agents and agent_id not in self.a2a_clients):
+                async def _no_agent(tn=tool_name):
+                    return MCPResponse(error={"message": f"No agent for {tn}"})
+                prepared.append((idx, tc, tool_name, agent_id, None, _no_agent()))
+                continue
 
-        if not tasks:
+            prepared.append((idx, tc, tool_name, agent_id, args, None))
+
+        if not prepared:
             return []
 
-        # Execute all tools concurrently
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Phase 2: Partition into parallel-safe vs serial based on scope
+        use_concurrency_safety = flags.is_enabled("tool_concurrency_safety")
+
+        parallel_items = []  # (idx, tool_name, coro)
+        serial_items = []    # (idx, tool_name, agent_id, args)
+        error_items = []     # (idx, coro)
+
+        for idx, tc, tool_name, agent_id, args, err_coro in prepared:
+            if err_coro is not None:
+                error_items.append((idx, err_coro))
+            elif use_concurrency_safety:
+                scope = self.tool_permissions.get_tool_scope(agent_id, tool_name)
+                if scope in self._PARALLEL_SAFE_SCOPES:
+                    parallel_items.append((idx, tool_name, self._execute_with_retry(websocket, agent_id, tool_name, args)))
+                else:
+                    serial_items.append((idx, tool_name, agent_id, args))
+            else:
+                parallel_items.append((idx, tool_name, self._execute_with_retry(websocket, agent_id, tool_name, args)))
+
+        # Collect results in original order
+        results_by_idx: Dict[int, Any] = {}
+
+        # Execute error items immediately
+        for idx, coro in error_items:
+            results_by_idx[idx] = await coro
+
+        # Execute parallel-safe tools concurrently (capped)
+        if parallel_items:
+            sem = asyncio.Semaphore(self._MAX_PARALLEL_CONCURRENCY)
+            async def _sem_wrap(coro):
+                async with sem:
+                    return await coro
+            par_results = await asyncio.gather(
+                *[_sem_wrap(coro) for _, _, coro in parallel_items],
+                return_exceptions=True
+            )
+            for (idx, _, _), res in zip(parallel_items, par_results):
+                results_by_idx[idx] = res
+
+        # Execute serial (write/system) tools one at a time
+        for idx, tool_name, agent_id, args in serial_items:
+            try:
+                results_by_idx[idx] = await self._execute_with_retry(websocket, agent_id, tool_name, args)
+            except Exception as e:
+                results_by_idx[idx] = e
+
+        if serial_items:
+            logger.info(f"Concurrency safety: {len(parallel_items)} parallel, {len(serial_items)} serial")
+
+        # Reassemble in original order
+        ordered = [results_by_idx.get(i) for i in range(len(tool_calls))]
+        tool_names = [tc.function.name for tc in tool_calls]
+
+        results = ordered
         
         # Process results — don't render here, caller batches into collapsible
         final_results = []
@@ -2101,7 +2298,7 @@ CRITICAL RULES:
         last_result = None
 
         for attempt in range(1, max_retries + 1):
-            result = await self.execute_tool_and_wait(agent_id, tool_name, args)
+            result = await self.execute_tool_and_wait(agent_id, tool_name, args, ui_websocket=websocket)
             last_result = result
 
             # Success: no error at all
@@ -2147,7 +2344,7 @@ CRITICAL RULES:
 
         return last_result
 
-    async def execute_tool_and_wait(self, agent_id: str, tool_name: str, args: Dict, timeout: float = 30.0) -> Optional[MCPResponse]:
+    async def execute_tool_and_wait(self, agent_id: str, tool_name: str, args: Dict, timeout: float = 30.0, ui_websocket=None) -> Optional[MCPResponse]:
         """Send an MCP tool call to an agent and wait for the response.
 
         Strategy: Always try WebSocket first (fastest, bidirectional), then
@@ -2155,7 +2352,7 @@ CRITICAL RULES:
         """
         # Try WebSocket first
         if agent_id in self.agents:
-            result = await self._execute_via_websocket(agent_id, tool_name, args, timeout)
+            result = await self._execute_via_websocket(agent_id, tool_name, args, timeout, ui_websocket=ui_websocket)
             if result and not (result.error and result.error.get("retryable")):
                 return result
             # WebSocket failed with a retryable error — fall back to A2A if available
@@ -2175,7 +2372,7 @@ CRITICAL RULES:
             try:
                 await self.discover_agent(base_url)
                 if agent_id in self.agents:
-                    return await self._execute_via_websocket(agent_id, tool_name, args, timeout)
+                    return await self._execute_via_websocket(agent_id, tool_name, args, timeout, ui_websocket=ui_websocket)
             except Exception as e:
                 logger.debug(f"WebSocket reconnect failed for {agent_id}: {e}")
 
@@ -2193,7 +2390,7 @@ CRITICAL RULES:
             error={"message": f"Agent {agent_id} not connected via WebSocket or A2A", "retryable": False},
         )
 
-    async def _execute_via_websocket(self, agent_id: str, tool_name: str, args: Dict, timeout: float = 30.0) -> Optional[MCPResponse]:
+    async def _execute_via_websocket(self, agent_id: str, tool_name: str, args: Dict, timeout: float = 30.0, ui_websocket=None) -> Optional[MCPResponse]:
         """Execute a tool call via WebSocket (internal agents)."""
         request_id = f"req_{tool_name}_{int(time.time() * 1000)}"
 
@@ -2206,6 +2403,10 @@ CRITICAL RULES:
         # Create a future for the response
         future = asyncio.get_event_loop().create_future()
         self.pending_requests[request_id] = future
+
+        # Register UI socket for progress forwarding
+        if ui_websocket and flags.is_enabled("progress_streaming"):
+            self.pending_ui_sockets[request_id] = ui_websocket
 
         try:
             agent_ws = self.agents[agent_id]
@@ -2225,6 +2426,7 @@ CRITICAL RULES:
                                error={"message": str(e), "retryable": True})
         finally:
             self.pending_requests.pop(request_id, None)
+            self.pending_ui_sockets.pop(request_id, None)
 
     async def _execute_via_a2a(self, agent_id: str, tool_name: str, args: Dict, timeout: float = 30.0) -> Optional[MCPResponse]:
         """Execute a tool call via A2A JSON-RPC (external agents)."""
@@ -2538,6 +2740,14 @@ CRITICAL RULES:
         self.ui_clients.append(websocket)
         self._registered_events[id(websocket)] = asyncio.Event()
         logger.info(f"UI client connected (total: {len(self.ui_clients)})")
+
+        # Hook: SESSION_START
+        if flags.is_enabled("hook_system"):
+            await self.hooks.emit(HookContext(
+                event=HookEvent.SESSION_START,
+                metadata={"websocket_id": id(websocket)},
+            ))
+
         try:
             while True:
                 message = await websocket.receive_text()
@@ -2552,6 +2762,15 @@ CRITICAL RULES:
             if "ConnectionClosed" not in str(e):
                 logger.error(f"WebSocket error: {e}")
         finally:
+            # Hook: SESSION_END
+            if flags.is_enabled("hook_system"):
+                user_data = self.ui_sessions.get(websocket, {})
+                await self.hooks.emit(HookContext(
+                    event=HookEvent.SESSION_END,
+                    user_id=user_data.get("user_id", ""),
+                    metadata={"websocket_id": id(websocket)},
+                ))
+
             if websocket in self.ui_clients:
                 self.ui_clients.remove(websocket)
             if websocket in self.ui_sessions:
@@ -2588,6 +2807,10 @@ CRITICAL RULES:
         agent_port = int(os.getenv("AGENT_PORT", 8003))
         max_agents = int(os.getenv("MAX_AGENTS", 10))
         asyncio.create_task(self._monitor_agents(agent_port, max_agents))
+
+        # Start knowledge synthesis background loop
+        if flags.is_enabled("knowledge_synthesis") and hasattr(self, '_knowledge_synthesizer'):
+            asyncio.create_task(self._knowledge_synthesizer.run_loop())
 
         # Import WebSocket protocol docs for OpenAPI description
         from orchestrator.models import WS_PROTOCOL_DOCS
@@ -2639,7 +2862,7 @@ CRITICAL RULES:
             await self.handle_ui_connection_fastapi(websocket)
 
         # Mount REST API routers
-        from orchestrator.api import chat_router, component_router, agent_router, dashboard_router, draft_router, voice_router
+        from orchestrator.api import chat_router, component_router, agent_router, dashboard_router, draft_router, voice_router, task_router
         from orchestrator.auth import auth_router
         app.include_router(chat_router)
         app.include_router(component_router)
@@ -2648,6 +2871,7 @@ CRITICAL RULES:
         app.include_router(dashboard_router)
         app.include_router(auth_router)
         app.include_router(voice_router)
+        app.include_router(task_router)
 
         # Mount A2A JSON-RPC server (orchestrator as A2A agent)
         try:

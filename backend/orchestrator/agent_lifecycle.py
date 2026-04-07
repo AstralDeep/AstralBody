@@ -279,11 +279,17 @@ class AgentLifecycleManager:
                                        "Generating tool implementations with AI...", GENERATING)
             self._append_log(draft_id, "Generating tool implementations...")
 
+            # Inject knowledge context if available
+            knowledge_context = ""
+            if hasattr(self.orchestrator, 'knowledge_index'):
+                knowledge_context = self.orchestrator.knowledge_index.get_generation_context(description)
+
             tools_code = await self.generator.generate_tools_file(
                 agent_name=agent_name,
                 description=description,
                 tools_spec=tools_spec,
                 packages=packages,
+                knowledge_context=knowledge_context,
             )
 
             all_files = {**template_files, "mcp_tools.py": tools_code}

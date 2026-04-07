@@ -38,6 +38,8 @@ class Message:
             return RegisterAgent.from_json(json_str)
         elif msg_type == 'register_ui':
             return RegisterUI.from_json(json_str)
+        elif msg_type == 'tool_progress':
+            return ToolProgress(**data)
         return Message(**data)
 
 # --- MCP Protocol Wrappers ---
@@ -155,6 +157,20 @@ class AgentCreationProgress(Message):
     message: str = ""       # human-readable progress message
     status: str = ""        # pending | generating | generated | testing | analyzing | approved | rejected | live | error
     detail: Optional[Dict[str, Any]] = None  # optional extra data (e.g., security report)
+
+@dataclass
+class ToolProgress(Message):
+    """Real-time progress update during tool execution.
+
+    Agents can send these messages during long-running tool calls so the
+    orchestrator can forward them to the UI client immediately.
+    """
+    type: str = "tool_progress"
+    tool_name: str = ""
+    agent_id: str = ""
+    message: str = ""
+    percentage: Optional[int] = None  # 0-100, or None if indeterminate
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class RegisterUI(Message):

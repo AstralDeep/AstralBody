@@ -20,6 +20,7 @@ import {
     PanelTopOpen,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
@@ -314,7 +315,7 @@ function RenderText({ content, variant = "body" }: AnyProps) {
         h3: "text-lg font-medium text-astral-text",
         body: "text-sm text-astral-text leading-relaxed",
         caption: "text-xs text-astral-muted",
-        markdown: "prose prose-invert max-w-none text-sm text-astral-text leading-relaxed prose-headings:text-astral-text prose-a:text-astral-primary hover:prose-a:text-astral-secondary prose-strong:text-astral-text prose-code:text-astral-accent prose-code:bg-white/5 prose-code:px-1 prose-code:rounded prose-pre:bg-black/40 prose-pre:border prose-pre:border-white/5",
+        markdown: "prose prose-invert max-w-none text-sm text-astral-text leading-relaxed prose-headings:text-astral-text prose-a:text-astral-primary hover:prose-a:text-astral-secondary prose-strong:text-astral-text prose-code:text-astral-accent prose-code:bg-white/5 prose-code:px-1 prose-code:rounded prose-pre:bg-black/40 prose-pre:border prose-pre:border-white/5 prose-table:border-collapse prose-th:border prose-th:border-white/10 prose-th:bg-white/5 prose-th:px-3 prose-th:py-2 prose-th:text-left prose-th:text-astral-text prose-td:border prose-td:border-white/10 prose-td:px-3 prose-td:py-2",
     };
 
     if (variant === "markdown") {
@@ -330,7 +331,7 @@ function RenderText({ content, variant = "body" }: AnyProps) {
         return (
             <div className={`${classes.markdown}`}>
                 <ReactMarkdown
-                    remarkPlugins={[remarkMath]}
+                    remarkPlugins={[remarkGfm, remarkMath]}
                     rehypePlugins={[rehypeKatex]}
                 >
                     {processedContent}

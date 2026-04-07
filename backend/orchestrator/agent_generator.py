@@ -284,7 +284,8 @@ class AgentCodeGenerator:
 
     async def generate_tools_file(self, agent_name: str, description: str,
                                    tools_spec: List[Dict[str, Any]],
-                                   packages: List[str] = None) -> str:
+                                   packages: List[str] = None,
+                                   knowledge_context: str = "") -> str:
         """Use LLM to generate mcp_tools.py with tool implementations."""
         if not self.llm_client:
             raise RuntimeError("LLM not configured — cannot generate agent tools")
@@ -305,6 +306,15 @@ class AgentCodeGenerator:
 
         ui_spec = generate_llm_prompt_section()
 
+        knowledge_section = ""
+        if knowledge_context:
+            knowledge_section = f"""
+## Proven Patterns & Techniques
+The following patterns have been learned from production usage and should inform your implementation:
+
+{knowledge_context}
+"""
+
         prompt = f"""You are a Python code generator for an agent tool system. Generate a complete `mcp_tools.py` file.
 
 ## Agent Info
@@ -316,6 +326,7 @@ class AgentCodeGenerator:
 {packages_note}
 
 {ui_spec}
+{knowledge_section}
 
 ## CREDENTIAL DECLARATION
 

@@ -238,6 +238,23 @@ class Database:
             )
         ''')
 
+        # Interaction log — captures tool call outcomes for knowledge synthesis
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS interaction_log (
+                id SERIAL PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                success BOOLEAN NOT NULL,
+                error_message TEXT,
+                response_time_ms INTEGER,
+                chat_id TEXT,
+                synthesized BOOLEAN DEFAULT FALSE,
+                created_at BIGINT
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_interaction_log_synthesized ON interaction_log(synthesized)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_interaction_log_agent ON interaction_log(agent_id)')
+
         # Indexes on user_id for query performance
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_chats_user_id ON chats(user_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id)')
@@ -467,6 +484,60 @@ class Database:
         """Delete a draft agent record."""
         cursor = self.execute("DELETE FROM draft_agents WHERE id = ?", (draft_id,))
         return cursor.rowcount > 0
+
+    # ── Interaction Log (Knowledge Synthesis) ──────────────────────────────
+
+    def log_interaction(self, agent_id: str, tool_name: str, success: bool,
+                        error_message: str = None, response_time_ms: int = None,
+                        chat_id: str = None) -> None:
+        """Record a tool interaction for knowledge synthesis."""
+        import time
+        now = int(time.time() * 1000)
+        self.execute(
+            """INSERT INTO interaction_log (agent_id, tool_name, success, error_message,
+               response_time_ms, chat_id, synthesized, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, FALSE, ?)""",
+            (agent_id, tool_name, success, error_message, response_time_ms, chat_id, now)
+        )
+
+    def get_unsynthesized_interactions(self, limit: int = 500) -> List[Dict]:
+        """Fetch interactions not yet processed by the knowledge synthesizer."""
+        rows = self.fetch_all(
+            "SELECT * FROM interaction_log WHERE synthesized = FALSE ORDER BY created_at ASC LIMIT ?",
+            (limit,)
+        )
+        return [dict(r) for r in rows]
+
+    def mark_interactions_synthesized(self, ids: List[int]) -> None:
+        """Mark interaction rows as synthesized."""
+        if not ids:
+            return
+        placeholders = ", ".join("?" for _ in ids)
+        self.execute(
+            f"UPDATE interaction_log SET synthesized = TRUE WHERE id IN ({placeholders})",
+            tuple(ids)
+        )
+
+    def get_interaction_stats(self, agent_id: str = None) -> List[Dict]:
+        """Get aggregated interaction stats, optionally filtered by agent."""
+        if agent_id:
+            rows = self.fetch_all(
+                """SELECT agent_id, tool_name, COUNT(*) as total_calls,
+                   SUM(CASE WHEN success THEN 1 ELSE 0 END) as success_count,
+                   AVG(response_time_ms) as avg_response_ms
+                   FROM interaction_log WHERE agent_id = ?
+                   GROUP BY agent_id, tool_name""",
+                (agent_id,)
+            )
+        else:
+            rows = self.fetch_all(
+                """SELECT agent_id, tool_name, COUNT(*) as total_calls,
+                   SUM(CASE WHEN success THEN 1 ELSE 0 END) as success_count,
+                   AVG(response_time_ms) as avg_response_ms
+                   FROM interaction_log
+                   GROUP BY agent_id, tool_name"""
+            )
+        return [dict(r) for r in rows]
 
     def close(self):
         """No-op for compatibility — connections are opened/closed per request."""
