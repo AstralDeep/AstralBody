@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
 from shared.primitives import (
     Text, Card, Table, Container, MetricCard, ProgressBar,
     Alert, Grid, BarChart, LineChart, PieChart, PlotlyChart, List_,
-    Collapsible, Divider, CodeBlock, Image, Tabs,
+    Divider, CodeBlock, Image, Tabs,
     FileDownload, FileUpload, Button, Input, ColorPicker,
     create_ui_response
 )
@@ -442,14 +442,13 @@ def analyze_email_for_tasks(email_id: str = "latest", **kwargs) -> Dict[str, Any
                 title="Email Task Analysis",
                 content=[
                     Text(content=f"Subject: {subject}", variant="subtitle"),
-                    Collapsible(
+                    Card(
                         title="Email Preview",
                         content=[
                             Text(content=body_content[:500] + ("..." if len(body_content) > 500 else ""), variant="body"),
                             Divider(),
-                            Text(content=f"Full length: {len(body_content)} characters", variant="caption")
+                            Text(content=f"Full length: {len(body_content)} characters", variant="caption"),
                         ],
-                        default_open=False
                     ),
                     Divider(),
                     MetricCard(

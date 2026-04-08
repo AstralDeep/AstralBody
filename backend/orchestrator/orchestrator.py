@@ -850,39 +850,41 @@ class Orchestrator:
 
                 elif msg.action == "condense_components":
                     component_ids = msg.payload.get("component_ids", [])
-                    
-                    if len(component_ids) < 2:
-                        await self._safe_send(websocket, json.dumps({
-                            "type": "combine_error",
-                            "error": "At least 2 components are required to condense"
-                        }))
-                        return
-                    
-                    components = []
-                    for cid in component_ids:
-                        comp = self.history.get_component_by_id(cid, user_id=user_id)
-                        if comp:
-                            components.append(comp)
-                    
-                    if len(components) < 2:
-                        await self._safe_send(websocket, json.dumps({
-                            "type": "combine_error",
-                            "error": "Not enough valid components found"
-                        }))
-                        return
-                    
-                    await self._safe_send(websocket, json.dumps({
-                        "type": "combine_status",
-                        "status": "condensing",
-                        "message": f"Condensing {len(components)} components..."
-                    }))
-                    
+                    logger.info(f"Condense requested: {len(component_ids)} component IDs for user={user_id}")
+
                     try:
+                        if len(component_ids) < 2:
+                            await self._safe_send(websocket, json.dumps({
+                                "type": "combine_error",
+                                "error": "At least 2 components are required to condense"
+                            }))
+                            return
+
+                        components = []
+                        for cid in component_ids:
+                            comp = self.history.get_component_by_id(cid, user_id=user_id)
+                            if comp:
+                                components.append(comp)
+
+                        if len(components) < 2:
+                            logger.warning(f"Condense: only {len(components)} of {len(component_ids)} components found in DB")
+                            await self._safe_send(websocket, json.dumps({
+                                "type": "combine_error",
+                                "error": "Not enough valid components found"
+                            }))
+                            return
+
+                        await self._safe_send(websocket, json.dumps({
+                            "type": "combine_status",
+                            "status": "condensing",
+                            "message": f"Condensing {len(components)} components..."
+                        }))
+
                         result = await self._combine_components_llm(
                             components,
                             mode="condense"
                         )
-                        
+
                         if result.get("error"):
                             await self._safe_send(websocket, json.dumps({
                                 "type": "combine_error",
@@ -1530,27 +1532,14 @@ CRITICAL RULES:
                                 tool_ui_components.append(comp)
 
                     if tool_ui_components:
-                        # Build label with agent attribution
-                        tool_labels = []
-                        for tn in tool_names:
-                            agent_id = tool_to_agent.get(tn, "")
-                            agent_name = self.agent_cards[agent_id].name if agent_id in self.agent_cards else ""
-                            label = tn.replace('_', ' ').title()
-                            if agent_name:
-                                label = f"{agent_name}: {label}"
-                            tool_labels.append(label)
-                        tool_label = ', '.join(tool_labels)
-                        collapsible = Collapsible(
-                            title=f"Tool Results — {tool_label}",
-                            content=[
-                                comp if isinstance(comp, dict) else comp
-                                for comp in tool_ui_components
-                            ],
-                            default_open=False
-                        ).to_json()
-                        await self.send_ui_render(websocket, [collapsible])
+                        # Send tool UI components directly to the canvas (no collapsible wrapper)
+                        canvas_components = [
+                            comp if isinstance(comp, dict) else comp
+                            for comp in tool_ui_components
+                        ]
+                        await self.send_ui_render(websocket, canvas_components)
                         if chat_id:
-                            self.history.add_message(chat_id, "assistant", [collapsible], user_id=user_id)
+                            self.history.add_message(chat_id, "assistant", canvas_components, user_id=user_id)
 
                     # Append tool outputs to LLM conversation history
                     for i, tc in enumerate(llm_msg.tool_calls):
@@ -1723,14 +1712,23 @@ CRITICAL RULES:
                     
                     if parsed_components:
                         response_components = parsed_components
+                        # Structured UI components go to canvas, send text summary to chat
+                        await self.send_ui_render(websocket, response_components, target="canvas")
+                        # Also send a chat summary so the floating panel gets the final text
+                        chat_summary = [
+                            Card(title="Analysis", content=[
+                                Text(content=content, variant="markdown")
+                            ]).to_json()
+                        ]
+                        await self.send_ui_render(websocket, chat_summary, target="chat")
                     else:
                         response_components = [
                             Card(title="Analysis", content=[
                                 Text(content=content, variant="markdown")
                             ]).to_json()
                         ]
-
-                    await self.send_ui_render(websocket, response_components)
+                        # Pure text response goes to chat panel
+                        await self.send_ui_render(websocket, response_components, target="chat")
 
                     # Save complete interaction to history
                     self.history.add_message(chat_id, "assistant", response_components, user_id=user_id)
@@ -1996,7 +1994,7 @@ CRITICAL RULES:
             err_msg = f"Tool '{tool_name}' is system-blocked: {reason}"
             logger.warning(f"Security block: agent={agent_id} tool={tool_name}")
             alert = Alert(message=err_msg, variant="error")
-            await self.send_ui_render(websocket, [alert.to_json()])
+            await self.send_ui_render(websocket, [alert.to_json()], target="chat")
             return MCPResponse(
                 error={"message": err_msg, "retryable": False},
                 ui_components=[alert.to_json()]
@@ -2031,7 +2029,7 @@ CRITICAL RULES:
             err_msg = f"No agent available for tool '{tool_name}'"
             await self.send_ui_render(websocket, [
                 Alert(message=err_msg, variant="error").to_json()
-            ])
+            ], target="chat")
             return MCPResponse(error={"message": err_msg})
 
         # RFC 8693 delegation: generate a scoped token excluding system-blocked tools
@@ -2080,7 +2078,7 @@ CRITICAL RULES:
             err_msg = result.error.get('message', 'Unknown error')
             await self.send_ui_render(websocket, [
                 Alert(message=f"Tool '{tool_name}' failed: {err_msg}", variant="error").to_json()
-            ])
+            ], target="chat")
 
             # Auto-fix: if this is a draft agent, attempt to fix the tool error automatically
             if agent_id and hasattr(self, 'lifecycle_manager'):
@@ -2588,10 +2586,16 @@ CRITICAL RULES:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def send_ui_render(self, websocket, components: List):
+    async def send_ui_render(self, websocket, components: List, target: str = "canvas"):
         """Send a UIRender message to a UI client, adapted via ROTE."""
+        # Auto-route error-only messages to the chat panel instead of the canvas
+        if target == "canvas" and components and all(
+            isinstance(c, dict) and c.get("type") == "alert" and c.get("variant") == "error"
+            for c in components
+        ):
+            target = "chat"
         adapted = self.rote.adapt(websocket, components)
-        msg = UIRender(components=adapted)
+        msg = UIRender(components=adapted, target=target)
         await self._safe_send(websocket, msg.to_json())
 
     @staticmethod
@@ -2930,7 +2934,10 @@ CRITICAL RULES:
                 ],
                 max_tokens=20
             )
-            title = response.choices[0].message.content.strip().strip('"')
+            content = response.choices[0].message.content
+            if not content:
+                return
+            title = content.strip().strip('"')
             
             # Update history and notify UI
             self.history.update_chat_title(chat_id, title, user_id=user_id)

@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
 
 from shared.primitives import (
     Text, Card, Table, Alert, MetricCard, Grid,
-    BarChart, PieChart, LineChart, List_, Collapsible, Tabs, TabItem,
+    BarChart, PieChart, LineChart, List_, Tabs, TabItem,
     create_ui_response,
 )
 from agents.linkedin.linkedin_api import LinkedInClient, REACTION_TYPES
@@ -492,12 +492,8 @@ def draft_linkedin_post(
             variant="info",
             title="Next Step",
         ),
-        Collapsible(title="Post Checklist", content=[
-            List_(items=checklist, variant="default"),
-        ]),
-        Collapsible(title=f"Best Practices: {target_frame['name']}", content=[
-            List_(items=target_frame.get("best_practices", []), variant="default"),
-        ]),
+        List_(items=checklist, variant="default"),
+        List_(items=target_frame.get("best_practices", []), variant="default"),
     ]
 
     if relevant_projects or relevant_expertise:
@@ -507,9 +503,7 @@ def draft_linkedin_post(
         for proj in relevant_projects[:2]:
             context_items.append(f"Project: {proj.get('name', '')} — {proj.get('description', '')[:100]}")
         card_content.append(
-            Collapsible(title="Relevant CAAI Context", content=[
-                List_(items=context_items, variant="default"),
-            ])
+            List_(items=context_items, variant="default")
         )
 
     components = [Card(title="LinkedIn Post Draft", content=card_content)]
@@ -612,7 +606,7 @@ def get_content_suggestions(
                 Text(content=fr["description"], variant="caption"),
                 Text(content=f"Suggested cadence: {fr.get('suggested_cadence', 'N/A')}", variant="caption"),
                 Tabs(tabs=tab_items) if tab_items else Text(content="No templates for this frame.", variant="body"),
-                Collapsible(title="Best Practices", content=[practices_list]),
+                practices_list,
             ],
         )
         frame_components.append(frame_card)

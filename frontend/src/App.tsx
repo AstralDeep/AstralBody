@@ -4,7 +4,8 @@
 import { useSmartAuth as useAuth } from "./hooks/useSmartAuth";
 import LoginScreen from "./components/LoginScreen";
 import DashboardLayout from "./components/DashboardLayout";
-import ChatInterface from "./components/ChatInterface";
+import SDUICanvas from "./components/SDUICanvas";
+import FloatingChatPanel from "./components/FloatingChatPanel";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { AlertCircle } from "lucide-react";
 import { Toaster } from "sonner";
@@ -31,8 +32,7 @@ function App() {
     loadChat,
     createNewChat,
     deleteChat,
-    savedComponents,
-    saveComponent,
+    canvasComponents,
     deleteSavedComponent,
     combineComponents,
     condenseComponents,
@@ -217,22 +217,25 @@ function App() {
       onDiscoverAgents={discoverAgents}
     >
       <AgentPermissionProvider agents={agents}>
-      <ChatInterface
+      <SDUICanvas
+        canvasComponents={canvasComponents}
+        onDeleteComponent={deleteSavedComponent}
+        onCombineComponents={combineComponents}
+        onCondenseComponents={condenseComponents}
+        isCombining={isCombining}
+        combineError={combineError}
+        onTablePaginate={sendTablePaginate}
+        onSendMessage={sendMessage}
+        activeChatId={activeChatId}
+      />
+      <FloatingChatPanel
         messages={messages}
         chatStatus={chatStatus}
         onSendMessage={sendMessage}
         onCancelTask={cancelTask}
         isConnected={isConnected}
         activeChatId={activeChatId}
-        savedComponents={savedComponents}
-        onSaveComponent={saveComponent}
-        onDeleteSavedComponent={deleteSavedComponent}
-        onCombineComponents={combineComponents}
-        onCondenseComponents={condenseComponents}
-        isCombining={isCombining}
-        combineError={combineError}
         accessToken={auth.user?.access_token}
-        onTablePaginate={sendTablePaginate}
         deviceCapabilities={deviceCapabilities}
       />
       </AgentPermissionProvider>

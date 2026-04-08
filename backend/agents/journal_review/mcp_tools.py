@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
 
 from shared.primitives import (
     Text, Card, Table, Alert, MetricCard, Grid, Grids,
-    BarChart, PieChart, List_, Collapsible, Tabs, TabItem, Divider,
+    BarChart, PieChart, List_, Tabs, TabItem, Divider,
     create_ui_response,
 )
 
@@ -345,9 +345,8 @@ def find_matching_journals(
         topics_str = ", ".join(j["topics"][:5]) if j["topics"] else "No topics listed"
         jid = j.get("issn_l") or j["name"][:20].replace(" ", "-")
         detail_items.append(
-            Collapsible(
+            Card(
                 title=f"{j['name']} — Topics & Details",
-                id=f"detail-{jid}",
                 content=[
                     Text(content=f"**Publisher:** {j['publisher']}", id=f"pub-{jid}"),
                     Text(content=f"**ISSN:** {j['issn']}", id=f"issn-{jid}"),
@@ -357,7 +356,7 @@ def find_matching_journals(
                          id=f"counts-{jid}"),
                     Text(content=f"**Homepage:** {j.get('homepage_url', 'N/A')}",
                          id=f"url-{jid}"),
-                ]
+                ],
             )
         )
     if detail_items:

@@ -135,7 +135,7 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
     const [agents, setAgents] = useState<Agent[]>([]);
     const [chatStatus, setChatStatus] = useState<ChatStatus>({ status: "idle", message: "" });
     const [uiComponents, setUiComponents] = useState<Record<string, unknown>[]>([]);
-    const [messages, setMessages] = useState<{ role: string; content: unknown }[]>([]);
+    const [messages, setMessages] = useState<{ role: string; content: unknown; _target?: string }[]>([]);
     const [chatHistory, setChatHistory] = useState<ChatSession[]>([]);
     const [activeChatIdState, setActiveChatIdState] = useState<string | null>(null);
     const activeChatIdRef = useRef<string | null>(null);
@@ -181,8 +181,10 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
 
     const activeChatId = activeChatIdState;
     const [savedComponents, setSavedComponents] = useState<SavedComponent[]>([]);
+    const [canvasComponents, setCanvasComponents] = useState<SavedComponent[]>([]);
     const [isCombining, setIsCombining] = useState(false);
     const [combineError, setCombineError] = useState<string | null>(null);
+    const condenseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const [agentPermissions, setAgentPermissions] = useState<AgentPermissionsData | null>(null);
     const [deviceCapabilities, setDeviceCapabilities] = useState<DeviceCapabilityFlags>({
         hasMicrophone: false,
@@ -240,15 +242,45 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                 });
                 break;
 
-            case "ui_render":
+            case "ui_render": {
                 // Don't auto-clear chat status here — the backend sends
                 // an explicit chat_status: "done" when processing is complete.
-                setUiComponents((data.components as Record<string, unknown>[]) || []);
-                setMessages(prev => [
-                    ...prev,
-                    { role: "assistant", content: data.components || [] }
-                ]);
+                const renderTarget = (data.target as string) || "canvas";
+                const components = (data.components as Record<string, unknown>[]) || [];
+                setUiComponents(components);
+
+                if (renderTarget === "chat") {
+                    // Text-only responses go to the floating chat panel
+                    setMessages(prev => [
+                        ...prev,
+                        { role: "assistant", content: components, _target: "chat" }
+                    ]);
+                } else {
+                    // Canvas components: save immediately to backend for persistence
+                    // The component_saved handler will add them to canvasComponents with real IDs
+                    const chatId = activeChatIdRef.current;
+                    if (chatId && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                        for (const comp of components) {
+                            wsRef.current.send(JSON.stringify({
+                                type: "ui_event",
+                                action: "save_component",
+                                payload: {
+                                    chat_id: chatId,
+                                    component_data: comp,
+                                    component_type: (comp.type as string) || "unknown",
+                                    title: (comp.title as string) || (comp.type as string) || "Component",
+                                }
+                            }));
+                        }
+                    }
+                    // Also add to messages for history, marked as canvas
+                    setMessages(prev => [
+                        ...prev,
+                        { role: "assistant", content: components, _target: "canvas" }
+                    ]);
+                }
                 break;
+            }
 
             case "ui_update":
                 setUiComponents((data.components as Record<string, unknown>[]) || []);
@@ -270,6 +302,7 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                     setMessages([]);
                     setUiComponents([]);
                     setSavedComponents([]);
+                    setCanvasComponents([]);
                 }
 
 
@@ -301,6 +334,7 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                     // For simplicity, we just clear current UI components unless we reconstruct them
                     setUiComponents([]);
                     setSavedComponents([]);
+                    setCanvasComponents([]);
 
                     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
                         wsRef.current.send(JSON.stringify({
@@ -316,17 +350,26 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
             case "saved_components_list":
                 if (data.components) {
                     setSavedComponents(data.components as SavedComponent[]);
+                    // Also populate canvas with saved components when loading a chat
+                    setCanvasComponents(data.components as SavedComponent[]);
                 }
                 break;
 
-            case "component_saved":
-                setSavedComponents(prev => [(data.component as SavedComponent), ...prev]);
+            case "component_saved": {
+                const savedComp = data.component as SavedComponent;
+                setSavedComponents(prev => [savedComp, ...prev]);
+                // Also add to canvas if not already there
+                setCanvasComponents(prev => {
+                    if (prev.some(c => c.id === savedComp.id)) return prev;
+                    return [savedComp, ...prev];
+                });
                 if (pendingSaveResolveRef.current) {
                     pendingSaveResolveRef.current(true);
                     pendingSaveResolveRef.current = null;
                     pendingSaveRejectRef.current = null;
                 }
                 break;
+            }
 
             case "component_save_error":
                 if (pendingSaveRejectRef.current) {
@@ -339,6 +382,7 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
             case "component_deleted":
                 if (data.component_id) {
                     setSavedComponents((prev) => prev.filter(c => c.id !== data.component_id));
+                    setCanvasComponents((prev) => prev.filter(c => c.id !== data.component_id));
                 }
                 break;
 
@@ -348,31 +392,37 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                 break;
 
             case "components_combined":
+                if (condenseTimeoutRef.current) { clearTimeout(condenseTimeoutRef.current); condenseTimeoutRef.current = null; }
                 setIsCombining(false);
                 setCombineError(null);
                 if (data.new_components) {
-                    // Prepend new combined components and remove deleted ones if any
-                    setSavedComponents(prev => {
+                    const updateCombined = (prev: SavedComponent[]) => {
                         let filtered = prev;
                         if (data.removed_ids) {
                             filtered = prev.filter(c => !(data.removed_ids as string[]).includes(c.id));
                         }
                         return [...(data.new_components as SavedComponent[]), ...filtered];
-                    });
+                    };
+                    setSavedComponents(updateCombined);
+                    setCanvasComponents(updateCombined);
                 }
                 break;
-            case "components_condensed":
+            case "components_condensed": {
+                if (condenseTimeoutRef.current) { clearTimeout(condenseTimeoutRef.current); condenseTimeoutRef.current = null; }
                 setIsCombining(false);
                 setCombineError(null);
-                // Remove old components and add new ones
-                setSavedComponents(prev => {
+                const updateCondensed = (prev: SavedComponent[]) => {
                     const removedIds = new Set((data.removed_ids as string[]) || []);
                     const remaining = prev.filter(c => !removedIds.has(c.id as string));
                     return [...((data.new_components as SavedComponent[]) || []), ...remaining];
-                });
+                };
+                setSavedComponents(updateCondensed);
+                setCanvasComponents(updateCondensed);
                 break;
+            }
 
             case "combine_error":
+                if (condenseTimeoutRef.current) { clearTimeout(condenseTimeoutRef.current); condenseTimeoutRef.current = null; }
                 setIsCombining(false);
                 setCombineError((data.error as string) || "Failed to combine components");
                 console.error("Combine error:", data.error);
@@ -720,6 +770,9 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
     }, [activeChatId]);
 
     const deleteSavedComponent = useCallback((componentId: string) => {
+        // Remove from canvas immediately
+        setCanvasComponents(prev => prev.filter(c => c.id !== componentId));
+
         if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
         wsRef.current.send(JSON.stringify({
             type: "ui_event",
@@ -752,6 +805,15 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
         setIsCombining(true);
         setCombineError(null);
+        // Safety timeout: reset spinner if backend never responds
+        if (condenseTimeoutRef.current) clearTimeout(condenseTimeoutRef.current);
+        condenseTimeoutRef.current = setTimeout(() => {
+            setIsCombining(false);
+            setCombineError("Condense timed out — no response from server");
+            toast.error("Condense timed out — please try again");
+            setTimeout(() => setCombineError(null), 5000);
+            condenseTimeoutRef.current = null;
+        }, 60_000);
         wsRef.current.send(JSON.stringify({
             type: "ui_event",
             action: "condense_components",
@@ -1036,6 +1098,7 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         createNewChat,
         deleteChat,
         savedComponents,
+        canvasComponents,
         saveComponent,
         deleteSavedComponent,
         loadSavedComponents,

@@ -70,6 +70,7 @@ class UIEvent(Message):
 class UIRender(Message):
     type: str = "ui_render"
     components: List[Dict[str, Any]] = field(default_factory=list)
+    target: str = "canvas"  # "canvas" for SDUI main area, "chat" for floating chat panel
 
 @dataclass
 class UIUpdate(Message):
