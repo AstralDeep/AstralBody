@@ -5,7 +5,7 @@
  * this uses a direct component mapping from the registry implementations.
  * This approach is more resilient to shape mismatches in backend data.
  */
-import React, { Component, type ErrorInfo, useState } from "react";
+import React, { Component, type ErrorInfo, useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
     AlertCircle,
@@ -286,6 +286,8 @@ function renderComponent(comp: AnyProps, index: number, onSaveComponent?: (compo
             return <RenderFileDownload key={index} {...baseProps} />;
         case "color_picker":
             return <RenderColorPicker key={index} {...baseProps} />;
+        case "theme_apply":
+            return <RenderThemeApply key={index} {...baseProps} />;
         default:
             console.warn(`Unknown component type: ${type}`);
             return null;
@@ -900,6 +902,32 @@ function RenderColorPicker({ label, color_key, value, _source_agent, _source_too
                 />
             </div>
             <span className="text-xs text-astral-muted font-mono">{currentValue}</span>
+        </div>
+    );
+}
+
+// ── ThemeApply ────────────────────────────────────────────────────
+function RenderThemeApply({ preset, colors, color_key, color_value, message }: AnyProps) {
+    const theme = useTheme();
+    const applied = useRef(false);
+
+    useEffect(() => {
+        if (applied.current) return;
+        applied.current = true;
+
+        if (preset && theme.presets[preset]) {
+            theme.setTheme(preset);
+        } else if (colors && typeof colors === "object") {
+            theme.setColors(colors as ThemeColors);
+        } else if (color_key && color_value) {
+            theme.setColor(color_key as keyof ThemeColors, color_value);
+        }
+    }, []);
+
+    return (
+        <div className="bg-green-500/10 border border-green-500/20 rounded-lg p-3 flex items-center gap-2">
+            <CheckCircle size={16} className="text-green-400" />
+            <span className="text-sm text-astral-text/80">{message || "Theme updated"}</span>
         </div>
     );
 }

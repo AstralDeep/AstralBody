@@ -29,7 +29,7 @@ class Component:
             'tabs': Tabs, 'divider': Divider, 'input': Input,
             'bar_chart': BarChart, 'line_chart': LineChart, 'pie_chart': PieChart,
             'plotly_chart': PlotlyChart, 'collapsible': Collapsible,
-            'color_picker': ColorPicker,
+            'color_picker': ColorPicker, 'theme_apply': ThemeApply,
             'file_upload': FileUpload, 'file_download': FileDownload,
         }
         cls = type_map.get(comp_type, Component)
@@ -277,6 +277,16 @@ class ColorPicker(Component):
     label: str = ""
     color_key: str = ""
     value: str = "#000000"
+
+
+@dataclass
+class ThemeApply(Component):
+    type: str = "theme_apply"
+    preset: Optional[str] = None
+    colors: Optional[Dict[str, str]] = None
+    color_key: Optional[str] = None
+    color_value: Optional[str] = None
+    message: str = ""
 
 
 @dataclass

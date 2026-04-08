@@ -28,7 +28,9 @@ const oidcConfig = {
   automaticSilentRenew: true,
   filterProtocolClaims: true,
   onSigninCallback: () => {
-    window.history.replaceState({}, document.title, window.location.pathname)
+    const chatParam = new URLSearchParams(window.location.search).get("chat");
+    const newUrl = chatParam ? `${window.location.pathname}?chat=${chatParam}` : window.location.pathname;
+    window.history.replaceState({}, document.title, newUrl);
   }
 }
 

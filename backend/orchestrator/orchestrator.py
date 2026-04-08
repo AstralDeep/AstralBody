@@ -86,6 +86,12 @@ class Orchestrator:
         self._chat_locks: Dict[int, asyncio.Lock] = {}  # per-websocket lock for chat serialization
         self._registered_events: Dict[int, asyncio.Event] = {}  # gate non-register messages until auth completes
 
+        # Live streaming subscriptions
+        self._stream_tasks: Dict[int, Dict[str, asyncio.Task]] = {}   # ws_id -> {tool_name -> Task}
+        self._stream_subs: Dict[int, Dict[str, Dict]] = {}            # ws_id -> {tool_name -> config}
+        self._streamable_tools: Dict[str, Dict] = {}                  # tool_name -> {agent_id, default_interval, min_interval, max_interval}
+        self._MAX_STREAM_SUBSCRIPTIONS = 10
+
         # A2A external agent connections (JSON-RPC transport)
         self.a2a_clients: Dict[str, Any] = {}  # agent_id -> A2A client
         self.a2a_agent_cards: Dict[str, Any] = {}  # agent_id -> official A2A AgentCard
@@ -192,6 +198,17 @@ class Orchestrator:
 
         # Register tool→scope mapping in the permission manager
         self.tool_permissions.register_tool_scopes(card.agent_id, tool_scope_map)
+
+        # Extract streamable tool metadata for live streaming
+        for skill in card.skills:
+            streamable_cfg = getattr(skill, 'metadata', {}).get("streamable")
+            if streamable_cfg and skill.scope in ("tools:read", "tools:system"):
+                self._streamable_tools[skill.id] = {
+                    "agent_id": card.agent_id,
+                    "default_interval": streamable_cfg.get("default_interval", 2),
+                    "min_interval": streamable_cfg.get("min_interval", 1),
+                    "max_interval": streamable_cfg.get("max_interval", 30),
+                }
 
         # Extract agent's ECIES public key for E2E credential encryption
         public_key_jwk = getattr(card, 'metadata', {}).get("public_key_jwk") if getattr(card, 'metadata', None) else None
@@ -740,12 +757,32 @@ class Orchestrator:
                             }))
                         else:
                             chat_id = source["chat_id"]
+                            # Collect source metadata from original components
+                            source_tools = set()
+                            source_agents = set()
+                            for comp in [source, target]:
+                                cd = comp.get("component_data", {})
+                                if cd.get("_source_tool"):
+                                    source_tools.add(cd["_source_tool"])
+                                if cd.get("_source_agent"):
+                                    source_agents.add(cd["_source_agent"])
+
                             new_components = self.history.replace_components(
                                 [source_id, target_id],
                                 result["components"],
                                 chat_id,
                                 user_id=user_id
                             )
+
+                            # Tag combined components with source metadata so live streaming continues
+                            if source_tools:
+                                for nc in new_components:
+                                    cd = nc.get("component_data")
+                                    if isinstance(cd, dict):
+                                        cd["_source_tool"] = next(iter(source_tools))
+                                        if source_agents:
+                                            cd["_source_agent"] = next(iter(source_agents))
+
                             await self._safe_send(websocket, json.dumps({
                                 "type": "components_combined",
                                 "removed_ids": [source_id, target_id],
@@ -892,12 +929,32 @@ class Orchestrator:
                             }))
                         else:
                             chat_id = components[0]["chat_id"]
+                            # Collect source metadata from original components to carry forward
+                            source_tools = set()
+                            source_agents = set()
+                            for comp in components:
+                                cd = comp.get("component_data", {})
+                                if cd.get("_source_tool"):
+                                    source_tools.add(cd["_source_tool"])
+                                if cd.get("_source_agent"):
+                                    source_agents.add(cd["_source_agent"])
+
                             new_components = self.history.replace_components(
                                 component_ids,
                                 result["components"],
                                 chat_id,
                                 user_id=user_id
                             )
+
+                            # Tag condensed components with source metadata so live streaming continues
+                            if source_tools:
+                                for nc in new_components:
+                                    cd = nc.get("component_data")
+                                    if isinstance(cd, dict):
+                                        cd["_source_tool"] = next(iter(source_tools))
+                                        if source_agents:
+                                            cd["_source_agent"] = next(iter(source_agents))
+
                             await self._safe_send(websocket, json.dumps({
                                 "type": "components_condensed",
                                 "removed_ids": component_ids,
@@ -950,6 +1007,24 @@ class Orchestrator:
                         await self._safe_send(websocket, json.dumps({
                             "type": "chat_status", "status": "done", "message": ""
                         }))
+
+                # --- Live Streaming ---
+                elif msg.action == "stream_subscribe":
+                    if flags.is_enabled("live_streaming"):
+                        await self._handle_stream_subscribe(websocket, msg.payload)
+                    else:
+                        await self._safe_send(websocket, json.dumps({
+                            "type": "stream_error", "tool_name": msg.payload.get("tool_name", ""),
+                            "error": "Live streaming is not enabled"
+                        }))
+
+                elif msg.action == "stream_unsubscribe":
+                    if flags.is_enabled("live_streaming"):
+                        await self._handle_stream_unsubscribe(websocket, msg.payload)
+
+                elif msg.action == "stream_list":
+                    if flags.is_enabled("live_streaming"):
+                        await self._handle_stream_list(websocket)
 
         except Exception as e:
             import traceback
@@ -1175,6 +1250,29 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                         if isinstance(child, dict):
                             self._validate_component_tree(child, valid_types)
 
+    # Component types that carry no rich visual content (just text wrappers)
+    _TEXT_ONLY_TYPES = {"text", "card", "container", "collapsible", "divider", "list", "alert"}
+
+    def _is_text_only_components(self, components: list) -> bool:
+        """Return True if all components in the tree contain only text-based content.
+
+        Used to decide whether parsed UI JSON should go to the canvas (rich content)
+        or the chat panel only (text-only content).
+        """
+        for comp in components:
+            if not isinstance(comp, dict):
+                continue
+            comp_type = comp.get("type", "").strip().lower()
+            if comp_type not in self._TEXT_ONLY_TYPES:
+                return False
+            for key in ("children", "content"):
+                children = comp.get(key, [])
+                if isinstance(children, list):
+                    child_dicts = [c for c in children if isinstance(c, dict) and "type" in c]
+                    if child_dicts and not self._is_text_only_components(child_dicts):
+                        return False
+        return True
+
     def _map_file_paths(self, chat_id: str, args: Dict, user_id: str = 'legacy') -> Dict:
         """Replace original filenames in tool arguments with backend paths.
         
@@ -1347,6 +1445,20 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     file_context += f"- {mapping['original_name']} -> {mapping['backend_path']}\n"
                 file_context += "\nIMPORTANT: You MUST use the absolute backend path (right side) when calling tools for these files. Never use just the original filename.\n"
 
+            # Fetch saved canvas components for context-aware updates
+            canvas_saved = self.history.get_saved_components(chat_id, user_id=user_id)
+            canvas_context = ""
+            if canvas_saved:
+                canvas_context = "\nCOMPONENTS CURRENTLY ON CANVAS:\n"
+                for sc in canvas_saved:
+                    cd = sc.get("component_data", {})
+                    source_tool = cd.get("_source_tool", "unknown")
+                    source_agent = cd.get("_source_agent", "unknown")
+                    canvas_context += (
+                        f"- ID: {sc['id']} | Title: {sc['title']} "
+                        f"| Type: {sc['component_type']} | Tool: {source_tool} | Agent: {source_agent}\n"
+                    )
+
             system_prompt = f"""You are an AI orchestrator. Your goal is to simplify complex tasks for the user by intelligently using available tools.
 
 {file_context}
@@ -1355,12 +1467,12 @@ AVAILABLE TOOLS: sent in the `tools` parameter.
 
 PROCESS (Re-Act Loop):
 1. **Analyze**: Break down the user's request into logical steps.
-2. **Plan & Execute**: 
+2. **Plan & Execute**:
    - If you need data, call the appropriate tool.
    - You can call multiple tools in parallel if they are independent.
    - If a step depends on previous output (e.g., "search patients" -> "graph their age"), wait for the first tool's result before calling the next.
 3. **Observe**: You will receive the tool's output in the next turn.
-4. **Iterate**: 
+4. **Iterate**:
    - IF the task is not complete or you need more data (e.g., now you have the patients, need to graph them), call the next tool.
    - IF you have all necessary information, provide a final answer.
 
@@ -1368,6 +1480,11 @@ CRITICAL RULES:
 - **VERIFY**: Check if tool outputs actually contain the data you expect before stating it exists. If a search returns 0 results, do NOT try to graph them.
 - **FINAL RESPONSE**: When you have finished all actions, provide a natural language summary of what you did and what was found.
 - **VISUALIZATIONS**: If the user asks for a graph, YOU MUST call the graphing tool. Do not just describe the data.
+{canvas_context}
+COMPONENT UPDATE RULES:
+- The user's canvas already has the components listed above under COMPONENTS CURRENTLY ON CANVAS.
+- When the user asks to MODIFY, UPDATE, REMOVE items from, or CHANGE existing displayed data, re-call the SAME tool that originally created it with the corrected/updated parameters. Do NOT create duplicates.
+- When the user asks for something completely NEW and unrelated, call the appropriate tool normally.
 """
 
             # Inject knowledge-based routing hints if available
@@ -1532,14 +1649,12 @@ CRITICAL RULES:
                                 tool_ui_components.append(comp)
 
                     if tool_ui_components:
-                        # Send tool UI components directly to the canvas (no collapsible wrapper)
-                        canvas_components = [
-                            comp if isinstance(comp, dict) else comp
-                            for comp in tool_ui_components
-                        ]
-                        await self.send_ui_render(websocket, canvas_components)
+                        # Send components, auto-replacing any that match existing canvas components
+                        await self._send_or_replace_components(
+                            websocket, tool_ui_components, chat_id, user_id=user_id
+                        )
                         if chat_id:
-                            self.history.add_message(chat_id, "assistant", canvas_components, user_id=user_id)
+                            self.history.add_message(chat_id, "assistant", tool_ui_components, user_id=user_id)
 
                     # Append tool outputs to LLM conversation history
                     for i, tc in enumerate(llm_msg.tool_calls):
@@ -1712,15 +1827,21 @@ CRITICAL RULES:
                     
                     if parsed_components:
                         response_components = parsed_components
-                        # Structured UI components go to canvas, send text summary to chat
-                        await self.send_ui_render(websocket, response_components, target="canvas")
-                        # Also send a chat summary so the floating panel gets the final text
-                        chat_summary = [
-                            Card(title="Analysis", content=[
-                                Text(content=content, variant="markdown")
-                            ]).to_json()
-                        ]
-                        await self.send_ui_render(websocket, chat_summary, target="chat")
+
+                        if self._is_text_only_components(parsed_components):
+                            # Text-only components -- route to chat panel only
+                            await self.send_ui_render(websocket, response_components, target="chat")
+                        else:
+                            # Rich UI components -- send to canvas + chat summary
+                            await self._send_or_replace_components(
+                                websocket, response_components, chat_id, user_id=user_id
+                            )
+                            chat_summary = [
+                                Card(title="Analysis", content=[
+                                    Text(content=content, variant="markdown")
+                                ]).to_json()
+                            ]
+                            await self.send_ui_render(websocket, chat_summary, target="chat")
                     else:
                         response_components = [
                             Card(title="Analysis", content=[
@@ -2545,6 +2666,163 @@ CRITICAL RULES:
             return None
 
     # =========================================================================
+    # LIVE STREAMING SUBSCRIPTIONS
+    # =========================================================================
+
+    async def _handle_stream_subscribe(self, websocket, payload: Dict):
+        """Subscribe a UI client to a live-streaming tool."""
+        tool_name = payload.get("tool_name")
+        interval = payload.get("interval_seconds")
+        params = payload.get("params", {})
+
+        if not tool_name or tool_name not in self._streamable_tools:
+            await self._safe_send(websocket, json.dumps({
+                "type": "stream_error", "tool_name": tool_name or "",
+                "error": f"Tool '{tool_name}' is not available for streaming"
+            }))
+            return
+
+        tool_cfg = self._streamable_tools[tool_name]
+        agent_id = tool_cfg["agent_id"]
+
+        # Permission check
+        user_id = self._get_user_id(websocket)
+        if not self.tool_permissions.is_tool_allowed(user_id, agent_id, tool_name):
+            await self._safe_send(websocket, json.dumps({
+                "type": "stream_error", "tool_name": tool_name,
+                "error": "Permission denied for this tool"
+            }))
+            return
+
+        # Clamp interval to tool's allowed range
+        if interval is None:
+            interval = tool_cfg["default_interval"]
+        interval = max(tool_cfg["min_interval"], min(tool_cfg["max_interval"], interval))
+
+        ws_id = id(websocket)
+
+        # Enforce max subscription limit
+        current_subs = self._stream_subs.get(ws_id, {})
+        if tool_name not in current_subs and len(current_subs) >= self._MAX_STREAM_SUBSCRIPTIONS:
+            await self._safe_send(websocket, json.dumps({
+                "type": "stream_error", "tool_name": tool_name,
+                "error": f"Maximum {self._MAX_STREAM_SUBSCRIPTIONS} concurrent streams exceeded"
+            }))
+            return
+
+        # Cancel existing task for this tool if re-subscribing
+        existing_task = self._stream_tasks.get(ws_id, {}).get(tool_name)
+        if existing_task:
+            existing_task.cancel()
+
+        # Store subscription config
+        self._stream_subs.setdefault(ws_id, {})[tool_name] = {
+            "interval": interval, "params": params, "agent_id": agent_id,
+        }
+
+        # Create streaming task
+        task = asyncio.create_task(
+            self._stream_loop(websocket, tool_name, agent_id, interval, params)
+        )
+        self._stream_tasks.setdefault(ws_id, {})[tool_name] = task
+
+        await self._safe_send(websocket, json.dumps({
+            "type": "stream_subscribed", "tool_name": tool_name,
+            "interval_seconds": interval,
+        }))
+        logger.info(f"Stream subscribed: user={user_id} tool={tool_name} interval={interval}s")
+
+    async def _handle_stream_unsubscribe(self, websocket, payload: Dict):
+        """Unsubscribe a UI client from a live-streaming tool."""
+        tool_name = payload.get("tool_name")
+        ws_id = id(websocket)
+
+        task = self._stream_tasks.get(ws_id, {}).pop(tool_name, None)
+        if task:
+            task.cancel()
+        self._stream_subs.get(ws_id, {}).pop(tool_name, None)
+
+        await self._safe_send(websocket, json.dumps({
+            "type": "stream_unsubscribed", "tool_name": tool_name,
+        }))
+        logger.info(f"Stream unsubscribed: tool={tool_name}")
+
+    async def _handle_stream_list(self, websocket):
+        """Return the list of active stream subscriptions for this client."""
+        ws_id = id(websocket)
+        subs = self._stream_subs.get(ws_id, {})
+        items = [
+            {"tool_name": name, "interval_seconds": cfg["interval"], "agent_id": cfg["agent_id"]}
+            for name, cfg in subs.items()
+        ]
+        await self._safe_send(websocket, json.dumps({
+            "type": "stream_list", "subscriptions": items,
+        }))
+
+    async def _stream_loop(self, websocket, tool_name: str, agent_id: str, interval: float, params: Dict):
+        """Core streaming loop — periodically executes a tool and pushes results to the UI client."""
+        user_id = self._get_user_id(websocket)
+        while True:
+            try:
+                # Re-check permission each iteration (user may revoke mid-stream)
+                if not self.tool_permissions.is_tool_allowed(user_id, agent_id, tool_name):
+                    await self._safe_send(websocket, json.dumps({
+                        "type": "stream_error", "tool_name": tool_name,
+                        "error": "Permission revoked"
+                    }))
+                    break
+
+                # Execute tool via existing agent WebSocket channel
+                result = await self._execute_via_websocket(agent_id, tool_name, dict(params), timeout=interval + 5)
+
+                if result and not result.error:
+                    # Tag components with source metadata (same as regular tool flow)
+                    def _tag(comp):
+                        if not isinstance(comp, dict):
+                            return
+                        comp["_source_agent"] = agent_id
+                        comp["_source_tool"] = tool_name
+                        for key in ("content", "children"):
+                            nested = comp.get(key)
+                            if isinstance(nested, list):
+                                for child in nested:
+                                    _tag(child)
+
+                    tagged_components = list(result.ui_components or [])
+                    for comp in tagged_components:
+                        _tag(comp)
+                    await self._safe_send(websocket, json.dumps({
+                        "type": "stream_data",
+                        "tool_name": tool_name,
+                        "agent_id": agent_id,
+                        "timestamp": time.time(),
+                        "components": tagged_components,
+                        "data": result.result or {},
+                    }))
+                elif result and result.error:
+                    logger.warning(f"Stream tool error ({tool_name}): {result.error}")
+                    # Don't break on transient errors; continue loop
+
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Stream loop error for {tool_name}: {e}")
+                await asyncio.sleep(interval)
+
+        # Cleanup on exit
+        ws_id = id(websocket)
+        self._stream_tasks.get(ws_id, {}).pop(tool_name, None)
+        self._stream_subs.get(ws_id, {}).pop(tool_name, None)
+
+    def _cleanup_streams(self, websocket):
+        """Cancel all streaming tasks for a disconnected websocket."""
+        ws_id = id(websocket)
+        for tool_name, task in self._stream_tasks.pop(ws_id, {}).items():
+            task.cancel()
+        self._stream_subs.pop(ws_id, None)
+
+    # =========================================================================
     # UI HELPERS
     # =========================================================================
 
@@ -2585,6 +2863,67 @@ CRITICAL RULES:
 
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _send_or_replace_components(self, websocket, components: List[Dict], chat_id: str, user_id: str):
+        """Send components to canvas, auto-replacing existing ones from the same source tool.
+
+        Components whose (_source_tool, _source_agent) match a saved canvas
+        component are treated as updates — the old component is replaced in the
+        DB and the frontend receives a 'components_replaced' message so it can
+        swap in-place. Unmatched components flow through the normal ui_render
+        path (frontend auto-saves them as new).
+        """
+        if not components:
+            return
+
+        replacement_ids = []
+        replacement_comps = []
+        new_only = []
+
+        if chat_id:
+            existing = self.history.get_saved_components(chat_id, user_id=user_id)
+            # Build lookup: (source_tool, source_agent) -> [component_ids] (most recent first)
+            existing_by_source: Dict[tuple, List[str]] = {}
+            for ec in existing:
+                cd = ec.get("component_data", {})
+                key = (cd.get("_source_tool", ""), cd.get("_source_agent", ""))
+                if key != ("", ""):
+                    existing_by_source.setdefault(key, []).append(ec["id"])
+
+            for comp in components:
+                key = (comp.get("_source_tool", ""), comp.get("_source_agent", ""))
+                matching_ids = existing_by_source.get(key, [])
+                if matching_ids:
+                    old_id = matching_ids.pop(0)
+                    replacement_ids.append(old_id)
+                    replacement_comps.append(comp)
+                else:
+                    new_only.append(comp)
+        else:
+            new_only = list(components)
+
+        # Replace matched components via existing replace_components infra
+        if replacement_ids:
+            new_comp_dicts = [
+                {
+                    "component_data": comp,
+                    "component_type": comp.get("type", "unknown"),
+                    "title": comp.get("title", comp.get("type", "Component")),
+                }
+                for comp in replacement_comps
+            ]
+            replaced = self.history.replace_components(
+                replacement_ids, new_comp_dicts, chat_id, user_id=user_id
+            )
+            await self._safe_send(websocket, json.dumps({
+                "type": "components_replaced",
+                "removed_ids": replacement_ids,
+                "new_components": replaced,
+            }))
+
+        # Send truly new components through normal ui_render flow
+        if new_only:
+            await self.send_ui_render(websocket, new_only)
 
     async def send_ui_render(self, websocket, components: List, target: str = "canvas"):
         """Send a UIRender message to a UI client, adapted via ROTE."""
@@ -2688,11 +3027,21 @@ CRITICAL RULES:
             else:
                 total_tools += len(agent["tools"])
 
+        # Build streamable tools list for live streaming
+        streamable_list = {}
+        if flags.is_enabled("live_streaming"):
+            for tool_name, cfg in self._streamable_tools.items():
+                streamable_list[tool_name] = {
+                    "agent_id": cfg["agent_id"],
+                    "default_interval": cfg["default_interval"],
+                }
+
         await self._safe_send(websocket, json.dumps({
             "type": "system_config",
             "config": {
                 "agents": agent_list,
-                "total_tools": total_tools
+                "total_tools": total_tools,
+                "streamable_tools": streamable_list,
             }
         }))
 
@@ -2775,6 +3124,7 @@ CRITICAL RULES:
                     metadata={"websocket_id": id(websocket)},
                 ))
 
+            self._cleanup_streams(websocket)
             if websocket in self.ui_clients:
                 self.ui_clients.remove(websocket)
             if websocket in self.ui_sessions:
@@ -2795,6 +3145,7 @@ CRITICAL RULES:
         except websockets.exceptions.ConnectionClosed:
             logger.info("UI client disconnected")
         finally:
+            self._cleanup_streams(websocket)
             if websocket in self.ui_clients:
                 self.ui_clients.remove(websocket)
             if websocket in self.ui_sessions:

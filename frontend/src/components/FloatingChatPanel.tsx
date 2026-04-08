@@ -61,6 +61,8 @@ export default function FloatingChatPanel({
 
     const bottomRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const inputRef = useRef<HTMLInputElement>(null);
+    const prevChatIdRef = useRef(activeChatId);
 
     // Voice Input (STT)
     const [isRecording, setIsRecording] = useState(false);
@@ -97,6 +99,21 @@ export default function FloatingChatPanel({
         if (!userLocation) return text;
         return `${text}\n\n[User location: ${userLocation.latitude}, ${userLocation.longitude}]`;
     }, [userLocation]);
+
+    // Auto-focus input when panel opens
+    useEffect(() => {
+        if (isOpen) {
+            setTimeout(() => inputRef.current?.focus(), 100);
+        }
+    }, [isOpen]);
+
+    // Auto-focus input on new chat or chat switch
+    useEffect(() => {
+        if (activeChatId && activeChatId !== prevChatIdRef.current) {
+            setTimeout(() => inputRef.current?.focus(), 100);
+        }
+        prevChatIdRef.current = activeChatId;
+    }, [activeChatId]);
 
     // Filter messages to only show chat-targeted messages (text summaries) and user messages
     const chatMessages = messages.filter(msg => {
@@ -707,6 +724,7 @@ export default function FloatingChatPanel({
                                     accept=".csv,.txt,.json,.md" />
 
                                 <input type="text"
+                                    ref={inputRef}
                                     value={isRecording || isTranscribing ? streamingTranscript || "" : input}
                                     onChange={(e) => { if (!isRecording && !isTranscribing) setInput(e.target.value); }}
                                     placeholder={isRecording ? "Listening..." : isTranscribing ? "Transcribing..." : isConnected ? "Ask anything..." : "Connecting..."}

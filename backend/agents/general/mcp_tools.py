@@ -38,7 +38,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
 from shared.primitives import (
     Text, Card, Table, Container, MetricCard, ProgressBar,
     Alert, Grid, BarChart, LineChart, PieChart, PlotlyChart, List_,
-    FileDownload, create_ui_response, ColorPicker, Button, Divider
+    FileDownload, create_ui_response, ColorPicker, Button, Divider,
+    ThemeApply
 )
 
 
@@ -473,12 +474,21 @@ def modify_data(
 import psutil
 import platform
 
+# If running inside Docker with host procfs/sysfs mounted, point psutil at the host
+_host_proc = os.environ.get("HOST_PROC")
+if _host_proc and os.path.isdir(_host_proc):
+    os.environ["PSUTIL_PROCFS_PATH"] = _host_proc  # psutil >= 6.x
+    psutil.PROCFS_PATH = _host_proc                 # direct override for older psutil
+
+# Root path for disk usage — use host rootfs if mounted, otherwise container root
+_disk_root = "/hostfs" if os.path.isdir("/hostfs") else "/"
+
 
 def get_system_status(session_id: str = "default", **kwargs) -> Dict[str, Any]:
     """Get comprehensive system status information."""
-    cpu_percent = psutil.cpu_percent(interval=0.5)
+    cpu_percent = psutil.cpu_percent(interval=0)
     mem = psutil.virtual_memory()
-    disk = psutil.disk_usage('/')
+    disk = psutil.disk_usage(_disk_root)
 
     def get_variant(percent):
         if percent > 90: return "error"
@@ -539,7 +549,7 @@ def get_cpu_info(session_id: str = "default", **kwargs) -> Dict[str, Any]:
     """Get detailed CPU information."""
     cpu_freq = psutil.cpu_freq()
     cpu_count = psutil.cpu_count()
-    cpu_percent_per_core = psutil.cpu_percent(interval=0.5, percpu=True)
+    cpu_percent_per_core = psutil.cpu_percent(interval=0, percpu=True)
 
     headers = ["Core", "Usage %"]
     rows = [[f"Core {i}", f"{p}%"] for i, p in enumerate(cpu_percent_per_core)]
@@ -895,10 +905,8 @@ THEME_COLOR_LABELS = {
 }
 
 
-def change_theme(preset: str = None, **kwargs) -> Dict[str, Any]:
-    """Show theme customization interface with presets and color pickers."""
-
-    # Build preset buttons
+def _build_theme_customization_card(active_preset: str = None):
+    """Build the interactive theme customization Card component."""
     preset_buttons = []
     for name, colors in THEME_PRESETS.items():
         preset_buttons.append(
@@ -911,8 +919,7 @@ def change_theme(preset: str = None, **kwargs) -> Dict[str, Any]:
             )
         )
 
-    # Build color pickers for each aspect
-    default_colors = THEME_PRESETS.get(preset, THEME_PRESETS["midnight"])
+    default_colors = THEME_PRESETS.get(active_preset, THEME_PRESETS["midnight"])
     color_pickers = []
     for key, label in THEME_COLOR_LABELS.items():
         color_pickers.append(
@@ -924,23 +931,26 @@ def change_theme(preset: str = None, **kwargs) -> Dict[str, Any]:
             )
         )
 
-    components = [
-        Card(
-            title="Theme Customization",
-            id="theme-card",
-            content=[
-                Text(content="Choose a preset theme:", variant="body"),
-                Grid(
-                    columns=5,
-                    children=preset_buttons,
-                    gap=8,
-                ),
-                Divider(),
-                Text(content="Or customize individual colors:", variant="body"),
-                Container(children=color_pickers),
-            ],
-        )
-    ]
+    return Card(
+        title="Theme Customization",
+        id="theme-card",
+        content=[
+            Text(content="Choose a preset theme:", variant="body"),
+            Grid(
+                columns=5,
+                children=preset_buttons,
+                gap=8,
+            ),
+            Divider(),
+            Text(content="Or customize individual colors:", variant="body"),
+            Container(children=color_pickers),
+        ],
+    )
+
+
+def change_theme(preset: str = None, **kwargs) -> Dict[str, Any]:
+    """Show theme customization interface with presets and color pickers."""
+    components = [_build_theme_customization_card(preset)]
 
     return {
         "_ui_components": [c.to_json() for c in components],
@@ -948,6 +958,79 @@ def change_theme(preset: str = None, **kwargs) -> Dict[str, Any]:
             "message": "Theme customization panel rendered. Use the preset buttons or color pickers to change colors.",
             "presets": list(THEME_PRESETS.keys()),
         },
+    }
+
+
+import re
+
+def apply_theme_preset(preset: str, **kwargs) -> Dict[str, Any]:
+    """Apply a predefined theme preset directly."""
+    preset = preset.lower().strip()
+    if preset not in THEME_PRESETS:
+        components = [
+            Alert(
+                title="Invalid Preset",
+                message=f"Unknown theme preset '{preset}'. Available: {', '.join(THEME_PRESETS.keys())}",
+                variant="error"
+            )
+        ]
+        return create_ui_response(components)
+
+    colors = THEME_PRESETS[preset]
+    message = f"Theme changed to {preset.title()}"
+    components = [
+        ThemeApply(
+            preset=preset,
+            message=message,
+            id="theme-apply-preset",
+        ),
+        _build_theme_customization_card(preset),
+    ]
+    return {
+        "_ui_components": [c.to_json() for c in components],
+        "_data": {"applied_preset": preset, "colors": colors, "message": message},
+    }
+
+
+def set_theme_color(color_key: str, hex_value: str, **kwargs) -> Dict[str, Any]:
+    """Change a single theme color."""
+    color_key = color_key.lower().strip()
+    hex_value = hex_value.strip()
+
+    if color_key not in THEME_COLOR_LABELS:
+        components = [
+            Alert(
+                title="Invalid Color Key",
+                message=f"Unknown color key '{color_key}'. Valid keys: {', '.join(THEME_COLOR_LABELS.keys())}",
+                variant="error"
+            )
+        ]
+        return create_ui_response(components)
+
+    if not re.match(r'^#[0-9a-fA-F]{6}$', hex_value):
+        components = [
+            Alert(
+                title="Invalid Color",
+                message=f"'{hex_value}' is not a valid hex color. Use format like '#FF5500'.",
+                variant="error"
+            )
+        ]
+        return create_ui_response(components)
+
+    label = THEME_COLOR_LABELS[color_key]
+    message = f"{label} color changed to {hex_value}"
+    components = [
+        ThemeApply(
+            color_key=color_key,
+            color_value=hex_value,
+            message=message,
+            id="theme-apply-color",
+        ),
+        _build_theme_customization_card(),
+    ]
+    return {
+        "_ui_components": [c.to_json() for c in components],
+        "_data": {"color_key": color_key, "color_value": hex_value, "message": message},
     }
 
 
@@ -999,7 +1082,8 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "input_schema": {
             "type": "object",
             "properties": {}
-        }
+        },
+        "streamable": {"default_interval": 2, "min_interval": 1, "max_interval": 30}
     },
     "get_cpu_info": {
         "function": get_cpu_info,
@@ -1008,7 +1092,8 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "input_schema": {
             "type": "object",
             "properties": {}
-        }
+        },
+        "streamable": {"default_interval": 2, "min_interval": 1, "max_interval": 30}
     },
     "get_memory_info": {
         "function": get_memory_info,
@@ -1017,7 +1102,8 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "input_schema": {
             "type": "object",
             "properties": {}
-        }
+        },
+        "streamable": {"default_interval": 2, "min_interval": 1, "max_interval": 30}
     },
     "get_disk_info": {
         "function": get_disk_info,
@@ -1026,7 +1112,8 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "input_schema": {
             "type": "object",
             "properties": {}
-        }
+        },
+        "streamable": {"default_interval": 5, "min_interval": 2, "max_interval": 60}
     },
     "search_wikipedia": {
         "function": search_wikipedia,
@@ -1088,7 +1175,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     "change_theme": {
         "function": change_theme,
         "scope": "tools:write",
-        "description": "Show theme customization interface. Presents preset themes (Midnight, Daylight, Ocean, Sunset, Forest) and color pickers to customize the UI appearance in real time. Use this when the user asks to change colors, theme, appearance, or look of the site.",
+        "description": "Show an interactive theme customization panel with preset buttons and color pickers. Use 'apply_theme_preset' or 'set_theme_color' instead when the user has already specified what they want.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1097,6 +1184,42 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
                     "description": "Optional preset name to show as default: midnight, daylight, ocean, sunset, forest"
                 }
             }
+        }
+    },
+    "apply_theme_preset": {
+        "function": apply_theme_preset,
+        "scope": "tools:write",
+        "description": "Apply a predefined theme preset immediately. Available presets: midnight (dark indigo/purple), daylight (light mode), ocean (deep blue/cyan), sunset (warm orange/red), forest (green nature). Use this when the user asks to switch to a specific theme.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "preset": {
+                    "type": "string",
+                    "enum": ["midnight", "daylight", "ocean", "sunset", "forest"],
+                    "description": "The theme preset name to apply"
+                }
+            },
+            "required": ["preset"]
+        }
+    },
+    "set_theme_color": {
+        "function": set_theme_color,
+        "scope": "tools:write",
+        "description": "Change a single UI theme color. Valid color keys: bg (background), surface (card/panel backgrounds), primary (primary buttons and interactive elements), secondary (secondary buttons and elements), text (main text color), muted (secondary/muted text), accent (accent highlights). Value must be a hex color like '#FF5500'. Use this when the user asks to change a specific color.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "color_key": {
+                    "type": "string",
+                    "enum": ["bg", "surface", "primary", "secondary", "text", "muted", "accent"],
+                    "description": "Which color to change: bg, surface, primary, secondary, text, muted, or accent"
+                },
+                "hex_value": {
+                    "type": "string",
+                    "description": "Hex color value (e.g. '#6366F1', '#FF5500')"
+                }
+            },
+            "required": ["color_key", "hex_value"]
         }
     },
 }

@@ -60,10 +60,16 @@ services:
       KNOWLEDGE_LLM_BASE_URL: http://ollama:11434/v1
       KNOWLEDGE_LLM_MODEL: ${KNOWLEDGE_LLM_MODEL:-qwen2.5:0.5b}
       KNOWLEDGE_LLM_API_KEY: ollama
+      HOST_PROC: /host/proc
+      HOST_SYS: /host/sys
     volumes:
       - ./backend/data:/app/backend/data
       - ./backend/tmp:/app/backend/tmp
       - ./backend/knowledge:/app/backend/knowledge
+      # Mount host procfs/sysfs/rootfs so psutil reports real host metrics
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/hostfs:ro
     depends_on:
       postgres:
         condition: service_healthy
