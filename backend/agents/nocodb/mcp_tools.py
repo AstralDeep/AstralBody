@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
 from shared.primitives import (
     Text, Card, Table, Container, MetricCard, ProgressBar,
     Alert, Grid, BarChart, LineChart, PieChart, PlotlyChart, List_,
-    Collapsible, Divider, CodeBlock, Image, Tabs,
+    Divider, CodeBlock, Image, Tabs,
     FileDownload, FileUpload, Button, Input, ColorPicker,
     create_ui_response
 )

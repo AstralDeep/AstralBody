@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
 
 from shared.primitives import (
     Text, Card, Table, Alert, MetricCard, Grid, Grids,
-    BarChart, PieChart, LineChart, List_, Collapsible, Tabs, TabItem,
+    BarChart, PieChart, LineChart, List_, Tabs, TabItem,
     create_ui_response,
 )
 from agents.grants.caai_knowledge import (
@@ -555,16 +555,8 @@ def get_grant_details(
                     rows=info_rows,
                     id="detail-table",
                 ),
-                Collapsible(
-                    title="Description",
-                    content=[Text(content=desc_display, variant="body")],
-                    default_open=True,
-                ),
-                Collapsible(
-                    title="Eligibility",
-                    content=[Text(content=eligibility, variant="body")],
-                    default_open=False,
-                ),
+                Text(content=desc_display, variant="body"),
+                Text(content=eligibility, variant="body"),
             ],
         )
     ]
@@ -684,7 +676,7 @@ def match_grants_to_caai(
         detail_items.append(f"View: {_grant_url(opp_id)}")
 
         top_details.append(
-            Collapsible(
+            Card(
                 title=f"#{idx + 1}: {s.get('title', 'Untitled')[:60]} (Score: {m['score']})",
                 content=[
                     List_(items=detail_items, id=f"match-detail-{idx}"),
@@ -693,7 +685,6 @@ def match_grants_to_caai(
                         variant="caption",
                     ),
                 ],
-                default_open=idx == 0,
             )
         )
 

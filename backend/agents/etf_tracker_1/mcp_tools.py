@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
 from shared.primitives import (
     Text, Card, Table, Container, MetricCard, ProgressBar,
     Alert, Grid, BarChart, LineChart, PieChart, PlotlyChart, List_,
-    Collapsible, Divider, CodeBlock, Image, Tabs,
+    Divider, CodeBlock, Image, Tabs,
     FileDownload, FileUpload, Button, Input, ColorPicker,
     create_ui_response
 )
@@ -220,24 +220,14 @@ def create_etf_from_description(description: str, number_of_stocks: int = 10, **
                         variant="default"
                     ),
                     Divider(variant="solid"),
-                    Text(content="Note: This is a simulated ETF proposal for illustrative purposes. Actual ETF creation requires regulatory approval and detailed financial analysis.", variant="caption"),
-                ]
-            )
-        )
-
-        chart_labels = [s["ticker"] for s in simulated_constituents]
-        chart_data = [s["weight"] * 100 for s in simulated_constituents]
-
-        components.append(
-            Card(
-                title="ETF Allocation Visualization",
-                content=[
                     PieChart(
                         title="Portfolio Weight by Holding",
-                        labels=chart_labels,
-                        data=chart_data,
+                        labels=[s["ticker"] for s in simulated_constituents],
+                        data=[s["weight"] * 100 for s in simulated_constituents],
                         colors=["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#84cc16", "#f97316", "#ec4899", "#6366f1"]
-                    )
+                    ),
+                    Divider(variant="solid"),
+                    Text(content="Note: This is a simulated ETF proposal for illustrative purposes. Actual ETF creation requires regulatory approval and detailed financial analysis.", variant="caption"),
                 ]
             )
         )
@@ -373,17 +363,13 @@ def analyze_etf_portfolio(tickers: List[str], weights: Optional[List[float]] = N
                         rows=table_rows,
                         variant="default"
                     ),
-                ]
-            ),
-            Card(
-                title="Sector Allocation",
-                content=[
+                    Divider(variant="solid"),
                     PieChart(
                         title="Portfolio Weight by Sector",
                         labels=sector_chart_labels,
                         data=sector_chart_data,
                         colors=["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#84cc16"]
-                    )
+                    ),
                 ]
             )
         ]

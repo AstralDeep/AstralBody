@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
 
 from shared.primitives import (
     Text, Card, Table, Alert, MetricCard, Grid, Grids,
-    BarChart, PieChart, List_, Collapsible, Tabs, TabItem,
+    BarChart, PieChart, List_, Tabs, TabItem,
     create_ui_response,
 )
 from agents.grant_budgets.budget_knowledge import (
@@ -1275,14 +1275,9 @@ def get_budget_guidelines(
             for cat in CGS_BUDGET_CATEGORIES.values()
         ]
         components.append(
-            Collapsible(
-                title="CGS Budget Categories Reference (A-J)",
-                content=[
-                    Table(
-                        headers=["Code", "Category", "Description"],
-                        rows=cgs_rows,
-                    ),
-                ],
+            Table(
+                headers=["Code", "Category", "Description"],
+                rows=cgs_rows,
             )
         )
 
@@ -1566,10 +1561,7 @@ def find_office_contact(
         does_not = office_data.get("does_not_handle", [])
         if does_not:
             components.append(
-                Collapsible(
-                    title=f"What {primary_office} does NOT handle",
-                    content=[List_(items=does_not)],
-                )
+                List_(items=does_not)
             )
 
     return {
@@ -1949,16 +1941,10 @@ def lookup_forms_templates(
     forms_with_urls = [f for f in filtered if f.get("url")]
     if forms_with_urls:
         components.append(
-            Collapsible(
-                title="Direct Links",
-                content=[
-                    List_(items=[
-                        f"{f['name']} ({f['office']}): {f['url']}"
-                        for f in forms_with_urls
-                    ]),
-                ],
-                default_open=True,
-            )
+            List_(items=[
+                f"{f['name']} ({f['office']}): {f['url']}"
+                for f in forms_with_urls
+            ])
         )
 
     return {
