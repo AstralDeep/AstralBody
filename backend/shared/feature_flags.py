@@ -22,6 +22,7 @@ class FeatureFlags:
             "task_state_machine": self._read("FF_TASK_STATE_MACHINE", False),
             "coordinator_mode": self._read("FF_COORDINATOR_MODE", False),
             "knowledge_synthesis": self._read("FF_KNOWLEDGE_SYNTHESIS", False),
+            "live_streaming": self._read("FF_LIVE_STREAMING", False),
         }
 
     @staticmethod

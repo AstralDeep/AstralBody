@@ -153,6 +153,9 @@ class BaseA2AAgent:
         for name, info in self.mcp_server.tools.items():
             desc = info.get("description", "No description provided")
             tags = list(self.skill_tags) if self.skill_tags else []
+            skill_metadata = {}
+            if "streamable" in info:
+                skill_metadata["streamable"] = info["streamable"]
             skills.append(AgentSkill(
                 name=name,
                 description=desc,
@@ -160,6 +163,7 @@ class BaseA2AAgent:
                 input_schema=info.get("input_schema"),
                 tags=tags,
                 scope=info.get("scope", "tools:read"),
+                metadata=skill_metadata,
             ))
 
         metadata = dict(self.card_metadata) if self.card_metadata else {}

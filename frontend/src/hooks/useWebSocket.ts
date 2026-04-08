@@ -174,9 +174,22 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         setUserId(id);
     }, [token]);
 
-    const setActiveChatId = useCallback((id: string | null) => {
+    const setActiveChatId = useCallback((id: string | null, replace = false) => {
         activeChatIdRef.current = id;
         setActiveChatIdState(id);
+        // Sync chat ID to URL
+        const params = new URLSearchParams(window.location.search);
+        if (id) {
+            params.set("chat", id);
+        } else {
+            params.delete("chat");
+        }
+        const newUrl = params.toString() ? `${window.location.pathname}?${params.toString()}` : window.location.pathname;
+        if (replace) {
+            window.history.replaceState({}, "", newUrl);
+        } else {
+            window.history.pushState({}, "", newUrl);
+        }
     }, []);
 
     const activeChatId = activeChatIdState;
@@ -186,6 +199,16 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
     const [combineError, setCombineError] = useState<string | null>(null);
     const condenseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const [agentPermissions, setAgentPermissions] = useState<AgentPermissionsData | null>(null);
+    // Live streaming state
+    const [streamData, setStreamData] = useState<Record<string, {
+        components: Record<string, unknown>[];
+        data: Record<string, unknown>;
+        timestamp: number;
+    }>>({});
+    const activeSubscriptionsRef = useRef<Map<string, { interval: number; params: Record<string, unknown> }>>(new Map());
+    const chatSubscriptionsMapRef = useRef<Map<string, Map<string, { interval: number; params: Record<string, unknown> }>>>(new Map());
+    const streamableToolsRef = useRef<Record<string, { agent_id: string; default_interval: number }>>({});
+
     const [deviceCapabilities, setDeviceCapabilities] = useState<DeviceCapabilityFlags>({
         hasMicrophone: false,
         hasGeolocation: false,
@@ -198,11 +221,16 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
 
     const handleMessage = useCallback((data: WSMessage) => {
         switch (data.type) {
-            case "system_config":
-                if ((data.config as Record<string, unknown>)?.agents) {
-                    setAgents((data.config as Record<string, unknown>).agents as Agent[]);
+            case "system_config": {
+                const config = data.config as Record<string, unknown>;
+                if (config?.agents) {
+                    setAgents(config.agents as Agent[]);
+                }
+                if (config?.streamable_tools) {
+                    streamableToolsRef.current = config.streamable_tools as Record<string, { agent_id: string; default_interval: number }>;
                 }
                 break;
+            }
 
             case "agent_registered":
                 setAgents(prev => {
@@ -271,6 +299,18 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                                     title: (comp.title as string) || (comp.type as string) || "Component",
                                 }
                             }));
+
+                            // Auto-subscribe to live streaming if this tool is streamable
+                            const sourceTool = comp._source_tool as string | undefined;
+                            if (sourceTool && streamableToolsRef.current[sourceTool] && !activeSubscriptionsRef.current.has(sourceTool)) {
+                                const cfg = streamableToolsRef.current[sourceTool];
+                                activeSubscriptionsRef.current.set(sourceTool, { interval: cfg.default_interval, params: {} });
+                                wsRef.current.send(JSON.stringify({
+                                    type: "ui_event",
+                                    action: "stream_subscribe",
+                                    payload: { tool_name: sourceTool, interval_seconds: cfg.default_interval, params: {} }
+                                }));
+                            }
                         }
                     }
                     // Also add to messages for history, marked as canvas
@@ -295,7 +335,7 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                 break;
 
             case "chat_created":
-                setActiveChatId((data.payload as Record<string, unknown>).chat_id as string);
+                setActiveChatId((data.payload as Record<string, unknown>).chat_id as string, true);
 
                 // Only clear messages and UI if this wasn't created as a side-effect of a message
                 if (!(data.payload as Record<string, unknown>).from_message) {
@@ -343,6 +383,26 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                             payload: { chat_id: (data.chat as Record<string, unknown>).id as string }
                         }));
                     }
+
+                    // Restore saved subscriptions for this chat (if any)
+                    const loadedChatId = (data.chat as Record<string, unknown>).id as string;
+                    const savedSubs = chatSubscriptionsMapRef.current.get(loadedChatId);
+                    if (savedSubs && savedSubs.size > 0) {
+                        setTimeout(() => {
+                            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                                for (const [toolName, config] of savedSubs.entries()) {
+                                    if (!activeSubscriptionsRef.current.has(toolName)) {
+                                        activeSubscriptionsRef.current.set(toolName, config);
+                                        wsRef.current.send(JSON.stringify({
+                                            type: "ui_event",
+                                            action: "stream_subscribe",
+                                            payload: { tool_name: toolName, interval_seconds: config.interval, params: config.params }
+                                        }));
+                                    }
+                                }
+                            }
+                        }, 500); // Delay to let saved_components_list auto-subscribe run first
+                    }
                 }
                 break;
 
@@ -352,6 +412,22 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                     setSavedComponents(data.components as SavedComponent[]);
                     // Also populate canvas with saved components when loading a chat
                     setCanvasComponents(data.components as SavedComponent[]);
+
+                    // Auto-subscribe to streams for any streamable tools on this chat's canvas
+                    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                        for (const sc of data.components as SavedComponent[]) {
+                            const sourceTool = sc.component_data?._source_tool as string | undefined;
+                            if (sourceTool && streamableToolsRef.current[sourceTool] && !activeSubscriptionsRef.current.has(sourceTool)) {
+                                const cfg = streamableToolsRef.current[sourceTool];
+                                activeSubscriptionsRef.current.set(sourceTool, { interval: cfg.default_interval, params: {} });
+                                wsRef.current.send(JSON.stringify({
+                                    type: "ui_event",
+                                    action: "stream_subscribe",
+                                    payload: { tool_name: sourceTool, interval_seconds: cfg.default_interval, params: {} }
+                                }));
+                            }
+                        }
+                    }
                 }
                 break;
 
@@ -421,6 +497,25 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                 break;
             }
 
+            case "components_replaced": {
+                // In-place replacement: swap old components with new ones at the same position
+                const removedArray = (data.removed_ids as string[]) || [];
+                const newComps = (data.new_components as SavedComponent[]) || [];
+                const replaceMap = new Map<string, SavedComponent>();
+                removedArray.forEach((oldId, idx) => {
+                    if (idx < newComps.length) replaceMap.set(oldId, newComps[idx]);
+                });
+                const updateReplaced = (prev: SavedComponent[]) => {
+                    return prev.map(c => {
+                        const replacement = replaceMap.get(c.id);
+                        return replacement ? replacement : c;
+                    });
+                };
+                setSavedComponents(updateReplaced);
+                setCanvasComponents(updateReplaced);
+                break;
+            }
+
             case "combine_error":
                 if (condenseTimeoutRef.current) { clearTimeout(condenseTimeoutRef.current); condenseTimeoutRef.current = null; }
                 setIsCombining(false);
@@ -485,6 +580,54 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                 // This prevents WebSocket timeout during long operations.
                 break;
 
+            // --- Live Streaming ---
+            case "stream_data": {
+                const toolName = data.tool_name as string;
+                const streamComponents = (data.components as Record<string, unknown>[]) || [];
+                setStreamData(prev => ({
+                    ...prev,
+                    [toolName]: {
+                        components: streamComponents,
+                        data: (data.data as Record<string, unknown>) || {},
+                        timestamp: data.timestamp as number,
+                    }
+                }));
+
+                // Live-update matching canvas components in-place (no DB save)
+                if (streamComponents.length > 0) {
+                    setCanvasComponents(prev => prev.map(sc => {
+                        if ((sc.component_data?._source_tool as string) === toolName) {
+                            return { ...sc, component_data: streamComponents[0] };
+                        }
+                        return sc;
+                    }));
+                }
+                break;
+            }
+
+            case "stream_subscribed":
+                break;
+
+            case "stream_unsubscribed": {
+                const unsubTool = data.tool_name as string;
+                setStreamData(prev => {
+                    const next = { ...prev };
+                    delete next[unsubTool];
+                    return next;
+                });
+                break;
+            }
+
+            case "stream_error":
+                console.error(`Stream error for ${data.tool_name}:`, data.error);
+                toast.error(`Stream error: ${data.error}`);
+                // Remove from active subscriptions so we don't re-subscribe on reconnect
+                activeSubscriptionsRef.current.delete(data.tool_name as string);
+                break;
+
+            case "stream_list":
+                break;
+
             default:
             // console.log("Unknown message type:", data.type, data);
         }
@@ -503,6 +646,9 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
 
             ws.onopen = () => {
                 const currentChatId = activeChatIdRef.current;
+                // On first connect, check URL for a chat ID to restore
+                const urlChatId = new URLSearchParams(window.location.search).get("chat");
+                const chatToLoad = currentChatId || urlChatId;
                 setIsConnected(true);
                 setConnectionState("connected");
 
@@ -527,22 +673,34 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                     payload: {}
                 }));
 
-                // If we have an active chat ID, reload it after reconnection
-                if (currentChatId) {
-                    // console.log('Reloading active chat after reconnection:', currentChatId);
+                // If we have an active chat ID (from state or URL), load it
+                if (chatToLoad) {
                     setTimeout(() => {
-                        // console.log('Attempting to reload chat - WebSocket readyState:', ws.readyState, 'activeChatId still:', currentChatId);
                         if (ws.readyState === WebSocket.OPEN) {
                             ws.send(JSON.stringify({
                                 type: "ui_event",
                                 action: "load_chat",
-                                payload: { chat_id: currentChatId }
+                                payload: { chat_id: chatToLoad }
                             }));
-                            // console.log('Chat reload request sent for:', currentChatId);
                         } else {
                             console.error('WebSocket not OPEN when trying to reload chat. State:', ws.readyState);
                         }
                     }, 500); // Small delay to ensure registration is processed
+                }
+
+                // Re-subscribe to active streams after reconnection
+                if (isReconnect && activeSubscriptionsRef.current.size > 0) {
+                    setTimeout(() => {
+                        if (ws.readyState === WebSocket.OPEN) {
+                            for (const [toolName, config] of activeSubscriptionsRef.current.entries()) {
+                                ws.send(JSON.stringify({
+                                    type: "ui_event",
+                                    action: "stream_subscribe",
+                                    payload: { tool_name: toolName, interval_seconds: config.interval, params: config.params }
+                                }));
+                            }
+                        }
+                    }, 1000); // After registration + chat reload
                 }
             };
 
@@ -612,8 +770,6 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         }
     }, [connect]);
 
-
-
     const sendMessage = useCallback((message: string, displayMessage?: string, explicitChatId?: string) => {
         if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
 
@@ -646,6 +802,21 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
 
     const loadChat = useCallback((chatId: string) => {
         if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+        // Save current chat's active subscriptions before switching
+        const currentChatId = activeChatIdRef.current;
+        if (currentChatId && activeSubscriptionsRef.current.size > 0) {
+            chatSubscriptionsMapRef.current.set(currentChatId, new Map(activeSubscriptionsRef.current));
+        }
+        // Unsubscribe all active streams when switching chats
+        for (const toolName of activeSubscriptionsRef.current.keys()) {
+            wsRef.current.send(JSON.stringify({
+                type: "ui_event",
+                action: "stream_unsubscribe",
+                payload: { tool_name: toolName }
+            }));
+        }
+        activeSubscriptionsRef.current.clear();
+        setStreamData({});
         wsRef.current.send(JSON.stringify({
             type: "ui_event",
             action: "load_chat",
@@ -655,6 +826,21 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
 
     const createNewChat = useCallback(() => {
         if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+        // Save current chat's active subscriptions before creating new chat
+        const currentChatId = activeChatIdRef.current;
+        if (currentChatId && activeSubscriptionsRef.current.size > 0) {
+            chatSubscriptionsMapRef.current.set(currentChatId, new Map(activeSubscriptionsRef.current));
+        }
+        // Unsubscribe all active streams when creating new chat
+        for (const toolName of activeSubscriptionsRef.current.keys()) {
+            wsRef.current.send(JSON.stringify({
+                type: "ui_event",
+                action: "stream_unsubscribe",
+                payload: { tool_name: toolName }
+            }));
+        }
+        activeSubscriptionsRef.current.clear();
+        setStreamData({});
         wsRef.current.send(JSON.stringify({
             type: "ui_event",
             action: "new_chat",
@@ -662,7 +848,23 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         }));
     }, []);
 
+    // Handle browser back/forward navigation
+    useEffect(() => {
+        const handlePopState = () => {
+            const urlChatId = new URLSearchParams(window.location.search).get("chat");
+            if (urlChatId && urlChatId !== activeChatIdRef.current) {
+                loadChat(urlChatId);
+            } else if (!urlChatId && activeChatIdRef.current) {
+                createNewChat();
+            }
+        };
+        window.addEventListener("popstate", handlePopState);
+        return () => window.removeEventListener("popstate", handlePopState);
+    }, [loadChat, createNewChat]);
+
     const deleteChat = useCallback(async (chatId: string) => {
+        // Clean up saved subscriptions for deleted chat
+        chatSubscriptionsMapRef.current.delete(chatId);
         try {
             const currentToken = tokenRef.current;
             const headers: Record<string, string> = {};
@@ -1081,6 +1283,27 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         }
     }, []);
 
+    // --- Live Streaming ---
+    const subscribeStream = useCallback((toolName: string, intervalSeconds: number = 2, params: Record<string, unknown> = {}) => {
+        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+        activeSubscriptionsRef.current.set(toolName, { interval: intervalSeconds, params });
+        wsRef.current.send(JSON.stringify({
+            type: "ui_event",
+            action: "stream_subscribe",
+            payload: { tool_name: toolName, interval_seconds: intervalSeconds, params }
+        }));
+    }, []);
+
+    const unsubscribeStream = useCallback((toolName: string) => {
+        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+        activeSubscriptionsRef.current.delete(toolName);
+        wsRef.current.send(JSON.stringify({
+            type: "ui_event",
+            action: "stream_unsubscribe",
+            payload: { tool_name: toolName }
+        }));
+    }, []);
+
     return {
         isConnected,
         connectionState,
@@ -1117,5 +1340,8 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         setAgentVisibility,
         sendTablePaginate,
         deviceCapabilities,
+        streamData,
+        subscribeStream,
+        unsubscribeStream,
     };
 }

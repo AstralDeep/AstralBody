@@ -93,6 +93,7 @@ class AgentSkill:
     output_schema: Optional[Dict[str, Any]] = None
     tags: List[str] = field(default_factory=list)
     scope: str = ""  # Required scope: "tools:read", "tools:write", "tools:search", "tools:system"
+    metadata: Dict[str, Any] = field(default_factory=dict)  # Optional metadata (e.g. streamable config)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
