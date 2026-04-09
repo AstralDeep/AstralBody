@@ -328,4 +328,54 @@ describe("SDUI Component Rendering via DynamicRenderer", () => {
         );
         expect(screen.getByText("More Details")).toBeTruthy();
     });
+
+    // ── FR-017: Inline markdown inside string props ───────────────
+    it("FR-017: renders **bold** inside a Card title as <strong>", () => {
+        const { container } = render(
+            <DynamicRenderer
+                components={[{
+                    type: "card",
+                    title: "System **Status** Report",
+                    content: [],
+                }]}
+            />
+        );
+        const strong = container.querySelector("h3 strong");
+        expect(strong).toBeTruthy();
+        expect(strong?.textContent).toBe("Status");
+    });
+
+    it("FR-017: renders `code` and *italic* inside a Progress label", () => {
+        const { container } = render(
+            <DynamicRenderer
+                components={[{
+                    type: "progress",
+                    value: 0.5,
+                    label: "Saving `config.json` *now*",
+                }]}
+            />
+        );
+        expect(container.querySelector("code")?.textContent).toBe("config.json");
+        expect(container.querySelector("em")?.textContent).toBe("now");
+    });
+
+    it("FR-017: does NOT introduce a <div> inside a <p> for inline markdown", () => {
+        // Regression: react-markdown wraps in a <div>; using it for inline contexts
+        // (Metric.title is rendered inside a <p>) caused invalid HTML and hydration
+        // warnings. The custom inline parser must not produce any block element.
+        const { container } = render(
+            <DynamicRenderer
+                components={[{
+                    type: "metric",
+                    title: "**CPU** Usage",
+                    value: "42%",
+                    subtitle: "all *cores*",
+                }]}
+            />
+        );
+        const ps = container.querySelectorAll("p");
+        ps.forEach((p) => {
+            expect(p.querySelector("div")).toBeNull();
+        });
+    });
 });
