@@ -10,6 +10,7 @@ Provides:
 - Agent-to-agent peer communication via WebSocket
 """
 import asyncio
+import inspect
 import json
 import os
 import sys
@@ -25,7 +26,14 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from shared.protocol import (
     Message, RegisterAgent, MCPRequest, MCPResponse,
-    AgentCard, AgentSkill
+    AgentCard, AgentSkill,
+    ToolStreamData, ToolStreamEnd, ToolStreamCancel,
+)
+from shared.feature_flags import flags
+from shared.stream_sdk import (
+    StreamComponents, StreamCtx, StreamPayloadError,
+    is_streaming_tool, get_stream_metadata,
+    assign_stream_id_to_components, validate_chunk_size,
 )
 from shared.a2a_bridge import custom_card_to_a2a
 from shared.a2a_executor import MCPAgentExecutor
@@ -117,6 +125,12 @@ class BaseA2AAgent:
         # Security validator for A2A requests
         self._security_validator = A2ASecurityValidator()
 
+        # 001-tool-stream-ui: in-flight streaming tasks keyed by stream_id so
+        # an inbound ToolStreamCancel can find and cancel the right generator.
+        # Each entry is (asyncio.Task, Optional[StreamCtx]) — ctx is non-None
+        # only for callback-style tools that take a StreamCtx parameter.
+        self._active_streams: Dict[str, "tuple[asyncio.Task, Optional[StreamCtx]]"] = {}
+
         self._logger = logging.getLogger(self.__class__.__name__)
 
     def _init_crypto(self):
@@ -154,8 +168,18 @@ class BaseA2AAgent:
             desc = info.get("description", "No description provided")
             tags = list(self.skill_tags) if self.skill_tags else []
             skill_metadata = {}
+            # Legacy single-key form: top-level "streamable" with a poll
+            # config dict.
             if "streamable" in info:
                 skill_metadata["streamable"] = info["streamable"]
+            # 001-tool-stream-ui: tools may declare a full metadata dict
+            # under the "metadata" key (containing streamable, streaming_kind,
+            # max_fps, min_fps, max_chunk_bytes). Merge it into the skill
+            # metadata. The orchestrator's validate_streaming_metadata
+            # enforces the shape at register_agent time.
+            tool_metadata = info.get("metadata")
+            if isinstance(tool_metadata, dict):
+                skill_metadata.update(tool_metadata)
             skills.append(AgentSkill(
                 name=name,
                 description=desc,
@@ -200,6 +224,11 @@ class BaseA2AAgent:
                     parsed = Message.from_json(message)
                     if isinstance(parsed, MCPRequest):
                         await self.handle_mcp_request(websocket, parsed)
+                    elif isinstance(parsed, ToolStreamCancel):
+                        # 001-tool-stream-ui: orchestrator wants us to stop a
+                        # streaming generator. Cancel the task; the generator's
+                        # `finally` block runs to free upstream subscriptions.
+                        await self._handle_stream_cancel(parsed)
                     elif parsed.type == "peer_registry":
                         # Orchestrator broadcasting peer agent URLs
                         data = json.loads(message)
@@ -218,12 +247,273 @@ class BaseA2AAgent:
 
         If the orchestrator sent E2E-encrypted credentials, decrypt them
         transparently before tool dispatch so individual tools see plaintext.
+
+        001-tool-stream-ui: If ``params._stream`` is True AND the named tool
+        is a streaming tool (decorated with ``@streaming_tool``) AND the
+        ``tool_streaming`` feature flag is enabled, dispatch to the streaming
+        path instead of the single-response path. The streaming path emits
+        ``ToolStreamData`` chunks until the generator returns or is
+        cancelled, then sends ``ToolStreamEnd``.
         """
         self._logger.info(f"Processing MCP Request: {msg.method}")
         self._decrypt_credentials_if_needed(msg)
+
+        # --- Streaming dispatch (001-tool-stream-ui) ---
+        if (
+            flags.is_enabled("tool_streaming")
+            and msg.method == "tools/call"
+            and msg.params.get("_stream") is True
+        ):
+            tool_name = msg.params.get("name", "")
+            tool_info = self.mcp_server.tools.get(tool_name) if hasattr(self.mcp_server, "tools") else None
+            tool_fn = tool_info.get("function") if tool_info else None
+            if tool_fn is not None and is_streaming_tool(tool_fn):
+                await self._handle_streaming_request(ws, msg, tool_fn)
+                return
+            # Fallthrough: tool exists but isn't a streaming tool — run as
+            # one-shot. The orchestrator should not have set _stream=True
+            # for a non-streaming tool, but defense-in-depth helps debugging.
+
+        # --- Existing single-response path (unchanged) ---
         response = await asyncio.to_thread(self.mcp_server.process_request, msg)
         await ws.send_text(response.to_json())
         self._logger.info(f"Sent response for {msg.request_id}")
+
+    # =========================================================================
+    # Streaming dispatch (001-tool-stream-ui)
+    # =========================================================================
+
+    async def _handle_streaming_request(
+        self,
+        ws: WebSocket,
+        msg: MCPRequest,
+        tool_fn: Any,
+    ) -> None:
+        """Drive a streaming tool to completion (or cancellation), emitting
+        ``ToolStreamData`` chunks per yield/emit and a final ``ToolStreamEnd``
+        on natural completion.
+
+        Two paths depending on the tool form:
+
+        - **Async generator** (``inspect.isasyncgenfunction(tool_fn)``): the
+          wrapper iterates ``async for chunk in tool_fn(args, credentials):``
+          and emits each chunk.
+        - **StreamCtx form** (``async def`` taking a ``ctx: StreamCtx``): the
+          wrapper constructs a ``StreamCtx``, schedules the tool function as
+          a task, and drains the ctx queue concurrently.
+
+        Errors raised by the tool become a final ``ToolStreamData`` chunk
+        with ``error.code="tool_error"``, ``error.phase="failed"``,
+        ``terminal: true``. The orchestrator's ``_classify_error`` then
+        decides whether to auto-retry the stream (FR-021a).
+        """
+        request_id = msg.request_id
+        stream_id = msg.params.get("_stream_id") or f"stream-{uuid.uuid4().hex[:12]}"
+        tool_name = msg.params.get("name", "")
+        agent_id = self.agent_id
+        arguments = dict(msg.params.get("arguments", {}))
+        credentials = arguments.pop("_credentials", {}) if "_credentials" in arguments else {}
+        meta = get_stream_metadata(tool_fn) or {}
+        max_chunk_bytes = (
+            meta.get("metadata", {}).get("max_chunk_bytes", 65536)
+        )
+        uses_ctx = bool(meta.get("uses_ctx"))
+
+        seq = 0
+
+        async def _emit(chunk: StreamComponents) -> None:
+            """Validate, assign id, send one ToolStreamData."""
+            nonlocal seq
+            try:
+                validate_chunk_size(chunk, max_chunk_bytes)
+            except StreamPayloadError as e:
+                await _emit_error("chunk_too_large", str(e), terminal=True)
+                raise
+            seq += 1
+            components_with_id = assign_stream_id_to_components(
+                chunk.components, stream_id
+            )
+            data_msg = ToolStreamData(
+                request_id=request_id,
+                stream_id=stream_id,
+                agent_id=agent_id,
+                tool_name=tool_name,
+                seq=seq,
+                components=components_with_id,
+                raw=chunk.raw,
+                terminal=bool(chunk.terminal),
+                error=chunk.error,
+            )
+            await ws.send_text(data_msg.to_json())
+
+        async def _emit_error(code: str, message: str, terminal: bool = True) -> None:
+            """Send a single error chunk and (optionally) an end marker."""
+            nonlocal seq
+            seq += 1
+            err_msg = ToolStreamData(
+                request_id=request_id,
+                stream_id=stream_id,
+                agent_id=agent_id,
+                tool_name=tool_name,
+                seq=seq,
+                components=[],
+                raw=None,
+                terminal=terminal,
+                error={
+                    "code": code,
+                    "message": message,
+                    "phase": "failed",
+                    "retryable": False,
+                },
+            )
+            await ws.send_text(err_msg.to_json())
+
+        ctx: Optional[StreamCtx] = None
+
+        async def _runner() -> None:
+            """The actual stream-driving coroutine."""
+            try:
+                if inspect.isasyncgenfunction(tool_fn):
+                    # Async generator form
+                    agen = tool_fn(arguments, credentials)
+                    try:
+                        async for payload in agen:
+                            if not isinstance(payload, StreamComponents):
+                                raise StreamPayloadError(
+                                    f"streaming tool {tool_name!r} yielded "
+                                    f"a {type(payload).__name__}, expected "
+                                    f"StreamComponents"
+                                )
+                            await _emit(payload)
+                            if payload.terminal:
+                                return
+                    finally:
+                        # Closing the generator runs the tool's `finally`
+                        # block (e.g. closing upstream subscriptions).
+                        try:
+                            await agen.aclose()
+                        except Exception:  # pragma: no cover
+                            pass
+                elif uses_ctx:
+                    # StreamCtx form: ctx is constructed in the outer scope
+                    # so the cancel handler can call ctx._cancel()
+                    nonlocal ctx
+                    ctx = StreamCtx(stream_id=stream_id)
+                    self._active_streams[stream_id] = (
+                        asyncio.current_task(), ctx
+                    )
+                    # Run the tool function as a child task
+                    tool_task = asyncio.create_task(
+                        tool_fn(arguments, credentials, ctx)
+                    )
+                    try:
+                        # Drain the queue until the tool completes or
+                        # cancellation arrives.
+                        while not tool_task.done():
+                            drain = asyncio.create_task(ctx._drain())
+                            done, _ = await asyncio.wait(
+                                {drain, tool_task},
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            if drain in done:
+                                payload = drain.result()
+                                if payload is None:
+                                    break  # cancelled
+                                await _emit(payload)
+                            else:
+                                drain.cancel()
+                                try:
+                                    await drain
+                                except (asyncio.CancelledError, Exception):
+                                    pass
+                    finally:
+                        if not tool_task.done():
+                            tool_task.cancel()
+                            try:
+                                await tool_task
+                            except (asyncio.CancelledError, Exception):
+                                pass
+                else:
+                    # Marker says streaming but signature is neither — bug.
+                    raise StreamPayloadError(
+                        f"streaming tool {tool_name!r} is neither an async "
+                        f"generator nor a StreamCtx-style coroutine"
+                    )
+
+                # Natural completion → ToolStreamEnd
+                end_msg = ToolStreamEnd(
+                    request_id=request_id,
+                    stream_id=stream_id,
+                )
+                await ws.send_text(end_msg.to_json())
+                self._logger.info(
+                    f"Stream {stream_id} ({tool_name}) completed naturally "
+                    f"after {seq} chunks"
+                )
+
+            except asyncio.CancelledError:
+                # ToolStreamCancel arrived; let the agen.aclose finally run
+                # via re-raise. Send a terminal cancellation chunk so the
+                # orchestrator knows we're done.
+                self._logger.info(
+                    f"Stream {stream_id} ({tool_name}) cancelled at seq={seq}"
+                )
+                try:
+                    await _emit_error("cancelled", "stream cancelled", terminal=True)
+                except Exception:
+                    pass
+                raise
+            except StreamPayloadError as e:
+                self._logger.warning(
+                    f"Stream {stream_id} ({tool_name}) payload error: {e}"
+                )
+                # _emit_error already sent if it was a chunk_too_large; for
+                # other payload errors send tool_error.
+                if "chunk_too_large" not in str(e):
+                    try:
+                        await _emit_error("tool_error", str(e), terminal=True)
+                    except Exception:
+                        pass
+            except Exception as e:
+                self._logger.error(
+                    f"Stream {stream_id} ({tool_name}) raised "
+                    f"{type(e).__name__}: {e}"
+                )
+                try:
+                    await _emit_error("tool_error", str(e), terminal=True)
+                except Exception:
+                    pass
+
+        # Register the task BEFORE starting it so a fast cancellation
+        # can find it. The StreamCtx case re-registers with ctx populated.
+        runner_task = asyncio.create_task(_runner())
+        self._active_streams[stream_id] = (runner_task, None)
+        try:
+            await runner_task
+        finally:
+            self._active_streams.pop(stream_id, None)
+
+    async def _handle_stream_cancel(self, msg: ToolStreamCancel) -> None:
+        """Handle an inbound ToolStreamCancel from the orchestrator.
+
+        Looks up the in-flight task by ``stream_id``, signals the StreamCtx
+        if present (for graceful queue drain wakeup), then cancels the task.
+        The task's `finally` block runs to free upstream subscriptions.
+        Returns immediately; cleanup is asynchronous but bounded by the 1 s
+        budget in contracts/protocol-messages.md §B3.
+        """
+        entry = self._active_streams.get(msg.stream_id)
+        if entry is None:
+            self._logger.debug(
+                f"ToolStreamCancel for unknown stream_id {msg.stream_id}"
+            )
+            return
+        task, ctx = entry
+        if ctx is not None:
+            ctx._cancel()
+        if not task.done():
+            task.cancel()
+        self._logger.info(f"ToolStreamCancel processed for {msg.stream_id}")
 
     def _decrypt_credentials_if_needed(self, msg: MCPRequest):
         """Decrypt E2E-encrypted credentials in-place before tool dispatch."""
