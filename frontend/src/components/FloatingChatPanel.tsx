@@ -20,6 +20,7 @@ import {
 import { toast } from "sonner";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { normalizeLlmMarkdown } from "../utils/normalizeLlmMarkdown";
 import { BFF_URL } from "../config";
 import type { ChatStatus, DeviceCapabilityFlags } from "../hooks/useWebSocket";
 
@@ -627,7 +628,7 @@ export default function FloatingChatPanel({
                             )}
                             <div className={msg.role === "user"
                                 ? "max-w-[80%] bg-astral-primary/20 border border-astral-primary/30 rounded-xl rounded-tr-sm px-3 py-2"
-                                : "flex-1 max-w-[calc(100%-2rem)] min-w-0"
+                                : "flex-1 max-w-[calc(100%-2rem)] min-w-0 bg-white/5 border border-white/10 rounded-xl rounded-tl-sm px-3 py-2"
                             }>
                                 {msg.role === "user" ? (
                                     <div className="space-y-1">
@@ -636,7 +637,7 @@ export default function FloatingChatPanel({
                                 ) : (
                                     <div className="text-xs text-astral-text prose prose-invert prose-xs max-w-none [&_p]:text-xs [&_li]:text-xs [&_h1]:text-sm [&_h2]:text-xs [&_h3]:text-xs">
                                         <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                            {extractTextFromComponents(msg.content)}
+                                            {normalizeLlmMarkdown(extractTextFromComponents(msg.content))}
                                         </ReactMarkdown>
                                     </div>
                                 )}

@@ -24,6 +24,7 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
+import { normalizeLlmMarkdown } from "../utils/normalizeLlmMarkdown";
 import { useSmartAuth } from "../hooks/useSmartAuth";
 import { toast } from "sonner";
 import { useTheme, type ThemeColors } from "../contexts/ThemeContext";
@@ -309,6 +310,111 @@ function RenderContainer({ children, content, onSaveComponent, onSendMessage, on
     );
 }
 
+// ── Markdown helpers ───────────────────────────────────────────────
+// Used by other Render* components whose string props (titles, labels,
+// alert messages, list items) frequently contain markdown from the LLM.
+//
+// `InlineMd` uses a custom inline-only parser instead of `react-markdown` so
+// it does NOT introduce a wrapping <div> — important because it gets used
+// inside <h3>, <p>, and <span> contexts where a block element would be
+// invalid HTML and trigger hydration errors.
+//
+// `BlockMd` is for places that allow block-level content (alert messages,
+// list descriptions) and uses the full `react-markdown` pipeline.
+
+// Matches inline markdown tokens. Order matters: `code` first so it wins
+// inside its own delimiters, then links, then `**bold**` (before `*italic*`),
+// then `~~strike~~`, then italics.
+const INLINE_MD_RE = new RegExp(
+    [
+        "(`[^`\\n]+`)",                              // 1: `code`
+        "(\\[[^\\]\\n]+\\]\\([^)\\n]+\\))",          // 2: [text](url)
+        "(\\*\\*[^*\\n]+\\*\\*)",                    // 3: **bold**
+        "(__[^_\\n]+__)",                            // 4: __bold__
+        "(~~[^~\\n]+~~)",                            // 5: ~~strike~~
+        "(\\*[^*\\n]+\\*)",                          // 6: *italic*
+        "(_[^_\\n]+_)",                              // 7: _italic_
+    ].join("|"),
+    "g",
+);
+
+function parseInlineMarkdown(text: string): React.ReactNode[] {
+    const out: React.ReactNode[] = [];
+    let lastIndex = 0;
+    let key = 0;
+    INLINE_MD_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = INLINE_MD_RE.exec(text)) !== null) {
+        if (m.index > lastIndex) {
+            out.push(text.slice(lastIndex, m.index));
+        }
+        const token = m[0];
+        if (m[1]) {
+            // `code`
+            out.push(
+                <code key={key++} className="text-astral-accent bg-white/5 px-1 rounded">
+                    {token.slice(1, -1)}
+                </code>,
+            );
+        } else if (m[2]) {
+            // [text](url)
+            const linkMatch = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+            if (linkMatch) {
+                out.push(
+                    <a
+                        key={key++}
+                        href={linkMatch[2]}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-astral-primary hover:underline"
+                    >
+                        {linkMatch[1]}
+                    </a>,
+                );
+            } else {
+                out.push(token);
+            }
+        } else if (m[3]) {
+            out.push(<strong key={key++} className="font-semibold text-astral-text">{token.slice(2, -2)}</strong>);
+        } else if (m[4]) {
+            out.push(<strong key={key++} className="font-semibold text-astral-text">{token.slice(2, -2)}</strong>);
+        } else if (m[5]) {
+            out.push(<del key={key++}>{token.slice(2, -2)}</del>);
+        } else if (m[6]) {
+            out.push(<em key={key++}>{token.slice(1, -1)}</em>);
+        } else if (m[7]) {
+            out.push(<em key={key++}>{token.slice(1, -1)}</em>);
+        }
+        lastIndex = INLINE_MD_RE.lastIndex;
+    }
+    if (lastIndex < text.length) {
+        out.push(text.slice(lastIndex));
+    }
+    return out;
+}
+
+function InlineMd({ text }: { text: unknown }) {
+    if (typeof text !== "string" || text.length === 0) return text as React.ReactNode;
+    // Run through normalizer for consistency (mainly LaTeX delimiter translation;
+    // bullet/JSON passes are no-ops on short inline strings).
+    const normalized = normalizeLlmMarkdown(text);
+    return <>{parseInlineMarkdown(normalized)}</>;
+}
+
+function BlockMd({ text, className = "" }: { text: unknown; className?: string }) {
+    if (typeof text !== "string" || text.length === 0) return text as React.ReactNode;
+    return (
+        <div className={`prose prose-invert prose-sm max-w-none text-astral-text prose-headings:text-astral-text prose-a:text-astral-primary prose-strong:text-astral-text prose-code:text-astral-accent prose-code:bg-white/5 prose-code:px-1 prose-code:rounded prose-pre:bg-black/40 prose-pre:border prose-pre:border-white/5 ${className}`}>
+            <ReactMarkdown
+                remarkPlugins={[remarkGfm, remarkMath]}
+                rehypePlugins={[rehypeKatex]}
+            >
+                {normalizeLlmMarkdown(text)}
+            </ReactMarkdown>
+        </div>
+    );
+}
+
 // ── Text ───────────────────────────────────────────────────────────
 function RenderText({ content, variant = "body" }: AnyProps) {
     const classes: Record<string, string> = {
@@ -321,14 +427,10 @@ function RenderText({ content, variant = "body" }: AnyProps) {
     };
 
     if (variant === "markdown") {
-        // Pre-process content correctly for remark-math by replacing \[ \] and \( \)
-        // with $$ and $ which remark-math natively understands.
+        // Normalize LLM quirks (Gemma's indented pseudo-lists, leaked UI-component
+        // JSON, LaTeX delimiters) before handing the string to ReactMarkdown.
         const processedContent = typeof content === "string"
-            ? content
-                .replace(/\\\[/g, "$$")
-                .replace(/\\\]/g, "$$")
-                .replace(/\\\(/g, "$")
-                .replace(/\\\)/g, "$")
+            ? normalizeLlmMarkdown(content)
             : content;
         return (
             <div className={`${classes.markdown}`}>
@@ -362,7 +464,7 @@ function RenderCard({ title, children, content, onSaveComponent, onSendMessage, 
                 <div className="mb-3">
                     <h3 className="text-base font-semibold text-astral-text flex items-center gap-2">
                         <span className="w-1 h-4 rounded-full bg-astral-primary inline-block" />
-                        {title}
+                        <InlineMd text={title} />
                     </h3>
                 </div>
             )}
@@ -426,7 +528,7 @@ function RenderTable({ headers, rows, title: compTitle, label,
     return (
         <div className="rounded-lg border border-white/5">
             <div className="p-3 border-b border-white/5 bg-astral-primary/5 flex items-center justify-between">
-                <div className="text-sm font-medium text-astral-text">{title}</div>
+                <div className="text-sm font-medium text-astral-text"><InlineMd text={title} /></div>
                 {hasPagination && (
                     <div className="text-xs text-astral-muted">
                         {showingFrom}–{showingTo} of {total_rows}
@@ -521,10 +623,10 @@ function RenderMetric({ title, value, subtitle, progress, variant = "default" }:
             animate={{ opacity: 1, scale: 1 }}
             className={`rounded-xl p-4 bg-gradient-to-br ${bg} border border-white/5 relative`}
         >
-            <p className="text-xs text-astral-muted font-medium uppercase tracking-wider mb-1">{title}</p>
+            <p className="text-xs text-astral-muted font-medium uppercase tracking-wider mb-1"><InlineMd text={title} /></p>
             <div className="flex-1">
                 <p className="text-2xl font-bold text-astral-text">{value}</p>
-                {subtitle && <p className="text-xs text-astral-muted mt-1">{subtitle}</p>}
+                {subtitle && <p className="text-xs text-astral-muted mt-1"><InlineMd text={subtitle} /></p>}
             </div>
             {progress != null && (
                 <div className="mt-3 h-1.5 bg-white/10 rounded-full overflow-hidden">
@@ -553,8 +655,8 @@ function RenderAlert({ message, title, variant = "info" }: AnyProps) {
             <span className={c.text}>{c.icon}</span>
             <div className="flex-1">
                 <div>
-                    {title && <p className={`font-medium text-sm ${c.text}`}>{title}</p>}
-                    <p className="text-sm text-astral-text/80">{message}</p>
+                    {title && <p className={`font-medium text-sm ${c.text}`}><InlineMd text={title} /></p>}
+                    <div className="text-sm text-astral-text/80"><BlockMd text={message} /></div>
                 </div>
             </div>
         </div>
@@ -567,7 +669,7 @@ function RenderProgress({ value, label, show_percentage }: AnyProps) {
         <div>
             {label && (
                 <div className="flex justify-between text-xs text-astral-muted w-full mb-1">
-                    <span>{label}</span>
+                    <span><InlineMd text={label} /></span>
                     {show_percentage !== false && <span>{Math.round(value * 100)}%</span>}
                 </div>
             )}
@@ -620,18 +722,18 @@ function RenderList({ items, ordered, variant = "default" }: AnyProps) {
                                 <h4 className="text-sm font-semibold text-astral-text flex items-center justify-between">
                                     {item.url ? (
                                         <a href={item.url} target="_blank" rel="noopener noreferrer" className="hover:text-astral-primary hover:underline flex items-center gap-2">
-                                            {item.title}
+                                            <InlineMd text={item.title} />
                                             <ExternalLink size={12} className="opacity-50" />
                                         </a>
                                     ) : (
-                                        item.title
+                                        <InlineMd text={item.title} />
                                     )}
                                 </h4>
                                 {item.subtitle && (
-                                    <p className="text-xs text-astral-muted">{item.subtitle}</p>
+                                    <p className="text-xs text-astral-muted"><InlineMd text={item.subtitle} /></p>
                                 )}
                                 {item.description && (
-                                    <p className="text-sm text-astral-text/80 line-clamp-2">{item.description}</p>
+                                    <div className="text-sm text-astral-text/80 line-clamp-2"><BlockMd text={item.description} /></div>
                                 )}
                             </div>
                         </div>
@@ -647,7 +749,7 @@ function RenderList({ items, ordered, variant = "default" }: AnyProps) {
             {items.map((item: AnyProps, i: number) => (
                 <li key={i} className="leading-relaxed">
                     {typeof item === "string" ? (
-                        <span dangerouslySetInnerHTML={{ __html: item.replace(/\*\*(.*?)\*\*/g, '<strong class="text-astral-text font-medium">$1</strong>') }} />
+                        <InlineMd text={item} />
                     ) : JSON.stringify(item)}
                 </li>
             ))}
