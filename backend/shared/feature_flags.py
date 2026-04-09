@@ -23,6 +23,11 @@ class FeatureFlags:
             "coordinator_mode": self._read("FF_COORDINATOR_MODE", False),
             "knowledge_synthesis": self._read("FF_KNOWLEDGE_SYNTHESIS", False),
             "live_streaming": self._read("FF_LIVE_STREAMING", False),
+            # 001-tool-stream-ui: enables tool→agent→orchestrator→UI push streaming
+            # via async-generator tools, the new RECONNECTING state, and per-user
+            # multi-client fan-out. Default OFF for safe rollout. See
+            # specs/001-tool-stream-ui/ for the full design.
+            "tool_streaming": self._read("FF_TOOL_STREAMING", False),
         }
 
     @staticmethod

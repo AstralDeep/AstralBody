@@ -1,6 +1,8 @@
 """
 MCP Server — dispatches tool calls to registered tool functions.
 """
+import asyncio
+import inspect
 import os
 import sys
 import json
@@ -79,6 +81,23 @@ class MCPServer:
 
             try:
                 tool_fn = self.tools[tool_name]["function"]
+
+                # 001-tool-stream-ui: a streaming tool (async generator
+                # decorated with @streaming_tool) called via the snapshot
+                # path. This happens when:
+                #   1. FF_TOOL_STREAMING is OFF and the LLM picks a streaming
+                #      tool from tools/list (the SDK still registers them).
+                #   2. The user calls a streaming tool directly without the
+                #      _stream=True flag.
+                # In either case, drain the generator to its FIRST yielded
+                # chunk and return that as the MCPResponse — the user gets
+                # a working snapshot. The generator's `finally` cleanup
+                # runs on aclose() so no upstream subscriptions leak.
+                if inspect.isasyncgenfunction(tool_fn):
+                    return self._drain_streaming_tool_to_snapshot(
+                        request.request_id, tool_name, tool_fn, arguments,
+                    )
+
                 result = tool_fn(**arguments)
 
                 # Check if the tool itself returned an error via UI components
@@ -131,3 +150,73 @@ class MCPServer:
             error={"code": -32601, "message": f"Unknown method: {request.method}",
                    "retryable": False}
         )
+
+    def _drain_streaming_tool_to_snapshot(
+        self,
+        request_id: str,
+        tool_name: str,
+        tool_fn: Any,
+        arguments: Dict[str, Any],
+    ) -> MCPResponse:
+        """Drain a @streaming_tool async generator to its first yielded
+        StreamComponents and return that as a single MCPResponse.
+
+        Used when the LLM picks a streaming tool from `tools/list` but the
+        request comes through the normal snapshot path (FF_TOOL_STREAMING off,
+        or _stream flag not set). The user sees a one-shot snapshot — exactly
+        the behavior of the equivalent non-streaming tool — without breaking
+        when the tool happens to be an async generator.
+
+        The agent's regular streaming dispatch in BaseA2AAgent still handles
+        the full async-generator path when FF_TOOL_STREAMING is on AND
+        _stream=True. This method is the fallback for the snapshot case.
+        """
+        # The MCPServer is invoked from a worker thread (asyncio.to_thread).
+        # We need our own loop here to drive the async generator.
+        loop = asyncio.new_event_loop()
+        try:
+            agen = tool_fn(arguments, {})
+            try:
+                first_chunk = loop.run_until_complete(agen.__anext__())
+            except StopAsyncIteration:
+                logger.warning(
+                    f"Streaming tool '{tool_name}' yielded nothing; "
+                    f"returning empty snapshot"
+                )
+                return MCPResponse(
+                    request_id=request_id,
+                    result=None,
+                    ui_components=[],
+                )
+            finally:
+                # Always close the generator so its `finally` block runs
+                # to release upstream subscriptions / file handles / etc.
+                try:
+                    loop.run_until_complete(agen.aclose())
+                except Exception:
+                    pass
+
+            # first_chunk is a StreamComponents instance — extract its
+            # components and raw data into the snapshot wire shape.
+            components = list(getattr(first_chunk, "components", []) or [])
+            raw = getattr(first_chunk, "raw", None)
+            return MCPResponse(
+                request_id=request_id,
+                result=raw,
+                ui_components=components,
+            )
+        except Exception as e:
+            retryable = self._classify_error(e)
+            logger.error(
+                f"Streaming tool '{tool_name}' (snapshot path) raised "
+                f"{type(e).__name__}: {e}"
+            )
+            return MCPResponse(
+                request_id=request_id,
+                error={"code": -32603, "message": str(e), "retryable": retryable},
+            )
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
