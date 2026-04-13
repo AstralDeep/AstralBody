@@ -299,7 +299,16 @@ class TestMCPServer:
         req = MCPRequest(request_id="r1", method="tools/list", params={})
         resp = server.process_request(req)
         assert resp.result is not None
-        assert len(resp.result["tools"]) == 8
+        # Registry grows over time as new tools are added; assert the
+        # expected core tools are present rather than a fixed count.
+        names = {t["name"] for t in resp.result["tools"]}
+        for required in {
+            "generate_dynamic_chart", "get_system_status",
+            # File-upload tools (feature 002-file-uploads)
+            "read_document", "read_spreadsheet", "read_presentation",
+            "read_text", "read_image", "list_attachments",
+        }:
+            assert required in names, f"missing tool: {required}"
 
     def test_tool_call_success(self):
         from agents.general.mcp_server import MCPServer

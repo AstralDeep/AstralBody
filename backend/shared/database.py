@@ -238,6 +238,25 @@ class Database:
             )
         ''')
 
+        # User attachments — chat-message file uploads, user-scoped (feature 002-file-uploads)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_attachments (
+                attachment_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                content_type TEXT NOT NULL,
+                category TEXT NOT NULL,
+                extension TEXT NOT NULL,
+                size_bytes BIGINT NOT NULL,
+                sha256 TEXT NOT NULL,
+                storage_path TEXT NOT NULL,
+                created_at BIGINT NOT NULL,
+                deleted_at BIGINT
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_attachments_user ON user_attachments(user_id, created_at DESC)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_attachments_live ON user_attachments(user_id) WHERE deleted_at IS NULL')
+
         # Interaction log — captures tool call outcomes for knowledge synthesis
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS interaction_log (

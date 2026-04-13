@@ -9,13 +9,16 @@
  */
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Send, Bot, User, Sparkles, Loader2, ChevronLeft, Paperclip, UploadCloud, X, FileMinus, FileText, Square, Mic, Volume2, VolumeX } from "lucide-react";
+import { Send, Bot, User, Sparkles, Loader2, ChevronLeft, Paperclip, UploadCloud, X, FileMinus, FileText, Square, Mic, Volume2, VolumeX, FolderOpen, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 import DynamicRenderer from "./DynamicRenderer";
 import type { TablePaginateEvent } from "./DynamicRenderer";
 import UISavedDrawer from "./UISavedDrawer";
+import AttachmentLibrary from "./AttachmentLibrary";
 import { BFF_URL } from "../config";
 import type { ChatStatus, DeviceCapabilityFlags } from "../hooks/useWebSocket";
+import { useAttachments, formatAttachmentRefs } from "../hooks/useAttachments";
+import { ACCEPT_ATTRIBUTE } from "../lib/attachmentTypes";
 
 interface ChatInterfaceProps {
     messages: { role: string; content: unknown }[];
@@ -71,13 +74,15 @@ export default function ChatInterface({
     });
     const [isDrawerOpen, setIsDrawerOpen] = useState(false);
     const [isDragging, setIsDragging] = useState(false);
-    const [isProcessingFile, setIsProcessingFile] = useState(false);
-
-    // File Staging State
-    const [attachedFile, setAttachedFile] = useState<File | null>(null);
-    const [fileContent, setFileContent] = useState<string | null>(null);
-    const [fileError, setFileError] = useState<string | null>(null);
     const [previewFile, setPreviewFile] = useState<{ name: string; content: string } | null>(null);
+    const [isLibraryOpen, setIsLibraryOpen] = useState(false);
+
+    // Attachment state — feature 002-file-uploads. Replaces the legacy
+    // single-file FileReader path; supports the FR-001 expanded type list,
+    // 30 MB cap, multi-file, and cross-chat reuse via AttachmentLibrary.
+    const attachments = useAttachments({ accessToken });
+    const isProcessingFile = attachments.pending.some((p) => p.status === "uploading");
+    const readyAttachments = attachments.pending.filter((p) => p.status === "ready");
 
     const bottomRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -139,14 +144,12 @@ export default function ChatInterface({
         return () => clearTimeout(timer);
     }, [input]);
 
-    const clearAttachment = () => {
-        setAttachedFile(null);
-        setFileContent(null);
-        setFileError(null);
+    const clearAttachment = useCallback(() => {
+        attachments.clear();
         if (fileInputRef.current) {
             fileInputRef.current.value = '';
         }
-    };
+    }, [attachments]);
 
     // ── Voice Input (STT) — Real-time streaming via WebSocket ────────
     const sendAudioForTranscription = useCallback(async (audioBlob: Blob) => {
@@ -435,84 +438,35 @@ export default function ChatInterface({
         e.preventDefault();
 
         const hasText = input.trim().length > 0;
-        const hasFile = attachedFile !== null;
+        const hasReadyAttachments = readyAttachments.length > 0;
 
-        if ((!hasText && !hasFile) || !isConnected) return;
-
-        if (hasFile && attachedFile) {
-            if (fileError) {
-                onSendMessage(`System Note: The user tried to upload a file (${attachedFile.name}) but there was an error: ${fileError}. Try to explain to the user what went wrong.`);
-            } else if (fileContent) {
-                const targetChatId = activeChatId || crypto.randomUUID();
-
-                // If file is large (> 10KB), upload it and send path + preview
-                const isLarge = attachedFile.size > 10 * 1024;
-
-                if (isLarge) {
-                    setIsProcessingFile(true);
-                    try {
-                        const formData = new FormData();
-                        formData.append('file', attachedFile);
-                        formData.append('session_id', targetChatId);
-
-                        const uploadUrl = `${BFF_URL}/api/upload`;
-                        const headers: HeadersInit = {};
-                        if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
-
-                        const uploadRes = await fetch(uploadUrl, {
-                            method: 'POST',
-                            headers,
-                            body: formData
-                        });
-
-                        if (!uploadRes.ok) throw new Error("File upload failed");
-                        const data = await uploadRes.json();
-                        const filePath = data.file_path;
-
-                        // Create a truncated preview
-                        const lines = fileContent.split(/\r?\n/);
-                        const preview = lines.slice(0, 50).join('\n');
-                        const isTruncated = lines.length > 50;
-                        const truncatedContent = isTruncated ? `${preview}\n... [TRUNCATED: ${lines.length - 50} more lines]` : preview;
-
-                        const promptPrefix = hasText ? `${input.trim()}\n\n` : '';
-                        const displayMsg = `${promptPrefix}[Attached File: ${attachedFile.name}]\n\n\`\`\`\n${truncatedContent}\n\`\`\``;
-
-                        const fullMsg = `${promptPrefix}I have uploaded ${attachedFile.name} to the backend at: \`${filePath}\`
- 
- Here is a preview (first 50 lines):
- \`\`\`${attachedFile.name.toLowerCase().endsWith('.csv') ? 'csv' : 'text'}
- ${truncatedContent}
- \`\`\`
- 
- Please use the provided absolute \`file_path\` with an appropriate tool (like \`analyze_csv_file\`) to handle this request. Only use \`modify_data\` if the user explicitly asks to edit the file or add columns.`;
-
-                        onSendMessage(enrichWithLocation(fullMsg), displayMsg, targetChatId);
-                    } catch (err: unknown) {
-                        const errorMessage = err instanceof Error ? err.message : String(err);
-                        console.error("Upload error:", err);
-                        toast.error(`File upload failed: ${errorMessage}`);
-                        onSendMessage(`System Note: Failed to upload large file ${attachedFile.name}: ${errorMessage}. The model might fail if the full file is sent instead.`, undefined, targetChatId);
-                    } finally {
-                        setIsProcessingFile(false);
-                    }
-                } else {
-                    // Original small file logic
-                    if (attachedFile.name.toLowerCase().endsWith('.csv')) {
-                        const prompt = hasText ? `${input.trim()}\n\n` : '';
-                        const displayMsg = `${prompt}[Attached File: ${attachedFile.name}]\n\n\`\`\`csv\n${fileContent}\n\`\`\``;
-                        onSendMessage(enrichWithLocation(`${prompt}Here is my data from ${attachedFile.name}. Please run various data analyses on it and tell me the results:\n\n\`\`\`csv\n${fileContent}\n\`\`\``), displayMsg, targetChatId);
-                    } else {
-                        const prompt = hasText ? `${input.trim()}\n\n` : '';
-                        const displayMsg = `${prompt}[Attached File: ${attachedFile.name}]\n\n\`\`\`text\n${fileContent}\n\`\`\``;
-                        onSendMessage(enrichWithLocation(`${prompt}I've attached a file named ${attachedFile.name}. Here are the contents:\n\n\`\`\`text\n${fileContent}\n\`\`\``), displayMsg, targetChatId);
-                    }
-                }
-            }
-        } else if (hasText) {
-            const targetChatId = activeChatId || crypto.randomUUID();
-            onSendMessage(enrichWithLocation(input.trim()), input.trim(), targetChatId);
+        if ((!hasText && !hasReadyAttachments) || !isConnected) return;
+        // Don't send while uploads are still in flight — prevents losing
+        // attachments mid-message.
+        if (isProcessingFile) {
+            toast.message("Waiting for uploads to finish…");
+            return;
         }
+
+        const targetChatId = activeChatId || crypto.randomUUID();
+
+        // Build the agent-facing message: user prompt + structured attachment
+        // hints the LLM uses to call read_document / read_spreadsheet / etc.
+        // Display message keeps the human-readable filename chips.
+        const refs = formatAttachmentRefs(attachments.pending);
+        const filenames = readyAttachments
+            .map((p) => p.attachment?.filename)
+            .filter(Boolean)
+            .join(", ");
+        const promptPrefix = hasText ? `${input.trim()}\n\n` : "";
+        const fullMsg = hasReadyAttachments
+            ? `${promptPrefix}${refs}\n\nThe user has attached the file(s) above. Use the appropriate file-reading tool (read_document / read_spreadsheet / read_presentation / read_text / read_image) with the given attachment_id(s) to read the contents before answering.`
+            : input.trim();
+        const displayMsg = hasReadyAttachments
+            ? `${promptPrefix}[Attached: ${filenames}]`
+            : input.trim();
+
+        onSendMessage(enrichWithLocation(fullMsg), displayMsg, targetChatId);
 
         setInput("");
         try { localStorage.removeItem("astral-draft"); } catch { /* ignore */ }
@@ -608,61 +562,28 @@ export default function ChatInterface({
         onSendMessage(text);
     };
 
-    const processFile = useCallback((file: File) => {
-        if (!file || !isConnected) return;
-
-        setIsProcessingFile(true);
-        const reader = new FileReader();
-
-        reader.onload = (event) => {
-            try {
-                const text = event.target?.result as string;
-                if (!text) throw new Error("File is empty");
-
-                setFileContent(text);
-                setAttachedFile(file);
-                setFileError(null);
-
-                // If it's a CSV, ensure it's not completely empty
-                if (file.name.toLowerCase().endsWith('.csv')) {
-                    const lines = text.split(/\r?\n/).filter(line => line.trim() !== '');
-                    if (lines.length === 0) throw new Error("CSV file contains no data");
-                }
-            } catch (err: unknown) {
-                setAttachedFile(file);
-                setFileError(err instanceof Error ? err.message : "Failed to parse file.");
-                setFileContent(null);
-            } finally {
-                setIsProcessingFile(false);
-            }
-        };
-
-        reader.onerror = () => {
-            setIsProcessingFile(false);
-            setAttachedFile(file);
-            setFileError("Error reading file. The browser failed to process it.");
-            setFileContent(null);
-        };
-
-        reader.readAsText(file);
-    }, [isConnected]);
+    /**
+     * Stage one or more files: validates against the FR-001 allow-list and
+     * 30 MB cap, then uploads each via /api/upload. Multi-file safe.
+     */
+    const stageFiles = useCallback(async (files: FileList | File[]) => {
+        if (!isConnected) return;
+        await attachments.upload(files);
+    }, [isConnected, attachments]);
 
     const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files?.[0];
-        if (file) {
-            processFile(file);
+        const files = e.target.files;
+        if (files && files.length > 0) {
+            void stageFiles(files);
         }
-        // Reset input so the same file can be uploaded again if needed
         if (fileInputRef.current) {
             fileInputRef.current.value = '';
         }
     };
 
-    // Drag and Drop Handlers
+    // ── Drag and Drop ────────────────────────────────────────────────
     const handleDragOver = useCallback((e: React.DragEvent) => {
-        // Only react to file drag events, ignore component drags from drawer
         if (!e.dataTransfer.types.includes("Files")) return;
-
         e.preventDefault();
         e.stopPropagation();
         if (!isDragging) setIsDragging(true);
@@ -670,10 +591,8 @@ export default function ChatInterface({
 
     const handleDragLeave = useCallback((e: React.DragEvent) => {
         if (!e.dataTransfer.types.includes("Files")) return;
-
         e.preventDefault();
         e.stopPropagation();
-        // Prevent flickering when dragging over children
         if (e.currentTarget === e.target) {
             setIsDragging(false);
         }
@@ -681,16 +600,13 @@ export default function ChatInterface({
 
     const handleDrop = useCallback((e: React.DragEvent) => {
         if (!e.dataTransfer.types.includes("Files")) return;
-
         e.preventDefault();
         e.stopPropagation();
         setIsDragging(false);
-
         if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-            const file = e.dataTransfer.files[0];
-            processFile(file);
+            void stageFiles(e.dataTransfer.files);
         }
-    }, [processFile]);
+    }, [stageFiles]);
 
     return (
         <div
@@ -846,36 +762,71 @@ export default function ChatInterface({
                         )}
                     </AnimatePresence>
 
-                    {/* Staged File View */}
-                    <AnimatePresence>
-                        {attachedFile && (
-                            <motion.div
-                                initial={{ opacity: 0, y: 10 }}
-                                animate={{ opacity: 1, y: 0 }}
-                                exit={{ opacity: 0, scale: 0.95 }}
-                                className="self-start"
-                            >
-                                <div className={`flex items-center gap-3 px-3 py-2 rounded-lg border ${fileError ? 'bg-red-500/10 border-red-500/30 text-red-400' : 'bg-astral-primary/10 border-astral-primary/30 text-astral-primary'} backdrop-blur-sm text-sm font-medium`}>
-                                    <FileMinus size={16} className={fileError ? 'text-red-400' : 'text-astral-primary'} />
-                                    <span className="truncate max-w-[200px]">{attachedFile.name}</span>
-                                    <button
-                                        type="button"
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                            clearAttachment();
-                                        }}
-                                        className="p-1 rounded-md hover:bg-white/10 transition-colors ml-2"
-                                        title="Remove File"
+                    {/* Attachment library panel (cross-chat reuse, FR-009) */}
+                    {isLibraryOpen && (
+                        <div className="self-stretch">
+                            <AttachmentLibrary
+                                api={attachments}
+                                open={isLibraryOpen}
+                                onAttach={() => setIsLibraryOpen(false)}
+                            />
+                        </div>
+                    )}
+
+                    {/* Staged attachment chips — feature 002-file-uploads (multi-file safe). */}
+                    {attachments.pending.length > 0 && (
+                        <div className="flex flex-wrap gap-2 self-start">
+                            {attachments.pending.map((p) => {
+                                const isError = p.status === "error";
+                                const isUploading = p.status === "uploading";
+                                return (
+                                    <div
+                                        key={p.localId}
+                                        className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs font-medium ${
+                                            isError
+                                                ? "bg-red-500/10 border-red-500/30 text-red-400"
+                                                : "bg-astral-primary/10 border-astral-primary/30 text-astral-primary"
+                                        }`}
                                     >
-                                        <X size={14} />
-                                    </button>
-                                </div>
-                                {fileError && (
-                                    <p className="text-xs text-red-400 mt-1 ml-1">{fileError}</p>
-                                )}
-                            </motion.div>
-                        )}
-                    </AnimatePresence>
+                                        {isUploading ? (
+                                            <Loader2 size={14} className="animate-spin" />
+                                        ) : (
+                                            <FileMinus size={14} className={isError ? "text-red-400" : "text-astral-primary"} />
+                                        )}
+                                        <span className="truncate max-w-[200px]" title={p.filename}>
+                                            {p.filename}
+                                        </span>
+                                        {p.attachment && (
+                                            <span className="text-[10px] uppercase tracking-wide opacity-60">
+                                                {p.attachment.category}
+                                            </span>
+                                        )}
+                                        {isError && p.source && (
+                                            <button
+                                                type="button"
+                                                onClick={(e) => { e.stopPropagation(); void attachments.retry(p.localId); }}
+                                                className="p-1 rounded-md hover:bg-white/10"
+                                                title="Retry upload"
+                                            >
+                                                <RotateCcw size={12} />
+                                            </button>
+                                        )}
+                                        <button
+                                            type="button"
+                                            onClick={(e) => { e.stopPropagation(); attachments.remove(p.localId); }}
+                                            className="p-1 rounded-md hover:bg-white/10"
+                                            title="Remove"
+                                        >
+                                            <X size={12} />
+                                        </button>
+                                        {isError && p.error && (
+                                            <span className="ml-1 text-[10px] opacity-90">{p.error.message}</span>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
 
                     <div className="flex gap-2 sm:gap-3">
                         <div className="flex-1 relative flex items-center gap-1 sm:gap-2 bg-astral-surface/60 border border-white/10 rounded-xl px-1.5 sm:px-2 transition-all focus-within:border-astral-primary/50 focus-within:ring-1 focus-within:ring-astral-primary/20">
@@ -884,9 +835,9 @@ export default function ChatInterface({
                             <button
                                 type="button"
                                 onClick={() => fileInputRef.current?.click()}
-                                disabled={!isConnected || isProcessingFile}
+                                disabled={!isConnected}
                                 className="p-2 text-astral-muted hover:text-white rounded-lg hover:bg-white/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
-                                title="Attach File"
+                                title="Attach files"
                             >
                                 {isProcessingFile ? (
                                     <Loader2 size={20} className="animate-spin text-astral-primary" />
@@ -894,12 +845,25 @@ export default function ChatInterface({
                                     <Paperclip size={20} />
                                 )}
                             </button>
+                            <button
+                                type="button"
+                                onClick={() => setIsLibraryOpen((v) => !v)}
+                                disabled={!isConnected}
+                                className={`p-2 rounded-lg hover:bg-white/10 transition-colors flex-shrink-0 ${
+                                    isLibraryOpen ? "text-astral-primary" : "text-astral-muted hover:text-white"
+                                } disabled:opacity-50 disabled:cursor-not-allowed`}
+                                title="Browse your uploaded files"
+                                data-testid="attachment-library-toggle"
+                            >
+                                <FolderOpen size={20} />
+                            </button>
                             <input
                                 type="file"
                                 className="hidden"
                                 ref={fileInputRef}
                                 onChange={handleFileChange}
-                                accept=".csv,.txt,.json,.md"
+                                accept={ACCEPT_ATTRIBUTE}
+                                multiple
                             />
 
                             <input
@@ -976,7 +940,7 @@ export default function ChatInterface({
                         </div>
                         <button
                             type="submit"
-                            disabled={(!input.trim() && !attachedFile) || !isConnected || (chatStatus.status !== "idle" && chatStatus.status !== "done")}
+                            disabled={(!input.trim() && readyAttachments.length === 0) || !isConnected || isProcessingFile || (chatStatus.status !== "idle" && chatStatus.status !== "done")}
                             className="px-3 sm:px-4 py-2.5 sm:py-3 rounded-xl bg-astral-primary hover:bg-astral-primary/80
                            disabled:opacity-30 disabled:cursor-not-allowed
                            transition-colors flex items-center gap-2 flex-shrink-0"
