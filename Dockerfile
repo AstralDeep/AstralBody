@@ -30,6 +30,16 @@ RUN set -a && . /app/.env && set +a && npm run build
 FROM python:3.11-slim
 WORKDIR /app
 
+# System packages required by file-upload parsing (feature 002-file-uploads):
+#   poppler-utils  - PDF rendering used by pdf2image (image-only PDFs are
+#                    handed to the vision model)
+#   libmagic1      - libmagic bindings used by python-magic for content-type sniffing
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        poppler-utils \
+        libmagic1 \
+    && rm -rf /var/lib/apt/lists/*
+
 # Upgrade pip and install wheel/setuptools first to ensure binary wheels are downloaded
 # instead of compiling heavy packages like pandas from source, saving lots of time and memory.
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel

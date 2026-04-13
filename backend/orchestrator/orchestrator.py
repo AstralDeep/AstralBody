@@ -135,6 +135,15 @@ class Orchestrator:
         data_dir = os.path.join(backend_dir, 'data')
         self.history = HistoryManager(data_dir=data_dir)
 
+        # File-tool DB wiring (feature 002-file-uploads). Lets the
+        # in-process tool functions resolve attachments without going
+        # through HTTP.
+        try:
+            from agents.general.file_tools import register_database as _register_file_tools_db
+            _register_file_tools_db(self.history.db)
+        except Exception as _exc:  # pragma: no cover - non-fatal
+            logger.warning(f"file_tools DB wiring skipped: {_exc}")
+
         # Tool Permission Manager (RFC 8693 delegation) — backed by same PostgreSQL DB
         self.tool_permissions = ToolPermissionManager(db=self.history.db, data_dir=data_dir)
 
@@ -3658,12 +3667,14 @@ COMPONENT UPDATE RULES:
         # Mount REST API routers
         from orchestrator.api import chat_router, component_router, agent_router, dashboard_router, draft_router, voice_router, task_router
         from orchestrator.auth import auth_router
+        from orchestrator.attachments.router import attachments_router
         app.include_router(chat_router)
         app.include_router(component_router)
         app.include_router(agent_router)
         app.include_router(draft_router)
         app.include_router(dashboard_router)
         app.include_router(auth_router)
+        app.include_router(attachments_router)
         app.include_router(voice_router)
         app.include_router(task_router)
 

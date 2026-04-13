@@ -22,6 +22,9 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { normalizeLlmMarkdown } from "../utils/normalizeLlmMarkdown";
 import { BFF_URL } from "../config";
+import { ACCEPT_ATTRIBUTE } from "../lib/attachmentTypes";
+import { useAttachments, formatAttachmentRefs } from "../hooks/useAttachments";
+import { RotateCcw } from "lucide-react";
 import type { ChatStatus, DeviceCapabilityFlags } from "../hooks/useWebSocket";
 
 interface FloatingChatPanelProps {
@@ -54,11 +57,14 @@ export default function FloatingChatPanel({
         try { return localStorage.getItem("astral-draft") || ""; } catch { return ""; }
     });
     const [isDragging, setIsDragging] = useState(false);
-    const [isProcessingFile, setIsProcessingFile] = useState(false);
-    const [attachedFile, setAttachedFile] = useState<File | null>(null);
-    const [fileContent, setFileContent] = useState<string | null>(null);
-    const [fileError, setFileError] = useState<string | null>(null);
     const [previewFile, setPreviewFile] = useState<{ name: string; content: string } | null>(null);
+
+    // Attachment state — feature 002-file-uploads. Replaces the legacy
+    // single-file FileReader path so binary uploads (PDFs, images, Office
+    // formats) are not corrupted by treating them as text.
+    const attachments = useAttachments({ accessToken });
+    const isProcessingFile = attachments.pending.some((p) => p.status === "uploading");
+    const readyAttachments = attachments.pending.filter((p) => p.status === "ready");
 
     const bottomRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -153,9 +159,7 @@ export default function FloatingChatPanel({
     }, [input]);
 
     const clearAttachment = () => {
-        setAttachedFile(null);
-        setFileContent(null);
-        setFileError(null);
+        attachments.clear();
         if (fileInputRef.current) fileInputRef.current.value = '';
     };
 
@@ -363,85 +367,35 @@ export default function FloatingChatPanel({
         speakAnalysis(plainText);
     }, [ttsEnabled, chatMessages, speakAnalysis]);
 
-    // File processing
-    const processFile = useCallback((file: File) => {
-        if (!file || !isConnected) return;
-        setIsProcessingFile(true);
-        const reader = new FileReader();
-        reader.onload = (event) => {
-            try {
-                const text = event.target?.result as string;
-                if (!text) throw new Error("File is empty");
-                setFileContent(text); setAttachedFile(file); setFileError(null);
-                if (file.name.toLowerCase().endsWith('.csv')) {
-                    const lines = text.split(/\r?\n/).filter(line => line.trim() !== '');
-                    if (lines.length === 0) throw new Error("CSV file contains no data");
-                }
-            } catch (err: unknown) {
-                setAttachedFile(file);
-                setFileError(err instanceof Error ? err.message : "Failed to parse file.");
-                setFileContent(null);
-            } finally { setIsProcessingFile(false); }
-        };
-        reader.onerror = () => {
-            setIsProcessingFile(false); setAttachedFile(file);
-            setFileError("Error reading file."); setFileContent(null);
-        };
-        reader.readAsText(file);
-    }, [isConnected]);
+    // Stage one or more files via the shared attachments hook (multi-file
+    // safe, validates extension + 30 MB cap, uploads via /api/upload).
+    const stageFiles = useCallback(async (files: FileList | File[]) => {
+        if (!isConnected) return;
+        await attachments.upload(files);
+    }, [isConnected, attachments]);
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         const hasText = input.trim().length > 0;
-        const hasFile = attachedFile !== null;
-        if ((!hasText && !hasFile) || !isConnected) return;
-
-        if (hasFile && attachedFile) {
-            if (fileError) {
-                onSendMessage(`System Note: The user tried to upload a file (${attachedFile.name}) but there was an error: ${fileError}.`);
-            } else if (fileContent) {
-                const targetChatId = activeChatId || crypto.randomUUID();
-                const isLarge = attachedFile.size > 10 * 1024;
-
-                if (isLarge) {
-                    setIsProcessingFile(true);
-                    try {
-                        const formData = new FormData();
-                        formData.append('file', attachedFile);
-                        formData.append('session_id', targetChatId);
-                        const headers: HeadersInit = {};
-                        if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
-                        const uploadRes = await fetch(`${BFF_URL}/api/upload`, { method: 'POST', headers, body: formData });
-                        if (!uploadRes.ok) throw new Error("File upload failed");
-                        const data = await uploadRes.json();
-                        const filePath = data.file_path;
-                        const lines = fileContent.split(/\r?\n/);
-                        const preview = lines.slice(0, 50).join('\n');
-                        const isTruncated = lines.length > 50;
-                        const truncatedContent = isTruncated ? `${preview}\n... [TRUNCATED: ${lines.length - 50} more lines]` : preview;
-                        const promptPrefix = hasText ? `${input.trim()}\n\n` : '';
-                        const displayMsg = `${promptPrefix}[Attached File: ${attachedFile.name}]\n\n\`\`\`\n${truncatedContent}\n\`\`\``;
-                        const fullMsg = `${promptPrefix}I have uploaded ${attachedFile.name} to the backend at: \`${filePath}\`\n\nHere is a preview (first 50 lines):\n\`\`\`${attachedFile.name.toLowerCase().endsWith('.csv') ? 'csv' : 'text'}\n${truncatedContent}\n\`\`\`\n\nPlease use the provided absolute \`file_path\` with an appropriate tool (like \`analyze_csv_file\`) to handle this request. Only use \`modify_data\` if the user explicitly asks to edit the file or add columns.`;
-                        onSendMessage(enrichWithLocation(fullMsg), displayMsg, targetChatId);
-                    } catch (err: unknown) {
-                        const errorMessage = err instanceof Error ? err.message : String(err);
-                        toast.error(`File upload failed: ${errorMessage}`);
-                    } finally { setIsProcessingFile(false); }
-                } else {
-                    if (attachedFile.name.toLowerCase().endsWith('.csv')) {
-                        const prompt = hasText ? `${input.trim()}\n\n` : '';
-                        const displayMsg = `${prompt}[Attached File: ${attachedFile.name}]\n\n\`\`\`csv\n${fileContent}\n\`\`\``;
-                        onSendMessage(enrichWithLocation(`${prompt}Here is my data from ${attachedFile.name}. Please run various data analyses on it and tell me the results:\n\n\`\`\`csv\n${fileContent}\n\`\`\``), displayMsg, activeChatId || crypto.randomUUID());
-                    } else {
-                        const prompt = hasText ? `${input.trim()}\n\n` : '';
-                        const displayMsg = `${prompt}[Attached File: ${attachedFile.name}]\n\n\`\`\`text\n${fileContent}\n\`\`\``;
-                        onSendMessage(enrichWithLocation(`${prompt}I've attached a file named ${attachedFile.name}. Here are the contents:\n\n\`\`\`text\n${fileContent}\n\`\`\``), displayMsg, activeChatId || crypto.randomUUID());
-                    }
-                }
-            }
-        } else if (hasText) {
-            onSendMessage(enrichWithLocation(input.trim()), input.trim(), activeChatId || crypto.randomUUID());
+        const hasReadyAttachments = readyAttachments.length > 0;
+        if ((!hasText && !hasReadyAttachments) || !isConnected) return;
+        if (isProcessingFile) {
+            toast.message("Waiting for uploads to finish…");
+            return;
         }
+
+        const targetChatId = activeChatId || crypto.randomUUID();
+        const refs = formatAttachmentRefs(attachments.pending);
+        const filenames = readyAttachments.map((p) => p.attachment?.filename).filter(Boolean).join(", ");
+        const promptPrefix = hasText ? `${input.trim()}\n\n` : "";
+        const fullMsg = hasReadyAttachments
+            ? `${promptPrefix}${refs}\n\nThe user has attached the file(s) above. Use the appropriate file-reading tool (read_document / read_spreadsheet / read_presentation / read_text / read_image) with the given attachment_id(s) to read the contents before answering.`
+            : input.trim();
+        const displayMsg = hasReadyAttachments
+            ? `${promptPrefix}[Attached: ${filenames}]`
+            : input.trim();
+
+        onSendMessage(enrichWithLocation(fullMsg), displayMsg, targetChatId);
 
         setInput("");
         try { localStorage.removeItem("astral-draft"); } catch { /* ignore */ }
@@ -511,8 +465,8 @@ export default function FloatingChatPanel({
         if (!e.dataTransfer.types.includes("Files")) return;
         e.preventDefault(); e.stopPropagation();
         setIsDragging(false);
-        if (e.dataTransfer.files?.length) processFile(e.dataTransfer.files[0]);
-    }, [processFile]);
+        if (e.dataTransfer.files?.length) void stageFiles(e.dataTransfer.files);
+    }, [stageFiles]);
 
     // Collapsed state — just a floating button
     if (!isOpen) {
@@ -697,19 +651,35 @@ export default function FloatingChatPanel({
                             )}
                         </AnimatePresence>
 
-                        {/* Staged File */}
-                        <AnimatePresence>
-                            {attachedFile && (
-                                <motion.div initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="self-start">
-                                    <div className={`flex items-center gap-2 px-2 py-1 rounded-md border text-xs font-medium ${fileError ? 'bg-red-500/10 border-red-500/30 text-red-400' : 'bg-astral-primary/10 border-astral-primary/30 text-astral-primary'}`}>
-                                        <FileMinus size={12} />
-                                        <span className="truncate max-w-[140px]">{attachedFile.name}</span>
-                                        <button type="button" onClick={clearAttachment} className="p-0.5 rounded hover:bg-white/10"><X size={10} /></button>
-                                    </div>
-                                    {fileError && <p className="text-[10px] text-red-400 mt-0.5 ml-1">{fileError}</p>}
-                                </motion.div>
-                            )}
-                        </AnimatePresence>
+                        {/* Staged attachment chips — feature 002-file-uploads */}
+                        {attachments.pending.length > 0 && (
+                            <div className="flex flex-wrap gap-1 self-start">
+                                {attachments.pending.map((p) => {
+                                    const isError = p.status === "error";
+                                    const isUploading = p.status === "uploading";
+                                    return (
+                                        <div
+                                            key={p.localId}
+                                            className={`flex items-center gap-1.5 px-2 py-1 rounded-md border text-[11px] font-medium ${
+                                                isError
+                                                    ? "bg-red-500/10 border-red-500/30 text-red-400"
+                                                    : "bg-astral-primary/10 border-astral-primary/30 text-astral-primary"
+                                            }`}
+                                        >
+                                            {isUploading
+                                                ? <Loader2 size={12} className="animate-spin" />
+                                                : <FileMinus size={12} className={isError ? "text-red-400" : "text-astral-primary"} />}
+                                            <span className="truncate max-w-[120px]" title={p.filename}>{p.filename}</span>
+                                            {isError && p.source && (
+                                                <button type="button" onClick={(e) => { e.stopPropagation(); void attachments.retry(p.localId); }} className="p-0.5 rounded hover:bg-white/10" title="Retry"><RotateCcw size={10} /></button>
+                                            )}
+                                            <button type="button" onClick={(e) => { e.stopPropagation(); attachments.remove(p.localId); }} className="p-0.5 rounded hover:bg-white/10" title="Remove"><X size={10} /></button>
+                                            {isError && p.error && <span className="ml-0.5 opacity-90">{p.error.message}</span>}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
 
                         <div className="flex gap-1.5">
                             <div className="flex-1 relative flex items-center gap-1 bg-astral-surface/60 border border-white/10 rounded-xl px-1.5 transition-all focus-within:border-astral-primary/50 focus-within:ring-1 focus-within:ring-astral-primary/20">
@@ -721,8 +691,9 @@ export default function FloatingChatPanel({
                                     {isProcessingFile ? <Loader2 size={16} className="animate-spin text-astral-primary" /> : <Paperclip size={16} />}
                                 </button>
                                 <input type="file" className="hidden" ref={fileInputRef}
-                                    onChange={(e) => { const f = e.target.files?.[0]; if (f) processFile(f); if (fileInputRef.current) fileInputRef.current.value = ''; }}
-                                    accept=".csv,.txt,.json,.md" />
+                                    onChange={(e) => { const fs = e.target.files; if (fs && fs.length) void stageFiles(fs); if (fileInputRef.current) fileInputRef.current.value = ''; }}
+                                    accept={ACCEPT_ATTRIBUTE}
+                                    multiple />
 
                                 <input type="text"
                                     ref={inputRef}
@@ -752,7 +723,7 @@ export default function FloatingChatPanel({
                                 )}
                             </div>
                             <button type="submit"
-                                disabled={(!input.trim() && !attachedFile) || !isConnected || (chatStatus.status !== "idle" && chatStatus.status !== "done")}
+                                disabled={(!input.trim() && readyAttachments.length === 0) || !isConnected || isProcessingFile || (chatStatus.status !== "idle" && chatStatus.status !== "done")}
                                 className="px-3 py-2 rounded-xl bg-astral-primary hover:bg-astral-primary/80 disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex items-center flex-shrink-0"
                             >
                                 <Send size={14} className="text-white" />

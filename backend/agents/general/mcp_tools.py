@@ -1419,3 +1419,123 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
         }
     },
 }
+
+
+# =============================================================================
+# File-handling tools (feature 002-file-uploads)
+# =============================================================================
+# Registered out-of-line to keep the diff against the main TOOL_REGISTRY tight
+# and to make it easy to iterate on the file-tool surface without touching the
+# rest of the registry.
+
+from agents.general.file_tools.read_document import read_document as _read_document
+from agents.general.file_tools.read_spreadsheet import read_spreadsheet as _read_spreadsheet
+from agents.general.file_tools.read_presentation import read_presentation as _read_presentation
+from agents.general.file_tools.read_text import read_text as _read_text
+from agents.general.file_tools.read_image import read_image as _read_image
+from agents.general.file_tools.list_attachments import list_attachments as _list_attachments
+
+TOOL_REGISTRY.update({
+    "read_document": {
+        "function": _read_document,
+        "scope": "tools:files",
+        "description": (
+            "Read a document attachment (PDF, DOCX, RTF, ODT) the user has uploaded. "
+            "Returns extracted text. PDFs without selectable text are rasterized and the "
+            "page images are returned in the `images` field for the vision-capable model "
+            "to interpret directly (no OCR step)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "attachment_id": {"type": "string", "format": "uuid"},
+                "page_range": {"type": "string", "description": "Optional. e.g. '1-5,9'. PDFs only."},
+                "max_chars": {"type": "integer", "minimum": 1, "default": 200000},
+            },
+            "required": ["attachment_id"],
+        },
+    },
+    "read_spreadsheet": {
+        "function": _read_spreadsheet,
+        "scope": "tools:files",
+        "description": (
+            "Read a spreadsheet attachment (XLSX, XLS, ODS, TSV, CSV) the user has uploaded. "
+            "Returns columns, rows, and (for multi-sheet workbooks) the available sheet names."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "attachment_id": {"type": "string", "format": "uuid"},
+                "sheet_name": {"type": "string"},
+                "max_rows": {"type": "integer", "minimum": 1, "default": 1000},
+            },
+            "required": ["attachment_id"],
+        },
+    },
+    "read_presentation": {
+        "function": _read_presentation,
+        "scope": "tools:files",
+        "description": (
+            "Read a presentation attachment (PPTX or ODP) the user has uploaded. "
+            "Returns each slide's title, body text, and speaker notes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "attachment_id": {"type": "string", "format": "uuid"},
+                "slide_range": {"type": "string", "description": "Optional. e.g. '1-5,9'."},
+            },
+            "required": ["attachment_id"],
+        },
+    },
+    "read_text": {
+        "function": _read_text,
+        "scope": "tools:files",
+        "description": (
+            "Read a text-class attachment (TXT, MD, JSON, YAML, XML, HTML, LOG, code) "
+            "the user has uploaded. Returns the raw source plus a stripped plaintext "
+            "rendering for HTML/XML."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "attachment_id": {"type": "string", "format": "uuid"},
+                "max_chars": {"type": "integer", "minimum": 1, "default": 200000},
+            },
+            "required": ["attachment_id"],
+        },
+    },
+    "read_image": {
+        "function": _read_image,
+        "scope": "tools:files",
+        "description": (
+            "Read an image attachment (PNG, JPG, GIF, WEBP) the user has uploaded "
+            "and return base64-encoded bytes ready for delivery to a vision model."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "attachment_id": {"type": "string", "format": "uuid"},
+            },
+            "required": ["attachment_id"],
+        },
+    },
+    "list_attachments": {
+        "function": _list_attachments,
+        "scope": "tools:files",
+        "description": (
+            "Enumerate the calling user's uploaded attachments. Useful when the user "
+            "refers to a file uploaded earlier in a different chat."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "enum": ["document", "spreadsheet", "presentation", "text", "image"],
+                },
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+            },
+        },
+    },
+})
