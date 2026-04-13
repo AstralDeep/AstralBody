@@ -5,6 +5,8 @@ Defines:
 - MCP Protocol: MCPRequest, MCPResponse
 - UI Protocol: UIEvent, UIRender, UIUpdate, UIAppend
 - A2A Protocol: AgentCard, AgentSkill, RegisterAgent, RegisterUI
+- Tool Streaming: ToolStreamData, ToolStreamEnd, ToolStreamCancel
+  (see specs/001-tool-stream-ui/contracts/protocol-messages.md §B)
 """
 from dataclasses import dataclass, asdict, field
 from typing import Optional, Dict, Any, List
@@ -40,11 +42,34 @@ class Message:
             return RegisterUI.from_json(json_str)
         elif msg_type == 'tool_progress':
             return ToolProgress(**data)
+        elif msg_type == 'tool_stream_data':
+            return ToolStreamData(**data)
+        elif msg_type == 'tool_stream_end':
+            return ToolStreamEnd(**data)
+        elif msg_type == 'tool_stream_cancel':
+            return ToolStreamCancel(**data)
         return Message(**data)
 
 # --- MCP Protocol Wrappers ---
 @dataclass
 class MCPRequest(Message):
+    """A tool-call request from orchestrator to agent.
+
+    For streaming tools (001-tool-stream-ui), the orchestrator sets the
+    following conventional keys inside ``params`` (no schema change required
+    because params is already an open dict):
+
+    - ``_stream``: ``True`` when the orchestrator wants the agent to treat
+      the request as long-lived and emit ``ToolStreamData`` chunks instead of
+      a single ``MCPResponse``.
+    - ``_stream_id``: The canonical ``stream_id`` the agent must echo on
+      every emitted chunk so the orchestrator can correlate them back to the
+      originating ``StreamSubscription``.
+
+    Agents that do not understand these keys (e.g. when ``FF_TOOL_STREAMING``
+    is off) MUST ignore them and run the tool to completion as a normal
+    one-shot call.
+    """
     type: str = "mcp_request"
     request_id: str = ""
     method: str = ""
@@ -174,6 +199,59 @@ class ToolProgress(Message):
     percentage: Optional[int] = None  # 0-100, or None if indeterminate
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+# --- Tool Streaming (001-tool-stream-ui) ---
+@dataclass
+class ToolStreamData(Message):
+    """One streaming chunk from an agent tool back to the orchestrator.
+
+    Sent by an agent in response to an ``MCPRequest`` whose ``params._stream``
+    is ``True``. The orchestrator forwards (after ROTE adaptation and per-
+    subscriber authorization) to every websocket subscribed to the
+    corresponding ``StreamSubscription`` as a ``ui_stream_data`` message.
+
+    See specs/001-tool-stream-ui/contracts/protocol-messages.md §B2.
+    """
+    type: str = "tool_stream_data"
+    request_id: str = ""
+    stream_id: str = ""
+    agent_id: str = ""
+    tool_name: str = ""
+    seq: int = 0
+    components: List[Dict[str, Any]] = field(default_factory=list)
+    raw: Optional[Any] = None
+    terminal: bool = False
+    error: Optional[Dict[str, Any]] = None  # see §A5: code, message, phase, attempt, next_retry_at_ms, retryable
+
+
+@dataclass
+class ToolStreamEnd(Message):
+    """Sent by an agent when a streaming tool's async generator returns
+    naturally (no more data, no error). Orchestrator forwards as a final
+    ``ui_stream_data`` chunk with ``terminal: true`` and removes the
+    subscription.
+
+    See specs/001-tool-stream-ui/contracts/protocol-messages.md §B4.
+    """
+    type: str = "tool_stream_end"
+    request_id: str = ""
+    stream_id: str = ""
+
+
+@dataclass
+class ToolStreamCancel(Message):
+    """Sent by the orchestrator to an agent to ask it to stop a streaming
+    tool. Triggered by user-leaves-chat, explicit unsubscribe, token
+    revocation, or dormant TTL expiry. The agent MUST close the underlying
+    async generator (which propagates ``GeneratorExit`` to any ``finally``
+    cleanup) within 1 second.
+
+    See specs/001-tool-stream-ui/contracts/protocol-messages.md §B3.
+    """
+    type: str = "tool_stream_cancel"
+    request_id: str = ""
+    stream_id: str = ""
+
+
 @dataclass
 class RegisterUI(Message):
     type: str = "register_ui"
@@ -189,3 +267,62 @@ class RegisterUI(Message):
     def from_json(json_str: str) -> 'RegisterUI':
         data = json.loads(json_str)
         return RegisterUI(**data)
+
+
+# --- Streaming tool metadata validation (001-tool-stream-ui) ---
+def validate_streaming_metadata(metadata: Dict[str, Any]) -> None:
+    """Validate the streaming-related fields of an ``AgentSkill.metadata``.
+
+    Called by the orchestrator at ``RegisterAgent`` time for any tool whose
+    metadata declares ``streamable: True``. Raises ``ValueError`` with a
+    human-readable message on the first invariant violation.
+
+    Required when streamable=True:
+    - ``streaming_kind`` MUST be ``"push"`` or ``"poll"``.
+
+    Optional but constrained:
+    - ``min_fps`` and ``max_fps`` (default 5/30) MUST satisfy
+      ``1 <= min_fps <= max_fps <= 60``.
+    - ``max_chunk_bytes`` (default 65536) MUST be ``<= 1 << 20`` (1 MiB hard
+      ceiling — anything larger indicates a tool that should be paginated,
+      not streamed).
+    - ``default_interval_s`` (poll only) MUST be a positive number when
+      present.
+
+    See specs/001-tool-stream-ui/contracts/protocol-messages.md §B5.
+    """
+    if not metadata.get("streamable"):
+        return  # nothing to validate
+    kind = metadata.get("streaming_kind")
+    if kind not in ("push", "poll"):
+        raise ValueError(
+            f"streamable tool metadata must set streaming_kind to 'push' or "
+            f"'poll', got {kind!r}"
+        )
+    min_fps = metadata.get("min_fps", 5)
+    max_fps = metadata.get("max_fps", 30)
+    if not isinstance(min_fps, int) or not isinstance(max_fps, int):
+        raise ValueError(
+            f"min_fps and max_fps must be integers, got {min_fps!r}, {max_fps!r}"
+        )
+    if not (1 <= min_fps <= max_fps <= 60):
+        raise ValueError(
+            f"streamable tool fps clamp invalid: must satisfy "
+            f"1 <= min_fps <= max_fps <= 60, got min={min_fps}, max={max_fps}"
+        )
+    max_chunk_bytes = metadata.get("max_chunk_bytes", 65536)
+    if not isinstance(max_chunk_bytes, int) or max_chunk_bytes <= 0:
+        raise ValueError(
+            f"max_chunk_bytes must be a positive integer, got {max_chunk_bytes!r}"
+        )
+    if max_chunk_bytes > (1 << 20):
+        raise ValueError(
+            f"max_chunk_bytes={max_chunk_bytes} exceeds 1 MiB hard ceiling; "
+            f"streaming is not the right pattern for chunks this large"
+        )
+    if kind == "poll":
+        interval = metadata.get("default_interval_s")
+        if interval is not None and (not isinstance(interval, (int, float)) or interval <= 0):
+            raise ValueError(
+                f"default_interval_s must be a positive number, got {interval!r}"
+            )

@@ -4,6 +4,12 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { toast } from "sonner";
 import { API_URL } from "../config";
+import { mergeStreamChunk } from "../utils/streamMerge";
+import type {
+    UIStreamDataMessage,
+    StreamSubscribedMessage,
+    StreamSubscriptionRecord,
+} from "../types/streaming";
 
 export interface SecurityFlag {
     tool_name: string;
@@ -124,6 +130,36 @@ function detectDeviceCapabilities(): Record<string, unknown> {
 
 // ---------------------------------------------------------------------------
 
+/**
+ * 001-tool-stream-ui: send a `stream_subscribe` message in the correct wire
+ * format for the tool's `kind`. Push-streaming tools require `session_id` at
+ * the message level and omit `interval_seconds`; poll tools use the legacy
+ * interval-driven shape. Centralising this prevents the three auto-subscribe
+ * call sites (ui_render, saved_components_list, chat_loaded) from drifting.
+ */
+export function sendStreamSubscribe(
+    ws: WebSocket,
+    toolName: string,
+    cfg: { default_interval: number; kind?: string },
+    params: Record<string, unknown>,
+    chatId: string | null,
+): void {
+    if (cfg.kind === "push") {
+        ws.send(JSON.stringify({
+            type: "ui_event",
+            action: "stream_subscribe",
+            session_id: chatId,
+            payload: { tool_name: toolName, params },
+        }));
+    } else {
+        ws.send(JSON.stringify({
+            type: "ui_event",
+            action: "stream_subscribe",
+            payload: { tool_name: toolName, interval_seconds: cfg.default_interval, params },
+        }));
+    }
+}
+
 export type ConnectionState = "disconnected" | "connecting" | "connected" | "reconnecting";
 
 const MAX_RECONNECT_ATTEMPTS = 10;
@@ -175,8 +211,26 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
     }, [token]);
 
     const setActiveChatId = useCallback((id: string | null, replace = false) => {
+        const oldId = activeChatIdRef.current;
         activeChatIdRef.current = id;
         setActiveChatIdState(id);
+
+        // 001-tool-stream-ui (US2 T046): when the active chat changes, drop
+        // any push-stream client-side records for the OLD chat. The server
+        // already moves them to dormant via load_chat → pause_chat (T042),
+        // so we just clean up the local refs to keep activeSubscriptionsRef
+        // honest.
+        if (oldId && oldId !== id) {
+            const stale: string[] = [];
+            pushStreamsRef.current.forEach((rec, sid) => {
+                if (rec.chat_id === oldId) stale.push(sid);
+            });
+            stale.forEach((sid) => {
+                pushStreamsRef.current.delete(sid);
+                streamSeqRef.current.delete(sid);
+            });
+        }
+
         // Sync chat ID to URL
         const params = new URLSearchParams(window.location.search);
         if (id) {
@@ -207,7 +261,15 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
     }>>({});
     const activeSubscriptionsRef = useRef<Map<string, { interval: number; params: Record<string, unknown> }>>(new Map());
     const chatSubscriptionsMapRef = useRef<Map<string, Map<string, { interval: number; params: Record<string, unknown> }>>>(new Map());
-    const streamableToolsRef = useRef<Record<string, { agent_id: string; default_interval: number }>>({});
+    const streamableToolsRef = useRef<Record<string, { agent_id: string; default_interval: number; kind?: string }>>({});
+
+    // 001-tool-stream-ui: per-stream client-side state for the new push path.
+    // - pushStreamsRef: stream_id → subscription record (so a manual retry
+    //   button can re-issue stream_subscribe with the original args).
+    // - streamSeqRef: stream_id → highest seq seen (so we drop out-of-order
+    //   chunks per contracts/frontend-events.md §1).
+    const pushStreamsRef = useRef<Map<string, StreamSubscriptionRecord>>(new Map());
+    const streamSeqRef = useRef<Map<string, number>>(new Map());
 
     const [deviceCapabilities, setDeviceCapabilities] = useState<DeviceCapabilityFlags>({
         hasMicrophone: false,
@@ -289,27 +351,37 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                     const chatId = activeChatIdRef.current;
                     if (chatId && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
                         for (const comp of components) {
-                            wsRef.current.send(JSON.stringify({
-                                type: "ui_event",
-                                action: "save_component",
-                                payload: {
-                                    chat_id: chatId,
-                                    component_data: comp,
-                                    component_type: (comp.type as string) || "unknown",
-                                    title: (comp.title as string) || (comp.type as string) || "Component",
-                                }
-                            }));
-
-                            // Auto-subscribe to live streaming if this tool is streamable
                             const sourceTool = comp._source_tool as string | undefined;
-                            if (sourceTool && streamableToolsRef.current[sourceTool] && !activeSubscriptionsRef.current.has(sourceTool)) {
-                                const cfg = streamableToolsRef.current[sourceTool];
-                                activeSubscriptionsRef.current.set(sourceTool, { interval: cfg.default_interval, params: {} });
+                            const sourceParams = (comp._source_params as Record<string, unknown> | undefined) || {};
+                            const cfg = sourceTool ? streamableToolsRef.current[sourceTool] : undefined;
+                            // 001-tool-stream-ui (US2 T047): skip auto-save for
+                            // streaming components. Saving every chunk would bloat
+                            // history and confuse the "latest version" semantics —
+                            // the subscription metadata is the persistent thing, not
+                            // the chunks (per A-007 / FR-009).
+                            const isStreamComponent = (
+                                (typeof comp.id === "string" && (comp.id as string).startsWith("stream-"))
+                                || (cfg?.kind === "push")
+                            );
+                            if (!isStreamComponent) {
                                 wsRef.current.send(JSON.stringify({
                                     type: "ui_event",
-                                    action: "stream_subscribe",
-                                    payload: { tool_name: sourceTool, interval_seconds: cfg.default_interval, params: {} }
+                                    action: "save_component",
+                                    payload: {
+                                        chat_id: chatId,
+                                        component_data: comp,
+                                        component_type: (comp.type as string) || "unknown",
+                                        title: (comp.title as string) || (comp.type as string) || "Component",
+                                    }
                                 }));
+                            }
+
+                            // Auto-subscribe to live streaming if this tool is streamable.
+                            // Runs for BOTH push and poll kinds — for push tools this is
+                            // how the first snapshot turns into a live-updating stream.
+                            if (sourceTool && cfg && !activeSubscriptionsRef.current.has(sourceTool)) {
+                                activeSubscriptionsRef.current.set(sourceTool, { interval: cfg.default_interval, params: sourceParams });
+                                sendStreamSubscribe(wsRef.current, sourceTool, cfg, sourceParams, chatId);
                             }
                         }
                     }
@@ -325,6 +397,41 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
             case "ui_update":
                 setUiComponents((data.components as Record<string, unknown>[]) || []);
                 break;
+
+            // 001-tool-stream-ui: incoming push streaming chunk.
+            // See contracts/frontend-events.md §1.
+            case "ui_stream_data": {
+                const msg = data as unknown as UIStreamDataMessage;
+
+                // Defense in depth: drop chunks for chats other than the
+                // currently-loaded one. The server already gates by chat,
+                // but this catches the race where a chunk arrives just as
+                // the user navigates away.
+                if (msg.session_id && msg.session_id !== activeChatIdRef.current) {
+                    break;
+                }
+
+                // Drop out-of-order chunks (a retry may have re-issued the
+                // tool call and a stale chunk from the previous attempt
+                // might arrive late).
+                const lastSeq = streamSeqRef.current.get(msg.stream_id) ?? -1;
+                if (msg.seq <= lastSeq) {
+                    break;
+                }
+                streamSeqRef.current.set(msg.stream_id, msg.seq);
+
+                // Merge into uiComponents by id (preserves React fiber
+                // identity for sibling components).
+                setUiComponents((prev) => mergeStreamChunk(prev, msg));
+
+                // Terminal chunk → drop the client-side subscription record
+                // and the seq tracker.
+                if (msg.terminal) {
+                    pushStreamsRef.current.delete(msg.stream_id);
+                    streamSeqRef.current.delete(msg.stream_id);
+                }
+                break;
+            }
 
             case "ui_append":
                 setUiComponents(prev => [...prev, ...((data.components as Record<string, unknown>[]) || [])]);
@@ -393,11 +500,9 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                                 for (const [toolName, config] of savedSubs.entries()) {
                                     if (!activeSubscriptionsRef.current.has(toolName)) {
                                         activeSubscriptionsRef.current.set(toolName, config);
-                                        wsRef.current.send(JSON.stringify({
-                                            type: "ui_event",
-                                            action: "stream_subscribe",
-                                            payload: { tool_name: toolName, interval_seconds: config.interval, params: config.params }
-                                        }));
+                                        const cfg = streamableToolsRef.current[toolName]
+                                            ?? { default_interval: config.interval, kind: "poll" };
+                                        sendStreamSubscribe(wsRef.current, toolName, cfg, config.params, loadedChatId);
                                     }
                                 }
                             }
@@ -415,16 +520,14 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
 
                     // Auto-subscribe to streams for any streamable tools on this chat's canvas
                     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                        const chatId = activeChatIdRef.current;
                         for (const sc of data.components as SavedComponent[]) {
                             const sourceTool = sc.component_data?._source_tool as string | undefined;
+                            const sourceParams = (sc.component_data?._source_params as Record<string, unknown> | undefined) || {};
                             if (sourceTool && streamableToolsRef.current[sourceTool] && !activeSubscriptionsRef.current.has(sourceTool)) {
                                 const cfg = streamableToolsRef.current[sourceTool];
-                                activeSubscriptionsRef.current.set(sourceTool, { interval: cfg.default_interval, params: {} });
-                                wsRef.current.send(JSON.stringify({
-                                    type: "ui_event",
-                                    action: "stream_subscribe",
-                                    payload: { tool_name: sourceTool, interval_seconds: cfg.default_interval, params: {} }
-                                }));
+                                activeSubscriptionsRef.current.set(sourceTool, { interval: cfg.default_interval, params: sourceParams });
+                                sendStreamSubscribe(wsRef.current, sourceTool, cfg, sourceParams, chatId);
                             }
                         }
                     }
@@ -605,8 +708,24 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                 break;
             }
 
-            case "stream_subscribed":
+            case "stream_subscribed": {
+                // Existing legacy poll path: no client-side bookkeeping.
+                // 001-tool-stream-ui push path: record the subscription so
+                // we can re-issue on manual retry. The server includes
+                // `attached: true` when this client joined an existing
+                // deduplicated subscription (FR-009a) — same recording.
+                const sub = data as unknown as StreamSubscribedMessage;
+                if (sub.stream_id) {
+                    pushStreamsRef.current.set(sub.stream_id, {
+                        stream_id: sub.stream_id,
+                        chat_id: sub.session_id ?? "",
+                        tool_name: sub.tool_name,
+                        agent_id: sub.agent_id,
+                        params: {}, // populated by the original subscribe call
+                    });
+                }
                 break;
+            }
 
             case "stream_unsubscribed": {
                 const unsubTool = data.tool_name as string;
