@@ -131,6 +131,12 @@ class BaseA2AAgent:
         # only for callback-style tools that take a StreamCtx parameter.
         self._active_streams: Dict[str, "tuple[asyncio.Task, Optional[StreamCtx]]"] = {}
 
+        # Strong refs to the outer wrapper tasks for streaming dispatches.
+        # asyncio only keeps weak refs to create_task results, so we pin each
+        # task here until it completes — otherwise the GC can collect the
+        # wrapper before it registers its runner_task in _active_streams.
+        self._stream_wrapper_tasks: set = set()
+
         self._logger = logging.getLogger(self.__class__.__name__)
 
     def _init_crypto(self):
@@ -169,9 +175,13 @@ class BaseA2AAgent:
             tags = list(self.skill_tags) if self.skill_tags else []
             skill_metadata = {}
             # Legacy single-key form: top-level "streamable" with a poll
-            # config dict.
+            # config dict. Defaults streaming_kind to "poll" so the
+            # validate_streaming_metadata check at RegisterAgent time (which
+            # requires an explicit kind) accepts it.
             if "streamable" in info:
                 skill_metadata["streamable"] = info["streamable"]
+                if isinstance(info["streamable"], dict):
+                    skill_metadata.setdefault("streaming_kind", "poll")
             # 001-tool-stream-ui: tools may declare a full metadata dict
             # under the "metadata" key (containing streamable, streaming_kind,
             # max_fps, min_fps, max_chunk_bytes). Merge it into the skill
@@ -268,7 +278,19 @@ class BaseA2AAgent:
             tool_info = self.mcp_server.tools.get(tool_name) if hasattr(self.mcp_server, "tools") else None
             tool_fn = tool_info.get("function") if tool_info else None
             if tool_fn is not None and is_streaming_tool(tool_fn):
-                await self._handle_streaming_request(ws, msg, tool_fn)
+                # Run the stream as a detached task so the agent's WebSocket
+                # message loop stays free to accept OTHER tool calls and
+                # ToolStreamCancel messages while this generator keeps
+                # emitting. Awaiting inline would deadlock the agent for the
+                # duration of the stream (which is often unbounded, e.g.
+                # `live_system_metrics`'s `while True`). _handle_streaming_request
+                # registers itself in self._active_streams for cancellation.
+                # We keep a strong reference in _stream_wrapper_tasks because
+                # asyncio only weak-refs create_task results and the GC would
+                # otherwise drop this task before its inner runner registers.
+                task = asyncio.create_task(self._handle_streaming_request(ws, msg, tool_fn))
+                self._stream_wrapper_tasks.add(task)
+                task.add_done_callback(self._stream_wrapper_tasks.discard)
                 return
             # Fallthrough: tool exists but isn't a streaming tool — run as
             # one-shot. The orchestrator should not have set _stream=True

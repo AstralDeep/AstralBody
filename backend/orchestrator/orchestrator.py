@@ -1794,12 +1794,19 @@ COMPONENT UPDATE RULES:
                         tool_results.extend(res_list)
 
                     # Collect tool UI components and tag each (recursively) with source metadata
-                    def _tag_source(comp, agent_id, tool_name):
-                        """Recursively tag a component dict and all nested children."""
+                    def _tag_source(comp, agent_id, tool_name, tool_params=None):
+                        """Recursively tag a component dict and all nested children.
+
+                        `tool_params` is only tagged on the top-level node — the
+                        frontend auto-subscribe path reads it there to replay the
+                        same arguments on `stream_subscribe`.
+                        """
                         if not isinstance(comp, dict):
                             return
                         comp["_source_agent"] = agent_id
                         comp["_source_tool"] = tool_name
+                        if tool_params is not None:
+                            comp["_source_params"] = tool_params
                         for key in ("content", "children"):
                             nested = comp.get(key)
                             if isinstance(nested, list):
@@ -1812,8 +1819,18 @@ COMPONENT UPDATE RULES:
                             tc = llm_msg.tool_calls[i_tc] if i_tc < len(llm_msg.tool_calls) else None
                             t_name = tc.function.name if tc else ""
                             a_id = tool_to_agent.get(t_name, "")
+                            t_params: Dict[str, Any] = {}
+                            if tc is not None:
+                                try:
+                                    raw_args = tc.function.arguments
+                                    if isinstance(raw_args, str):
+                                        t_params = json.loads(raw_args) if raw_args else {}
+                                    elif isinstance(raw_args, dict):
+                                        t_params = raw_args
+                                except (ValueError, TypeError):
+                                    t_params = {}
                             for comp in res.ui_components:
-                                _tag_source(comp, a_id, t_name)
+                                _tag_source(comp, a_id, t_name, tool_params=t_params)
                                 tool_ui_components.append(comp)
 
                     if tool_ui_components:
