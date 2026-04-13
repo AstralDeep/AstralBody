@@ -130,6 +130,36 @@ function detectDeviceCapabilities(): Record<string, unknown> {
 
 // ---------------------------------------------------------------------------
 
+/**
+ * 001-tool-stream-ui: send a `stream_subscribe` message in the correct wire
+ * format for the tool's `kind`. Push-streaming tools require `session_id` at
+ * the message level and omit `interval_seconds`; poll tools use the legacy
+ * interval-driven shape. Centralising this prevents the three auto-subscribe
+ * call sites (ui_render, saved_components_list, chat_loaded) from drifting.
+ */
+export function sendStreamSubscribe(
+    ws: WebSocket,
+    toolName: string,
+    cfg: { default_interval: number; kind?: string },
+    params: Record<string, unknown>,
+    chatId: string | null,
+): void {
+    if (cfg.kind === "push") {
+        ws.send(JSON.stringify({
+            type: "ui_event",
+            action: "stream_subscribe",
+            session_id: chatId,
+            payload: { tool_name: toolName, params },
+        }));
+    } else {
+        ws.send(JSON.stringify({
+            type: "ui_event",
+            action: "stream_subscribe",
+            payload: { tool_name: toolName, interval_seconds: cfg.default_interval, params },
+        }));
+    }
+}
+
 export type ConnectionState = "disconnected" | "connecting" | "connected" | "reconnecting";
 
 const MAX_RECONNECT_ATTEMPTS = 10;
@@ -321,6 +351,9 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                     const chatId = activeChatIdRef.current;
                     if (chatId && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
                         for (const comp of components) {
+                            const sourceTool = comp._source_tool as string | undefined;
+                            const sourceParams = (comp._source_params as Record<string, unknown> | undefined) || {};
+                            const cfg = sourceTool ? streamableToolsRef.current[sourceTool] : undefined;
                             // 001-tool-stream-ui (US2 T047): skip auto-save for
                             // streaming components. Saving every chunk would bloat
                             // history and confuse the "latest version" semantics —
@@ -328,46 +361,27 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                             // the chunks (per A-007 / FR-009).
                             const isStreamComponent = (
                                 (typeof comp.id === "string" && (comp.id as string).startsWith("stream-"))
-                                || (typeof comp._source_tool === "string"
-                                    && (streamableToolsRef.current[comp._source_tool as string]?.kind === "push"))
+                                || (cfg?.kind === "push")
                             );
-                            if (isStreamComponent) continue;
-                            wsRef.current.send(JSON.stringify({
-                                type: "ui_event",
-                                action: "save_component",
-                                payload: {
-                                    chat_id: chatId,
-                                    component_data: comp,
-                                    component_type: (comp.type as string) || "unknown",
-                                    title: (comp.title as string) || (comp.type as string) || "Component",
-                                }
-                            }));
+                            if (!isStreamComponent) {
+                                wsRef.current.send(JSON.stringify({
+                                    type: "ui_event",
+                                    action: "save_component",
+                                    payload: {
+                                        chat_id: chatId,
+                                        component_data: comp,
+                                        component_type: (comp.type as string) || "unknown",
+                                        title: (comp.title as string) || (comp.type as string) || "Component",
+                                    }
+                                }));
+                            }
 
-                            // Auto-subscribe to live streaming if this tool is streamable
-                            const sourceTool = comp._source_tool as string | undefined;
-                            const sourceParams = (comp._source_params as Record<string, unknown> | undefined) || {};
-                            if (sourceTool && streamableToolsRef.current[sourceTool] && !activeSubscriptionsRef.current.has(sourceTool)) {
-                                const cfg = streamableToolsRef.current[sourceTool];
+                            // Auto-subscribe to live streaming if this tool is streamable.
+                            // Runs for BOTH push and poll kinds — for push tools this is
+                            // how the first snapshot turns into a live-updating stream.
+                            if (sourceTool && cfg && !activeSubscriptionsRef.current.has(sourceTool)) {
                                 activeSubscriptionsRef.current.set(sourceTool, { interval: cfg.default_interval, params: sourceParams });
-                                // 001-tool-stream-ui: route push-streamable tools through the new
-                                // path. The orchestrator distinguishes by tool_cfg.kind and
-                                // dispatches to StreamManager (push) vs the legacy poller.
-                                // Both paths share the same `stream_subscribe` action name; the
-                                // server picks the right handler based on the tool's metadata.
-                                if (cfg.kind === "push") {
-                                    wsRef.current.send(JSON.stringify({
-                                        type: "ui_event",
-                                        action: "stream_subscribe",
-                                        session_id: chatId,
-                                        payload: { tool_name: sourceTool, params: sourceParams }
-                                    }));
-                                } else {
-                                    wsRef.current.send(JSON.stringify({
-                                        type: "ui_event",
-                                        action: "stream_subscribe",
-                                        payload: { tool_name: sourceTool, interval_seconds: cfg.default_interval, params: sourceParams }
-                                    }));
-                                }
+                                sendStreamSubscribe(wsRef.current, sourceTool, cfg, sourceParams, chatId);
                             }
                         }
                     }
@@ -486,11 +500,9 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                                 for (const [toolName, config] of savedSubs.entries()) {
                                     if (!activeSubscriptionsRef.current.has(toolName)) {
                                         activeSubscriptionsRef.current.set(toolName, config);
-                                        wsRef.current.send(JSON.stringify({
-                                            type: "ui_event",
-                                            action: "stream_subscribe",
-                                            payload: { tool_name: toolName, interval_seconds: config.interval, params: config.params }
-                                        }));
+                                        const cfg = streamableToolsRef.current[toolName]
+                                            ?? { default_interval: config.interval, kind: "poll" };
+                                        sendStreamSubscribe(wsRef.current, toolName, cfg, config.params, loadedChatId);
                                     }
                                 }
                             }
@@ -508,16 +520,14 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
 
                     // Auto-subscribe to streams for any streamable tools on this chat's canvas
                     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                        const chatId = activeChatIdRef.current;
                         for (const sc of data.components as SavedComponent[]) {
                             const sourceTool = sc.component_data?._source_tool as string | undefined;
+                            const sourceParams = (sc.component_data?._source_params as Record<string, unknown> | undefined) || {};
                             if (sourceTool && streamableToolsRef.current[sourceTool] && !activeSubscriptionsRef.current.has(sourceTool)) {
                                 const cfg = streamableToolsRef.current[sourceTool];
-                                activeSubscriptionsRef.current.set(sourceTool, { interval: cfg.default_interval, params: {} });
-                                wsRef.current.send(JSON.stringify({
-                                    type: "ui_event",
-                                    action: "stream_subscribe",
-                                    payload: { tool_name: sourceTool, interval_seconds: cfg.default_interval, params: {} }
-                                }));
+                                activeSubscriptionsRef.current.set(sourceTool, { interval: cfg.default_interval, params: sourceParams });
+                                sendStreamSubscribe(wsRef.current, sourceTool, cfg, sourceParams, chatId);
                             }
                         }
                     }
