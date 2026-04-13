@@ -246,49 +246,57 @@ function renderComponent(comp: AnyProps, index: number, onSaveComponent?: (compo
 
     const baseProps = { ...props, onSaveComponent, onSendMessage, onTablePaginate };
 
+    // 001-tool-stream-ui T022: prefer the component's stable `id` as the
+    // React key when present. Streaming components carry `id == stream_id`
+    // (assigned by the agent SDK / orchestrator), so React reconciliation
+    // keeps the same fiber across chunk merges and sibling components do
+    // NOT remount when one streaming tile updates. Falls back to the array
+    // index for components without an id (the existing behavior).
+    const key = (props.id as string | undefined) ?? `idx-${index}`;
+
     switch (type) {
         case "container":
-            return <RenderContainer key={index} {...baseProps} />;
+            return <RenderContainer key={key} {...baseProps} />;
         case "text":
-            return <RenderText key={index} {...baseProps} />;
+            return <RenderText key={key} {...baseProps} />;
         case "card":
-            return <RenderCard key={index} {...baseProps} />;
+            return <RenderCard key={key} {...baseProps} />;
         case "table":
-            return <RenderTable key={index} {...baseProps} />;
+            return <RenderTable key={key} {...baseProps} />;
         case "metric":
-            return <RenderMetric key={index} {...baseProps} />;
+            return <RenderMetric key={key} {...baseProps} />;
         case "alert":
-            return <RenderAlert key={index} {...baseProps} />;
+            return <RenderAlert key={key} {...baseProps} />;
         case "progress":
-            return <RenderProgress key={index} {...baseProps} />;
+            return <RenderProgress key={key} {...baseProps} />;
         case "grid":
-            return <RenderGrid key={index} {...baseProps} />;
+            return <RenderGrid key={key} {...baseProps} />;
         case "list":
-            return <RenderList key={index} {...baseProps} />;
+            return <RenderList key={key} {...baseProps} />;
         case "code":
-            return <RenderCode key={index} {...baseProps} />;
+            return <RenderCode key={key} {...baseProps} />;
         case "bar_chart":
-            return <RenderBarChart key={index} {...baseProps} />;
+            return <RenderBarChart key={key} {...baseProps} />;
         case "line_chart":
-            return <RenderLineChart key={index} {...baseProps} />;
+            return <RenderLineChart key={key} {...baseProps} />;
         case "pie_chart":
-            return <RenderPieChart key={index} {...baseProps} />;
+            return <RenderPieChart key={key} {...baseProps} />;
         case "plotly_chart":
-            return <RenderGenericPlotly key={index} {...baseProps} />;
+            return <RenderGenericPlotly key={key} {...baseProps} />;
         case "divider":
-            return <hr key={index} className="border-white/10 my-3" />;
+            return <hr key={key} className="border-white/10 my-3" />;
         case "button":
-            return <RenderButton key={index} {...baseProps} />;
+            return <RenderButton key={key} {...baseProps} />;
         case "collapsible":
-            return <RenderCollapsible key={index} {...baseProps} />;
+            return <RenderCollapsible key={key} {...baseProps} />;
         case "file_upload":
-            return <RenderFileUpload key={index} {...baseProps} />;
+            return <RenderFileUpload key={key} {...baseProps} />;
         case "file_download":
-            return <RenderFileDownload key={index} {...baseProps} />;
+            return <RenderFileDownload key={key} {...baseProps} />;
         case "color_picker":
-            return <RenderColorPicker key={index} {...baseProps} />;
+            return <RenderColorPicker key={key} {...baseProps} />;
         case "theme_apply":
-            return <RenderThemeApply key={index} {...baseProps} />;
+            return <RenderThemeApply key={key} {...baseProps} />;
         default:
             console.warn(`Unknown component type: ${type}`);
             return null;

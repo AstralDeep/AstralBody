@@ -7,13 +7,14 @@ Includes:
 - Weather tools: get_current_weather, get_hourly_forecast, get_daily_forecast, get_weekly_forecast
 - Visualization tools: generate_weather_charts
 """
+import asyncio
 import os
 import sys
 import json
 import logging
 import time
 import concurrent.futures
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, AsyncIterator
 from datetime import datetime, timedelta
 
 import requests
@@ -25,6 +26,7 @@ from shared.primitives import (
     Alert, Grid, BarChart, LineChart, PieChart, PlotlyChart, List_,
     FileDownload, create_ui_response
 )
+from shared.stream_sdk import streaming_tool, StreamComponents
 from .data_models import ExtendedWeatherData, HistoricalWeatherData
 
 logger = logging.getLogger(__name__)
@@ -1614,10 +1616,149 @@ def get_weekly_forecast(
 
 
 # =============================================================================
+# STREAMING TOOLS (001-tool-stream-ui reference implementation)
+# =============================================================================
+
+@streaming_tool(
+    name="live_temperature",
+    description=(
+        "Stream live temperature for a location, updating every interval_s "
+        "seconds. Returns a Metric component with the latest reading."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "latitude": {
+                "type": "number",
+                "description": "Latitude coordinate",
+            },
+            "longitude": {
+                "type": "number",
+                "description": "Longitude coordinate",
+            },
+            "interval_s": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 60,
+                "default": 5,
+                "description": "Polling interval in seconds (clamped 1..60)",
+            },
+        },
+        "required": ["latitude", "longitude"],
+    },
+    max_fps=10,
+    min_fps=5,
+)
+async def live_temperature(args: Dict[str, Any], credentials: Dict[str, Any]) -> AsyncIterator[StreamComponents]:
+    """Yield a Metric component every ``interval_s`` seconds with the latest
+    temperature reading from Open-Meteo.
+
+    Reference implementation for the 001-tool-stream-ui feature. The
+    cleanup pattern (try/finally) is REQUIRED of every streaming tool —
+    when the orchestrator sends ToolStreamCancel, the SDK propagates
+    GeneratorExit through this generator and the finally block runs.
+    """
+    interval = max(1, min(60, int(args.get("interval_s", 5))))
+    lat = float(args["latitude"])
+    lon = float(args["longitude"])
+    last_temp: Optional[float] = None
+
+    try:
+        while True:
+            try:
+                # Run the blocking HTTP call in a thread so we don't stall
+                # the event loop. Open-Meteo's free tier supports the
+                # current_weather=true short form.
+                data = await asyncio.to_thread(
+                    _make_api_request,
+                    f"{OPEN_METEO_BASE_URL}/forecast",
+                    {"latitude": lat, "longitude": lon, "current_weather": True},
+                    10,
+                )
+                current = data.get("current_weather") or {}
+                temp = current.get("temperature")
+                if temp is None:
+                    raise Exception("Open-Meteo response missing current_weather.temperature")
+
+                delta_str = ""
+                if last_temp is not None:
+                    delta = temp - last_temp
+                    delta_str = f"{delta:+.1f}°C"
+                last_temp = float(temp)
+
+                yield StreamComponents(
+                    components=[{
+                        "type": "metric",
+                        "label": "Live Temperature",
+                        "value": f"{temp:.1f}°C",
+                        "subtitle": f"{lat:.2f}, {lon:.2f}",
+                        "delta": delta_str,
+                    }],
+                    raw={
+                        "temperature_c": temp,
+                        "wind_kph": current.get("windspeed"),
+                        "wind_dir": current.get("winddirection"),
+                        "weather_code": current.get("weathercode"),
+                        "ts": current.get("time"),
+                    },
+                )
+
+            except asyncio.CancelledError:
+                # Reraise so the outer finally runs
+                raise
+            except Exception as e:
+                # Surface as a transient error chunk; the orchestrator's
+                # _classify_error will route this to RECONNECTING (when US5
+                # lands) and the auto-retry kicks in.
+                logger.warning(f"live_temperature poll failed: {e}")
+                yield StreamComponents(
+                    components=[],
+                    error={
+                        "code": "upstream_unavailable",
+                        "message": f"Open-Meteo error: {e}",
+                        "phase": "reconnecting",
+                        "retryable": False,
+                    },
+                )
+
+            await asyncio.sleep(interval)
+    finally:
+        logger.info(f"live_temperature stream stopping (lat={lat}, lon={lon})")
+
+
+# =============================================================================
 # TOOL REGISTRY
 # =============================================================================
 
 TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
+    "live_temperature": {
+        "function": live_temperature,
+        "scope": "tools:read",
+        "description": (
+            "Stream live temperature updates for a location. Pushes a new "
+            "Metric component every interval_s seconds."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "latitude": {"type": "number"},
+                "longitude": {"type": "number"},
+                "interval_s": {"type": "integer", "minimum": 1, "maximum": 60, "default": 5},
+            },
+            "required": ["latitude", "longitude"],
+        },
+        # 001-tool-stream-ui: marks this tool as push-streamable so the
+        # orchestrator routes stream_subscribe to StreamManager rather than
+        # the legacy poll path. validate_streaming_metadata enforces the
+        # shape at register_agent time.
+        "metadata": {
+            "streamable": True,
+            "streaming_kind": "push",
+            "max_fps": 10,
+            "min_fps": 5,
+            "max_chunk_bytes": 65536,
+        },
+    },
     "geocode_location": {
         "function": geocode_location,
         "scope": "tools:search",

@@ -42,7 +42,9 @@ from orchestrator.task_state import TaskManager, TaskState
 
 from shared.protocol import (
     Message, MCPRequest, MCPResponse, UIEvent, UIRender, UIUpdate,
-    RegisterAgent, RegisterUI, AgentCard, AgentSkill, ToolProgress
+    RegisterAgent, RegisterUI, AgentCard, AgentSkill, ToolProgress,
+    ToolStreamData, ToolStreamEnd, ToolStreamCancel,
+    validate_streaming_metadata,
 )
 from shared.primitives import (
     Container, Text, Card, Grid, Alert, MetricCard, ProgressBar,
@@ -50,6 +52,7 @@ from shared.primitives import (
 )
 from rote.rote import ROTE
 from shared.feature_flags import flags
+from orchestrator.stream_manager import StreamManager
 
 load_dotenv(override=False)
 
@@ -86,11 +89,24 @@ class Orchestrator:
         self._chat_locks: Dict[int, asyncio.Lock] = {}  # per-websocket lock for chat serialization
         self._registered_events: Dict[int, asyncio.Event] = {}  # gate non-register messages until auth completes
 
-        # Live streaming subscriptions
+        # Live streaming subscriptions (existing POLLING path — kept for tools
+        # that declare streaming_kind == "poll")
         self._stream_tasks: Dict[int, Dict[str, asyncio.Task]] = {}   # ws_id -> {tool_name -> Task}
         self._stream_subs: Dict[int, Dict[str, Dict]] = {}            # ws_id -> {tool_name -> config}
-        self._streamable_tools: Dict[str, Dict] = {}                  # tool_name -> {agent_id, default_interval, min_interval, max_interval}
+        self._streamable_tools: Dict[str, Dict] = {}                  # tool_name -> {agent_id, default_interval, min_interval, max_interval, kind}
         self._MAX_STREAM_SUBSCRIPTIONS = 10
+
+        # 001-tool-stream-ui: PUSH streaming via StreamManager. Constructed
+        # below after self.rote is initialized; the manager wires into
+        # _safe_send and ui_sessions for per-subscriber authorization.
+        self.stream_manager: Optional[StreamManager] = None  # populated post-init
+
+        # 001-tool-stream-ui: per-ws "currently active chat" tracker. Used by
+        # pause_chat / resume on load_chat transitions so the stream manager
+        # knows which chat to pause for THIS websocket (each tab has its own
+        # active chat — pausing/resuming one tab must not affect others).
+        # Keyed by id(websocket).
+        self._ws_active_chat: Dict[int, str] = {}
 
         # A2A external agent connections (JSON-RPC transport)
         self.a2a_clients: Dict[str, Any] = {}  # agent_id -> A2A client
@@ -137,6 +153,20 @@ class Orchestrator:
 
         # ROTE — Response Output Translation Engine
         self.rote = ROTE()
+
+        # 001-tool-stream-ui: instantiate the push-streaming manager now that
+        # ROTE exists. Wires _safe_send for per-subscriber delivery,
+        # ui_sessions for the per-chunk authorization invariant
+        # (data-model.md §8), and the streaming agent dispatcher / canceller
+        # methods defined below for routing MCPRequest with _stream=True.
+        self.stream_manager = StreamManager(
+            rote=self.rote,
+            send_to_ws=self._safe_send,
+            get_user_session=lambda ws: self.ui_sessions.get(ws),
+            agent_dispatcher=self._dispatch_stream_request,
+            agent_canceller=self._cancel_stream_request,
+            validate_chat_ownership=self._validate_chat_ownership_for_stream,
+        )
 
         # Hook/Event System — extensible lifecycle events
         self.hooks = HookManager()
@@ -199,16 +229,57 @@ class Orchestrator:
         # Register tool→scope mapping in the permission manager
         self.tool_permissions.register_tool_scopes(card.agent_id, tool_scope_map)
 
-        # Extract streamable tool metadata for live streaming
+        # Extract streamable tool metadata for live streaming.
+        # Two paths: legacy POLL streaming (orchestrator drives cadence) and
+        # 001-tool-stream-ui PUSH streaming (tool is an async generator).
         for skill in card.skills:
-            streamable_cfg = getattr(skill, 'metadata', {}).get("streamable")
-            if streamable_cfg and skill.scope in ("tools:read", "tools:system"):
-                self._streamable_tools[skill.id] = {
-                    "agent_id": card.agent_id,
-                    "default_interval": streamable_cfg.get("default_interval", 2),
-                    "min_interval": streamable_cfg.get("min_interval", 1),
-                    "max_interval": streamable_cfg.get("max_interval", 30),
-                }
+            skill_metadata = getattr(skill, 'metadata', {}) or {}
+            # Validate streaming metadata up front (001-tool-stream-ui T016).
+            # Catches misconfigured tools at registration time with a clear
+            # error rather than silently accepting and failing at subscribe.
+            try:
+                validate_streaming_metadata(skill_metadata)
+            except ValueError as e:
+                logger.warning(
+                    f"Agent '{card.agent_id}' tool '{skill.id}' rejected: "
+                    f"invalid streaming metadata: {e}"
+                )
+                continue
+
+            # Legacy single-bool form: metadata.streamable is a config dict
+            # (poll path). New form: metadata.streamable is True with
+            # streaming_kind set to "push" or "poll".
+            streamable_value = skill_metadata.get("streamable")
+            if not streamable_value:
+                continue
+            if skill.scope not in ("tools:read", "tools:system"):
+                continue
+
+            # Determine kind: explicit metadata.streaming_kind wins; legacy
+            # dict form (no kind) defaults to "poll".
+            kind = skill_metadata.get("streaming_kind")
+            if kind not in ("push", "poll"):
+                kind = "poll"
+
+            entry: Dict[str, Any] = {
+                "agent_id": card.agent_id,
+                "kind": kind,
+            }
+            # Poll path config
+            if isinstance(streamable_value, dict):
+                entry["default_interval"] = streamable_value.get("default_interval", 2)
+                entry["min_interval"] = streamable_value.get("min_interval", 1)
+                entry["max_interval"] = streamable_value.get("max_interval", 30)
+            else:
+                entry["default_interval"] = skill_metadata.get("default_interval_s", 2)
+                entry["min_interval"] = 1
+                entry["max_interval"] = 30
+            # Push path bounds
+            if kind == "push":
+                entry["max_fps"] = skill_metadata.get("max_fps", 30)
+                entry["min_fps"] = skill_metadata.get("min_fps", 5)
+                entry["max_chunk_bytes"] = skill_metadata.get("max_chunk_bytes", 65536)
+            self._streamable_tools[skill.id] = entry
 
         # Extract agent's ECIES public key for E2E credential encryption
         public_key_jwk = getattr(card, 'metadata', {}).get("public_key_jwk") if getattr(card, 'metadata', None) else None
@@ -454,6 +525,32 @@ class Orchestrator:
                         "percentage": msg.percentage,
                     }))
 
+            # 001-tool-stream-ui: forward streaming tool chunks to subscribers
+            # via StreamManager. Gated on the feature flag — when off, agents
+            # never send these messages so the branches are never taken.
+            elif isinstance(msg, ToolStreamData) and flags.is_enabled("tool_streaming"):
+                if self.stream_manager is not None:
+                    try:
+                        await self.stream_manager.handle_agent_chunk(msg)
+                    except NotImplementedError:
+                        # Phase 2 foundational: handlers are stubs until US1
+                        # implements the routing. Drop the chunk silently
+                        # while we're still building the feature.
+                        logger.debug(
+                            f"ToolStreamData received but stream_manager handler "
+                            f"not yet implemented (stream_id={msg.stream_id})"
+                        )
+
+            elif isinstance(msg, ToolStreamEnd) and flags.is_enabled("tool_streaming"):
+                if self.stream_manager is not None:
+                    try:
+                        await self.stream_manager.handle_agent_end(msg)
+                    except NotImplementedError:
+                        logger.debug(
+                            f"ToolStreamEnd received but stream_manager handler "
+                            f"not yet implemented (stream_id={msg.stream_id})"
+                        )
+
         except Exception as e:
             logger.error(f"Error handling agent message: {e}")
 
@@ -628,10 +725,49 @@ class Orchestrator:
                     chat_id = msg.payload.get("chat_id")
                     chat = self.history.get_chat(chat_id, user_id=user_id)
                     if chat:
+                        # 001-tool-stream-ui (US2 T042): pause any push
+                        # streams this websocket has in its previous chat
+                        # before sending chat_loaded. The streams transition
+                        # to DORMANT and become eligible for US3 resume on
+                        # return.
+                        ws_id = id(websocket)
+                        old_chat_id = self._ws_active_chat.get(ws_id)
+                        if old_chat_id and old_chat_id != chat_id and self.stream_manager is not None:
+                            try:
+                                await self.stream_manager.pause_chat(websocket, old_chat_id)
+                            except Exception as e:
+                                logger.warning(f"pause_chat failed: {e}")
+                        self._ws_active_chat[ws_id] = chat_id
+
                         await self._safe_send(websocket, json.dumps({
                             "type": "chat_loaded",
                             "chat": chat
                         }))
+
+                        # 001-tool-stream-ui (US3 T054): after chat_loaded
+                        # is sent, resume any DORMANT streams for this chat.
+                        # Each resumed stream gets a stream_subscribed reply
+                        # so the frontend re-registers it in pushStreamsRef
+                        # and starts merging chunks again.
+                        if self.stream_manager is not None:
+                            try:
+                                resumed = await self.stream_manager.resume(
+                                    websocket, user_id, chat_id,
+                                )
+                                for resumed_stream_id, resumed_tool_name in resumed:
+                                    cfg = self._streamable_tools.get(resumed_tool_name, {})
+                                    await self._safe_send(websocket, json.dumps({
+                                        "type": "stream_subscribed",
+                                        "stream_id": resumed_stream_id,
+                                        "tool_name": resumed_tool_name,
+                                        "agent_id": cfg.get("agent_id", ""),
+                                        "session_id": chat_id,
+                                        "max_fps": cfg.get("max_fps", 30),
+                                        "min_fps": cfg.get("min_fps", 5),
+                                        "attached": False,
+                                    }))
+                            except Exception as e:
+                                logger.warning(f"stream_manager.resume failed: {e}")
                     else:
                         await self.send_ui_render(websocket, [
                             Alert(message="Chat not found", variant="error").to_json()
@@ -1010,17 +1146,49 @@ class Orchestrator:
 
                 # --- Live Streaming ---
                 elif msg.action == "stream_subscribe":
-                    if flags.is_enabled("live_streaming"):
+                    # 001-tool-stream-ui: route based on the tool's declared
+                    # kind. PUSH tools go through StreamManager (the new
+                    # async-generator path); POLL tools stay on the existing
+                    # _handle_stream_subscribe path. The kind comes from the
+                    # tool's metadata, populated at register_agent time.
+                    tool_name = msg.payload.get("tool_name", "")
+                    tool_cfg = self._streamable_tools.get(tool_name, {})
+                    kind = tool_cfg.get("kind", "poll")
+
+                    if kind == "push":
+                        if not flags.is_enabled("tool_streaming"):
+                            await self._safe_send(websocket, json.dumps({
+                                "type": "stream_error",
+                                "request_action": "stream_subscribe",
+                                "session_id": msg.session_id,
+                                "payload": {
+                                    "tool_name": tool_name,
+                                    "code": "not_streamable",
+                                    "message": "Push streaming is not enabled (FF_TOOL_STREAMING)",
+                                },
+                            }))
+                        else:
+                            await self._handle_push_stream_subscribe(
+                                websocket, msg.session_id, msg.payload, user_id
+                            )
+                    elif flags.is_enabled("live_streaming"):
                         await self._handle_stream_subscribe(websocket, msg.payload)
                     else:
                         await self._safe_send(websocket, json.dumps({
-                            "type": "stream_error", "tool_name": msg.payload.get("tool_name", ""),
+                            "type": "stream_error", "tool_name": tool_name,
                             "error": "Live streaming is not enabled"
                         }))
 
                 elif msg.action == "stream_unsubscribe":
-                    if flags.is_enabled("live_streaming"):
-                        await self._handle_stream_unsubscribe(websocket, msg.payload)
+                    # 001-tool-stream-ui: dual routing as above. The push
+                    # path takes a stream_id; the poll path takes a tool_name.
+                    payload = msg.payload or {}
+                    if payload.get("stream_id") and flags.is_enabled("tool_streaming"):
+                        await self._handle_push_stream_unsubscribe(
+                            websocket, msg.session_id, payload, user_id
+                        )
+                    elif flags.is_enabled("live_streaming"):
+                        await self._handle_stream_unsubscribe(websocket, payload)
 
                 elif msg.action == "stream_list":
                     if flags.is_enabled("live_streaming"):
@@ -1626,12 +1794,19 @@ COMPONENT UPDATE RULES:
                         tool_results.extend(res_list)
 
                     # Collect tool UI components and tag each (recursively) with source metadata
-                    def _tag_source(comp, agent_id, tool_name):
-                        """Recursively tag a component dict and all nested children."""
+                    def _tag_source(comp, agent_id, tool_name, tool_params=None):
+                        """Recursively tag a component dict and all nested children.
+
+                        `tool_params` is only tagged on the top-level node — the
+                        frontend auto-subscribe path reads it there to replay the
+                        same arguments on `stream_subscribe`.
+                        """
                         if not isinstance(comp, dict):
                             return
                         comp["_source_agent"] = agent_id
                         comp["_source_tool"] = tool_name
+                        if tool_params is not None:
+                            comp["_source_params"] = tool_params
                         for key in ("content", "children"):
                             nested = comp.get(key)
                             if isinstance(nested, list):
@@ -1644,8 +1819,18 @@ COMPONENT UPDATE RULES:
                             tc = llm_msg.tool_calls[i_tc] if i_tc < len(llm_msg.tool_calls) else None
                             t_name = tc.function.name if tc else ""
                             a_id = tool_to_agent.get(t_name, "")
+                            t_params: Dict[str, Any] = {}
+                            if tc is not None:
+                                try:
+                                    raw_args = tc.function.arguments
+                                    if isinstance(raw_args, str):
+                                        t_params = json.loads(raw_args) if raw_args else {}
+                                    elif isinstance(raw_args, dict):
+                                        t_params = raw_args
+                                except (ValueError, TypeError):
+                                    t_params = {}
                             for comp in res.ui_components:
-                                _tag_source(comp, a_id, t_name)
+                                _tag_source(comp, a_id, t_name, tool_params=t_params)
                                 tool_ui_components.append(comp)
 
                     if tool_ui_components:
@@ -2669,6 +2854,234 @@ COMPONENT UPDATE RULES:
     # LIVE STREAMING SUBSCRIPTIONS
     # =========================================================================
 
+    # =========================================================================
+    # PUSH STREAMING (001-tool-stream-ui)
+    # =========================================================================
+
+    def _validate_chat_ownership_for_stream(
+        self, websocket, user_id: str, chat_id: str,
+    ) -> bool:
+        """Callback used by StreamManager to verify that ``chat_id`` belongs
+        to ``user_id``. Reuses the existing history.get_chat ownership
+        check that all other chat-scoped operations go through.
+        Returns True if the chat exists AND is owned by the user.
+        """
+        try:
+            chat = self.history.get_chat(chat_id, user_id=user_id)
+            return chat is not None
+        except Exception as e:
+            logger.warning(f"chat ownership check failed: {e}")
+            return False
+
+    async def _dispatch_stream_request(
+        self,
+        agent_id: str,
+        tool_name: str,
+        args: Dict[str, Any],
+        stream_id: str,
+        user_id: Optional[str],
+    ) -> str:
+        """Dispatch a streaming tool call to an agent. Returns the
+        ``request_id`` so StreamManager can populate ``_request_to_key``.
+
+        Unlike ``_execute_via_websocket`` (the synchronous response path),
+        this fire-and-forgets the request. The chunks arrive asynchronously
+        as ``ToolStreamData`` messages and are routed back via
+        ``handle_agent_message`` → ``stream_manager.handle_agent_chunk``.
+
+        Per RFC 8693 (constitution VII), if user credentials are stored for
+        this user/agent pair we inject them encrypted alongside the args
+        before sending — exactly like the polling path.
+        """
+        if agent_id not in self.agents:
+            raise RuntimeError(f"agent {agent_id!r} is not connected")
+
+        request_id = f"stream_{tool_name}_{int(time.time() * 1000)}_{stream_id[-6:]}"
+
+        # Inject per-user credentials (E2E encrypted — only the agent can decrypt)
+        full_args = dict(args)
+        if user_id and agent_id:
+            try:
+                creds = self.credential_manager.get_agent_credentials_encrypted(user_id, agent_id)
+                if creds:
+                    full_args["_credentials"] = creds
+                    full_args["_credentials_encrypted"] = True
+            except Exception as e:
+                logger.debug(f"credential injection skipped for {agent_id}: {e}")
+
+        request = MCPRequest(
+            request_id=request_id,
+            method="tools/call",
+            params={
+                "name": tool_name,
+                "arguments": full_args,
+                "_stream": True,
+                "_stream_id": stream_id,
+            },
+        )
+        agent_ws = self.agents[agent_id]
+        await agent_ws.send(request.to_json())
+        logger.info(
+            f"Dispatched streaming tool call: {tool_name} → {agent_id} "
+            f"(stream_id={stream_id}, request_id={request_id})"
+        )
+        return request_id
+
+    async def _cancel_stream_request(
+        self, agent_id: str, request_id: str, stream_id: str,
+    ) -> None:
+        """Send a ``ToolStreamCancel`` to the agent for an in-flight stream.
+        The agent's BaseA2AAgent loop closes the underlying generator and
+        sends a final ``ToolStreamData`` with ``terminal: true``.
+        """
+        if agent_id not in self.agents:
+            logger.debug(
+                f"_cancel_stream_request: agent {agent_id} not connected, "
+                f"nothing to cancel"
+            )
+            return
+        cancel_msg = ToolStreamCancel(request_id=request_id, stream_id=stream_id)
+        try:
+            await self.agents[agent_id].send(cancel_msg.to_json())
+            logger.info(
+                f"Sent ToolStreamCancel: stream_id={stream_id} → {agent_id}"
+            )
+        except Exception as e:
+            logger.warning(f"_cancel_stream_request failed: {e}")
+
+    async def _handle_push_stream_subscribe(
+        self, websocket, session_id: Optional[str], payload: Dict, user_id: str
+    ) -> None:
+        """Handle a stream_subscribe action for a PUSH-streaming tool.
+
+        Delegates to ``self.stream_manager.subscribe(...)``. Translates
+        ``ValueError`` into a ``stream_error`` reply per
+        contracts/protocol-messages.md §A6. On success replies with
+        ``stream_subscribed``.
+
+        US1 implementation: subscribe() actually creates a subscription and
+        the agent dispatcher fires the request. agent_id is looked up from
+        the orchestrator's _streamable_tools registry so the client doesn't
+        need to know it (mirrors the legacy poll path).
+        """
+        tool_name = payload.get("tool_name", "")
+        params = payload.get("params", {})
+        chat_id = session_id or ""
+
+        if not tool_name or not chat_id:
+            await self._safe_send(websocket, json.dumps({
+                "type": "stream_error",
+                "request_action": "stream_subscribe",
+                "session_id": session_id,
+                "payload": {
+                    "tool_name": tool_name,
+                    "code": "params_invalid",
+                    "message": "tool_name and session_id are required",
+                },
+            }))
+            return
+
+        tool_cfg = self._streamable_tools.get(tool_name)
+        if tool_cfg is None or tool_cfg.get("kind") != "push":
+            await self._safe_send(websocket, json.dumps({
+                "type": "stream_error",
+                "request_action": "stream_subscribe",
+                "session_id": session_id,
+                "payload": {
+                    "tool_name": tool_name,
+                    "code": "not_streamable",
+                    "message": f"tool {tool_name!r} is not push-streamable",
+                },
+            }))
+            return
+
+        agent_id = tool_cfg["agent_id"]
+
+        # Permission check (mirrors legacy poll path)
+        if not self.tool_permissions.is_tool_allowed(user_id, agent_id, tool_name):
+            await self._safe_send(websocket, json.dumps({
+                "type": "stream_error",
+                "request_action": "stream_subscribe",
+                "session_id": session_id,
+                "payload": {
+                    "tool_name": tool_name,
+                    "code": "unauthorized",
+                    "message": "permission denied for this tool",
+                },
+            }))
+            return
+
+        try:
+            stream_id, attached = await self.stream_manager.subscribe(
+                ws=websocket,
+                user_id=user_id,
+                chat_id=chat_id,
+                tool_name=tool_name,
+                agent_id=agent_id,
+                params=params,
+                tool_metadata=tool_cfg,
+            )
+        except ValueError as e:
+            await self._safe_send(websocket, json.dumps({
+                "type": "stream_error",
+                "request_action": "stream_subscribe",
+                "session_id": session_id,
+                "payload": {
+                    "tool_name": tool_name,
+                    "code": "params_invalid",
+                    "message": str(e),
+                },
+            }))
+            return
+
+        # Success — reply with stream_subscribed including the FPS bounds and
+        # the FR-009a `attached` flag so the client knows whether this was a
+        # fresh subscribe or an attach to an existing deduplicated stream.
+        cfg = self._streamable_tools.get(tool_name, {})
+        await self._safe_send(websocket, json.dumps({
+            "type": "stream_subscribed",
+            "stream_id": stream_id,
+            "tool_name": tool_name,
+            "agent_id": agent_id,
+            "session_id": session_id,
+            "max_fps": cfg.get("max_fps", 30),
+            "min_fps": cfg.get("min_fps", 5),
+            "attached": attached,
+        }))
+
+    async def _handle_push_stream_unsubscribe(
+        self, websocket, session_id: Optional[str], payload: Dict, user_id: str
+    ) -> None:
+        """Handle a stream_unsubscribe for a push-streamed subscription.
+
+        Per FR-009a per-subscriber semantics, removing this websocket from
+        the subscription's ``subscribers`` list does NOT necessarily stop
+        the stream — only when the list becomes empty does the stream
+        transition to STOPPED. The actual logic is in
+        ``StreamManager.unsubscribe`` (US4 T066).
+        """
+        stream_id = payload.get("stream_id", "")
+        if not stream_id:
+            return  # silent: malformed unsubscribe is not worth a reply
+        try:
+            await self.stream_manager.unsubscribe(websocket, stream_id)
+        except NotImplementedError:
+            logger.debug(
+                f"push stream_unsubscribe received but unsubscribe() not yet "
+                f"implemented (stream_id={stream_id})"
+            )
+        except ValueError as e:
+            await self._safe_send(websocket, json.dumps({
+                "type": "stream_error",
+                "request_action": "stream_unsubscribe",
+                "session_id": session_id,
+                "payload": {
+                    "stream_id": stream_id,
+                    "code": "unauthorized",
+                    "message": str(e),
+                },
+            }))
+
     async def _handle_stream_subscribe(self, websocket, payload: Dict):
         """Subscribe a UI client to a live-streaming tool."""
         tool_name = payload.get("tool_name")
@@ -3027,14 +3440,24 @@ COMPONENT UPDATE RULES:
             else:
                 total_tools += len(agent["tools"])
 
-        # Build streamable tools list for live streaming
-        streamable_list = {}
-        if flags.is_enabled("live_streaming"):
-            for tool_name, cfg in self._streamable_tools.items():
-                streamable_list[tool_name] = {
-                    "agent_id": cfg["agent_id"],
-                    "default_interval": cfg["default_interval"],
-                }
+        # Build streamable tools list for live streaming. Includes BOTH the
+        # legacy poll path (gated by FF_LIVE_STREAMING) AND the new push path
+        # (001-tool-stream-ui, gated by FF_TOOL_STREAMING). The frontend
+        # uses the `kind` field to decide which subscribe payload to send.
+        streamable_list: Dict[str, Dict[str, Any]] = {}
+        live_enabled = flags.is_enabled("live_streaming")
+        push_enabled = flags.is_enabled("tool_streaming")
+        for tool_name, cfg in self._streamable_tools.items():
+            kind = cfg.get("kind", "poll")
+            if kind == "push" and not push_enabled:
+                continue
+            if kind == "poll" and not live_enabled:
+                continue
+            streamable_list[tool_name] = {
+                "agent_id": cfg["agent_id"],
+                "default_interval": cfg.get("default_interval", 5),
+                "kind": kind,
+            }
 
         await self._safe_send(websocket, json.dumps({
             "type": "system_config",
@@ -3125,6 +3548,15 @@ COMPONENT UPDATE RULES:
                 ))
 
             self._cleanup_streams(websocket)
+            # 001-tool-stream-ui (US2 T043): pause any push streams owned by
+            # this websocket. They transition to DORMANT and become eligible
+            # for resume on the user's return (US3).
+            if self.stream_manager is not None:
+                try:
+                    await self.stream_manager.detach(websocket)
+                except Exception as e:
+                    logger.warning(f"stream_manager.detach failed: {e}")
+            self._ws_active_chat.pop(id(websocket), None)
             if websocket in self.ui_clients:
                 self.ui_clients.remove(websocket)
             if websocket in self.ui_sessions:
@@ -3146,6 +3578,13 @@ COMPONENT UPDATE RULES:
             logger.info("UI client disconnected")
         finally:
             self._cleanup_streams(websocket)
+            # 001-tool-stream-ui (US2 T043): same detach for the legacy path.
+            if self.stream_manager is not None:
+                try:
+                    await self.stream_manager.detach(websocket)
+                except Exception as e:
+                    logger.warning(f"stream_manager.detach failed: {e}")
+            self._ws_active_chat.pop(id(websocket), None)
             if websocket in self.ui_clients:
                 self.ui_clients.remove(websocket)
             if websocket in self.ui_sessions:

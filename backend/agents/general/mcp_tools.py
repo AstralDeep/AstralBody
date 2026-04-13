@@ -4,11 +4,13 @@ MCP Tools — tool functions that return UI Primitives.
 Includes:
 - Patient tools (mock): search_patients, graph_patient_data
 - System tools: get_system_status, get_cpu_info, get_memory_info, get_disk_info
+- System streaming tools: live_system_metrics (push streaming, 001-tool-stream-ui)
 - Search tools: search_wikipedia
 """
+import asyncio
 import os
 import sys
-from typing import List, Dict, Any
+from typing import List, Dict, Any, AsyncIterator
 import arxiv
 from openai import OpenAI
 from typing import Dict, Any, List, Optional
@@ -41,6 +43,7 @@ from shared.primitives import (
     FileDownload, create_ui_response, ColorPicker, Button, Divider,
     ThemeApply
 )
+from shared.stream_sdk import streaming_tool, StreamComponents
 
 
 def generate_dynamic_chart(
@@ -652,6 +655,147 @@ def get_disk_info(session_id: str = "default", **kwargs) -> Dict[str, Any]:
 
 
 # =============================================================================
+# STREAMING SYSTEM TOOLS (001-tool-stream-ui)
+# =============================================================================
+#
+# `live_system_metrics` is the push-streaming counterpart to the four
+# legacy poll-based system tools above. Where those return a single snapshot
+# (and rely on the orchestrator's polling loop in FF_LIVE_STREAMING to call
+# them repeatedly), this one is an async generator that pushes a fresh
+# snapshot every `interval_s` seconds via the new push pipeline. The agent
+# owns the cadence, so we can:
+#
+# - Run psutil.cpu_percent() with the proper sampling interval (which the
+#   poll path can't do — it always passes interval=0).
+# - Coalesce all three metrics into ONE Card with a single stream id, so
+#   the user sees one component updating in place rather than three
+#   independently-rendering cards racing each other.
+# - Clean up cleanly via the try/finally pattern when the user navigates
+#   away (the orchestrator sends ToolStreamCancel which propagates as
+#   GeneratorExit through this function).
+#
+# Existing one-shot calls to get_system_status / get_cpu_info / get_memory_info /
+# get_disk_info are unchanged. The legacy poll path still works for users
+# who haven't enabled FF_TOOL_STREAMING.
+
+@streaming_tool(
+    name="live_system_metrics",
+    description=(
+        "Stream live CPU, memory, and disk usage metrics. Pushes a fresh "
+        "system status card every interval_s seconds, updating the same "
+        "component in place. Use this for monitoring dashboards instead of "
+        "the snapshot-style get_system_status."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "interval_s": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 30,
+                "default": 2,
+                "description": "How often to emit a fresh sample (seconds, 1-30)",
+            },
+        },
+    },
+    max_fps=2,   # cap at 2 fps — system metrics never need more than that
+    min_fps=1,
+)
+async def live_system_metrics(
+    args: Dict[str, Any], credentials: Dict[str, Any],
+) -> AsyncIterator[StreamComponents]:
+    """Push CPU + memory + disk usage as a single Card every interval_s seconds.
+
+    Why a single Card with a Grid of three MetricCards rather than three
+    top-level streams: the orchestrator merges-by-id at the top level, and
+    one consolidated component means one stream subscription, one network
+    chunk per update, one render. The frontend renders three pulse-updating
+    metrics inside a stable parent — exactly the htop / Activity Monitor
+    pattern users expect.
+
+    Cleanup: the try/finally swallows GeneratorExit when the user leaves
+    the chat. psutil holds no per-process state we need to release here,
+    but the pattern is required by the SDK contract for any future tool
+    that does (e.g. an open file handle, a socket).
+    """
+    interval = max(1, min(30, int(args.get("interval_s", 2))))
+
+    def _variant(percent: float) -> str:
+        if percent > 90:
+            return "error"
+        if percent > 70:
+            return "warning"
+        return "default"
+
+    # Prime the CPU sampler with a non-blocking 0-interval call so that the
+    # FIRST yield reflects activity since startup rather than a misleading
+    # 0%. (psutil.cpu_percent returns the delta since the previous call.)
+    psutil.cpu_percent(interval=0)
+
+    try:
+        while True:
+            # Sample. cpu_percent with interval=None returns the delta since
+            # the previous call — we control the sampling window via the
+            # asyncio.sleep below, so passing interval=0 is correct here.
+            cpu_percent = psutil.cpu_percent(interval=0)
+            mem = psutil.virtual_memory()
+            disk = psutil.disk_usage(_disk_root)
+
+            card = Card(
+                title="Live System Metrics",
+                content=[
+                    Grid(
+                        columns=3,
+                        children=[
+                            MetricCard(
+                                title="CPU Usage",
+                                value=f"{cpu_percent:.1f}%",
+                                progress=cpu_percent / 100,
+                                variant=_variant(cpu_percent),
+                            ),
+                            MetricCard(
+                                title="Memory Usage",
+                                value=f"{mem.percent:.1f}%",
+                                subtitle=f"{mem.used / (1024**3):.1f} / {mem.total / (1024**3):.1f} GB",
+                                progress=mem.percent / 100,
+                                variant=_variant(mem.percent),
+                            ),
+                            MetricCard(
+                                title="Disk Usage",
+                                value=f"{disk.percent:.1f}%",
+                                subtitle=f"{disk.used / (1024**3):.1f} / {disk.total / (1024**3):.1f} GB",
+                                progress=disk.percent / 100,
+                                variant=_variant(disk.percent),
+                            ),
+                        ],
+                    ),
+                    Text(
+                        content=f"Sampled every {interval}s · Platform: {platform.system()} {platform.release()}",
+                        variant="caption",
+                    ),
+                ],
+            )
+
+            yield StreamComponents(
+                components=[card.to_json()],
+                raw={
+                    "cpu_percent": cpu_percent,
+                    "memory_percent": mem.percent,
+                    "memory_used_gb": mem.used / (1024**3),
+                    "memory_total_gb": mem.total / (1024**3),
+                    "disk_percent": disk.percent,
+                    "disk_used_gb": disk.used / (1024**3),
+                    "disk_total_gb": disk.total / (1024**3),
+                    "ts": time.time(),
+                },
+            )
+
+            await asyncio.sleep(interval)
+    finally:
+        logger.info("live_system_metrics stream stopping")
+
+
+# =============================================================================
 # SEARCH TOOLS
 # =============================================================================
 import requests
@@ -1078,7 +1222,14 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     "get_system_status": {
         "function": get_system_status,
         "scope": "tools:system",
-        "description": "Get comprehensive system status including CPU, memory, and disk usage with visual metrics.",
+        "description": (
+            "Take a one-time SNAPSHOT of system status (CPU, memory, disk). "
+            "For LIVE / continuously-updating system metrics — including "
+            "any 'show me', 'monitor', 'watch', 'dashboard', 'live', or "
+            "'real-time' system request — prefer `live_system_metrics` "
+            "instead. Only use this tool when the user explicitly asks for "
+            "a snapshot or one-time check."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {}
@@ -1088,7 +1239,10 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     "get_cpu_info": {
         "function": get_cpu_info,
         "scope": "tools:system",
-        "description": "Get detailed CPU information including per-core usage.",
+        "description": (
+            "Take a one-time SNAPSHOT of detailed CPU information including "
+            "per-core usage. For LIVE CPU monitoring use `live_system_metrics`."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {}
@@ -1098,7 +1252,10 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     "get_memory_info": {
         "function": get_memory_info,
         "scope": "tools:system",
-        "description": "Get detailed memory (RAM + swap) information.",
+        "description": (
+            "Take a one-time SNAPSHOT of detailed memory (RAM + swap) "
+            "information. For LIVE memory monitoring use `live_system_metrics`."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {}
@@ -1108,12 +1265,51 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     "get_disk_info": {
         "function": get_disk_info,
         "scope": "tools:system",
-        "description": "Get disk partition and usage information.",
+        "description": (
+            "Take a one-time SNAPSHOT of disk partition and usage information. "
+            "For LIVE disk usage monitoring use `live_system_metrics`."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {}
         },
         "streamable": {"default_interval": 5, "min_interval": 2, "max_interval": 60}
+    },
+    # 001-tool-stream-ui: push-streaming counterpart to the four poll-based
+    # system tools above. Single consolidated Card with CPU + memory + disk
+    # that updates in place every interval_s seconds. Use this for live
+    # dashboards instead of the snapshot-style get_system_status.
+    "live_system_metrics": {
+        "function": live_system_metrics,
+        "scope": "tools:system",
+        "description": (
+            "STREAM LIVE CPU, memory, and disk usage. Pushes a fresh "
+            "system status card every interval_s seconds, updating the "
+            "same component in place. **PREFER THIS over `get_system_status` "
+            "for any request that mentions 'live', 'real-time', 'monitor', "
+            "'watch', 'dashboard', or 'show me' system metrics.** Use "
+            "`get_system_status` only when the user explicitly asks for a "
+            "one-time snapshot."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "interval_s": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 30,
+                    "default": 2,
+                    "description": "How often to emit a fresh sample (seconds)",
+                },
+            },
+        },
+        "metadata": {
+            "streamable": True,
+            "streaming_kind": "push",
+            "max_fps": 2,
+            "min_fps": 1,
+            "max_chunk_bytes": 65536,
+        },
     },
     "search_wikipedia": {
         "function": search_wikipedia,
