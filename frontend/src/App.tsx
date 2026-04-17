@@ -100,8 +100,9 @@ function App() {
         return {
           realm_access: { roles: ['admin', 'user'] },
           resource_access: { 'astral-frontend': { roles: ['admin', 'user'] } },
-          sub: 'dev-user-id',
-          preferred_username: 'DevUser'
+          sub: 'test_user',
+          preferred_username: 'test_user',
+          email: 'test_user@local'
         };
       }
       return null;
@@ -115,48 +116,23 @@ function App() {
   const userEmail = tokenPayload?.email || auth.user?.profile?.email || "";
   const clientId = import.meta.env.VITE_KEYCLOAK_CLIENT_ID || "astral-frontend";
 
-  // For mock auth, always return admin and user roles
   const useMockAuth = import.meta.env.VITE_USE_MOCK_AUTH === 'true';
 
-  // Debug: log environment variable value
-  console.log('Environment debug:', {
-    VITE_USE_MOCK_AUTH: import.meta.env.VITE_USE_MOCK_AUTH,
-    VITE_KEYCLOAK_CLIENT_ID: import.meta.env.VITE_KEYCLOAK_CLIENT_ID,
-    useMockAuth
-  });
-
-  let roles: string[] = [];
   let isUser = false;
   let isAdmin = false;
 
   if (useMockAuth) {
-    // Mock auth always has admin and user roles
-    console.log('Using mock auth - bypassing role checks');
-    roles = ['admin', 'user'];
     isUser = true;
     isAdmin = true;
   } else {
-    // Real auth: extract roles from token
-    console.log('Using real auth - extracting roles from token');
     const realmRoles = tokenPayload?.realm_access?.roles || [];
     const accountRoles = tokenPayload?.resource_access?.account?.roles || [];
     const clientRoles = tokenPayload?.resource_access?.[clientId]?.roles || [];
 
-    roles = [...realmRoles, ...accountRoles, ...clientRoles];
+    const roles = [...realmRoles, ...accountRoles, ...clientRoles];
     isUser = roles.includes("user");
     isAdmin = roles.includes("admin");
   }
-
-  // Debug logging
-  console.log('Auth debug:', {
-    useMockAuth,
-    tokenPayload,
-    clientId,
-    roles,
-    isUser,
-    isAdmin,
-    hasToken: !!auth.user?.access_token
-  });
 
   if (!useMockAuth && !isUser && !isAdmin) {
     return (

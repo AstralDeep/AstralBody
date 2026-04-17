@@ -23,6 +23,11 @@ import shutil
 
 logger = logging.getLogger("AuthProxy")
 
+if os.getenv("VITE_USE_MOCK_AUTH", "").lower() == "true":
+    logger.info("Mock auth ENABLED — all tokens accepted as test_user with roles [admin, user]")
+else:
+    logger.info("Mock auth disabled — Keycloak JWKS validation active")
+
 # =============================================================================
 # APIRouter for Auth & File endpoints (included in main app for OpenAPI docs)
 # =============================================================================
@@ -119,42 +124,37 @@ async def get_current_user_payload(request: Request, credentials: HTTPAuthorizat
             detail="Not authenticated",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    if os.getenv("VITE_USE_MOCK_AUTH") == "true":
+    if os.getenv("VITE_USE_MOCK_AUTH", "").lower() == "true":
         # Accept any token for mock auth (for testing)
-        # Check if it's the old dev-token or new JWT format
         if token == "dev-token":
             return {
-                "sub": "dev-user-id",
-                "preferred_username": "DevUser",
-                "realm_access": {"roles": ["admin", "user"]}
-            }
-        else:
-            # Try to decode as JWT for mock
-            try:
-                import base64
-                import json
-                # Extract payload from JWT
-                parts = token.split('.')
-                if len(parts) == 3:
-                    # Decode payload
-                    payload_b64 = parts[1]
-                    # Add padding if needed
-                    payload_b64 += '=' * ((4 - len(payload_b64) % 4) % 4)
-                    payload_json = base64.b64decode(payload_b64).decode('utf-8')
-                    payload = json.loads(payload_json)
-                    return payload
-            except:
-                # If decoding fails, return default mock user
-                pass
-            # Default mock user
-            return {
-                "sub": "dev-user-id",
-                "preferred_username": "DevUser",
+                "sub": "test_user",
+                "preferred_username": "test_user",
+                "email": "test_user@local",
                 "realm_access": {"roles": ["admin", "user"]},
                 "resource_access": {
                     "astral-frontend": {"roles": ["admin", "user"]}
                 }
             }
+        try:
+            import base64
+            parts = token.split('.')
+            if len(parts) == 3:
+                payload_b64 = parts[1]
+                payload_b64 += '=' * ((4 - len(payload_b64) % 4) % 4)
+                payload_json = base64.b64decode(payload_b64).decode('utf-8')
+                return json.loads(payload_json)
+        except Exception as e:
+            logger.debug(f"Mock JWT decode failed, falling back to default test_user: {e}")
+        return {
+            "sub": "test_user",
+            "preferred_username": "test_user",
+            "email": "test_user@local",
+            "realm_access": {"roles": ["admin", "user"]},
+            "resource_access": {
+                "astral-frontend": {"roles": ["admin", "user"]}
+            }
+        }
     
     authority, client_id, _ = _get_keycloak_config()
     if not authority or not client_id:
@@ -255,42 +255,9 @@ async def verify_admin(user_data: dict = Depends(get_current_user_payload)):
 # File Upload/Download Endpoints
 # =============================================================================
 
-@auth_router.post(
-    "/api/upload",
-    tags=["Files"],
-    summary="Upload a file",
-    description="Upload a file to the backend, associated with a session ID. Returns the file path.",
-)
-async def upload_file(file: UploadFile = File(...), session_id: str = Form("default"), user_id: str = Depends(require_user_id)):
-    """
-    Handle file uploads and save them to a temporary directory under the session id.
-    Returns the absolute file path.
-    """
-    try:
-        # Create tmp directory if it doesn't exist
-        # We go up one level from orchestrator to backend root
-        backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-        # User-specific upload directory
-        upload_dir = os.path.join(backend_dir, "tmp", user_id, session_id)
-        os.makedirs(upload_dir, exist_ok=True)
-
-        # Remove UUID renaming and instead use original filename (sanitize to avoid path traversal)
-        safe_filename = os.path.basename(file.filename)
-        file_path = os.path.join(upload_dir, safe_filename)
-
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-
-        logger.info(f"File uploaded by user {user_id}: {file.filename} -> {file_path}")
-        return JSONResponse(content={
-            "status": "success",
-            "filename": file.filename,
-            "file_path": file_path,
-            "user_id": user_id
-        })
-    except Exception as e:
-        logger.error(f"Upload failed for user {user_id}: {e}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
+# NOTE: POST /api/upload moved to backend/orchestrator/attachments/router.py
+# (feature 002-file-uploads) — supports the expanded type set, 30 MB cap,
+# user-scoped storage, and content-type sniffing.
 
 @auth_router.get(
     "/api/download/{session_id}/{filename}",
