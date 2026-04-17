@@ -176,3 +176,209 @@ def make_csv(rows: list[list[object]]) -> bytes:
     for r in rows:
         w.writerow(r)
     return out.getvalue().encode()
+
+
+# ---------------------------------------------------------------------------
+# Medical imaging fixture builders.
+# Each builder imports its library lazily so tests can individually skip when
+# the library isn't installed in the current env.
+# ---------------------------------------------------------------------------
+
+
+def make_dicom(
+    rows: int = 64,
+    cols: int = 64,
+    frames: int = 1,
+    patient_name: str = "ANON^TEST",
+    patient_id: str = "12345",
+    modality: str = "CT",
+) -> bytes:
+    """Build a minimal DICOM file with identifiable PHI tags in the header."""
+    import numpy as np  # type: ignore
+    import pydicom  # type: ignore
+    from pydicom.dataset import FileDataset, FileMetaDataset  # type: ignore
+    from pydicom.uid import ExplicitVRLittleEndian, generate_uid  # type: ignore
+
+    file_meta = FileMetaDataset()
+    file_meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.2"  # CT Image Storage
+    file_meta.MediaStorageSOPInstanceUID = generate_uid()
+    file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+    file_meta.ImplementationClassUID = generate_uid()
+
+    ds = FileDataset(
+        "<in-memory>", {}, file_meta=file_meta, preamble=b"\0" * 128,
+    )
+    ds.PatientName = patient_name
+    ds.PatientID = patient_id
+    ds.PatientBirthDate = "19700101"
+    ds.InstitutionName = "TEST CLINIC"
+    ds.ReferringPhysicianName = "DR^SMITH"
+    ds.StudyDate = "20250101"
+    ds.SeriesDate = "20250101"
+    ds.AccessionNumber = "ACC-001"
+    ds.StudyInstanceUID = generate_uid()
+    ds.SeriesInstanceUID = generate_uid()
+    ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
+    ds.SOPClassUID = file_meta.MediaStorageSOPClassUID
+
+    ds.Modality = modality
+    ds.Manufacturer = "TestCorp"
+    ds.BodyPartExamined = "HEAD"
+    ds.StudyDescription = "Test study"
+    ds.SeriesDescription = "Test series"
+    ds.Rows = rows
+    ds.Columns = cols
+    ds.SamplesPerPixel = 1
+    ds.PhotometricInterpretation = "MONOCHROME2"
+    ds.BitsAllocated = 16
+    ds.BitsStored = 16
+    ds.HighBit = 15
+    ds.PixelRepresentation = 0
+
+    if frames > 1:
+        ds.NumberOfFrames = frames
+        arr = (np.random.rand(frames, rows, cols) * 2048).astype(np.uint16)
+    else:
+        arr = (np.random.rand(rows, cols) * 2048).astype(np.uint16)
+    ds.PixelData = arr.tobytes()
+
+    ds.is_little_endian = True
+    ds.is_implicit_VR = False
+
+    buf = io.BytesIO()
+    pydicom.dcmwrite(buf, ds, write_like_original=False)
+    return buf.getvalue()
+
+
+def make_nifti(shape: Tuple[int, int, int] = (8, 8, 8), gz: bool = False) -> bytes:
+    """Build a tiny NIfTI (.nii) payload from a numpy array."""
+    import tempfile
+    import numpy as np  # type: ignore
+    import nibabel as nib  # type: ignore
+
+    data = (np.random.rand(*shape) * 100).astype(np.int16)
+    affine = np.eye(4)
+    img = nib.Nifti1Image(data, affine)
+    suffix = ".nii.gz" if gz else ".nii"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        nib.save(img, tmp.name)
+        tmp_path = tmp.name
+    try:
+        with open(tmp_path, "rb") as fh:
+            return fh.read()
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+
+def make_nrrd(shape: Tuple[int, int, int] = (8, 8, 8)) -> bytes:
+    """Build a tiny NRRD volume payload."""
+    import tempfile
+    import numpy as np  # type: ignore
+    import SimpleITK as sitk  # type: ignore
+
+    arr = (np.random.rand(*shape) * 100).astype(np.int16)
+    img = sitk.GetImageFromArray(arr)
+    with tempfile.NamedTemporaryFile(suffix=".nrrd", delete=False) as tmp:
+        sitk.WriteImage(img, tmp.name)
+        tmp_path = tmp.name
+    try:
+        with open(tmp_path, "rb") as fh:
+            return fh.read()
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+
+def make_mha(shape: Tuple[int, int, int] = (8, 8, 8)) -> bytes:
+    """Build a single-file MetaImage (.mha) payload."""
+    import tempfile
+    import numpy as np  # type: ignore
+    import SimpleITK as sitk  # type: ignore
+
+    arr = (np.random.rand(*shape) * 100).astype(np.int16)
+    img = sitk.GetImageFromArray(arr)
+    with tempfile.NamedTemporaryFile(suffix=".mha", delete=False) as tmp:
+        sitk.WriteImage(img, tmp.name)
+        tmp_path = tmp.name
+    try:
+        with open(tmp_path, "rb") as fh:
+            return fh.read()
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+
+def make_ome_tiff(shape: Tuple[int, int, int] = (3, 16, 16)) -> bytes:
+    """Build a minimal OME-TIFF payload (CYX, channels=3)."""
+    import numpy as np  # type: ignore
+    import tifffile  # type: ignore
+
+    arr = (np.random.rand(*shape) * 255).astype(np.uint8)
+    buf = io.BytesIO()
+    # Use `ome=True` so tifffile emits OME-XML; axes describes the dim order.
+    tifffile.imwrite(buf, arr, ome=True, metadata={"axes": "CYX"})
+    return buf.getvalue()
+
+
+def make_tiff(width: int = 32, height: int = 32) -> bytes:
+    """Build a plain 2-D TIFF (tifffile without OME metadata)."""
+    import numpy as np  # type: ignore
+    import tifffile  # type: ignore
+
+    arr = (np.random.rand(height, width, 3) * 255).astype(np.uint8)
+    buf = io.BytesIO()
+    tifffile.imwrite(buf, arr, photometric="rgb")
+    return buf.getvalue()
+
+
+def make_pyramidal_tiff(size: int = 512, levels: int = 3) -> bytes:
+    """Build a tiled pyramidal TIFF OpenSlide can read as a WSI.
+
+    The result is saved to a tempfile and returned as bytes — OpenSlide reads
+    from a path, but downstream tests go through ``_persist`` which writes the
+    bytes back to disk before opening, so the round-trip is fine.
+    """
+    import tempfile
+    import numpy as np  # type: ignore
+    import tifffile  # type: ignore
+
+    # Base level: RGB gradient for visual interest.
+    base = np.zeros((size, size, 3), dtype=np.uint8)
+    for y in range(size):
+        base[y, :, 0] = (y * 255) // max(1, size - 1)
+    for x in range(size):
+        base[:, x, 1] = (x * 255) // max(1, size - 1)
+    base[..., 2] = 128
+
+    with tempfile.NamedTemporaryFile(suffix=".tiff", delete=False) as tmp:
+        tmp_path = tmp.name
+
+    try:
+        with tifffile.TiffWriter(tmp_path, bigtiff=False) as tif:
+            cur = base
+            for level in range(levels):
+                tif.write(
+                    cur,
+                    photometric="rgb",
+                    tile=(256, 256),
+                    compression="zlib",
+                    subfiletype=0 if level == 0 else 1,
+                )
+                # Halve resolution for the next pyramid level.
+                cur = cur[::2, ::2, :]
+                if cur.shape[0] < 2 or cur.shape[1] < 2:
+                    break
+        with open(tmp_path, "rb") as fh:
+            return fh.read()
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass

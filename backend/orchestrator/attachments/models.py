@@ -10,7 +10,9 @@ from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-AttachmentCategory = Literal["document", "spreadsheet", "presentation", "text", "image"]
+AttachmentCategory = Literal[
+    "document", "spreadsheet", "presentation", "text", "image", "medical",
+]
 
 
 class Attachment(BaseModel):
