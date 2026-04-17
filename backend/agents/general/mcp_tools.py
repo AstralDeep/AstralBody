@@ -1419,3 +1419,306 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
         }
     },
 }
+
+
+# =============================================================================
+# File-handling tools (feature 002-file-uploads)
+# =============================================================================
+# Registered out-of-line to keep the diff against the main TOOL_REGISTRY tight
+# and to make it easy to iterate on the file-tool surface without touching the
+# rest of the registry.
+
+from agents.general.file_tools.read_document import read_document as _read_document
+from agents.general.file_tools.read_spreadsheet import read_spreadsheet as _read_spreadsheet
+from agents.general.file_tools.read_presentation import read_presentation as _read_presentation
+from agents.general.file_tools.read_text import read_text as _read_text
+from agents.general.file_tools.read_image import read_image as _read_image
+from agents.general.file_tools.list_attachments import list_attachments as _list_attachments
+from agents.general.file_tools.medical import (
+    compute_volume_statistics as _compute_volume_statistics,
+    extract_volume_slice as _extract_volume_slice,
+    extract_wsi_region as _extract_wsi_region,
+    read_bio_tiff as _read_bio_tiff,
+    read_czi as _read_czi,
+    read_dicom as _read_dicom,
+    read_nifti as _read_nifti,
+    read_volume_itk as _read_volume_itk,
+    read_wsi as _read_wsi,
+)
+
+TOOL_REGISTRY.update({
+    "read_document": {
+        "function": _read_document,
+        "scope": "tools:files",
+        "description": (
+            "Read a document attachment (PDF, DOCX, RTF, ODT) the user has uploaded. "
+            "Returns extracted text. PDFs without selectable text are rasterized and the "
+            "page images are returned in the `images` field for the vision-capable model "
+            "to interpret directly (no OCR step)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "attachment_id": {"type": "string", "format": "uuid"},
+                "page_range": {"type": "string", "description": "Optional. e.g. '1-5,9'. PDFs only."},
+                "max_chars": {"type": "integer", "minimum": 1, "default": 200000},
+            },
+            "required": ["attachment_id"],
+        },
+    },
+    "read_spreadsheet": {
+        "function": _read_spreadsheet,
+        "scope": "tools:files",
+        "description": (
+            "Read a spreadsheet attachment (XLSX, XLS, ODS, TSV, CSV) the user has uploaded. "
+            "Returns columns, rows, and (for multi-sheet workbooks) the available sheet names."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "attachment_id": {"type": "string", "format": "uuid"},
+                "sheet_name": {"type": "string"},
+                "max_rows": {"type": "integer", "minimum": 1, "default": 1000},
+            },
+            "required": ["attachment_id"],
+        },
+    },
+    "read_presentation": {
+        "function": _read_presentation,
+        "scope": "tools:files",
+        "description": (
+            "Read a presentation attachment (PPTX or ODP) the user has uploaded. "
+            "Returns each slide's title, body text, and speaker notes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "attachment_id": {"type": "string", "format": "uuid"},
+                "slide_range": {"type": "string", "description": "Optional. e.g. '1-5,9'."},
+            },
+            "required": ["attachment_id"],
+        },
+    },
+    "read_text": {
+        "function": _read_text,
+        "scope": "tools:files",
+        "description": (
+            "Read a text-class attachment (TXT, MD, JSON, YAML, XML, HTML, LOG, code) "
+            "the user has uploaded. Returns the raw source plus a stripped plaintext "
+            "rendering for HTML/XML."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "attachment_id": {"type": "string", "format": "uuid"},
+                "max_chars": {"type": "integer", "minimum": 1, "default": 200000},
+            },
+            "required": ["attachment_id"],
+        },
+    },
+    "read_image": {
+        "function": _read_image,
+        "scope": "tools:files",
+        "description": (
+            "Read an image attachment (PNG, JPG, GIF, WEBP) the user has uploaded "
+            "and return base64-encoded bytes ready for delivery to a vision model."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "attachment_id": {"type": "string", "format": "uuid"},
+            },
+            "required": ["attachment_id"],
+        },
+    },
+    "list_attachments": {
+        "function": _list_attachments,
+        "scope": "tools:files",
+        "description": (
+            "Enumerate the calling user's uploaded attachments. Useful when the user "
+            "refers to a file uploaded earlier in a different chat."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "enum": ["document", "spreadsheet", "presentation", "text", "image", "medical"],
+                },
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+            },
+        },
+    },
+    "read_dicom": {
+        "function": _read_dicom,
+        "scope": "tools:files",
+        "description": (
+            "Read a DICOM medical-imaging file (.dcm, .dicom) the user has uploaded. "
+            "Returns non-identifying metadata (modality, acquisition params, dimensions), "
+            "pixel intensity stats, and a base64 PNG thumbnail of the pixel data. "
+            "Patient-identifying fields (name, MRN, DOB, study/series dates, "
+            "institution, physician) are stripped by default; pass include_phi=true "
+            "ONLY when the user has authorised disclosure (e.g. pre-de-identified research data)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "attachment_id": {"type": "string", "format": "uuid"},
+                "include_phi": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Surface patient-identifying tags alongside the safe metadata.",
+                },
+            },
+            "required": ["attachment_id"],
+        },
+    },
+    "read_nifti": {
+        "function": _read_nifti,
+        "scope": "tools:files",
+        "description": (
+            "Read a NIfTI neuroimaging volume (.nii, .nii.gz) the user has uploaded. "
+            "Returns shape, voxel sizes, orientation, affine, pixel stats, and three "
+            "orthogonal mid-plane thumbnails (axial, coronal, sagittal) as base64 PNGs."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "attachment_id": {"type": "string", "format": "uuid"},
+            },
+            "required": ["attachment_id"],
+        },
+    },
+    "read_czi": {
+        "function": _read_czi,
+        "scope": "tools:files",
+        "description": (
+            "Read a Zeiss CZI microscopy file (.czi) the user has uploaded. "
+            "Returns dimension layout (STCZYX), pixel type, mosaic flag, and a "
+            "mid-plane thumbnail of the requested scene."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "attachment_id": {"type": "string", "format": "uuid"},
+                "scene": {"type": "integer", "minimum": 0, "default": 0},
+            },
+            "required": ["attachment_id"],
+        },
+    },
+    "read_bio_tiff": {
+        "function": _read_bio_tiff,
+        "scope": "tools:files",
+        "description": (
+            "Read a TIFF or OME-TIFF file (.tif, .tiff, .ome.tif, .ome.tiff) the user "
+            "has uploaded. Returns series layout, pyramid level count, OME-XML preview "
+            "(if present), and a thumbnail of series 0 at the coarsest pyramid level."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "attachment_id": {"type": "string", "format": "uuid"},
+            },
+            "required": ["attachment_id"],
+        },
+    },
+    "read_volume_itk": {
+        "function": _read_volume_itk,
+        "scope": "tools:files",
+        "description": (
+            "Read an NRRD or MetaImage volume (.nrrd, .mha, .mhd) the user has "
+            "uploaded. Returns size, spacing, origin, direction cosines, per-voxel "
+            "metadata, and a middle-slice thumbnail."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "attachment_id": {"type": "string", "format": "uuid"},
+            },
+            "required": ["attachment_id"],
+        },
+    },
+    "read_wsi": {
+        "function": _read_wsi,
+        "scope": "tools:files",
+        "description": (
+            "Read a whole-slide pathology image (.svs, .ndpi) the user has uploaded. "
+            "Returns pyramid level dimensions, downsample factors, microns-per-pixel, "
+            "vendor-specific properties, and the slide's embedded thumbnail as base64 PNG. "
+            "Use extract_wsi_region for high-magnification detail."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "attachment_id": {"type": "string", "format": "uuid"},
+            },
+            "required": ["attachment_id"],
+        },
+    },
+    "extract_volume_slice": {
+        "function": _extract_volume_slice,
+        "scope": "tools:files",
+        "description": (
+            "Render a single 2-D slice of a volumetric medical file (DICOM multi-frame, "
+            "NIfTI, NRRD/MHA/MHD, volumetric TIFF) as a base64 PNG. Call this after the "
+            "corresponding read_* tool when the user asks for a specific slice."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "attachment_id": {"type": "string", "format": "uuid"},
+                "axis": {
+                    "type": "string",
+                    "enum": ["x", "y", "z"],
+                    "default": "z",
+                    "description": "Which axis to slice along.",
+                },
+                "index": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "0-based slice index. Defaults to the middle of the axis.",
+                },
+            },
+            "required": ["attachment_id"],
+        },
+    },
+    "extract_wsi_region": {
+        "function": _extract_wsi_region,
+        "scope": "tools:files",
+        "description": (
+            "Crop a rectangular region from a whole-slide image at a specified pyramid "
+            "level. Returns a base64 PNG capped at 2048x2048. Coordinates x,y are in "
+            "level-0 reference pixels (OpenSlide convention)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "attachment_id": {"type": "string", "format": "uuid"},
+                "level": {"type": "integer", "minimum": 0, "default": 0},
+                "x": {"type": "integer", "default": 0},
+                "y": {"type": "integer", "default": 0},
+                "width": {"type": "integer", "minimum": 1, "maximum": 2048, "default": 512},
+                "height": {"type": "integer", "minimum": 1, "maximum": 2048, "default": 512},
+            },
+            "required": ["attachment_id"],
+        },
+    },
+    "compute_volume_statistics": {
+        "function": _compute_volume_statistics,
+        "scope": "tools:files",
+        "description": (
+            "Compute an intensity histogram and max-intensity projections (axial, "
+            "coronal, sagittal) for a volumetric medical file. Returns bin edges + "
+            "counts plus three thumbnail PNGs. Use when the user wants to understand "
+            "the distribution of voxel values or see overall structure."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "attachment_id": {"type": "string", "format": "uuid"},
+                "bins": {"type": "integer", "minimum": 2, "maximum": 512, "default": 64},
+            },
+            "required": ["attachment_id"],
+        },
+    },
+})
