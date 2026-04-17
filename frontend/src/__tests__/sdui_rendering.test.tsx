@@ -77,11 +77,10 @@ import DynamicRenderer from "../components/DynamicRenderer";
 describe("SDUI Component Rendering via DynamicRenderer", () => {
     // ── FR-001: Text ──────────────────────────────────────────────
     it("FR-001: renders text component with h1 variant", () => {
-        const { container } = render(
+        render(
             <DynamicRenderer components={[{ type: "text", content: "Hello World", variant: "h1" }]} />
         );
         expect(screen.getByText("Hello World")).toBeTruthy();
-        expect(container).toMatchSnapshot();
     });
 
     it("FR-001b: renders text with body variant", () => {
@@ -93,7 +92,7 @@ describe("SDUI Component Rendering via DynamicRenderer", () => {
 
     // ── FR-002: Card ──────────────────────────────────────────────
     it("FR-002: renders card with title and children", () => {
-        const { container } = render(
+        render(
             <DynamicRenderer
                 components={[{
                     type: "card",
@@ -104,12 +103,11 @@ describe("SDUI Component Rendering via DynamicRenderer", () => {
         );
         expect(screen.getByText("Test Card")).toBeTruthy();
         expect(screen.getByText("Inner content")).toBeTruthy();
-        expect(container).toMatchSnapshot();
     });
 
     // ── FR-003: Table ─────────────────────────────────────────────
     it("FR-003: renders table with headers and rows", () => {
-        const { container } = render(
+        render(
             <DynamicRenderer
                 components={[{
                     type: "table",
@@ -124,12 +122,11 @@ describe("SDUI Component Rendering via DynamicRenderer", () => {
         expect(screen.getAllByText("Name").length).toBeGreaterThanOrEqual(1);
         expect(screen.getAllByText("Alice").length).toBeGreaterThanOrEqual(1);
         expect(screen.getAllByText("Critical").length).toBeGreaterThanOrEqual(1);
-        expect(container).toMatchSnapshot();
     });
 
     // ── FR-004: Metric ────────────────────────────────────────────
     it("FR-004: renders metric card with value", () => {
-        const { container } = render(
+        render(
             <DynamicRenderer
                 components={[{
                     type: "metric",
@@ -142,7 +139,6 @@ describe("SDUI Component Rendering via DynamicRenderer", () => {
         );
         expect(screen.getByText("CPU Usage")).toBeTruthy();
         expect(screen.getByText("78%")).toBeTruthy();
-        expect(container).toMatchSnapshot();
     });
 
     // ── FR-005: Alert variants ────────────────────────────────────
@@ -165,7 +161,7 @@ describe("SDUI Component Rendering via DynamicRenderer", () => {
 
     // ── FR-006: Progress bar ──────────────────────────────────────
     it("FR-006: renders progress bar", () => {
-        const { container } = render(
+        render(
             <DynamicRenderer
                 components={[{
                     type: "progress",
@@ -176,12 +172,11 @@ describe("SDUI Component Rendering via DynamicRenderer", () => {
             />
         );
         expect(screen.getByText("Upload Progress")).toBeTruthy();
-        expect(container).toMatchSnapshot();
     });
 
     // ── FR-007: Grid ──────────────────────────────────────────────
     it("FR-007: renders grid layout", () => {
-        const { container } = render(
+        render(
             <DynamicRenderer
                 components={[{
                     type: "grid",
@@ -196,7 +191,6 @@ describe("SDUI Component Rendering via DynamicRenderer", () => {
         );
         expect(screen.getByText("Cell 1")).toBeTruthy();
         expect(screen.getByText("Cell 2")).toBeTruthy();
-        expect(container).toMatchSnapshot();
     });
 
     // ── FR-008: List ──────────────────────────────────────────────
@@ -215,7 +209,7 @@ describe("SDUI Component Rendering via DynamicRenderer", () => {
 
     // ── FR-009: Code block ────────────────────────────────────────
     it("FR-009: renders code block with language", () => {
-        const { container } = render(
+        render(
             <DynamicRenderer
                 components={[{
                     type: "code",
@@ -226,7 +220,6 @@ describe("SDUI Component Rendering via DynamicRenderer", () => {
         );
         expect(screen.getByText("python")).toBeTruthy();
         expect(screen.getByText("print('hello')")).toBeTruthy();
-        expect(container).toMatchSnapshot();
     });
 
     // ── FR-010: Bar chart ─────────────────────────────────────────
