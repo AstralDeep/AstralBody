@@ -6,7 +6,7 @@
  * Feature: 002-file-uploads (FR-009 cross-chat).
  */
 import { useCallback, useEffect, useState } from "react";
-import { FileText, Image as ImageIcon, Sheet, Presentation, FileCode, Trash2, Paperclip, Loader2 } from "lucide-react";
+import { FileText, Image as ImageIcon, Sheet, Presentation, FileCode, Stethoscope, Trash2, Paperclip, Loader2 } from "lucide-react";
 import type { AttachmentCategory } from "../lib/attachmentTypes";
 import type { UseAttachmentsAPI, UploadedAttachment } from "../hooks/useAttachments";
 
@@ -16,6 +16,7 @@ const CATEGORY_LABEL: Record<AttachmentCategory, string> = {
   presentation: "Presentations",
   text: "Text & Code",
   image: "Images",
+  medical: "Medical imaging",
 };
 
 function CategoryIcon({ category }: { category: AttachmentCategory }) {
@@ -25,6 +26,7 @@ function CategoryIcon({ category }: { category: AttachmentCategory }) {
     case "presentation": return <Presentation size={16} />;
     case "image": return <ImageIcon size={16} />;
     case "text": return <FileCode size={16} />;
+    case "medical": return <Stethoscope size={16} />;
   }
 }
 
@@ -79,13 +81,13 @@ export default function AttachmentLibrary({
 
   // Group by category in a stable order.
   const byCategory: Record<AttachmentCategory, UploadedAttachment[]> = {
-    document: [], spreadsheet: [], presentation: [], text: [], image: [],
+    document: [], spreadsheet: [], presentation: [], text: [], image: [], medical: [],
   };
   for (const a of items) {
     byCategory[a.category]?.push(a);
   }
   const orderedCategories: AttachmentCategory[] = [
-    "document", "spreadsheet", "presentation", "text", "image",
+    "document", "spreadsheet", "presentation", "text", "image", "medical",
   ];
 
   return (
