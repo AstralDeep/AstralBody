@@ -48,9 +48,11 @@ class A2ASecurityValidator:
         """Decode a mock JWT without cryptographic verification."""
         if token == "dev-token":
             return {
-                "sub": "dev-user-id",
-                "preferred_username": "DevUser",
+                "sub": "test_user",
+                "preferred_username": "test_user",
+                "email": "test_user@local",
                 "realm_access": {"roles": ["admin", "user"]},
+                "resource_access": {"astral-frontend": {"roles": ["admin", "user"]}},
             }
         try:
             parts = token.split(".")
@@ -59,12 +61,14 @@ class A2ASecurityValidator:
                 payload_b64 += "=" * ((4 - len(payload_b64) % 4) % 4)
                 payload_json = base64.b64decode(payload_b64).decode("utf-8")
                 return json.loads(payload_json)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"A2A mock JWT decode failed, falling back to default test_user: {e}")
         return {
-            "sub": "dev-user-id",
-            "preferred_username": "DevUser",
+            "sub": "test_user",
+            "preferred_username": "test_user",
+            "email": "test_user@local",
             "realm_access": {"roles": ["admin", "user"]},
+            "resource_access": {"astral-frontend": {"roles": ["admin", "user"]}},
         }
 
     async def _validate_keycloak_token(self, token: str) -> Optional[Dict[str, Any]]:
