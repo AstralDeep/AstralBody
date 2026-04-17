@@ -25,7 +25,17 @@ except Exception:  # pragma: no cover
     _HAS_MAGIC = False
 
 
-AttachmentCategory = str  # one of: document, spreadsheet, presentation, text, image
+AttachmentCategory = str  # one of: document, spreadsheet, presentation, text, image, medical
+
+
+# Compound suffixes we recognize as a single logical extension. Order matters
+# only within this tuple: ``normalise_extension`` checks these *before* the
+# usual last-dot split, so ``report.nii.gz`` → ``"nii.gz"`` and not ``"gz"``.
+_COMPOUND_EXTENSIONS: Tuple[str, ...] = (
+    "nii.gz",
+    "ome.tif",
+    "ome.tiff",
+)
 
 
 ACCEPTED_EXTENSIONS: Dict[str, AttachmentCategory] = {
@@ -71,6 +81,22 @@ ACCEPTED_EXTENSIONS: Dict[str, AttachmentCategory] = {
     "jpeg": "image",
     "gif": "image",
     "webp": "image",
+    # Medical imaging (feature: medical-file-uploads)
+    "dcm": "medical",
+    "dicom": "medical",
+    "nii": "medical",
+    "nii.gz": "medical",
+    "czi": "medical",
+    "nrrd": "medical",
+    "mha": "medical",
+    "mhd": "medical",
+    "raw": "medical",  # MetaImage (.mhd) sidecar; accepted alongside .mhd
+    "ome.tif": "medical",
+    "ome.tiff": "medical",
+    "tif": "medical",
+    "tiff": "medical",
+    "svs": "medical",
+    "ndpi": "medical",
 }
 
 
@@ -117,6 +143,25 @@ _EXTENSION_TO_MIME_PREFIXES: Dict[str, Tuple[str, ...]] = {
     "jpg": ("image/jpeg",), "jpeg": ("image/jpeg",),
     "gif": ("image/gif",),
     "webp": ("image/webp",),
+    # Medical formats. Most lack a registered MIME; libmagic commonly returns
+    # ``application/octet-stream`` for them, with an occasional ``image/tiff``
+    # for SVS/NDPI/OME-TIFF (which are TIFF-based). Be permissive — the reader
+    # tool will surface a structured parse error if the file is truly broken.
+    "dcm": ("application/dicom", "application/octet-stream"),
+    "dicom": ("application/dicom", "application/octet-stream"),
+    "nii": ("application/octet-stream",),
+    "nii.gz": ("application/gzip", "application/x-gzip", "application/octet-stream"),
+    "czi": ("application/octet-stream",),
+    "nrrd": ("application/octet-stream", "text/plain"),  # NRRD header is ASCII
+    "mha": ("application/octet-stream", "text/plain"),  # MetaImage header is ASCII
+    "mhd": ("application/octet-stream", "text/plain"),
+    "raw": ("application/octet-stream",),
+    "ome.tif": ("image/tiff", "application/octet-stream"),
+    "ome.tiff": ("image/tiff", "application/octet-stream"),
+    "tif": ("image/tiff", "application/octet-stream"),
+    "tiff": ("image/tiff", "application/octet-stream"),
+    "svs": ("image/tiff", "application/octet-stream"),
+    "ndpi": ("image/tiff", "application/octet-stream"),
 }
 
 
@@ -125,15 +170,53 @@ _EXTENSION_TO_MIME_PREFIXES: Dict[str, Tuple[str, ...]] = {
 LEGACY_BINARY_FORMATS = frozenset({"doc", "ppt"})
 
 
+# Per-category upload size caps. Medical imaging files routinely exceed the
+# 30 MB cap that's fine for docs/images — whole-slide SVS/NDPI and multi-series
+# CZI files can run into several GB. Keep the existing categories at 30 MB and
+# open up "medical" to 2 GiB.
+_MB = 1024 * 1024
+_GB = 1024 * _MB
+
+MAX_BYTES_BY_CATEGORY: Dict[AttachmentCategory, int] = {
+    "document": 30 * _MB,
+    "spreadsheet": 30 * _MB,
+    "presentation": 30 * _MB,
+    "text": 30 * _MB,
+    "image": 30 * _MB,
+    "medical": 2 * _GB,
+}
+
+
 def normalise_extension(filename: str) -> str:
-    """Return the lower-cased extension for *filename*, no leading dot."""
-    _, ext = os.path.splitext(filename)
-    return ext[1:].lower() if ext else ""
+    """Return the lower-cased extension for *filename*, no leading dot.
+
+    Recognizes the compound suffixes listed in :data:`_COMPOUND_EXTENSIONS`
+    (e.g. ``.nii.gz``, ``.ome.tif``) as single logical extensions; otherwise
+    falls back to the usual last-dot split.
+    """
+    lower = filename.lower()
+    for compound in _COMPOUND_EXTENSIONS:
+        if lower.endswith("." + compound):
+            return compound
+    _, ext = os.path.splitext(lower)
+    return ext[1:] if ext else ""
 
 
 def category_for_extension(extension: str) -> Optional[AttachmentCategory]:
     """Return the category for *extension*, or ``None`` if unsupported."""
     return ACCEPTED_EXTENSIONS.get(extension.lower())
+
+
+def max_bytes_for_category(category: AttachmentCategory) -> int:
+    """Return the upload-size cap for *category*.
+
+    Unknown categories fall back to the strictest (smallest) known cap so a
+    misconfiguration never silently widens the upload ceiling.
+    """
+    cap = MAX_BYTES_BY_CATEGORY.get(category)
+    if cap is None:
+        return min(MAX_BYTES_BY_CATEGORY.values())
+    return cap
 
 
 def sniff_content_type(blob_path_or_bytes) -> str:
@@ -176,8 +259,10 @@ __all__ = [
     "ACCEPTED_EXTENSIONS",
     "AttachmentCategory",
     "LEGACY_BINARY_FORMATS",
+    "MAX_BYTES_BY_CATEGORY",
     "category_for_extension",
     "is_consistent",
+    "max_bytes_for_category",
     "normalise_extension",
     "sniff_content_type",
 ]

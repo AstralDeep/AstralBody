@@ -28,12 +28,21 @@ from orchestrator.auth import require_user_id
 
 logger = logging.getLogger("AttachmentsAPI")
 
-# 30 MiB hard cap (FR-003). Mirrored on the client.
-MAX_UPLOAD_BYTES = 30 * 1024 * 1024
+# Legacy alias: kept for any downstream imports. The real per-upload cap now
+# comes from ``content_type.max_bytes_for_category(category)``.
+MAX_UPLOAD_BYTES = ct.MAX_BYTES_BY_CATEGORY["document"]
 
 # Stream upload in modest chunks so we can short-circuit oversize files without
-# buffering them in memory.
+# buffering them in memory. Medical uploads can run into the GBs, so writes go
+# straight to disk via ``store.awrite`` rather than being collected in a list.
 _CHUNK_SIZE = 1024 * 256  # 256 KiB
+
+
+def _format_cap_mb(cap_bytes: int) -> str:
+    """Render a byte cap as a human-friendly '30 MB' / '2 GB' string."""
+    if cap_bytes >= 1024 * 1024 * 1024:
+        return f"{cap_bytes // (1024 * 1024 * 1024)} GB"
+    return f"{cap_bytes // (1024 * 1024)} MB"
 
 attachments_router = APIRouter(tags=["Files"])
 
@@ -71,7 +80,10 @@ def _attachment_to_response(att) -> dict:
     "/api/upload",
     summary="Upload a file",
     description=(
-        "Upload a single file (≤ 30 MB). Returns the new attachment's metadata. "
+        "Upload a single file. Returns the new attachment's metadata. "
+        "Size caps are per-category: 30 MB for documents / spreadsheets / "
+        "presentations / text / images; 2 GB for medical imaging formats "
+        "(DICOM, NIfTI, CZI, NRRD/MHA/MHD, OME-TIFF, SVS, NDPI). "
         "Files are user-scoped and visible across the user's chats."
     ),
     status_code=status.HTTP_201_CREATED,
@@ -95,11 +107,13 @@ async def upload_file(
                 f"Unsupported file extension '.{extension or '?'}'. "
                 "Supported: documents (pdf, docx, rtf, odt), spreadsheets "
                 "(xlsx, xls, ods, tsv, csv), presentations (pptx, odp), "
-                "text/code, and images."
+                "text/code, images, and medical imaging formats (dcm, nii, "
+                "nii.gz, czi, nrrd, mha, mhd, ome.tif, tif, tiff, svs, ndpi)."
             ),
         )
 
     attachment_id = str(uuid.uuid4())
+    max_bytes = ct.max_bytes_for_category(category)
 
     async def _stream_chunks():
         while True:
@@ -108,35 +122,21 @@ async def upload_file(
                 break
             yield chunk
 
-    # We need a sync iterable for store.write; bridge via a small pre-read loop.
-    chunks: list[bytes] = []
-    total = 0
-    async for chunk in _stream_chunks():
-        total += len(chunk)
-        if total > MAX_UPLOAD_BYTES:
-            raise HTTPException(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail=(
-                    f"{safe_filename} exceeds the 30 MB upload limit "
-                    f"({MAX_UPLOAD_BYTES} bytes)."
-                ),
-            )
-        chunks.append(chunk)
-
     try:
-        path, size_bytes, sha256 = store.write(
+        path, size_bytes, sha256 = await store.awrite(
             user_id=user_id,
             attachment_id=attachment_id,
             filename=safe_filename,
-            chunks=iter(chunks),
-            max_bytes=MAX_UPLOAD_BYTES,
+            chunks=_stream_chunks(),
+            max_bytes=max_bytes,
         )
-    except ValueError as exc:
-        # Should be unreachable because the loop above already enforces the cap,
-        # but treat defensively.
+    except ValueError:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=str(exc),
+            detail=(
+                f"{safe_filename} exceeds the {_format_cap_mb(max_bytes)} "
+                f"upload limit for {category} files."
+            ),
         )
 
     sniffed = ct.sniff_content_type(path)

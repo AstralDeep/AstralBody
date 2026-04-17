@@ -111,11 +111,42 @@ def test_upload_legacy_binary_format_returns_415(app):
 
 
 def test_upload_oversize_returns_413(app, monkeypatch):
-    """A file larger than the cap is rejected with 413."""
-    monkeypatch.setattr(attachments_router_module, "MAX_UPLOAD_BYTES", 100)
+    """A file larger than the per-category cap is rejected with 413."""
+    from orchestrator.attachments import content_type as ct
+
+    monkeypatch.setitem(ct.MAX_BYTES_BY_CATEGORY, "text", 100)
     client = _client(app)
     res = client.post("/api/upload", files={"file": ("big.txt", b"x" * 200, "text/plain")})
     assert res.status_code == 413
+    assert "upload limit" in res.json()["detail"].lower()
+
+
+def test_upload_oversize_respects_per_category_caps(app, monkeypatch):
+    """A medical-size file (>30 MB) that fits under the medical cap is accepted;
+    the same size uploaded as a text file is rejected."""
+    from orchestrator.attachments import content_type as ct
+
+    # Shrink medical cap to make the test fast but still larger than the text cap.
+    monkeypatch.setitem(ct.MAX_BYTES_BY_CATEGORY, "text", 1000)
+    monkeypatch.setitem(ct.MAX_BYTES_BY_CATEGORY, "medical", 100_000)
+
+    client = _client(app)
+    payload = b"x" * 5000  # 5 KB: > text cap (1 KB), < medical cap (100 KB)
+
+    # .txt (text category) → 413
+    res_text = client.post(
+        "/api/upload", files={"file": ("big.txt", payload, "text/plain")},
+    )
+    assert res_text.status_code == 413, res_text.text
+
+    # .nii (medical category) → bypasses the smaller text cap.
+    # We can't easily satisfy the libmagic sniff for NIfTI in a 5KB blob, but
+    # the size check runs before the sniff so it'll pass the 413 gate. If it
+    # fails, it must fail with 415 (mismatch), NOT 413 (oversize).
+    res_med = client.post(
+        "/api/upload", files={"file": ("big.nii", payload, "application/octet-stream")},
+    )
+    assert res_med.status_code != 413, res_med.text
 
 
 def test_get_foreign_attachment_returns_404_not_403(app):

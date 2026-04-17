@@ -14,7 +14,7 @@ import hashlib
 import os
 import shutil
 from pathlib import Path
-from typing import Iterable, Tuple
+from typing import AsyncIterable, Iterable, Tuple
 
 
 def get_upload_root() -> Path:
@@ -104,6 +104,53 @@ def write(
     return target, total, hasher.hexdigest()
 
 
+async def awrite(
+    user_id: str,
+    attachment_id: str,
+    filename: str,
+    chunks: AsyncIterable[bytes],
+    *,
+    max_bytes: int,
+    root: Path | None = None,
+) -> Tuple[Path, int, str]:
+    """Stream an async iterable of *chunks* directly to disk.
+
+    Async variant of :func:`write` designed for large uploads (medical files
+    can exceed 1 GB). Unlike the sync version, this never materialises the
+    full payload in memory — chunks are written to the destination file as
+    they arrive, and the size cap is enforced per chunk.
+
+    Args, Returns, Raises: identical to :func:`write`.
+    """
+    target_dir = attachment_dir(user_id, attachment_id, root)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / filename
+    hasher = hashlib.sha256()
+    total = 0
+    try:
+        with open(target, "wb") as fh:
+            async for chunk in chunks:
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > max_bytes:
+                    raise ValueError(
+                        f"upload exceeded max_bytes={max_bytes} (got {total})"
+                    )
+                fh.write(chunk)
+                hasher.update(chunk)
+    except Exception:
+        try:
+            if target.exists():
+                target.unlink()
+            if target_dir.exists() and not any(target_dir.iterdir()):
+                target_dir.rmdir()
+        except Exception:
+            pass
+        raise
+    return target, total, hasher.hexdigest()
+
+
 def read_path(user_id: str, attachment_id: str, filename: str, root: Path | None = None) -> Path:
     """Return the path to read an attachment, raising ``FileNotFoundError`` if missing."""
     p = attachment_path(user_id, attachment_id, filename, root)
@@ -129,6 +176,7 @@ def delete_user(user_id: str, root: Path | None = None) -> None:
 __all__ = [
     "attachment_dir",
     "attachment_path",
+    "awrite",
     "delete",
     "delete_user",
     "get_upload_root",

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from orchestrator.attachments import store
@@ -70,3 +72,43 @@ def test_delete_user_purges_all(upload_root):
                 chunks=_chunks(b"bye"), max_bytes=1024, root=upload_root)
     store.delete_user("u", root=upload_root)
     assert not (upload_root / "u").exists()
+
+
+# Async streaming variant ----------------------------------------------------
+
+
+async def _async_chunks(data: bytes, n: int = 16):
+    for i in range(0, len(data), n):
+        yield data[i : i + n]
+
+
+def _run(coro):
+    return asyncio.new_event_loop().run_until_complete(coro)
+
+
+def test_awrite_streams_chunks_to_disk(upload_root):
+    payload = b"abc" * 1000
+    path, size, sha = _run(
+        store.awrite(
+            user_id="u", attachment_id="aid-async", filename="big.bin",
+            chunks=_async_chunks(payload),
+            max_bytes=len(payload) + 1,
+            root=upload_root,
+        )
+    )
+    assert path.read_bytes() == payload
+    assert size == len(payload)
+    assert len(sha) == 64
+
+
+def test_awrite_rejects_oversize_and_cleans_up(upload_root):
+    with pytest.raises(ValueError):
+        _run(
+            store.awrite(
+                user_id="u", attachment_id="aid-async-big", filename="too.bin",
+                chunks=_async_chunks(b"x" * 1000),
+                max_bytes=100,
+                root=upload_root,
+            )
+        )
+    assert not (upload_root / "u" / "aid-async-big").exists()

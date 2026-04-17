@@ -13,8 +13,8 @@ import { useCallback, useState } from "react";
 import { BFF_URL } from "../config";
 import {
   ACCEPTED_EXTENSIONS,
-  MAX_FILE_BYTES,
   extensionOf,
+  maxBytesFor,
   rejectionMessage,
 } from "../lib/attachmentTypes";
 import type { AttachmentCategory, AttachmentError } from "../lib/attachmentTypes";
@@ -83,7 +83,7 @@ function validate(file: File): AttachmentError | null {
   if (!ACCEPTED_EXTENSIONS[ext]) {
     return rejectionMessage(file.name, "unsupported");
   }
-  if (file.size > MAX_FILE_BYTES) {
+  if (file.size > maxBytesFor(file.name)) {
     return rejectionMessage(
       file.name,
       "oversize",
