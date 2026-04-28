@@ -437,6 +437,67 @@ class Database:
         ''')
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_qe_held ON quarantine_entry(detected_at DESC) WHERE status = 'held'")
 
+        # ------------------------------------------------------------------
+        # Feature 005 — tool tips and getting started tutorial
+        # ------------------------------------------------------------------
+        # tutorial_step holds the canonical (current) copy of each step and
+        # is editable by admins via /api/admin/tutorial/steps. Soft-delete
+        # via archived_at so revisions and in-flight resumes stay valid.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS tutorial_step (
+                id BIGSERIAL PRIMARY KEY,
+                slug TEXT NOT NULL UNIQUE,
+                audience TEXT NOT NULL CHECK (audience IN ('user','admin')),
+                display_order INTEGER NOT NULL,
+                target_kind TEXT NOT NULL CHECK (target_kind IN ('static','sdui','none')),
+                target_key TEXT,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                archived_at TIMESTAMPTZ,
+                CONSTRAINT tutorial_step_target_consistent CHECK (
+                    (target_kind = 'none' AND target_key IS NULL)
+                    OR (target_kind IN ('static','sdui') AND target_key IS NOT NULL AND length(target_key) > 0)
+                ),
+                CONSTRAINT tutorial_step_title_nonempty CHECK (length(btrim(title)) > 0 AND length(title) <= 120),
+                CONSTRAINT tutorial_step_body_nonempty CHECK (length(btrim(body)) > 0 AND length(body) <= 1000)
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_tutorial_step_user_view ON tutorial_step(archived_at, audience, display_order)')
+
+        # onboarding_state — one row per user; absence is the implicit
+        # "not_started" default so first-run is distinguishable from a
+        # deliberately persisted state.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS onboarding_state (
+                user_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL CHECK (status IN ('not_started','in_progress','completed','skipped')),
+                last_step_id BIGINT REFERENCES tutorial_step(id) ON DELETE SET NULL,
+                started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                completed_at TIMESTAMPTZ,
+                skipped_at TIMESTAMPTZ
+            )
+        ''')
+
+        # tutorial_step_revision — append-only history of admin edits.
+        # Full before/after snapshots live here; the audit log only carries
+        # a structured changed-fields summary.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS tutorial_step_revision (
+                id BIGSERIAL PRIMARY KEY,
+                step_id BIGINT NOT NULL REFERENCES tutorial_step(id) ON DELETE CASCADE,
+                editor_user_id TEXT NOT NULL,
+                edited_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                previous JSONB,
+                current JSONB NOT NULL,
+                change_kind TEXT NOT NULL CHECK (change_kind IN ('create','update','archive','restore'))
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_tutorial_step_revision_step_time ON tutorial_step_revision(step_id, edited_at DESC)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_tutorial_step_revision_editor ON tutorial_step_revision(editor_user_id, edited_at DESC)')
+
         conn.commit()
         conn.close()
 

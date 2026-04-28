@@ -200,6 +200,15 @@ class Orchestrator:
         from feedback.recorder import Recorder as FeedbackRecorder
         self.feedback_repo = FeedbackRepository(self.history.db)
         self.feedback_recorder = FeedbackRecorder(self.feedback_repo)
+
+        # Feature 005 — tool tips and getting started tutorial
+        from onboarding.repository import OnboardingRepository
+        from onboarding.seed import seed_tutorial_steps
+        self.onboarding_repo = OnboardingRepository(self.history.db)
+        try:
+            seed_tutorial_steps(self.history.db)
+        except Exception as exc:  # pragma: no cover — never block startup
+            logger.warning(f"Tutorial seed loader failed (non-fatal): {exc}")
         # Publish self as the module-level singleton so the feedback CLI
         # and the pre-pass entrypoint can find the synthesizer without
         # going through FastAPI app.state.
@@ -3845,6 +3854,7 @@ COMPONENT UPDATE RULES:
         from audit.api import audit_router
         from audit.middleware import AuditHTTPMiddleware
         from feedback.api import feedback_user_router, feedback_admin_router
+        from onboarding.api import onboarding_user_router, onboarding_admin_router
         app.include_router(chat_router)
         app.include_router(component_router)
         app.include_router(agent_router)
@@ -3858,6 +3868,9 @@ COMPONENT UPDATE RULES:
         # Feature 004 — component feedback & tool-improvement loop
         app.include_router(feedback_user_router)
         app.include_router(feedback_admin_router)
+        # Feature 005 — tool tips and getting started tutorial
+        app.include_router(onboarding_user_router)
+        app.include_router(onboarding_admin_router)
 
         # Audit HTTP middleware — records every authenticated REST request
         # in the caller's own log (FR-021). Added after CORS so OPTIONS

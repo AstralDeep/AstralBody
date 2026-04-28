@@ -701,6 +701,7 @@ export default function FloatingChatPanel({
                                     onChange={(e) => { if (!isRecording && !isTranscribing) setInput(e.target.value); }}
                                     placeholder={isRecording ? "Listening..." : isTranscribing ? "Transcribing..." : isConnected ? "Ask anything..." : "Connecting..."}
                                     disabled={!isConnected || isRecording || isTranscribing || (chatStatus.status !== "idle" && chatStatus.status !== "done")}
+                                    data-tutorial-target="chat.input"
                                     className="w-full py-2 bg-transparent text-xs text-white placeholder:text-astral-muted/50 focus:outline-none disabled:opacity-50"
                                 />
 
