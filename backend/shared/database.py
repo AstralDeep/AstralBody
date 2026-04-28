@@ -343,6 +343,100 @@ class Database:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_draft_agents_user_id ON draft_agents(user_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_draft_agents_status ON draft_agents(status)')
 
+        # ------------------------------------------------------------------
+        # Feature 004 — component feedback & tool-improvement loop
+        # ------------------------------------------------------------------
+        # ComponentFeedback: append-only with logical supersession; lifecycle
+        # enforced at the repository layer. Per-user isolation enforced at
+        # the application layer (mirrors audit_events from feature 003).
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS component_feedback (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id TEXT NOT NULL,
+                conversation_id TEXT,
+                correlation_id TEXT,
+                source_agent TEXT,
+                source_tool TEXT,
+                component_id TEXT,
+                sentiment TEXT NOT NULL CHECK (sentiment IN ('positive','negative')),
+                category TEXT NOT NULL DEFAULT 'unspecified'
+                    CHECK (category IN
+                        ('wrong-data','irrelevant','layout-broken','too-slow','other','unspecified')),
+                comment_raw TEXT,
+                comment_safety TEXT NOT NULL DEFAULT 'clean'
+                    CHECK (comment_safety IN ('clean','quarantined')),
+                comment_safety_reason TEXT,
+                lifecycle TEXT NOT NULL DEFAULT 'active'
+                    CHECK (lifecycle IN ('active','superseded','retracted')),
+                superseded_by UUID REFERENCES component_feedback(id),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_cf_user_created ON component_feedback(user_id, created_at DESC)')
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_cf_tool_created ON component_feedback(source_agent, source_tool, created_at DESC) WHERE lifecycle = 'active'")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_cf_quarantine ON component_feedback(comment_safety, created_at DESC) WHERE comment_safety = 'quarantined'")
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_cf_dedup_lookup ON component_feedback(user_id, correlation_id, component_id, created_at DESC)')
+
+        # ToolQualitySignal: per-(agent, tool) snapshot per evaluation cycle.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS tool_quality_signal (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                agent_id TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                window_start TIMESTAMPTZ NOT NULL,
+                window_end TIMESTAMPTZ NOT NULL,
+                dispatch_count INTEGER NOT NULL,
+                failure_count INTEGER NOT NULL,
+                negative_feedback_count INTEGER NOT NULL,
+                failure_rate REAL NOT NULL,
+                negative_feedback_rate REAL NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('healthy','insufficient-data','underperforming')),
+                computed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (agent_id, tool_name, window_end)
+            )
+        ''')
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_tqs_underperforming ON tool_quality_signal(computed_at DESC) WHERE status = 'underperforming'")
+
+        # KnowledgeUpdateProposal: system-generated change to a synthesizer
+        # knowledge artifact under backend/knowledge/. Always admin-gated.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS knowledge_update_proposal (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                agent_id TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                artifact_path TEXT NOT NULL,
+                diff_payload TEXT NOT NULL,
+                artifact_sha_at_gen TEXT NOT NULL,
+                evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending','accepted','applied','rejected','superseded')),
+                reviewer_user_id TEXT,
+                reviewed_at TIMESTAMPTZ,
+                reviewer_rationale TEXT,
+                applied_at TIMESTAMPTZ,
+                generated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        ''')
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_kup_pending ON knowledge_update_proposal(generated_at DESC) WHERE status = 'pending'")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_kup_tool ON knowledge_update_proposal(agent_id, tool_name, generated_at DESC)")
+
+        # QuarantineEntry: pointer to a flagged ComponentFeedback. One per
+        # feedback record (enforced by PRIMARY KEY on feedback_id).
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS quarantine_entry (
+                feedback_id UUID PRIMARY KEY REFERENCES component_feedback(id) ON DELETE CASCADE,
+                reason TEXT NOT NULL,
+                detector TEXT NOT NULL CHECK (detector IN ('inline','loop_pre_pass')),
+                detected_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                status TEXT NOT NULL DEFAULT 'held'
+                    CHECK (status IN ('held','released','dismissed')),
+                actor_user_id TEXT,
+                actioned_at TIMESTAMPTZ
+            )
+        ''')
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_qe_held ON quarantine_entry(detected_at DESC) WHERE status = 'held'")
+
         conn.commit()
         conn.close()
 

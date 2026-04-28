@@ -191,6 +191,17 @@ class ToolDispatchAudit:
     def set_outputs_meta(self, meta: Dict[str, Any]) -> None:
         self._outputs_meta = meta
 
+    @property
+    def correlation_id(self) -> str:
+        """Public accessor for the per-dispatch correlation id.
+
+        Feature 004 propagates this id onto the MCPResponse so each rendered
+        component can be tagged with the originating dispatch's audit id —
+        which the frontend's component_feedback flow uses to scope a user's
+        feedback submission.
+        """
+        return self._correlation_id
+
     async def __aenter__(self) -> "ToolDispatchAudit":
         rec = get_recorder()
         user, principal = actor_principal_from_claims(self._claims)

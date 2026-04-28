@@ -29,6 +29,8 @@ import { useSmartAuth } from "../hooks/useSmartAuth";
 import { toast } from "sonner";
 import { useTheme, type ThemeColors } from "../contexts/ThemeContext";
 import { useAgentPermissions } from "../contexts/AgentPermissionContext";
+import { FeedbackControl } from "./feedback/FeedbackControl";
+import { useFeedbackContext } from "./feedback/FeedbackContext";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyProps = any;
@@ -1270,12 +1272,7 @@ function RenderFileDownload({ label, url, filename }: AnyProps) {
 export default function DynamicRenderer({ components, onSaveComponent, onSendMessage, onTablePaginate }: DynamicRendererProps) {
     const comps = Array.isArray(components) ? components : [components];
 
-    // console.log('DynamicRenderer rendered with:', {
-    //     componentCount: comps.length,
-    //     hasOnSaveComponent: !!onSaveComponent,
-    //     activeChatId,
-    //     components: comps.map(c => c?.type)
-    // });
+    const { token, ws } = useFeedbackContext();
 
     if (!comps || comps.length === 0) return null;
 
@@ -1287,23 +1284,50 @@ export default function DynamicRenderer({ components, onSaveComponent, onSendMes
             <div className="dynamic-renderer space-y-3">
                 {comps.map((comp, i) => {
                     const c = comp as Record<string, unknown>;
+                    const correlationId = (c?._source_correlation_id as string | undefined) ?? null;
+                    const componentId = (c?.id as string | undefined) ?? null;
+                    const sourceAgent = (c?._source_agent as string | undefined) ?? null;
+                    const sourceTool = (c?._source_tool as string | undefined) ?? null;
+                    // Skip the feedback overlay on non-substantive primitives.
+                    const skipFeedback = c?.type === "divider" || c?.type === "button";
+
                     if (onSaveComponent && !addAllInjected && c?.type === "collapsible") {
                         addAllInjected = true;
                         return (
                             <RenderErrorBoundary key={i}>
-                                <RenderCollapsible
-                                    {...c}
-                                    onSaveComponent={onSaveComponent}
-                                    onSendMessage={onSendMessage}
-                                    onTablePaginate={onTablePaginate}
-                                    headerAction={<AddAllToUIButton components={comps} onSave={onSaveComponent} />}
-                                />
+                                <FeedbackOverlay
+                                    correlationId={correlationId}
+                                    componentId={componentId}
+                                    sourceAgent={sourceAgent}
+                                    sourceTool={sourceTool}
+                                    token={token}
+                                    ws={ws}
+                                    skip={skipFeedback}
+                                >
+                                    <RenderCollapsible
+                                        {...c}
+                                        onSaveComponent={onSaveComponent}
+                                        onSendMessage={onSendMessage}
+                                        onTablePaginate={onTablePaginate}
+                                        headerAction={<AddAllToUIButton components={comps} onSave={onSaveComponent} />}
+                                    />
+                                </FeedbackOverlay>
                             </RenderErrorBoundary>
                         );
                     }
                     return (
                         <RenderErrorBoundary key={i}>
-                            {renderComponent(comp, i, onSaveComponent, onSendMessage, onTablePaginate)}
+                            <FeedbackOverlay
+                                correlationId={correlationId}
+                                componentId={componentId}
+                                sourceAgent={sourceAgent}
+                                sourceTool={sourceTool}
+                                token={token}
+                                ws={ws}
+                                skip={skipFeedback}
+                            >
+                                {renderComponent(comp, i, onSaveComponent, onSendMessage, onTablePaginate)}
+                            </FeedbackOverlay>
                         </RenderErrorBoundary>
                     );
                 })}
@@ -1312,5 +1336,41 @@ export default function DynamicRenderer({ components, onSaveComponent, onSendMes
                 )}
             </div>
         </RenderErrorBoundary>
+    );
+}
+
+// ─── Feedback overlay (feature 004) ────────────────────────────────
+interface FeedbackOverlayProps {
+    correlationId: string | null;
+    componentId: string | null;
+    sourceAgent: string | null;
+    sourceTool: string | null;
+    token: string | null;
+    ws: WebSocket | null;
+    skip: boolean;
+    children: React.ReactNode;
+}
+
+function FeedbackOverlay({
+    correlationId, componentId, sourceAgent, sourceTool,
+    token, ws, skip, children,
+}: FeedbackOverlayProps) {
+    if (skip) {
+        return <>{children}</>;
+    }
+    return (
+        <div style={{ position: "relative" }} data-feedback-target>
+            <div style={{ position: "absolute", top: 4, right: 4, zIndex: 5 }}>
+                <FeedbackControl
+                    correlationId={correlationId}
+                    componentId={componentId}
+                    sourceAgent={sourceAgent}
+                    sourceTool={sourceTool}
+                    token={token}
+                    ws={ws}
+                />
+            </div>
+            {children}
+        </div>
     );
 }
