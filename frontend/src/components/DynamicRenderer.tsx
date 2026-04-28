@@ -31,6 +31,7 @@ import { useTheme, type ThemeColors } from "../contexts/ThemeContext";
 import { useAgentPermissions } from "../contexts/AgentPermissionContext";
 import { FeedbackControl } from "./feedback/FeedbackControl";
 import { useFeedbackContext } from "./feedback/FeedbackContext";
+import { Tooltip } from "./onboarding/Tooltip";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyProps = any;
@@ -240,6 +241,17 @@ class RenderErrorBoundary extends Component<
 
 function renderComponent(comp: AnyProps, index: number, onSaveComponent?: (componentData: AnyProps, componentType: string) => Promise<boolean>, onSendMessage?: (message: string) => void, onTablePaginate?: (event: TablePaginateEvent) => void): React.ReactNode {
     if (!comp || typeof comp !== "object") return null;
+    const inner = renderComponentInner(comp, index, onSaveComponent, onSendMessage, onTablePaginate);
+    // Feature 005 — tool tips and getting started tutorial:
+    // wrap any SDUI component that carries a non-empty `tooltip` field.
+    const tip = (comp as AnyProps).tooltip;
+    if (inner && typeof tip === "string" && tip.trim()) {
+        return <Tooltip text={tip}>{inner}</Tooltip>;
+    }
+    return inner;
+}
+
+function renderComponentInner(comp: AnyProps, index: number, onSaveComponent?: (componentData: AnyProps, componentType: string) => Promise<boolean>, onSendMessage?: (message: string) => void, onTablePaginate?: (event: TablePaginateEvent) => void): React.ReactNode {
     const { type, ...props } = comp;
 
     const savableComponents = ["card", "table", "metric", "bar_chart", "line_chart", "pie_chart", "plotly_chart", "grid", "collapsible"];

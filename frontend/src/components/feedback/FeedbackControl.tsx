@@ -100,6 +100,7 @@ export function FeedbackControl(props: FeedbackControlProps): ReactElement {
                 type="button"
                 className={`feedback-trigger ${className ?? ""}`.trim()}
                 aria-label="Provide feedback on this component"
+                data-tutorial-target="feedback.control"
                 onClick={(e) => {
                     e.stopPropagation();
                     setOpen((v) => !v);
