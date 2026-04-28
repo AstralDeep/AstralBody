@@ -84,6 +84,12 @@ class MCPResponse(Message):
     result: Optional[Any] = None
     error: Optional[Dict[str, Any]] = None
     ui_components: Optional[List[Dict[str, Any]]] = None
+    # Feature 004: correlation_id propagated from the orchestrator's
+    # ToolDispatchAudit context so every produced UI component can be
+    # tagged with the originating tool dispatch's audit correlation_id.
+    # The orchestrator stamps this onto the response after the audit
+    # context closes; agents do not set it.
+    correlation_id: Optional[str] = None
 
 # --- UI Protocol ---
 @dataclass
@@ -92,6 +98,30 @@ class UIEvent(Message):
     action: str = ""
     payload: Dict[str, Any] = field(default_factory=dict)
     session_id: Optional[str] = None
+
+
+# --- Feature 004 UI event action names ---------------------------------
+# The UIEvent message above is open (action is a free string; payload is
+# a free dict) so adding new actions does not require a new dataclass.
+# These constants exist purely to make the wire contract greppable and to
+# document the valid set in one place.
+
+# Client → server
+UI_ACTION_COMPONENT_FEEDBACK = "component_feedback"
+UI_ACTION_FEEDBACK_RETRACT = "feedback_retract"
+UI_ACTION_FEEDBACK_AMEND = "feedback_amend"
+
+# Server → client (delivered as ui_event messages on the same socket).
+UI_ACTION_COMPONENT_FEEDBACK_ACK = "component_feedback_ack"
+UI_ACTION_COMPONENT_FEEDBACK_ERROR = "component_feedback_error"
+UI_ACTION_FEEDBACK_RETRACT_ACK = "feedback_retract_ack"
+UI_ACTION_FEEDBACK_AMEND_ACK = "feedback_amend_ack"
+
+# Optional metadata key attached to each component dict in UIRender.components
+# when the component originated from a tool dispatch. The value is the
+# audit-log correlation_id of that dispatch (string). Frontend consumers
+# treat this as an opaque identifier used to scope feedback submissions.
+UI_RENDER_META_CORRELATION_ID = "_source_correlation_id"
 
 @dataclass
 class UIRender(Message):

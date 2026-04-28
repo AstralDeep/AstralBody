@@ -1469,5 +1469,8 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         streamData,
         subscribeStream,
         unsubscribeStream,
+        // Feature 004 — exposed so FeedbackProvider can wire the WS through
+        // to FeedbackControl without an additional hook in the component tree.
+        wsRef,
     };
 }
