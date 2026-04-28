@@ -274,6 +274,65 @@ class Database:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_interaction_log_synthesized ON interaction_log(synthesized)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_interaction_log_agent ON interaction_log(agent_id)')
 
+        # Audit events — feature 003-agent-audit-log
+        # HIPAA + NIST SP 800-53 AU compliant per-user audit log.
+        # Append-only (no UPDATE/DELETE except the retention CLI under a
+        # session GUC). See backend/audit/ for the recorder/repository.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS audit_events (
+                event_id UUID PRIMARY KEY,
+                actor_user_id TEXT NOT NULL,
+                auth_principal TEXT NOT NULL,
+                agent_id TEXT,
+                event_class TEXT NOT NULL,
+                action_type TEXT NOT NULL,
+                description TEXT NOT NULL,
+                conversation_id TEXT,
+                correlation_id UUID NOT NULL,
+                outcome TEXT NOT NULL,
+                outcome_detail TEXT,
+                inputs_meta JSONB NOT NULL DEFAULT '{}'::jsonb,
+                outputs_meta JSONB NOT NULL DEFAULT '{}'::jsonb,
+                artifact_pointers JSONB NOT NULL DEFAULT '[]'::jsonb,
+                started_at TIMESTAMPTZ NOT NULL,
+                completed_at TIMESTAMPTZ,
+                recorded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                prev_hash BYTEA NOT NULL,
+                entry_hash BYTEA NOT NULL,
+                key_id TEXT NOT NULL,
+                schema_version SMALLINT NOT NULL DEFAULT 1,
+                CONSTRAINT audit_events_outcome_check CHECK (outcome IN ('in_progress','success','failure','interrupted'))
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_user_recorded ON audit_events(actor_user_id, recorded_at DESC, event_id DESC)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_correlation ON audit_events(correlation_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_user_class_recorded ON audit_events(actor_user_id, event_class, recorded_at DESC)')
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_user_failures ON audit_events(actor_user_id, recorded_at DESC) WHERE outcome IN ('failure','interrupted')")
+
+        # Append-only enforcement: a trigger that raises on UPDATE/DELETE
+        # unless the session GUC ``audit.allow_purge`` is set to 'true'.
+        # The retention CLI sets that GUC; application code never does.
+        cursor.execute('''
+            CREATE OR REPLACE FUNCTION audit_events_protect() RETURNS trigger AS $func$
+            BEGIN
+                IF current_setting('audit.allow_purge', true) IS DISTINCT FROM 'true' THEN
+                    RAISE EXCEPTION 'audit_events is append-only (TG_OP=%)', TG_OP
+                        USING ERRCODE = '42501';
+                END IF;
+                IF TG_OP = 'DELETE' THEN
+                    RETURN OLD;
+                END IF;
+                RETURN NEW;
+            END;
+            $func$ LANGUAGE plpgsql
+        ''')
+        cursor.execute("DROP TRIGGER IF EXISTS audit_events_no_update ON audit_events")
+        cursor.execute('''
+            CREATE TRIGGER audit_events_no_update
+            BEFORE UPDATE OR DELETE ON audit_events
+            FOR EACH ROW EXECUTE FUNCTION audit_events_protect()
+        ''')
+
         # Indexes on user_id for query performance
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_chats_user_id ON chats(user_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id)')

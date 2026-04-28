@@ -180,6 +180,15 @@ class Orchestrator:
         # Hook/Event System — extensible lifecycle events
         self.hooks = HookManager()
 
+        # Audit log (003-agent-audit-log) — repository, recorder, publisher
+        from audit.repository import AuditRepository
+        from audit.recorder import Recorder, set_recorder
+        from audit.ws_publisher import make_publish_callable
+        self.audit_repo = AuditRepository(self.history.db)
+        self.audit_recorder = Recorder(self.audit_repo)
+        self.audit_recorder.set_publisher(make_publish_callable(self))
+        set_recorder(self.audit_recorder)
+
         # Task State Machine — tracks Re-Act loop execution state
         self.task_manager = TaskManager()
 
@@ -426,8 +435,7 @@ class Orchestrator:
         # Step 2: Fall back to A2A JSON-RPC
         try:
             import httpx
-            from a2a.client.card_resolver import A2ACardResolver
-            from a2a.client.client_factory import ClientFactory, ClientConfig
+            from a2a.client import A2ACardResolver
             from shared.a2a_bridge import a2a_card_to_custom
 
             async with httpx.AsyncClient() as http_client:
@@ -441,18 +449,12 @@ class Orchestrator:
                 logger.debug(f"A2A agent {agent_id} already connected")
                 return
 
-            # Create persistent A2A client
-            config = ClientConfig(streaming=True)
-            client = await ClientFactory.connect(
-                agent=a2a_card,
-                client_config=config,
-            )
-
-            self.a2a_clients[agent_id] = client
+            # Track this agent as reachable via hand-rolled JSON-RPC (v1.0 client
+            # is bypassed because we POST per-call with a per-request Bearer token).
+            self.a2a_clients[agent_id] = base_url
             self.a2a_agent_cards[agent_id] = a2a_card
             self.agent_urls[agent_id] = base_url
 
-            # Register via the same path as WS agents (for routing, permissions, etc.)
             register_msg = RegisterAgent(agent_card=custom_card)
             await self.register_agent(None, register_msg)
 
@@ -462,24 +464,21 @@ class Orchestrator:
             logger.debug(f"A2A discovery to {base_url} also failed: {e}")
 
     async def _setup_a2a_client_for_agent(self, base_url: str, agent_id: str):
-        """Set up an A2A client as backup transport for a WebSocket-connected agent."""
+        """Set up an A2A backup transport for a WebSocket-connected agent.
+
+        Records the agent's base URL so tool calls can fall back to hand-rolled
+        JSON-RPC if WebSocket transport fails.
+        """
         try:
             import httpx
-            from a2a.client.card_resolver import A2ACardResolver
-            from a2a.client.client_factory import ClientFactory, ClientConfig
+            from a2a.client import A2ACardResolver
 
             a2a_url = f"{base_url}/a2a"
             async with httpx.AsyncClient() as http_client:
                 resolver = A2ACardResolver(http_client, a2a_url)
                 a2a_card = await resolver.get_agent_card()
 
-            config = ClientConfig(streaming=True)
-            client = await ClientFactory.connect(
-                agent=a2a_card,
-                client_config=config,
-            )
-
-            self.a2a_clients[agent_id] = client
+            self.a2a_clients[agent_id] = base_url
             self.a2a_agent_cards[agent_id] = a2a_card
             logger.info(f"A2A backup client set up for {agent_id}")
         except Exception as e:
@@ -598,6 +597,17 @@ class Orchestrator:
                     # Persist user profile to database
                     self._save_user_profile(user_data)
 
+                    # Audit: WebSocket login lifecycle event (auth.ws_register)
+                    try:
+                        from audit.hooks import record_auth_event
+                        await record_auth_event(
+                            claims=user_data,
+                            action="ws_register",
+                            description=f"WebSocket session established for {user_data.get('preferred_username', user_data.get('sub', 'unknown'))}",
+                        )
+                    except Exception as _e:
+                        logger.debug(f"WS register audit record failed: {_e}")
+
                     # ROTE: register device capabilities and send profile back
                     device_info = msg.device or {}
                     rote_profile = self.rote.register_device(websocket, device_info)
@@ -647,6 +657,19 @@ class Orchestrator:
                     return
 
                 user_id = self._get_user_id(websocket)
+
+                # Audit: record the WS UI action in the user's audit log
+                try:
+                    from audit.hooks import record_ws_action
+                    _action_chat_id = msg.session_id or (msg.payload or {}).get("chat_id")
+                    asyncio.create_task(record_ws_action(
+                        claims=self.ui_sessions.get(websocket),
+                        action=str(msg.action or ""),
+                        chat_id=_action_chat_id,
+                        payload=msg.payload or {},
+                    ))
+                except Exception as _e:
+                    logger.debug(f"WS action audit record failed: {_e}")
 
                 if msg.action == "chat_message":
                     user_message = msg.payload.get("message", "")
@@ -2371,7 +2394,23 @@ COMPONENT UPDATE RULES:
             if hook_resp.action == "modify" and hook_resp.modified_args:
                 args = hook_resp.modified_args
 
-        result = await self._execute_with_retry(websocket, agent_id, tool_name, args)
+        # Audit: record the tool dispatch (in_progress → success/failure)
+        from audit.hooks import ToolDispatchAudit
+        claims = self.ui_sessions.get(websocket) if websocket is not None else None
+        async with ToolDispatchAudit(
+            claims=claims,
+            agent_id=agent_id,
+            tool_name=tool_name,
+            chat_id=chat_id,
+            args_meta={k: v for k, v in args.items() if not (isinstance(k, str) and k.startswith("_"))},
+        ) as _audit_ctx:
+            result = await self._execute_with_retry(websocket, agent_id, tool_name, args)
+            if result and result.error:
+                _audit_ctx.set_outcome("failure", str(result.error.get("message", ""))[:1000])
+            elif result is None:
+                _audit_ctx.set_outcome("interrupted", "no result returned")
+            else:
+                _audit_ctx.set_outputs_meta({"has_ui_components": bool(result.ui_components)})
 
         # Hook: POST_TOOL_USE or POST_TOOL_FAILURE
         if flags.is_enabled("hook_system"):
@@ -2742,73 +2781,91 @@ COMPONENT UPDATE RULES:
             self.pending_ui_sockets.pop(request_id, None)
 
     async def _execute_via_a2a(self, agent_id: str, tool_name: str, args: Dict, timeout: float = 30.0) -> Optional[MCPResponse]:
-        """Execute a tool call via A2A JSON-RPC (external agents)."""
+        """Execute a tool call via A2A JSON-RPC (external agents).
+
+        Posts a hand-rolled JSON-RPC `message/send` request to the agent's /a2a
+        endpoint so the per-call delegation token can be forwarded as a Bearer
+        Authorization header. Avoids the v1.0 SDK Client which routes auth
+        through interceptors rather than per-call metadata.
+        """
         import uuid
-        from a2a.types import (
-            Message as A2AMessage, DataPart, Part, Role, Task, TaskState,
-        )
-        from shared.a2a_bridge import a2a_response_to_mcp_response
+        import httpx
+        from google.protobuf.json_format import ParseDict, MessageToDict
+        from a2a.types import Message as A2AMessage, Role, Task, Message as A2AMsg
+        from shared.a2a_bridge import make_data_part, a2a_response_to_mcp_response
 
         request_id = f"a2a_{tool_name}_{int(time.time() * 1000)}"
-        client = self.a2a_clients[agent_id]
 
-        # Build A2A message with tool call in DataPart
+        base_url = self.a2a_clients.get(agent_id) or self.agent_urls.get(agent_id)
+        if not base_url:
+            return MCPResponse(
+                request_id=request_id,
+                error={"message": f"No A2A endpoint registered for {agent_id}", "retryable": False},
+            )
+        a2a_url = base_url if base_url.rstrip("/").endswith("/a2a") else f"{base_url.rstrip('/')}/a2a"
+
+        clean_args = {k: v for k, v in args.items() if not k.startswith("_")}
+        if args.get("_credentials_encrypted"):
+            clean_args["_credentials"] = args["_credentials"]
+            clean_args["_credentials_encrypted"] = args["_credentials_encrypted"]
+
         msg = A2AMessage(
             message_id=str(uuid.uuid4()),
-            role=Role.user,
-            parts=[Part(root=DataPart(data={
+            role=Role.ROLE_USER,
+            parts=[make_data_part({
                 "method": "tools/call",
                 "name": tool_name,
-                "arguments": {
-                    **{k: v for k, v in args.items() if not k.startswith("_")},
-                    **({
-                        "_credentials": args["_credentials"],
-                        "_credentials_encrypted": args["_credentials_encrypted"],
-                    } if args.get("_credentials_encrypted") else {}),
-                },
-            }))],
+                "arguments": clean_args,
+            })],
         )
 
-        # Forward delegation token in request metadata
+        headers = {"Content-Type": "application/json"}
         delegation_token = args.get("_delegation_token")
+        if delegation_token:
+            headers["Authorization"] = f"Bearer {delegation_token}"
+
+        jsonrpc_payload = {
+            "jsonrpc": "2.0",
+            "method": "message/send",
+            "id": request_id,
+            "params": {"message": MessageToDict(msg, preserving_proto_field_name=True)},
+        }
 
         try:
             logger.info(f"Sent tool call (A2A): {tool_name} → {agent_id}")
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(a2a_url, json=jsonrpc_payload, headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
 
-            # Use the A2A client to send the message
-            # The client returns an async iterator of events
-            context = None
-            if delegation_token:
-                from a2a.client.client import ClientCallContext
-                context = ClientCallContext(
-                    metadata={"authorization": f"Bearer {delegation_token}"},
+            if "error" in data:
+                err = data["error"] if isinstance(data["error"], dict) else {"message": str(data["error"])}
+                return MCPResponse(
+                    request_id=request_id,
+                    error={"message": err.get("message", "A2A error"), "retryable": False},
                 )
 
-            last_task = None
-            last_message = None
-            async for event in await asyncio.wait_for(
-                client.send_message(msg, context=context),
-                timeout=timeout,
-            ):
-                if isinstance(event, tuple):
-                    # ClientEvent = (Task, UpdateEvent | None)
-                    task, _ = event
-                    last_task = task
-                else:
-                    # Direct Message response
-                    last_message = event
+            result = data.get("result")
+            if isinstance(result, dict):
+                # Try to parse the result as a Task; fall back to Message; else raw dict.
+                try:
+                    return a2a_response_to_mcp_response(ParseDict(result, Task()), request_id)
+                except Exception:
+                    pass
+                try:
+                    return a2a_response_to_mcp_response(ParseDict(result, A2AMsg()), request_id)
+                except Exception:
+                    pass
+                return MCPResponse(request_id=request_id, result=result)
 
-            if last_task:
-                return a2a_response_to_mcp_response(last_task, request_id)
-            elif last_message:
-                return a2a_response_to_mcp_response(last_message, request_id)
-            else:
+            if result is None:
                 return MCPResponse(
                     request_id=request_id,
                     error={"message": "No response from A2A agent", "retryable": True},
                 )
+            return MCPResponse(request_id=request_id, result=str(result))
 
-        except asyncio.TimeoutError:
+        except httpx.TimeoutException:
             logger.error(f"A2A tool call timed out: {tool_name}")
             return MCPResponse(request_id=request_id,
                                error={"message": "A2A tool call timed out", "retryable": True})
@@ -3556,6 +3613,19 @@ COMPONENT UPDATE RULES:
                     metadata={"websocket_id": id(websocket)},
                 ))
 
+            # Audit: WebSocket logout / disconnect
+            try:
+                _claims = self.ui_sessions.get(websocket)
+                if _claims:
+                    from audit.hooks import record_auth_event
+                    await record_auth_event(
+                        claims=_claims,
+                        action="ws_disconnect",
+                        description="WebSocket session ended",
+                    )
+            except Exception as _e:
+                logger.debug(f"WS disconnect audit record failed: {_e}")
+
             self._cleanup_streams(websocket)
             # 001-tool-stream-ui (US2 T043): pause any push streams owned by
             # this websocket. They transition to DORMANT and become eligible
@@ -3626,6 +3696,7 @@ COMPONENT UPDATE RULES:
             {"name": "System", "description": "System dashboard and configuration."},
             {"name": "Auth", "description": "Authentication token proxy (Keycloak BFF)."},
             {"name": "Files", "description": "File upload and download."},
+            {"name": "Audit", "description": "Per-user audit log (HIPAA + NIST AU). Read-only; admin-blind."},
         ]
 
         # Create FastAPI app with rich OpenAPI documentation
@@ -3668,6 +3739,8 @@ COMPONENT UPDATE RULES:
         from orchestrator.api import chat_router, component_router, agent_router, dashboard_router, draft_router, voice_router, task_router
         from orchestrator.auth import auth_router
         from orchestrator.attachments.router import attachments_router
+        from audit.api import audit_router
+        from audit.middleware import AuditHTTPMiddleware
         app.include_router(chat_router)
         app.include_router(component_router)
         app.include_router(agent_router)
@@ -3677,6 +3750,12 @@ COMPONENT UPDATE RULES:
         app.include_router(attachments_router)
         app.include_router(voice_router)
         app.include_router(task_router)
+        app.include_router(audit_router)
+
+        # Audit HTTP middleware — records every authenticated REST request
+        # in the caller's own log (FR-021). Added after CORS so OPTIONS
+        # preflights are short-circuited before reaching the recorder.
+        app.add_middleware(AuditHTTPMiddleware)
 
         # Mount A2A JSON-RPC server (orchestrator as A2A agent)
         try:

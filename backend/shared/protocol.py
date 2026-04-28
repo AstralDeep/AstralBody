@@ -48,6 +48,8 @@ class Message:
             return ToolStreamEnd(**data)
         elif msg_type == 'tool_stream_cancel':
             return ToolStreamCancel(**data)
+        elif msg_type == 'audit_append':
+            return AuditAppend(**data)
         return Message(**data)
 
 # --- MCP Protocol Wrappers ---
@@ -250,6 +252,23 @@ class ToolStreamCancel(Message):
     type: str = "tool_stream_cancel"
     request_id: str = ""
     stream_id: str = ""
+
+
+@dataclass
+class AuditAppend(Message):
+    """Server→client live audit-log append (feature 003-agent-audit-log).
+
+    Sent on the user's existing WebSocket immediately after a new audit
+    row is inserted. The ``event`` payload matches the ``AuditEventDTO``
+    JSON Schema (see backend/audit/schemas.py and
+    specs/003-agent-audit-log/contracts/audit-event-schema.json) — it
+    is a strict subset of the underlying database row that omits
+    internal AU-9 fields. Server-side filtering by user_id is mandatory:
+    a connection authenticated as user A MUST NEVER receive an
+    ``audit_append`` whose event belongs to user B (FR-007 / FR-019).
+    """
+    type: str = "audit_append"
+    event: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
