@@ -5,7 +5,7 @@ Provides:
 - WebSocket endpoint (/agent) for orchestrator communication (default internal transport)
 - A2A JSON-RPC endpoint for external A2A-compliant clients
 - Legacy agent card (/.well-known/agent-card.json) for backward compat
-- Official A2A agent card (/.well-known/agent.json via A2AFastAPIApplication)
+- Official A2A agent card (/a2a/.well-known/agent-card.json via a2a-sdk routes)
 - Health check endpoint (/health)
 - Agent-to-agent peer communication via WebSocket
 """
@@ -702,21 +702,20 @@ class BaseA2AAgent:
         try:
             import httpx
             import uuid as uuid_mod
-            from a2a.types import (
-                Message as A2AMessage, DataPart, Part, Role,
-            )
-            from shared.a2a_bridge import a2a_response_to_mcp_response
+            from google.protobuf.json_format import MessageToDict
+            from a2a.types import Message as A2AMessage, Role
+            from shared.a2a_bridge import make_data_part
 
             # Build A2A JSON-RPC request
             a2a_url = f"{peer_url}/a2a" if not peer_url.endswith("/a2a") else peer_url
             msg = A2AMessage(
                 message_id=str(uuid_mod.uuid4()),
-                role=Role.user,
-                parts=[Part(root=DataPart(data={
+                role=Role.ROLE_USER,
+                parts=[make_data_part({
                     "method": "tools/call",
                     "name": tool_name,
                     "arguments": {k: v for k, v in arguments.items() if not k.startswith("_")},
-                }))],
+                })],
             )
 
             # Send via httpx (simple JSON-RPC POST)
@@ -728,7 +727,7 @@ class BaseA2AAgent:
                 "jsonrpc": "2.0",
                 "method": "message/send",
                 "id": request_id,
-                "params": {"message": msg.model_dump()},
+                "params": {"message": MessageToDict(msg, preserving_proto_field_name=True)},
             }
 
             async with httpx.AsyncClient(timeout=timeout) as client:
@@ -760,32 +759,30 @@ class BaseA2AAgent:
     # =========================================================================
 
     def _setup_a2a_routes(self, app: FastAPI):
-        """Mount the A2A JSON-RPC application on the FastAPI app."""
+        """Mount A2A JSON-RPC and agent-card routes on the FastAPI app."""
         try:
-            from a2a.server.apps.jsonrpc.fastapi_app import A2AFastAPIApplication
-            from a2a.server.request_handlers.default_request_handler import DefaultRequestHandler
+            from a2a.server.request_handlers import DefaultRequestHandler
             from a2a.server.tasks.inmemory_task_store import InMemoryTaskStore
+            from a2a.server.routes import (
+                create_jsonrpc_routes, create_agent_card_routes,
+            )
 
             a2a_card = self._build_a2a_card()
             executor = MCPAgentExecutor(self.mcp_server, self._security_validator, private_key=self._private_key)
-            task_store = InMemoryTaskStore()
             handler = DefaultRequestHandler(
                 agent_executor=executor,
-                task_store=task_store,
-            )
-
-            a2a_app = A2AFastAPIApplication(
+                task_store=InMemoryTaskStore(),
                 agent_card=a2a_card,
-                http_handler=handler,
             )
 
-            # Mount at /a2a — this provides:
-            #   /a2a/.well-known/agent-card.json (official A2A card)
-            #   /a2a/ (JSON-RPC endpoint)
-            a2a_fastapi = a2a_app.build()
-            app.mount("/a2a", a2a_fastapi)
+            # /.well-known/agent-card.json is served by the agent's own
+            # FastAPI route below; expose the v1.0 SDK routes under /a2a.
+            for route in create_jsonrpc_routes(handler, rpc_url="/a2a", enable_v0_3_compat=True):
+                app.router.routes.append(route)
+            for route in create_agent_card_routes(a2a_card, card_url="/a2a/.well-known/agent-card.json"):
+                app.router.routes.append(route)
 
-            self._logger.info(f"A2A JSON-RPC endpoint mounted at /a2a/")
+            self._logger.info("A2A JSON-RPC endpoint mounted at /a2a (v0.3 compat enabled)")
 
         except Exception as e:
             self._logger.warning(f"A2A setup failed (SDK may not be installed): {e}")

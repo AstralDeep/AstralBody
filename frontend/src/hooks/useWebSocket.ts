@@ -325,6 +325,13 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                 window.dispatchEvent(new CustomEvent("agent_creation_progress", { detail: data }));
                 break;
 
+            case "audit_append":
+                // 003-agent-audit-log: live-push a new audit entry to whichever
+                // panel is open. The hook does not retain audit state itself —
+                // panels subscribe via the "audit:append" custom event.
+                window.dispatchEvent(new CustomEvent("audit:append", { detail: data.event }));
+                break;
+
             case "chat_status":
                 setChatStatus({
                     status: (data.status as "idle" | "thinking" | "executing" | "done") || "idle",

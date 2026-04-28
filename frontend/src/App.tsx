@@ -1,11 +1,13 @@
 /**
  * App — Root component with login gate and dashboard.
  */
+import { useEffect, useState } from "react";
 import { useSmartAuth as useAuth } from "./hooks/useSmartAuth";
 import LoginScreen from "./components/LoginScreen";
 import DashboardLayout from "./components/DashboardLayout";
 import SDUICanvas from "./components/SDUICanvas";
 import FloatingChatPanel from "./components/FloatingChatPanel";
+import AuditLogPanel from "./components/audit/AuditLogPanel";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { AlertCircle } from "lucide-react";
 import { Toaster } from "sonner";
@@ -16,6 +18,20 @@ import { WS_URL } from "./config";
 
 function App() {
   const auth = useAuth();
+  const [auditOpen, setAuditOpen] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return new URLSearchParams(window.location.search).get("audit") === "open";
+  });
+
+  // Keep auditOpen in sync with browser back/forward navigation
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onPop = () => {
+      setAuditOpen(new URLSearchParams(window.location.search).get("audit") === "open");
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
 
   // Pass the token to the WebSocket hook.
   // It will only connect when token is available.
@@ -191,6 +207,7 @@ function App() {
       onSetAgentVisibility={setAgentVisibility}
       onRegisterExternalAgent={registerExternalAgent}
       onDiscoverAgents={discoverAgents}
+      onOpenAuditLog={() => setAuditOpen(true)}
     >
       <AgentPermissionProvider agents={agents}>
       <SDUICanvas
@@ -216,6 +233,11 @@ function App() {
       />
       </AgentPermissionProvider>
     </DashboardLayout>
+    <AuditLogPanel
+      open={auditOpen}
+      accessToken={auth.user?.access_token}
+      onClose={() => setAuditOpen(false)}
+    />
     </ThemeProvider>
   );
 }
