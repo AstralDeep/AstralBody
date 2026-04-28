@@ -28,6 +28,8 @@ import {
     Trash2,
     ListChecks,
     ShieldAlert,
+    Compass,
+    BookOpen,
 } from "lucide-react";
 import { API_URL } from "../config";
 import type { Agent, ChatSession, AgentPermissionsData, ConnectionState } from "../hooks/useWebSocket";
@@ -35,6 +37,8 @@ import AgentPermissionsModal from "./AgentPermissionsModal";
 import CreateAgentModal from "./CreateAgentModal";
 import { listFlaggedTools } from "../api/feedback";
 import { useFeedbackContext } from "./feedback/FeedbackContext";
+import { Tooltip } from "./onboarding/Tooltip";
+import { tooltipCatalog } from "./onboarding/tooltipCatalog";
 
 interface DashboardLayoutProps {
     children: React.ReactNode;
@@ -56,6 +60,12 @@ interface DashboardLayoutProps {
     onRegisterExternalAgent?: (url: string) => void;
     onOpenAuditLog?: () => void;
     onOpenFeedbackAdmin?: () => void;
+    /** Feature 005 — replays the getting-started tutorial overlay. */
+    onReplayTutorial?: () => void;
+    /** Feature 005 — opens the admin tutorial-step editor (admin only). */
+    onOpenTutorialAdmin?: () => void;
+    /** Feature 005 — opens the static User Guide overlay. */
+    onOpenUserGuide?: () => void;
     // Credential management
     agentCredentialKeys?: Record<string, string[]>;
     onFetchAgentCredentials?: (agentId: string) => Promise<unknown>;
@@ -94,6 +104,9 @@ export default function DashboardLayout({
     onDiscoverAgents,
     onOpenAuditLog,
     onOpenFeedbackAdmin,
+    onReplayTutorial,
+    onOpenTutorialAdmin,
+    onOpenUserGuide,
 }: DashboardLayoutProps) {
     const [chatToDelete, setChatToDelete] = useState<string | null>(null);
     const [permModalAgent, setPermModalAgent] = useState<string | null>(null);
@@ -677,41 +690,110 @@ export default function DashboardLayout({
 
                     {/* Agents Button */}
                     <div>
-                        <button
-                            onClick={() => setAgentsModalOpen(true)}
-                            className="w-full flex items-center gap-2 px-2 py-2 rounded-lg
-                                       hover:bg-white/5 transition-colors group text-left"
-                        >
-                            <div className="w-6 h-6 rounded-md bg-astral-primary/20 flex items-center justify-center flex-shrink-0">
-                                <Bot size={12} className="text-astral-primary" />
-                            </div>
-                            <span className="text-xs font-medium text-white flex-1">Agents</span>
-                            <span className="text-[10px] text-astral-muted">{agents.length} connected</span>
-                            <ChevronRight size={12} className="text-astral-muted/50 group-hover:text-astral-primary transition-colors flex-shrink-0" />
-                        </button>
+                        <Tooltip text={tooltipCatalog["sidebar.agents"]}>
+                            <button
+                                onClick={() => setAgentsModalOpen(true)}
+                                data-tutorial-target="sidebar.agents"
+                                className="w-full flex items-center gap-2 px-2 py-2 rounded-lg
+                                           hover:bg-white/5 transition-colors group text-left"
+                            >
+                                <div className="w-6 h-6 rounded-md bg-astral-primary/20 flex items-center justify-center flex-shrink-0">
+                                    <Bot size={12} className="text-astral-primary" />
+                                </div>
+                                <span className="text-xs font-medium text-white flex-1">Agents</span>
+                                <span className="text-[10px] text-astral-muted">{agents.length} connected</span>
+                                <ChevronRight size={12} className="text-astral-muted/50 group-hover:text-astral-primary transition-colors flex-shrink-0" />
+                            </button>
+                        </Tooltip>
                     </div>
 
                     {/* Audit log Button (003-agent-audit-log) */}
                     {onOpenAuditLog && (
                         <div>
-                            <button
-                                onClick={onOpenAuditLog}
-                                className="w-full flex items-center gap-2 px-2 py-2 rounded-lg
-                                           hover:bg-white/5 transition-colors group text-left"
-                            >
-                                <div className="w-6 h-6 rounded-md bg-astral-primary/20 flex items-center justify-center flex-shrink-0">
-                                    <ListChecks size={12} className="text-astral-primary" />
-                                </div>
-                                <span className="text-xs font-medium text-white flex-1">Audit log</span>
-                                <span className="text-[10px] text-astral-muted">your activity</span>
-                                <ChevronRight size={12} className="text-astral-muted/50 group-hover:text-astral-primary transition-colors flex-shrink-0" />
-                            </button>
+                            <Tooltip text={tooltipCatalog["sidebar.audit"]}>
+                                <button
+                                    onClick={onOpenAuditLog}
+                                    data-tutorial-target="sidebar.audit"
+                                    className="w-full flex items-center gap-2 px-2 py-2 rounded-lg
+                                               hover:bg-white/5 transition-colors group text-left"
+                                >
+                                    <div className="w-6 h-6 rounded-md bg-astral-primary/20 flex items-center justify-center flex-shrink-0">
+                                        <ListChecks size={12} className="text-astral-primary" />
+                                    </div>
+                                    <span className="text-xs font-medium text-white flex-1">Audit log</span>
+                                    <span className="text-[10px] text-astral-muted">your activity</span>
+                                    <ChevronRight size={12} className="text-astral-muted/50 group-hover:text-astral-primary transition-colors flex-shrink-0" />
+                                </button>
+                            </Tooltip>
                         </div>
                     )}
 
                     {/* Tool quality (admin-only, feature 004) */}
                     {onOpenFeedbackAdmin && (
                         <FeedbackAdminExpandedButton onClick={onOpenFeedbackAdmin} />
+                    )}
+
+                    {/* Tutorial admin (admin-only, feature 005) */}
+                    {onOpenTutorialAdmin && (
+                        <div>
+                            <Tooltip text={tooltipCatalog["sidebar.tutorial-admin"]}>
+                                <button
+                                    onClick={onOpenTutorialAdmin}
+                                    data-tutorial-target="sidebar.tutorial-admin"
+                                    className="w-full flex items-center gap-2 px-2 py-2 rounded-lg
+                                               hover:bg-white/5 transition-colors group text-left"
+                                >
+                                    <div className="w-6 h-6 rounded-md bg-astral-primary/20 flex items-center justify-center flex-shrink-0">
+                                        <BookOpen size={12} className="text-astral-primary" />
+                                    </div>
+                                    <span className="text-xs font-medium text-white flex-1">Tutorial admin</span>
+                                    <span className="text-[10px] text-astral-muted">edit step copy</span>
+                                    <ChevronRight size={12} className="text-astral-muted/50 group-hover:text-astral-primary transition-colors flex-shrink-0" />
+                                </button>
+                            </Tooltip>
+                        </div>
+                    )}
+
+                    {/* Take the tour (replay, feature 005) */}
+                    {onReplayTutorial && (
+                        <div>
+                            <Tooltip text={tooltipCatalog["sidebar.replay-tour"]}>
+                                <button
+                                    onClick={onReplayTutorial}
+                                    data-tutorial-target="sidebar.replay-tour"
+                                    className="w-full flex items-center gap-2 px-2 py-2 rounded-lg
+                                               hover:bg-white/5 transition-colors group text-left"
+                                >
+                                    <div className="w-6 h-6 rounded-md bg-astral-primary/20 flex items-center justify-center flex-shrink-0">
+                                        <Compass size={12} className="text-astral-primary" />
+                                    </div>
+                                    <span className="text-xs font-medium text-white flex-1">Take the tour</span>
+                                    <span className="text-[10px] text-astral-muted">getting started</span>
+                                    <ChevronRight size={12} className="text-astral-muted/50 group-hover:text-astral-primary transition-colors flex-shrink-0" />
+                                </button>
+                            </Tooltip>
+                        </div>
+                    )}
+
+                    {/* User guide (feature 005) */}
+                    {onOpenUserGuide && (
+                        <div>
+                            <Tooltip text={tooltipCatalog["sidebar.user-guide"]}>
+                                <button
+                                    onClick={onOpenUserGuide}
+                                    data-tutorial-target="sidebar.user-guide"
+                                    className="w-full flex items-center gap-2 px-2 py-2 rounded-lg
+                                               hover:bg-white/5 transition-colors group text-left"
+                                >
+                                    <div className="w-6 h-6 rounded-md bg-astral-primary/20 flex items-center justify-center flex-shrink-0">
+                                        <BookOpen size={12} className="text-astral-primary" />
+                                    </div>
+                                    <span className="text-xs font-medium text-white flex-1">User guide</span>
+                                    <span className="text-[10px] text-astral-muted">full reference</span>
+                                    <ChevronRight size={12} className="text-astral-muted/50 group-hover:text-astral-primary transition-colors flex-shrink-0" />
+                                </button>
+                            </Tooltip>
+                        </div>
                     )}
 
                     {/* Recent Chats */}

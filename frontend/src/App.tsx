@@ -15,6 +15,11 @@ import { ThemeProvider } from "./contexts/ThemeContext";
 import { AgentPermissionProvider } from "./contexts/AgentPermissionContext";
 import { FeedbackProvider } from "./components/feedback/FeedbackContext";
 import FeedbackAdminPanel from "./components/feedback/FeedbackAdminPanel";
+import { OnboardingProvider, useOnboarding } from "./components/onboarding/OnboardingContext";
+import { TooltipProvider } from "./components/onboarding/TooltipProvider";
+import { TutorialOverlay } from "./components/onboarding/TutorialOverlay";
+import { TutorialAdminPanel } from "./components/onboarding/TutorialAdminPanel";
+import UserGuidePanel from "./components/guide/UserGuidePanel";
 
 import { WS_URL } from "./config";
 
@@ -27,6 +32,14 @@ function App() {
   const [feedbackAdminOpen, setFeedbackAdminOpen] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
     return new URLSearchParams(window.location.search).get("feedback") === "open";
+  });
+  const [tutorialAdminOpen, setTutorialAdminOpen] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return new URLSearchParams(window.location.search).get("tutorial_admin") === "open";
+  });
+  const [userGuideOpen, setUserGuideOpen] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return new URLSearchParams(window.location.search).get("guide") === "open";
   });
 
   // Keep auditOpen in sync with browser back/forward navigation
@@ -176,85 +189,115 @@ function App() {
     );
   }
 
+  // ----- Inner shell that consumes OnboardingContext -----------------------
+  function Shell() {
+    const onboarding = useOnboarding();
+    return (
+      <>
+        <DashboardLayout
+          agents={agents}
+          isConnected={isConnected}
+          connectionState={connectionState}
+          onLogout={() => void auth.signoutRedirect()}
+          chatHistory={chatHistory}
+          activeChatId={activeChatId}
+          onLoadChat={loadChat}
+          onNewChat={createNewChat}
+          onDeleteChat={deleteChat}
+          isAdmin={isAdmin}
+          accessToken={auth.user?.access_token}
+          agentPermissions={agentPermissions}
+          onGetAgentPermissions={getAgentPermissions}
+          onSetAgentPermissions={setAgentPermissions}
+          agentCredentialKeys={agentCredentialKeys}
+          onFetchAgentCredentials={fetchAgentCredentials}
+          onSaveAgentCredentials={saveAgentCredentials}
+          onDeleteAgentCredential={deleteAgentCredential}
+          onStartOAuthFlow={startOAuthFlow}
+          userEmail={userEmail}
+          onSetAgentVisibility={setAgentVisibility}
+          onRegisterExternalAgent={registerExternalAgent}
+          onDiscoverAgents={discoverAgents}
+          onOpenAuditLog={() => setAuditOpen(true)}
+          onOpenFeedbackAdmin={isAdmin ? () => setFeedbackAdminOpen(true) : undefined}
+          onReplayTutorial={() => void onboarding.replay()}
+          onOpenTutorialAdmin={isAdmin ? () => setTutorialAdminOpen(true) : undefined}
+          onOpenUserGuide={() => setUserGuideOpen(true)}
+        >
+          <FeedbackProvider token={auth.user?.access_token ?? null} ws={wsRef?.current ?? null} isAdmin={isAdmin}>
+            <AgentPermissionProvider agents={agents}>
+              <SDUICanvas
+                canvasComponents={canvasComponents}
+                onDeleteComponent={deleteSavedComponent}
+                onCombineComponents={combineComponents}
+                onCondenseComponents={condenseComponents}
+                isCombining={isCombining}
+                combineError={combineError}
+                onTablePaginate={sendTablePaginate}
+                onSendMessage={sendMessage}
+                activeChatId={activeChatId}
+              />
+              <FloatingChatPanel
+                messages={messages}
+                chatStatus={chatStatus}
+                onSendMessage={sendMessage}
+                onCancelTask={cancelTask}
+                isConnected={isConnected}
+                activeChatId={activeChatId}
+                accessToken={auth.user?.access_token}
+                deviceCapabilities={deviceCapabilities}
+              />
+            </AgentPermissionProvider>
+          </FeedbackProvider>
+        </DashboardLayout>
+        <TutorialOverlay />
+      </>
+    );
+  }
+
   return (
     <ThemeProvider>
-    <Toaster
-      theme="dark"
-      position="top-right"
-      toastOptions={{
-        style: {
-          background: 'rgba(15, 18, 25, 0.95)',
-          border: '1px solid rgba(255, 255, 255, 0.1)',
-          color: '#e2e8f0',
-          backdropFilter: 'blur(12px)',
-        },
-      }}
-    />
-    <DashboardLayout
-      agents={agents}
-      isConnected={isConnected}
-      connectionState={connectionState}
-      onLogout={() => void auth.signoutRedirect()}
-      chatHistory={chatHistory}
-      activeChatId={activeChatId}
-      onLoadChat={loadChat}
-      onNewChat={createNewChat}
-      onDeleteChat={deleteChat}
-      isAdmin={isAdmin}
-      accessToken={auth.user?.access_token}
-      agentPermissions={agentPermissions}
-      onGetAgentPermissions={getAgentPermissions}
-      onSetAgentPermissions={setAgentPermissions}
-      agentCredentialKeys={agentCredentialKeys}
-      onFetchAgentCredentials={fetchAgentCredentials}
-      onSaveAgentCredentials={saveAgentCredentials}
-      onDeleteAgentCredential={deleteAgentCredential}
-      onStartOAuthFlow={startOAuthFlow}
-      userEmail={userEmail}
-      onSetAgentVisibility={setAgentVisibility}
-      onRegisterExternalAgent={registerExternalAgent}
-      onDiscoverAgents={discoverAgents}
-      onOpenAuditLog={() => setAuditOpen(true)}
-      onOpenFeedbackAdmin={isAdmin ? () => setFeedbackAdminOpen(true) : undefined}
-    >
-      <FeedbackProvider token={auth.user?.access_token ?? null} ws={wsRef?.current ?? null} isAdmin={isAdmin}>
-      <AgentPermissionProvider agents={agents}>
-      <SDUICanvas
-        canvasComponents={canvasComponents}
-        onDeleteComponent={deleteSavedComponent}
-        onCombineComponents={combineComponents}
-        onCondenseComponents={condenseComponents}
-        isCombining={isCombining}
-        combineError={combineError}
-        onTablePaginate={sendTablePaginate}
-        onSendMessage={sendMessage}
-        activeChatId={activeChatId}
-      />
-      <FloatingChatPanel
-        messages={messages}
-        chatStatus={chatStatus}
-        onSendMessage={sendMessage}
-        onCancelTask={cancelTask}
-        isConnected={isConnected}
-        activeChatId={activeChatId}
-        accessToken={auth.user?.access_token}
-        deviceCapabilities={deviceCapabilities}
-      />
-      </AgentPermissionProvider>
-      </FeedbackProvider>
-    </DashboardLayout>
-    <AuditLogPanel
-      open={auditOpen}
-      accessToken={auth.user?.access_token}
-      onClose={() => setAuditOpen(false)}
-    />
-    {isAdmin && (
-      <FeedbackAdminPanel
-        open={feedbackAdminOpen}
-        accessToken={auth.user?.access_token ?? null}
-        onClose={() => setFeedbackAdminOpen(false)}
-      />
-    )}
+      <TooltipProvider>
+        <OnboardingProvider accessToken={auth.user?.access_token ?? null}>
+          <Toaster
+            theme="dark"
+            position="top-right"
+            toastOptions={{
+              style: {
+                background: 'rgba(15, 18, 25, 0.95)',
+                border: '1px solid rgba(255, 255, 255, 0.1)',
+                color: '#e2e8f0',
+                backdropFilter: 'blur(12px)',
+              },
+            }}
+          />
+          <Shell />
+          <AuditLogPanel
+            open={auditOpen}
+            accessToken={auth.user?.access_token}
+            onClose={() => setAuditOpen(false)}
+          />
+          {isAdmin && (
+            <FeedbackAdminPanel
+              open={feedbackAdminOpen}
+              accessToken={auth.user?.access_token ?? null}
+              onClose={() => setFeedbackAdminOpen(false)}
+            />
+          )}
+          {isAdmin && (
+            <TutorialAdminPanel
+              open={tutorialAdminOpen}
+              accessToken={auth.user?.access_token ?? null}
+              onClose={() => setTutorialAdminOpen(false)}
+            />
+          )}
+          <UserGuidePanel
+            open={userGuideOpen}
+            isAdmin={isAdmin}
+            onClose={() => setUserGuideOpen(false)}
+          />
+        </OnboardingProvider>
+      </TooltipProvider>
     </ThemeProvider>
   );
 }

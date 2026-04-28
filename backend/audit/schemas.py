@@ -41,6 +41,12 @@ EVENT_CLASSES = (
     "tool_quality",
     "proposal_review",
     "quarantine",
+    # Feature 005 — tool tips and getting started tutorial
+    "onboarding_started",
+    "onboarding_completed",
+    "onboarding_skipped",
+    "onboarding_replayed",
+    "tutorial_step_edited",
 )
 
 OUTCOMES = ("in_progress", "success", "failure", "interrupted")

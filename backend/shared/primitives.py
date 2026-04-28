@@ -14,6 +14,7 @@ class Component:
     type: str
     id: Optional[str] = None
     style: Dict[str, str] = field(default_factory=dict)
+    tooltip: Optional[str] = None
 
     def to_json(self) -> Dict[str, Any]:
         return asdict(self)
