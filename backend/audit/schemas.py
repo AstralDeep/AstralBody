@@ -36,6 +36,11 @@ EVENT_CLASSES = (
     "agent_ui_render",
     "agent_external_call",
     "audit_view",
+    # Feature 004 — component feedback & tool-improvement loop
+    "component_feedback",
+    "tool_quality",
+    "proposal_review",
+    "quarantine",
 )
 
 OUTCOMES = ("in_progress", "success", "failure", "interrupted")

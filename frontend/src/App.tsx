@@ -13,6 +13,8 @@ import { AlertCircle } from "lucide-react";
 import { Toaster } from "sonner";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import { AgentPermissionProvider } from "./contexts/AgentPermissionContext";
+import { FeedbackProvider } from "./components/feedback/FeedbackContext";
+import FeedbackAdminPanel from "./components/feedback/FeedbackAdminPanel";
 
 import { WS_URL } from "./config";
 
@@ -21,6 +23,10 @@ function App() {
   const [auditOpen, setAuditOpen] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
     return new URLSearchParams(window.location.search).get("audit") === "open";
+  });
+  const [feedbackAdminOpen, setFeedbackAdminOpen] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return new URLSearchParams(window.location.search).get("feedback") === "open";
   });
 
   // Keep auditOpen in sync with browser back/forward navigation
@@ -67,6 +73,7 @@ function App() {
     discoverAgents,
     sendTablePaginate,
     deviceCapabilities,
+    wsRef,
   } = useWebSocket(
     WS_URL,
     auth.user?.access_token
@@ -208,7 +215,9 @@ function App() {
       onRegisterExternalAgent={registerExternalAgent}
       onDiscoverAgents={discoverAgents}
       onOpenAuditLog={() => setAuditOpen(true)}
+      onOpenFeedbackAdmin={isAdmin ? () => setFeedbackAdminOpen(true) : undefined}
     >
+      <FeedbackProvider token={auth.user?.access_token ?? null} ws={wsRef?.current ?? null} isAdmin={isAdmin}>
       <AgentPermissionProvider agents={agents}>
       <SDUICanvas
         canvasComponents={canvasComponents}
@@ -232,12 +241,20 @@ function App() {
         deviceCapabilities={deviceCapabilities}
       />
       </AgentPermissionProvider>
+      </FeedbackProvider>
     </DashboardLayout>
     <AuditLogPanel
       open={auditOpen}
       accessToken={auth.user?.access_token}
       onClose={() => setAuditOpen(false)}
     />
+    {isAdmin && (
+      <FeedbackAdminPanel
+        open={feedbackAdminOpen}
+        accessToken={auth.user?.access_token ?? null}
+        onClose={() => setFeedbackAdminOpen(false)}
+      />
+    )}
     </ThemeProvider>
   );
 }
