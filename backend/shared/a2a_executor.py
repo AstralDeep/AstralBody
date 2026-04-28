@@ -15,15 +15,17 @@ from a2a.server.agent_execution.context import RequestContext
 from a2a.server.events.event_queue import EventQueue
 from a2a.server.tasks.task_updater import TaskUpdater
 from a2a.types import (
-    Part,
-    TextPart,
-    DataPart,
     Message as A2AMessage,
     Role,
-    TaskState,
 )
 
-from shared.a2a_bridge import a2a_message_to_mcp_request, mcp_response_to_a2a_message, extract_text_from_a2a_message
+from shared.a2a_bridge import (
+    a2a_message_to_mcp_request,
+    mcp_response_to_a2a_message,
+    extract_text_from_a2a_message,
+    make_text_part,
+    make_data_part,
+)
 from shared.a2a_security import A2ASecurityValidator
 from shared.crypto import decrypt_from_orchestrator, is_e2e_encrypted
 
@@ -35,7 +37,7 @@ class MCPAgentExecutor(AgentExecutor):
 
     For each incoming A2A message:
     1. Optionally validates the Bearer token (if security_validator provided)
-    2. Extracts tool name + arguments from DataPart
+    2. Extracts tool name + arguments from a data Part
     3. Dispatches via the agent's MCPServer.process_request()
     4. Converts the MCPResponse to A2A events and publishes them
     """
@@ -104,16 +106,15 @@ class MCPAgentExecutor(AgentExecutor):
 
         if response.error:
             error_msg = response.error.get("message", "Tool execution failed") if isinstance(response.error, dict) else str(response.error)
-            # Still send ui_components if present (e.g. error alerts)
-            parts = [Part(root=TextPart(text=f"Error: {error_msg}"))]
+            parts = [make_text_part(f"Error: {error_msg}")]
             if response.ui_components:
-                parts.append(Part(root=DataPart(
-                    data={"_ui_components": response.ui_components},
+                parts.append(make_data_part(
+                    {"_ui_components": response.ui_components},
                     metadata={"type": "ui_components"},
-                )))
+                ))
             msg = A2AMessage(
                 message_id=str(uuid.uuid4()),
-                role=Role.agent,
+                role=Role.ROLE_AGENT,
                 parts=parts,
                 task_id=context.task_id,
             )
@@ -127,17 +128,14 @@ class MCPAgentExecutor(AgentExecutor):
         """Return the list of available tools as an A2A message."""
         tool_list = self.mcp_server.get_tool_list()
         parts = [
-            Part(root=DataPart(
-                data={
-                    "tools": tool_list,
-                    "method": "tools/list",
-                },
+            make_data_part(
+                {"tools": tool_list, "method": "tools/list"},
                 metadata={"type": "tool_list"},
-            ))
+            )
         ]
         msg = A2AMessage(
             message_id=str(uuid.uuid4()),
-            role=Role.agent,
+            role=Role.ROLE_AGENT,
             parts=parts,
             task_id=context.task_id,
         )
@@ -171,7 +169,7 @@ class MCPAgentExecutor(AgentExecutor):
         """Create a simple error A2A Message."""
         return A2AMessage(
             message_id=str(uuid.uuid4()),
-            role=Role.agent,
-            parts=[Part(root=TextPart(text=f"Error: {error_text}"))],
+            role=Role.ROLE_AGENT,
+            parts=[make_text_part(f"Error: {error_text}")],
             task_id=task_id,
         )

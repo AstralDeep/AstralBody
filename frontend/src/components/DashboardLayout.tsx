@@ -26,6 +26,7 @@ import {
     User,
     FileCode,
     Trash2,
+    ListChecks,
 } from "lucide-react";
 import { API_URL } from "../config";
 import type { Agent, ChatSession, AgentPermissionsData, ConnectionState } from "../hooks/useWebSocket";
@@ -50,6 +51,7 @@ interface DashboardLayoutProps {
     onGetAgentPermissions?: (agentId: string) => void;
     onSetAgentPermissions?: (agentId: string, scopes: Record<string, boolean>, toolOverrides?: Record<string, boolean>) => void;
     onRegisterExternalAgent?: (url: string) => void;
+    onOpenAuditLog?: () => void;
     // Credential management
     agentCredentialKeys?: Record<string, string[]>;
     onFetchAgentCredentials?: (agentId: string) => Promise<unknown>;
@@ -86,6 +88,7 @@ export default function DashboardLayout({
     onSetAgentVisibility,
     onRegisterExternalAgent,
     onDiscoverAgents,
+    onOpenAuditLog,
 }: DashboardLayoutProps) {
     const [chatToDelete, setChatToDelete] = useState<string | null>(null);
     const [permModalAgent, setPermModalAgent] = useState<string | null>(null);
@@ -603,6 +606,15 @@ export default function DashboardLayout({
                     >
                         <Bot size={18} className="text-astral-primary" />
                     </button>
+                    {onOpenAuditLog && (
+                        <button
+                            onClick={onOpenAuditLog}
+                            className="p-2.5 rounded-lg hover:bg-white/10 transition-colors"
+                            title="Audit log"
+                        >
+                            <ListChecks size={18} className="text-astral-primary" />
+                        </button>
+                    )}
                     <div className="flex-1" />
                     <div className="flex flex-col items-center gap-1 mb-1">
                         <span className={`w-2 h-2 rounded-full ${isConnected ? "bg-green-400" : "bg-red-400"} ${connectionState === "reconnecting" || connectionState === "connecting" ? "animate-pulse" : ""}`}
@@ -672,6 +684,24 @@ export default function DashboardLayout({
                             <ChevronRight size={12} className="text-astral-muted/50 group-hover:text-astral-primary transition-colors flex-shrink-0" />
                         </button>
                     </div>
+
+                    {/* Audit log Button (003-agent-audit-log) */}
+                    {onOpenAuditLog && (
+                        <div>
+                            <button
+                                onClick={onOpenAuditLog}
+                                className="w-full flex items-center gap-2 px-2 py-2 rounded-lg
+                                           hover:bg-white/5 transition-colors group text-left"
+                            >
+                                <div className="w-6 h-6 rounded-md bg-astral-primary/20 flex items-center justify-center flex-shrink-0">
+                                    <ListChecks size={12} className="text-astral-primary" />
+                                </div>
+                                <span className="text-xs font-medium text-white flex-1">Audit log</span>
+                                <span className="text-[10px] text-astral-muted">your activity</span>
+                                <ChevronRight size={12} className="text-astral-muted/50 group-hover:text-astral-primary transition-colors flex-shrink-0" />
+                            </button>
+                        </div>
+                    )}
 
                     {/* Recent Chats */}
                     <div>

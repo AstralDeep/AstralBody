@@ -127,7 +127,7 @@ async def get_current_user_payload(request: Request, credentials: HTTPAuthorizat
     if os.getenv("VITE_USE_MOCK_AUTH", "").lower() == "true":
         # Accept any token for mock auth (for testing)
         if token == "dev-token":
-            return {
+            mock_payload = {
                 "sub": "test_user",
                 "preferred_username": "test_user",
                 "email": "test_user@local",
@@ -136,6 +136,11 @@ async def get_current_user_payload(request: Request, credentials: HTTPAuthorizat
                     "astral-frontend": {"roles": ["admin", "user"]}
                 }
             }
+            try:
+                request.state.audit_claims = mock_payload
+            except Exception:
+                pass
+            return mock_payload
         try:
             import base64
             parts = token.split('.')
@@ -143,10 +148,15 @@ async def get_current_user_payload(request: Request, credentials: HTTPAuthorizat
                 payload_b64 = parts[1]
                 payload_b64 += '=' * ((4 - len(payload_b64) % 4) % 4)
                 payload_json = base64.b64decode(payload_b64).decode('utf-8')
-                return json.loads(payload_json)
+                decoded = json.loads(payload_json)
+                try:
+                    request.state.audit_claims = decoded
+                except Exception:
+                    pass
+                return decoded
         except Exception as e:
             logger.debug(f"Mock JWT decode failed, falling back to default test_user: {e}")
-        return {
+        fallback = {
             "sub": "test_user",
             "preferred_username": "test_user",
             "email": "test_user@local",
@@ -155,6 +165,11 @@ async def get_current_user_payload(request: Request, credentials: HTTPAuthorizat
                 "astral-frontend": {"roles": ["admin", "user"]}
             }
         }
+        try:
+            request.state.audit_claims = fallback
+        except Exception:
+            pass
+        return fallback
     
     authority, client_id, _ = _get_keycloak_config()
     if not authority or not client_id:
@@ -173,6 +188,10 @@ async def get_current_user_payload(request: Request, credentials: HTTPAuthorizat
         azp = payload.get("azp")
         if azp and azp != client_id:
              raise HTTPException(status_code=401, detail="Invalid client")
+        try:
+            request.state.audit_claims = payload
+        except Exception:
+            pass
         return payload
     except Exception as e:
         logger.error(f"Token validation failed in auth wrapper: {e}")
