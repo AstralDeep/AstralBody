@@ -76,6 +76,12 @@ class EndpointFilter(logging.Filter):
 logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
 
 
+# Module-level singleton handle, set by Orchestrator.__init__. Used by
+# external callers (e.g., feedback.cli) that need to reach into the
+# running instance without going through FastAPI app.state.
+_ORCH_INSTANCE = None  # type: Optional["Orchestrator"]
+
+
 class Orchestrator:
     def __init__(self):
         self.agents: Dict[str, websockets.WebSocketServerProtocol] = {}
@@ -188,6 +194,17 @@ class Orchestrator:
         self.audit_recorder = Recorder(self.audit_repo)
         self.audit_recorder.set_publisher(make_publish_callable(self))
         set_recorder(self.audit_recorder)
+
+        # Feature 004 — component feedback & tool-improvement loop
+        from feedback.repository import FeedbackRepository
+        from feedback.recorder import Recorder as FeedbackRecorder
+        self.feedback_repo = FeedbackRepository(self.history.db)
+        self.feedback_recorder = FeedbackRecorder(self.feedback_repo)
+        # Publish self as the module-level singleton so the feedback CLI
+        # and the pre-pass entrypoint can find the synthesizer without
+        # going through FastAPI app.state.
+        global _ORCH_INSTANCE
+        _ORCH_INSTANCE = self
 
         # Task State Machine — tracks Re-Act loop execution state
         self.task_manager = TaskManager()
@@ -709,6 +726,48 @@ class Orchestrator:
                         "status": "done",
                         "message": "Cancelled"
                     }))
+
+                elif msg.action == "component_feedback":
+                    # Feature 004 — submit feedback for a rendered component.
+                    from feedback.ws_handlers import handle_component_feedback
+                    claims = self.ui_sessions.get(websocket) or {}
+                    auth_principal = claims.get("preferred_username") or claims.get("sub") or "unknown"
+                    chat_id = msg.session_id or msg.payload.get("chat_id")
+                    await handle_component_feedback(
+                        safe_send=self._safe_send,
+                        websocket=websocket,
+                        payload=msg.payload or {},
+                        actor_user_id=user_id,
+                        auth_principal=auth_principal,
+                        recorder=self.feedback_recorder,
+                        conversation_id=chat_id,
+                    )
+
+                elif msg.action == "feedback_retract":
+                    from feedback.ws_handlers import handle_feedback_retract
+                    claims = self.ui_sessions.get(websocket) or {}
+                    auth_principal = claims.get("preferred_username") or claims.get("sub") or "unknown"
+                    await handle_feedback_retract(
+                        safe_send=self._safe_send,
+                        websocket=websocket,
+                        payload=msg.payload or {},
+                        actor_user_id=user_id,
+                        auth_principal=auth_principal,
+                        recorder=self.feedback_recorder,
+                    )
+
+                elif msg.action == "feedback_amend":
+                    from feedback.ws_handlers import handle_feedback_amend
+                    claims = self.ui_sessions.get(websocket) or {}
+                    auth_principal = claims.get("preferred_username") or claims.get("sub") or "unknown"
+                    await handle_feedback_amend(
+                        safe_send=self._safe_send,
+                        websocket=websocket,
+                        payload=msg.payload or {},
+                        actor_user_id=user_id,
+                        auth_principal=auth_principal,
+                        recorder=self.feedback_recorder,
+                    )
 
                 elif msg.action == "get_dashboard":
                     await self.send_dashboard(websocket)
@@ -1826,12 +1885,17 @@ COMPONENT UPDATE RULES:
                         tool_results.extend(res_list)
 
                     # Collect tool UI components and tag each (recursively) with source metadata
-                    def _tag_source(comp, agent_id, tool_name, tool_params=None):
+                    def _tag_source(comp, agent_id, tool_name, tool_params=None, correlation_id=None):
                         """Recursively tag a component dict and all nested children.
 
                         `tool_params` is only tagged on the top-level node — the
                         frontend auto-subscribe path reads it there to replay the
                         same arguments on `stream_subscribe`.
+
+                        Feature 004: `correlation_id` is the audit-log id of the
+                        originating tool dispatch. When present, every component
+                        (including nested children) carries it so the frontend
+                        can scope user feedback to the originating dispatch.
                         """
                         if not isinstance(comp, dict):
                             return
@@ -1839,11 +1903,13 @@ COMPONENT UPDATE RULES:
                         comp["_source_tool"] = tool_name
                         if tool_params is not None:
                             comp["_source_params"] = tool_params
+                        if correlation_id is not None:
+                            comp["_source_correlation_id"] = correlation_id
                         for key in ("content", "children"):
                             nested = comp.get(key)
                             if isinstance(nested, list):
                                 for child in nested:
-                                    _tag_source(child, agent_id, tool_name)
+                                    _tag_source(child, agent_id, tool_name, correlation_id=correlation_id)
 
                     tool_ui_components = []
                     for i_tc, res in enumerate(tool_results):
@@ -1861,8 +1927,9 @@ COMPONENT UPDATE RULES:
                                         t_params = raw_args
                                 except (ValueError, TypeError):
                                     t_params = {}
+                            corr_id = getattr(res, "correlation_id", None)
                             for comp in res.ui_components:
-                                _tag_source(comp, a_id, t_name, tool_params=t_params)
+                                _tag_source(comp, a_id, t_name, tool_params=t_params, correlation_id=corr_id)
                                 tool_ui_components.append(comp)
 
                     if tool_ui_components:
@@ -2411,6 +2478,15 @@ COMPONENT UPDATE RULES:
                 _audit_ctx.set_outcome("interrupted", "no result returned")
             else:
                 _audit_ctx.set_outputs_meta({"has_ui_components": bool(result.ui_components)})
+            # Feature 004: propagate the audit correlation_id onto the response
+            # so the caller can tag every produced UI component with the
+            # originating dispatch's id. The frontend's component_feedback
+            # flow uses this to scope a user's feedback to a specific dispatch.
+            if result is not None:
+                try:
+                    result.correlation_id = _audit_ctx.correlation_id
+                except Exception:
+                    pass
 
         # Hook: POST_TOOL_USE or POST_TOOL_FAILURE
         if flags.is_enabled("hook_system"):
@@ -3256,11 +3332,17 @@ COMPONENT UPDATE RULES:
 
                 if result and not result.error:
                     # Tag components with source metadata (same as regular tool flow)
+                    # Feature 004: also tag with correlation_id when available
+                    # so streamed components are linkable to their dispatch.
+                    stream_corr_id = getattr(result, "correlation_id", None)
+
                     def _tag(comp):
                         if not isinstance(comp, dict):
                             return
                         comp["_source_agent"] = agent_id
                         comp["_source_tool"] = tool_name
+                        if stream_corr_id is not None:
+                            comp["_source_correlation_id"] = stream_corr_id
                         for key in ("content", "children"):
                             nested = comp.get(key)
                             if isinstance(nested, list):
@@ -3685,6 +3767,27 @@ COMPONENT UPDATE RULES:
         if flags.is_enabled("knowledge_synthesis") and hasattr(self, '_knowledge_synthesizer'):
             asyncio.create_task(self._knowledge_synthesizer.run_loop())
 
+        # Feature 004 — daily quality-signal job + proposal generation
+        async def _feedback_quality_loop():
+            from feedback.quality import compute_for_window
+            from feedback.proposals import generate_for_underperforming
+            interval_seconds = int(os.getenv("FEEDBACK_QUALITY_JOB_INTERVAL", str(24 * 3600)))
+            # First run after a short warm-up so a freshly-restarted server
+            # produces an initial snapshot quickly without colliding with startup.
+            await asyncio.sleep(int(os.getenv("FEEDBACK_QUALITY_JOB_WARMUP", "60")))
+            while True:
+                try:
+                    await compute_for_window(self.feedback_repo)
+                    refine = None
+                    if flags.is_enabled("knowledge_synthesis") and getattr(self, "_knowledge_synthesizer", None):
+                        refine = getattr(self._knowledge_synthesizer, "refine_proposal", None)
+                    await generate_for_underperforming(self.feedback_repo, refine_with_llm=refine)
+                except Exception as exc:
+                    logger.warning("feedback quality loop iteration failed: %s", exc)
+                await asyncio.sleep(interval_seconds)
+
+        asyncio.create_task(_feedback_quality_loop())
+
         # Import WebSocket protocol docs for OpenAPI description
         from orchestrator.models import WS_PROTOCOL_DOCS
 
@@ -3741,6 +3844,7 @@ COMPONENT UPDATE RULES:
         from orchestrator.attachments.router import attachments_router
         from audit.api import audit_router
         from audit.middleware import AuditHTTPMiddleware
+        from feedback.api import feedback_user_router, feedback_admin_router
         app.include_router(chat_router)
         app.include_router(component_router)
         app.include_router(agent_router)
@@ -3751,6 +3855,9 @@ COMPONENT UPDATE RULES:
         app.include_router(voice_router)
         app.include_router(task_router)
         app.include_router(audit_router)
+        # Feature 004 — component feedback & tool-improvement loop
+        app.include_router(feedback_user_router)
+        app.include_router(feedback_admin_router)
 
         # Audit HTTP middleware — records every authenticated REST request
         # in the caller's own log (FR-021). Added after CORS so OPTIONS
