@@ -21,6 +21,8 @@ export const tooltipCatalog: Record<string, string> = {
     "sidebar.tutorial-admin":
         "Admin: edit the copy of every step in the getting-started tour.",
     "sidebar.replay-tour": "Replay the getting-started tour from the beginning.",
+    "sidebar.user-guide":
+        "Open the full user guide — every dashboard feature, explained.",
     "sidebar.new-chat": "Start a new conversation with an agent.",
     "sidebar.toggle": "Show or hide the sidebar.",
     "sidebar.logout": "Sign out of AstralBody.",

@@ -19,6 +19,7 @@ import { OnboardingProvider, useOnboarding } from "./components/onboarding/Onboa
 import { TooltipProvider } from "./components/onboarding/TooltipProvider";
 import { TutorialOverlay } from "./components/onboarding/TutorialOverlay";
 import { TutorialAdminPanel } from "./components/onboarding/TutorialAdminPanel";
+import UserGuidePanel from "./components/guide/UserGuidePanel";
 
 import { WS_URL } from "./config";
 
@@ -35,6 +36,10 @@ function App() {
   const [tutorialAdminOpen, setTutorialAdminOpen] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
     return new URLSearchParams(window.location.search).get("tutorial_admin") === "open";
+  });
+  const [userGuideOpen, setUserGuideOpen] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return new URLSearchParams(window.location.search).get("guide") === "open";
   });
 
   // Keep auditOpen in sync with browser back/forward navigation
@@ -217,6 +222,7 @@ function App() {
           onOpenFeedbackAdmin={isAdmin ? () => setFeedbackAdminOpen(true) : undefined}
           onReplayTutorial={() => void onboarding.replay()}
           onOpenTutorialAdmin={isAdmin ? () => setTutorialAdminOpen(true) : undefined}
+          onOpenUserGuide={() => setUserGuideOpen(true)}
         >
           <FeedbackProvider token={auth.user?.access_token ?? null} ws={wsRef?.current ?? null} isAdmin={isAdmin}>
             <AgentPermissionProvider agents={agents}>
@@ -285,6 +291,11 @@ function App() {
               onClose={() => setTutorialAdminOpen(false)}
             />
           )}
+          <UserGuidePanel
+            open={userGuideOpen}
+            isAdmin={isAdmin}
+            onClose={() => setUserGuideOpen(false)}
+          />
         </OnboardingProvider>
       </TooltipProvider>
     </ThemeProvider>

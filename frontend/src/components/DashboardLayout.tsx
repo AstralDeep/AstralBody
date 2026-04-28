@@ -64,6 +64,8 @@ interface DashboardLayoutProps {
     onReplayTutorial?: () => void;
     /** Feature 005 — opens the admin tutorial-step editor (admin only). */
     onOpenTutorialAdmin?: () => void;
+    /** Feature 005 — opens the static User Guide overlay. */
+    onOpenUserGuide?: () => void;
     // Credential management
     agentCredentialKeys?: Record<string, string[]>;
     onFetchAgentCredentials?: (agentId: string) => Promise<unknown>;
@@ -104,6 +106,7 @@ export default function DashboardLayout({
     onOpenFeedbackAdmin,
     onReplayTutorial,
     onOpenTutorialAdmin,
+    onOpenUserGuide,
 }: DashboardLayoutProps) {
     const [chatToDelete, setChatToDelete] = useState<string | null>(null);
     const [permModalAgent, setPermModalAgent] = useState<string | null>(null);
@@ -766,6 +769,27 @@ export default function DashboardLayout({
                                     </div>
                                     <span className="text-xs font-medium text-white flex-1">Take the tour</span>
                                     <span className="text-[10px] text-astral-muted">getting started</span>
+                                    <ChevronRight size={12} className="text-astral-muted/50 group-hover:text-astral-primary transition-colors flex-shrink-0" />
+                                </button>
+                            </Tooltip>
+                        </div>
+                    )}
+
+                    {/* User guide (feature 005) */}
+                    {onOpenUserGuide && (
+                        <div>
+                            <Tooltip text={tooltipCatalog["sidebar.user-guide"]}>
+                                <button
+                                    onClick={onOpenUserGuide}
+                                    data-tutorial-target="sidebar.user-guide"
+                                    className="w-full flex items-center gap-2 px-2 py-2 rounded-lg
+                                               hover:bg-white/5 transition-colors group text-left"
+                                >
+                                    <div className="w-6 h-6 rounded-md bg-astral-primary/20 flex items-center justify-center flex-shrink-0">
+                                        <BookOpen size={12} className="text-astral-primary" />
+                                    </div>
+                                    <span className="text-xs font-medium text-white flex-1">User guide</span>
+                                    <span className="text-[10px] text-astral-muted">full reference</span>
                                     <ChevronRight size={12} className="text-astral-muted/50 group-hover:text-astral-primary transition-colors flex-shrink-0" />
                                 </button>
                             </Tooltip>
