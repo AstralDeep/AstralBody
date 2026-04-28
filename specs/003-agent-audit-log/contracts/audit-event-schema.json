@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://astralbody.local/specs/003-agent-audit-log/audit-event.schema.json",
+  "title": "AuditEvent",
+  "description": "Public-facing audit event DTO returned by REST /api/audit and WebSocket audit_append messages. Strict subset of the underlying audit_events row; internal AU-9 fields are intentionally absent.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "event_class",
+    "action_type",
+    "description",
+    "correlation_id",
+    "outcome",
+    "inputs_meta",
+    "outputs_meta",
+    "artifact_pointers",
+    "started_at",
+    "recorded_at"
+  ],
+  "properties": {
+    "event_id": { "type": "string", "format": "uuid" },
+    "event_class": {
+      "type": "string",
+      "enum": [
+        "auth",
+        "conversation",
+        "file",
+        "settings",
+        "agent_tool_call",
+        "agent_ui_render",
+        "agent_external_call",
+        "audit_view"
+      ]
+    },
+    "action_type": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "description": { "type": "string", "minLength": 1, "maxLength": 1024 },
+    "agent_id": { "type": ["string", "null"] },
+    "conversation_id": { "type": ["string", "null"] },
+    "correlation_id": { "type": "string", "format": "uuid" },
+    "outcome": {
+      "type": "string",
+      "enum": ["in_progress", "success", "failure", "interrupted"]
+    },
+    "outcome_detail": { "type": ["string", "null"], "maxLength": 2048 },
+    "inputs_meta": {
+      "type": "object",
+      "description": "Non-PHI metadata describing the action's inputs. No raw payload bytes (FR-004).",
+      "maxProperties": 32
+    },
+    "outputs_meta": {
+      "type": "object",
+      "description": "Non-PHI metadata describing the action's outputs. No raw payload bytes (FR-004).",
+      "maxProperties": 32
+    },
+    "artifact_pointers": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["artifact_id", "store", "available"],
+        "properties": {
+          "artifact_id": { "type": "string", "minLength": 1 },
+          "store": { "type": "string", "minLength": 1 },
+          "extension": {
+            "type": ["string", "null"],
+            "pattern": "^[a-z0-9]{1,16}$",
+            "description": "Lowercase normalized extension only — no filename (FR-015)."
+          },
+          "size_bytes": { "type": ["integer", "null"], "minimum": 0 },
+          "available": {
+            "type": "boolean",
+            "description": "Computed at read time (FR-017). False indicates the artifact has been purged from its source store."
+          }
+        }
+      }
+    },
+    "started_at": { "type": "string", "format": "date-time" },
+    "completed_at": { "type": ["string", "null"], "format": "date-time" },
+    "recorded_at": { "type": "string", "format": "date-time" }
+  },
+  "$comment": "Excluded by design: prev_hash, entry_hash, key_id, schema_version, auth_principal, actor_user_id. The first four are internal AU-9 integrity fields; auth_principal adds no user value and is forensic-only; actor_user_id is implicit (always equals the authenticated caller per FR-007/FR-019)."
+}
