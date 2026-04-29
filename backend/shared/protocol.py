@@ -50,6 +50,14 @@ class Message:
             return ToolStreamCancel(**data)
         elif msg_type == 'audit_append':
             return AuditAppend(**data)
+        elif msg_type == 'llm_config_set':
+            return LLMConfigSet(**data)
+        elif msg_type == 'llm_config_clear':
+            return LLMConfigClear(**data)
+        elif msg_type == 'llm_config_ack':
+            return LLMConfigAck(**data)
+        elif msg_type == 'llm_usage_report':
+            return LLMUsageReport(**data)
         return Message(**data)
 
 # --- MCP Protocol Wrappers ---
@@ -308,6 +316,10 @@ class RegisterUI(Message):
     session_id: Optional[str] = None
     token: Optional[str] = None
     device: Optional[Dict[str, Any]] = None  # ROTE: frontend device capabilities
+    # Feature 006: optional initial LLM config carried from the user's
+    # browser localStorage at register time. Shape: {api_key, base_url, model}.
+    # Stored only in per-WebSocket memory on the server (never persisted).
+    llm_config: Optional[Dict[str, Any]] = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self))
@@ -316,6 +328,60 @@ class RegisterUI(Message):
     def from_json(json_str: str) -> 'RegisterUI':
         data = json.loads(json_str)
         return RegisterUI(**data)
+
+
+# --- Feature 006: User-Configurable LLM Subscription -------------------
+@dataclass
+class LLMConfigSet(Message):
+    """Client→server: user saved/updated their personal LLM configuration.
+
+    The ``config`` dict carries ``api_key``, ``base_url``, ``model`` — all
+    three required and non-empty. Server-side validation rejects any
+    malformed payload with an ``error`` reply (code ``llm_config_invalid``)
+    and does NOT mutate the per-WebSocket credential store.
+    """
+    type: str = "llm_config_set"
+    config: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class LLMConfigClear(Message):
+    """Client→server: user cleared their personal LLM configuration.
+
+    Pops the per-WebSocket credential entry. Subsequent LLM-dependent
+    calls fall back to the operator's ``.env`` default credentials (or
+    fail closed if those are also unavailable).
+    """
+    type: str = "llm_config_clear"
+
+
+@dataclass
+class LLMConfigAck(Message):
+    """Server→client: acknowledgement for ``llm_config_set`` / ``llm_config_clear``."""
+    type: str = "llm_config_ack"
+    ok: bool = True
+
+
+@dataclass
+class LLMUsageReport(Message):
+    """Server→client: per-call token-usage report.
+
+    Emitted ONLY when the LLM call was served using the user's personal
+    credentials (``credential_source == 'user'``). Calls served using
+    the operator default are NOT reported, so the per-user token-usage
+    counters in the browser only reflect the user's own spend.
+
+    ``total_tokens`` / ``prompt_tokens`` / ``completion_tokens`` may be
+    ``None`` when the upstream response omitted the ``usage`` block.
+    """
+    type: str = "llm_usage_report"
+    feature: str = ""           # call-site identifier, e.g. "tool_dispatch"
+    model: str = ""
+    total_tokens: Optional[int] = None
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+    outcome: str = "success"     # "success" | "failure"
+    at: str = ""                 # ISO 8601 timestamp
 
 
 # --- Streaming tool metadata validation (001-tool-stream-ui) ---

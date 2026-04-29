@@ -47,6 +47,10 @@ EVENT_CLASSES = (
     "onboarding_skipped",
     "onboarding_replayed",
     "tutorial_step_edited",
+    # Feature 006 — user-configurable LLM subscription
+    "llm_config_change",
+    "llm_unconfigured",
+    "llm_call",
 )
 
 OUTCOMES = ("in_progress", "success", "failure", "interrupted")

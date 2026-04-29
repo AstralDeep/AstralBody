@@ -119,22 +119,69 @@ class Orchestrator:
         self.a2a_agent_cards: Dict[str, Any] = {}  # agent_id -> official A2A AgentCard
         self.agent_urls: Dict[str, str] = {}  # agent_id -> base URL (for peer registry)
 
-        # LLM Client
-        api_key = os.getenv("OPENAI_API_KEY")
-        base_url = os.getenv("OPENAI_BASE_URL")
-        self.llm_model = os.getenv("LLM_MODEL", "meta-llama/Llama-3.2-90B-Vision-Instruct")
+        # LLM Client (feature 006-user-llm-config)
+        # ----------------------------------------------------------------
+        # The operator's .env-supplied credentials are used as the
+        # *default* for users who have not configured their own. A user
+        # who has configured personal credentials sees those credentials
+        # used exclusively (no runtime fallback — FR-003 / FR-009).
+        # Per-user credentials are NEVER persisted server-side; they
+        # live in `_session_llm_creds`, keyed by id(websocket), and are
+        # cleared on socket disconnect (FR-002).
+        from llm_config import (
+            OperatorDefaultCreds,
+            SessionCredentialStore,
+            build_llm_client,
+            CredentialSource,
+            LLMUnavailable,
+            ResolvedConfig,
+        )
+        from llm_config.audit_events import (
+            record_llm_call,
+            record_llm_unconfigured,
+        )
+        self._operator_creds = OperatorDefaultCreds.from_env()
+        self._session_llm_creds = SessionCredentialStore()
+        # Cache the imports as instance attributes so the hot _call_llm
+        # path doesn't re-import on every call.
+        self._build_llm_client = build_llm_client
+        self._CredentialSource = CredentialSource
+        self._LLMUnavailable = LLMUnavailable
+        self._ResolvedConfig = ResolvedConfig
+        self._record_llm_call = record_llm_call
+        self._record_llm_unconfigured = record_llm_unconfigured
 
-        if api_key and base_url:
+        # Default model name — used when the operator default is the
+        # active credential set. Personal-config callers supply their
+        # own model via SessionCreds.model.
+        self.llm_model = self._operator_creds.model or os.getenv(
+            "LLM_MODEL", "meta-llama/Llama-3.2-90B-Vision-Instruct"
+        )
+
+        # Pre-built default OpenAI client. Used directly only for the
+        # legacy `_combine_components_llm` call site that does not
+        # accept a websocket; user-initiated calls go through
+        # `_resolve_llm_client_for(websocket)` instead. May be None when
+        # the operator has not provided default credentials, in which
+        # case unconfigured users will see the FR-004a "LLM unavailable"
+        # prompt.
+        if self._operator_creds.is_complete:
             self.llm_client = OpenAI(
-                api_key=api_key,
-                base_url=base_url,
+                api_key=self._operator_creds.api_key,
+                base_url=self._operator_creds.base_url,
                 timeout=Timeout(90.0, connect=10.0),
                 max_retries=0,  # We handle retries in _call_llm — disable SDK-internal retries
             )
-            logger.info(f"LLM configured: {base_url} model={self.llm_model}")
+            logger.info(
+                f"Operator-default LLM configured: {self._operator_creds.base_url} "
+                f"model={self.llm_model}"
+            )
         else:
             self.llm_client = None
-            logger.warning("No LLM configured — tool routing disabled")
+            logger.warning(
+                "No operator-default LLM configured — users without personal "
+                "config will see the 'LLM unavailable' prompt"
+            )
 
         # History Manager
         backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -634,6 +681,26 @@ class Orchestrator:
                     except Exception as _e:
                         logger.debug(f"WS register audit record failed: {_e}")
 
+                    # Feature 006: pick up any LLM credentials the browser
+                    # forwarded with this register_ui (the user's browser
+                    # localStorage is the source of truth for personal config).
+                    try:
+                        from llm_config.ws_handlers import populate_from_register_ui
+                        await populate_from_register_ui(
+                            websocket=websocket,
+                            llm_config=msg.llm_config,
+                            actor_user_id=user_data.get("sub", "legacy"),
+                            auth_principal=(
+                                user_data.get("preferred_username")
+                                or user_data.get("sub")
+                                or "unknown"
+                            ),
+                            creds_store=self._session_llm_creds,
+                            recorder=self.audit_recorder,
+                        )
+                    except Exception as _e:  # pragma: no cover — non-fatal
+                        logger.debug(f"register_ui llm_config seeding failed (non-fatal): {_e}")
+
                     # ROTE: register device capabilities and send profile back
                     device_info = msg.device or {}
                     rote_profile = self.rote.register_device(websocket, device_info)
@@ -673,6 +740,47 @@ class Orchestrator:
                     ])
                     # We might want to close, but let's let the UI handle the error alert
                     return
+
+            elif msg.type in ("llm_config_set", "llm_config_clear"):
+                # Feature 006-user-llm-config: per-user LLM credential
+                # set/clear over WS. Both require an authenticated socket.
+                if websocket not in self.ui_sessions:
+                    await self._safe_send(websocket, json.dumps({
+                        "type": "error",
+                        "code": "unauthenticated",
+                        "message": "register_ui must complete before llm_config_*",
+                    }))
+                    return
+                claims = self.ui_sessions.get(websocket) or {}
+                actor_user_id = claims.get("sub") or "legacy"
+                auth_principal = (
+                    claims.get("preferred_username")
+                    or claims.get("sub")
+                    or "unknown"
+                )
+                from llm_config.ws_handlers import (
+                    handle_llm_config_set,
+                    handle_llm_config_clear,
+                )
+                if msg.type == "llm_config_set":
+                    await handle_llm_config_set(
+                        safe_send=self._safe_send,
+                        websocket=websocket,
+                        config=getattr(msg, "config", {}) or {},
+                        actor_user_id=actor_user_id,
+                        auth_principal=auth_principal,
+                        creds_store=self._session_llm_creds,
+                        recorder=self.audit_recorder,
+                    )
+                else:
+                    await handle_llm_config_clear(
+                        safe_send=self._safe_send,
+                        websocket=websocket,
+                        actor_user_id=actor_user_id,
+                        auth_principal=auth_principal,
+                        creds_store=self._session_llm_creds,
+                        recorder=self.audit_recorder,
+                    )
 
             elif isinstance(msg, UIEvent):
                 # Ensure authenticated
@@ -1312,7 +1420,13 @@ class Orchestrator:
         Returns:
             {"components": [...]} on success, {"error": "..."} on failure.
         """
-        if not self.llm_client:
+        # Feature 006: this is a system-initiated combine (websocket=None
+        # is passed to _call_llm below), so it relies on the operator's
+        # .env defaults — per-user credentials don't apply here (FR-011).
+        # The downstream _call_llm will emit llm_unconfigured if the
+        # operator default is also absent; this fast-path return just
+        # avoids building a long prompt that would never be sent.
+        if not self._operator_creds.is_complete:
             return {"error": "LLM not configured"}
 
         # Build the component descriptions for the prompt
@@ -1622,9 +1736,27 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             logger.warning("Empty message received")
             return
 
-        if not self.llm_client:
+        # Feature 006: pre-flight check — surface the FR-004a "LLM
+        # unavailable" prompt up-front when neither the user's personal
+        # config nor the operator default is usable, instead of letting
+        # the user wait through the loading state for an inevitable failure.
+        # The per-call resolver in _call_llm will also catch this, but
+        # exiting early avoids the extra UX latency.
+        try:
+            self._resolve_llm_client_for(websocket)
+        except self._LLMUnavailable:
+            actor_user_id, auth_principal = self._llm_audit_principals(websocket)
+            await self._record_llm_unconfigured(
+                self.audit_recorder,
+                actor_user_id=actor_user_id,
+                auth_principal=auth_principal,
+                feature="chat_dispatch",
+            )
             await self.send_ui_render(websocket, [
-                Alert(message="LLM not configured. Set OPENAI_API_KEY and OPENAI_BASE_URL.", variant="error").to_json()
+                Alert(
+                    message="LLM unavailable — set your own provider in settings.",
+                    variant="error",
+                ).to_json()
             ])
             return
 
@@ -1650,7 +1782,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # Async title summarization for new chats
         chat_data = self.history.get_chat(chat_id, user_id=user_id)
         if chat_data and len(chat_data.get("messages", [])) == 1:
-            asyncio.create_task(self.summarize_chat_title(chat_id, msg_to_save, user_id=user_id))
+            asyncio.create_task(
+                self.summarize_chat_title(chat_id, msg_to_save, user_id=user_id, websocket=websocket)
+            )
 
         # Build tool definitions from registered agents
         # Filter by user's per-agent tool permissions (RFC 8693 delegation)
@@ -2271,20 +2405,107 @@ COMPONENT UPDATE RULES:
             f"Token usage for chat {chat_id}: {self.token_usage[chat_id]}"
         )
 
-    async def _call_llm(self, websocket, messages, tools_desc=None, temperature=None):
+    # ------------------------------------------------------------------
+    # Feature 006 — credential resolution helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_llm_client_for(self, websocket):
+        """Resolve the (client, source, resolved) tuple for a per-call LLM
+        invocation on behalf of the user behind ``websocket``.
+
+        - If the user has saved personal credentials in their browser and
+          forwarded them on register_ui or via llm_config_set, those are
+          used (CredentialSource.USER).
+        - Otherwise, if the operator has supplied .env defaults, those
+          are used (CredentialSource.OPERATOR_DEFAULT).
+        - Otherwise, raises LLMUnavailable. Callers handle this by
+          emitting an llm_unconfigured audit event and surfacing the
+          'LLM unavailable' UI prompt (FR-004a).
+
+        ``websocket`` may be None for server-initiated background jobs
+        (e.g. the daily feedback quality / proposals job from feature 004).
+        Such jobs always use the operator default — no individual user is
+        the caller. (FR-011)
+        """
+        ws_id = id(websocket) if websocket is not None else None
+        session_creds = (
+            self._session_llm_creds.get(ws_id) if ws_id is not None else None
+        )
+        return self._build_llm_client(session_creds, self._operator_creds)
+
+    def _llm_audit_principals(self, websocket):
+        """Return ``(actor_user_id, auth_principal)`` for audit-event emission
+        on behalf of ``websocket``.
+
+        Mirrors the convention used elsewhere in the orchestrator
+        (handle_ui_message lines 743/758/771). Background-job calls with
+        websocket=None get ``actor_user_id='system'`` per FR-011 wiring
+        in audit-events.md.
+        """
+        if websocket is None:
+            return ("system", "system")
+        claims = self.ui_sessions.get(websocket) or {}
+        actor_user_id = claims.get("sub") or "legacy"
+        auth_principal = (
+            claims.get("preferred_username") or claims.get("sub") or "unknown"
+        )
+        return (actor_user_id, auth_principal)
+
+    @staticmethod
+    def _classify_llm_upstream_error(exc) -> str:
+        """Map an upstream OpenAI-SDK exception to one of the audit-event
+        ``upstream_error_class`` taxonomy values defined in
+        contracts/audit-events.md §3.
+        """
+        s = str(exc)
+        if "401" in s or "auth" in s.lower():
+            return "auth_failed"
+        if "429" in s or "rate" in s.lower():
+            return "rate_limit"
+        if "404" in s or "not found" in s.lower() or "model" in s.lower() and "not" in s.lower():
+            return "model_not_found"
+        if any(k in s.lower() for k in ("connection", "timeout", "network", "dns")):
+            return "transport_error"
+        return "other"
+
+    async def _call_llm(self, websocket, messages, tools_desc=None, temperature=None,
+                        feature: str = "tool_dispatch"):
         """Helper to call LLM with retries and exponential backoff.
 
         Only retries on transient errors (502, 503, 504). Fails fast on
         non-transient errors like 424 (model not found) or 401 (auth).
 
+        Feature 006: credential resolution happens here. The caller's
+        credentials (or operator default) are picked up from the
+        per-WebSocket credential store via ``_resolve_llm_client_for``.
+        Every call emits an ``llm_call`` audit event with
+        ``credential_source`` so SC-006 invariants can be verified;
+        ``LLMUnavailable`` (no credentials anywhere) emits
+        ``llm_unconfigured`` instead and returns ``(None, None)``.
+
         Returns:
             Tuple of (message, usage) where usage is the token usage object
             from the API response, or (None, None) on complete failure.
         """
+        actor_user_id, auth_principal = self._llm_audit_principals(websocket)
+        try:
+            client, source, resolved = self._resolve_llm_client_for(websocket)
+        except self._LLMUnavailable:
+            await self._record_llm_unconfigured(
+                self.audit_recorder,
+                actor_user_id=actor_user_id,
+                auth_principal=auth_principal,
+                feature=feature,
+            )
+            return None, None
+        # The resolved.model is the user's chosen model when source=USER,
+        # else the operator default model (== self.llm_model).
+        call_model = resolved.model
+        last_error = None
         for attempt in range(1, self.MAX_RETRIES + 1):
             try:
                 kwargs = {
-                    "model": self.llm_model,
+                    "model": call_model,
                     "messages": messages
                 }
                 if tools_desc:
@@ -2294,12 +2515,37 @@ COMPONENT UPDATE RULES:
                     kwargs["temperature"] = temperature
 
                 response = await asyncio.to_thread(
-                    self.llm_client.chat.completions.create,
+                    client.chat.completions.create,
                     **kwargs
                 )
                 usage = getattr(response, "usage", None)
+                # Audit: successful llm_call
+                total_tokens = getattr(usage, "total_tokens", None) if usage else None
+                await self._record_llm_call(
+                    self.audit_recorder,
+                    actor_user_id=actor_user_id,
+                    auth_principal=auth_principal,
+                    feature=feature,
+                    credential_source=source,
+                    resolved=resolved,
+                    total_tokens=total_tokens,
+                    outcome="success",
+                )
+                # Feature 006: emit llm_usage_report WS message ONLY when
+                # the call was served with the user's personal credentials
+                # (FR-016 — operator-default calls are NOT attributed to
+                # the user's per-device counters).
+                if source == self._CredentialSource.USER and websocket is not None:
+                    await self._emit_llm_usage_report(
+                        websocket,
+                        feature=feature,
+                        model=call_model,
+                        usage=usage,
+                        outcome="success",
+                    )
                 return response.choices[0].message, usage
             except Exception as e:
+                last_error = e
                 error_str = str(e)
                 is_transient = any(code in error_str for code in ["502", "503", "504", "Bad Gateway", "Service Unavailable", "Connection", "timeout"])
                 is_fatal = any(code in error_str for code in ["424", "401", "403", "Repository Not Found", "Invalid username"])
@@ -2309,9 +2555,41 @@ COMPONENT UPDATE RULES:
                 # Don't retry fatal errors — they won't resolve with retries
                 if is_fatal:
                     logger.error(f"Fatal LLM error (no retry): {e}")
+                    await self._record_llm_call(
+                        self.audit_recorder,
+                        actor_user_id=actor_user_id,
+                        auth_principal=auth_principal,
+                        feature=feature,
+                        credential_source=source,
+                        resolved=resolved,
+                        total_tokens=None,
+                        outcome="failure",
+                        upstream_error_class=self._classify_llm_upstream_error(e),
+                    )
+                    if source == self._CredentialSource.USER and websocket is not None:
+                        await self._emit_llm_usage_report(
+                            websocket, feature=feature, model=call_model,
+                            usage=None, outcome="failure",
+                        )
                     raise e
 
                 if attempt == self.MAX_RETRIES:
+                    await self._record_llm_call(
+                        self.audit_recorder,
+                        actor_user_id=actor_user_id,
+                        auth_principal=auth_principal,
+                        feature=feature,
+                        credential_source=source,
+                        resolved=resolved,
+                        total_tokens=None,
+                        outcome="failure",
+                        upstream_error_class=self._classify_llm_upstream_error(e),
+                    )
+                    if source == self._CredentialSource.USER and websocket is not None:
+                        await self._emit_llm_usage_report(
+                            websocket, feature=feature, model=call_model,
+                            usage=None, outcome="failure",
+                        )
                     raise e
 
                 # Exponential backoff: 1s, 2s, 4s, 8s
@@ -2319,15 +2597,57 @@ COMPONENT UPDATE RULES:
                 if is_transient:
                     logger.info(f"Transient error detected, retrying in {backoff}s...")
                 await asyncio.sleep(backoff)
+        # Defensive: should be unreachable since the MAX_RETRIES branch raises.
         return None, None
+
+    async def _emit_llm_usage_report(self, websocket, *, feature, model, usage, outcome):
+        """Send an ``llm_usage_report`` message to ``websocket`` carrying the
+        token-usage tally for one LLM-dependent call (feature 006 FR-014).
+
+        Only invoked when the call's credential source was ``user`` —
+        operator-default calls are NOT reported to the per-device
+        token-usage counters (FR-016). Best-effort fire-and-forget;
+        failures here never affect the LLM call's user-facing result.
+        """
+        try:
+            from datetime import datetime, timezone
+            payload = {
+                "type": "llm_usage_report",
+                "feature": feature,
+                "model": model,
+                "total_tokens": getattr(usage, "total_tokens", None) if usage else None,
+                "prompt_tokens": getattr(usage, "prompt_tokens", None) if usage else None,
+                "completion_tokens": getattr(usage, "completion_tokens", None) if usage else None,
+                "outcome": outcome,
+                "at": datetime.now(timezone.utc).isoformat(),
+            }
+            await self._safe_send(websocket, json.dumps(payload))
+        except Exception as exc:  # pragma: no cover — best-effort delivery
+            logger.debug(f"llm_usage_report send failed (non-fatal): {exc}")
 
     async def _generate_tool_summary(self, websocket, messages, chat_id=None, user_id=None):
         """
         Generate an LLM summary/analysis of accumulated tool results.
         Called when the Re-Act loop ends (max turns or completion) to ensure
         the user always gets a meaningful summary rather than a 'stopped' message.
+
+        Feature 006: routes through the per-user / operator-default
+        credential resolver. ``LLMUnavailable`` (no credentials available)
+        emits an llm_unconfigured audit event and returns None silently —
+        a missing summary is non-fatal and the user already has the
+        primary tool output.
         """
-        if not self.llm_client:
+        feature = "tool_summary"
+        actor_user_id, auth_principal = self._llm_audit_principals(websocket)
+        try:
+            client, source, resolved = self._resolve_llm_client_for(websocket)
+        except self._LLMUnavailable:
+            await self._record_llm_unconfigured(
+                self.audit_recorder,
+                actor_user_id=actor_user_id,
+                auth_principal=auth_principal,
+                feature=feature,
+            )
             return None
 
         try:
@@ -2363,12 +2683,29 @@ COMPONENT UPDATE RULES:
             })
 
             response = await asyncio.to_thread(
-                self.llm_client.chat.completions.create,
-                model=self.llm_model,
+                client.chat.completions.create,
+                model=resolved.model,
                 messages=summary_messages,
                 max_tokens=300,
             )
-            self._accumulate_usage(chat_id, getattr(response, "usage", None))
+            usage = getattr(response, "usage", None)
+            self._accumulate_usage(chat_id, usage)
+            total_tokens = getattr(usage, "total_tokens", None) if usage else None
+            await self._record_llm_call(
+                self.audit_recorder,
+                actor_user_id=actor_user_id,
+                auth_principal=auth_principal,
+                feature=feature,
+                credential_source=source,
+                resolved=resolved,
+                total_tokens=total_tokens,
+                outcome="success",
+            )
+            if source == self._CredentialSource.USER and websocket is not None:
+                await self._emit_llm_usage_report(
+                    websocket, feature=feature, model=resolved.model,
+                    usage=usage, outcome="success",
+                )
 
             summary_text = response.choices[0].message.content or ""
             summary_text = summary_text.strip()
@@ -2382,6 +2719,22 @@ COMPONENT UPDATE RULES:
 
         except Exception as e:
             logger.warning(f"Failed to generate tool summary: {e}")
+            await self._record_llm_call(
+                self.audit_recorder,
+                actor_user_id=actor_user_id,
+                auth_principal=auth_principal,
+                feature=feature,
+                credential_source=source,
+                resolved=resolved,
+                total_tokens=None,
+                outcome="failure",
+                upstream_error_class=self._classify_llm_upstream_error(e),
+            )
+            if source == self._CredentialSource.USER and websocket is not None:
+                await self._emit_llm_usage_report(
+                    websocket, feature=feature, model=resolved.model,
+                    usage=None, outcome="failure",
+                )
 
         return None
 
@@ -2438,6 +2791,28 @@ COMPONENT UPDATE RULES:
             if creds:
                 args["_credentials"] = creds
                 args["_credentials_encrypted"] = True
+
+        # Feature 006: surface the user's personal LLM credentials (if
+        # any) so agent-side tools that fall back to OPENAI_* env vars
+        # pick them up instead. We use a separate kwarg
+        # (``_session_llm_credentials``) to avoid colliding with the
+        # encrypted ``_credentials`` bundle above — agent code that
+        # wants the user's LLM creds reads ``_session_llm_credentials``
+        # in preference to env. mcp_tools.py with its existing
+        # ``creds.get("OPENAI_API_KEY") or os.getenv(...)`` pattern is
+        # NOT modified by this feature; it continues to work against
+        # the operator-default env. Future agent-side wiring may opt
+        # into reading ``_session_llm_credentials`` first.
+        session_llm = (
+            self._session_llm_creds.get(id(websocket))
+            if websocket is not None else None
+        )
+        if session_llm is not None:
+            args["_session_llm_credentials"] = {
+                "OPENAI_API_KEY": session_llm.api_key,
+                "OPENAI_BASE_URL": session_llm.base_url,
+                "LLM_MODEL": session_llm.model,
+            }
 
         if not agent_id or (agent_id not in self.agents and agent_id not in self.a2a_clients):
             err_msg = f"No agent available for tool '{tool_name}'"
@@ -3733,6 +4108,9 @@ COMPONENT UPDATE RULES:
                 del self.ui_sessions[websocket]
             self._chat_locks.pop(id(websocket), None)
             self._registered_events.pop(id(websocket), None)
+            # Feature 006: clear per-WebSocket LLM credentials (in-memory only;
+            # never persisted server-side per FR-002).
+            self._session_llm_creds.clear(id(websocket))
             self.rote.cleanup(websocket)
             logger.info(f"UI client session cleaned up (total: {len(self.ui_clients)})")
 
@@ -3761,6 +4139,9 @@ COMPONENT UPDATE RULES:
                 del self.ui_sessions[websocket]
             self._chat_locks.pop(id(websocket), None)
             self._registered_events.pop(id(websocket), None)
+            # Feature 006: clear per-WebSocket LLM credentials (in-memory only;
+            # never persisted server-side per FR-002).
+            self._session_llm_creds.clear(id(websocket))
             self.rote.cleanup(websocket)
             logger.info(f"UI client session cleaned up (total: {len(self.ui_clients)})")
 
@@ -3855,6 +4236,7 @@ COMPONENT UPDATE RULES:
         from audit.middleware import AuditHTTPMiddleware
         from feedback.api import feedback_user_router, feedback_admin_router
         from onboarding.api import onboarding_user_router, onboarding_admin_router
+        from llm_config.api import llm_router  # Feature 006-user-llm-config
         app.include_router(chat_router)
         app.include_router(component_router)
         app.include_router(agent_router)
@@ -3871,6 +4253,8 @@ COMPONENT UPDATE RULES:
         # Feature 005 — tool tips and getting started tutorial
         app.include_router(onboarding_user_router)
         app.include_router(onboarding_admin_router)
+        # Feature 006 — user-configurable LLM subscription (Test Connection)
+        app.include_router(llm_router)
 
         # Audit HTTP middleware — records every authenticated REST request
         # in the caller's own log (FR-021). Added after CORS so OPTIONS
@@ -3919,34 +4303,84 @@ COMPONENT UPDATE RULES:
             
             await asyncio.sleep(5)  # Check every 5 seconds
 
-    async def summarize_chat_title(self, chat_id: str, message: str, user_id: str = 'legacy'):
-        """Generate a concise title for the chat using LLM."""
-        if not self.llm_client:
+    async def summarize_chat_title(self, chat_id: str, message: str, user_id: str = 'legacy', websocket=None):
+        """Generate a concise title for the chat using LLM.
+
+        Feature 006: routes through the per-user / operator-default
+        credential resolver. If the user has personal credentials
+        configured, those are used; otherwise the operator default.
+        ``LLMUnavailable`` (no credentials anywhere) returns silently —
+        a missing chat title is non-fatal.
+        """
+        feature = "chat_title"
+        actor_user_id, auth_principal = self._llm_audit_principals(websocket)
+        try:
+            client, source, resolved = self._resolve_llm_client_for(websocket)
+        except self._LLMUnavailable:
+            await self._record_llm_unconfigured(
+                self.audit_recorder,
+                actor_user_id=actor_user_id,
+                auth_principal=auth_principal,
+                feature=feature,
+            )
             return
 
         try:
             response = await asyncio.to_thread(
-                self.llm_client.chat.completions.create,
-                model=self.llm_model,
+                client.chat.completions.create,
+                model=resolved.model,
                 messages=[
                     {"role": "system", "content": "Summarize the following user request into a concise 3-5 word title. Return ONLY the title, no quotes or other text."},
                     {"role": "user", "content": message}
                 ],
                 max_tokens=20
             )
+            usage = getattr(response, "usage", None)
+            total_tokens = getattr(usage, "total_tokens", None) if usage else None
+            await self._record_llm_call(
+                self.audit_recorder,
+                actor_user_id=actor_user_id,
+                auth_principal=auth_principal,
+                feature=feature,
+                credential_source=source,
+                resolved=resolved,
+                total_tokens=total_tokens,
+                outcome="success",
+            )
+            if source == self._CredentialSource.USER and websocket is not None:
+                await self._emit_llm_usage_report(
+                    websocket, feature=feature, model=resolved.model,
+                    usage=usage, outcome="success",
+                )
             content = response.choices[0].message.content
             if not content:
                 return
             title = content.strip().strip('"')
-            
+
             # Update history and notify UI
             self.history.update_chat_title(chat_id, title, user_id=user_id)
-            
+
             # Broadcast update (each user gets their own history)
             await self._broadcast_user_history()
-                
+
         except Exception as e:
             logger.error(f"Failed to summarize chat title: {e}")
+            await self._record_llm_call(
+                self.audit_recorder,
+                actor_user_id=actor_user_id,
+                auth_principal=auth_principal,
+                feature=feature,
+                credential_source=source,
+                resolved=resolved,
+                total_tokens=None,
+                outcome="failure",
+                upstream_error_class=self._classify_llm_upstream_error(e),
+            )
+            if source == self._CredentialSource.USER and websocket is not None:
+                await self._emit_llm_usage_report(
+                    websocket, feature=feature, model=resolved.model,
+                    usage=None, outcome="failure",
+                )
 
     # =========================================================================
     # AUTHENTICATION
