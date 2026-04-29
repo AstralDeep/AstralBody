@@ -672,6 +672,23 @@ function RenderAlert({ message, title, variant = "info" }: AnyProps) {
         error: { bg: "bg-red-500/10", border: "border-red-500/20", icon: <AlertCircle size={16} />, text: "text-red-400" },
     };
     const c = config[variant] || config.info;
+    // Feature 006: when the FR-004a "LLM unavailable" alert renders,
+    // include a one-click link that opens the LLM Settings panel via
+    // the existing `?llm=open` URL-state mechanism. Match heuristically
+    // on the canonical message string emitted by the orchestrator;
+    // anything else stays as a plain alert.
+    const looksLikeLLMUnavailable =
+        typeof message === "string" &&
+        message.toLowerCase().includes("llm unavailable");
+    const openLlmSettings = () => {
+        const params = new URLSearchParams(window.location.search);
+        params.set("llm", "open");
+        window.history.pushState({}, "", `?${params.toString()}`);
+        // The popstate listener in App.tsx flips llmSettingsOpen on
+        // back/forward navigation. For a programmatic push we also fire
+        // popstate so the panel opens immediately.
+        window.dispatchEvent(new PopStateEvent("popstate"));
+    };
     return (
         <div className={`${c.bg} ${c.border} border rounded-lg p-4 flex items-start gap-3`}>
             <span className={c.text}>{c.icon}</span>
@@ -679,6 +696,15 @@ function RenderAlert({ message, title, variant = "info" }: AnyProps) {
                 <div>
                     {title && <p className={`font-medium text-sm ${c.text}`}><InlineMd text={title} /></p>}
                     <div className="text-sm text-astral-text/80"><BlockMd text={message} /></div>
+                    {looksLikeLLMUnavailable && (
+                        <button
+                            type="button"
+                            onClick={openLlmSettings}
+                            className="mt-2 text-xs px-2 py-1 rounded border border-white/10 hover:bg-white/5 text-white"
+                        >
+                            Open LLM settings
+                        </button>
+                    )}
                 </div>
             </div>
         </div>

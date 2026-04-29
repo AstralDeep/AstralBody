@@ -8,6 +8,7 @@ import DashboardLayout from "./components/DashboardLayout";
 import SDUICanvas from "./components/SDUICanvas";
 import FloatingChatPanel from "./components/FloatingChatPanel";
 import AuditLogPanel from "./components/audit/AuditLogPanel";
+import LlmSettingsPanel from "./components/llm/LlmSettingsPanel";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { AlertCircle } from "lucide-react";
 import { Toaster } from "sonner";
@@ -29,6 +30,10 @@ function App() {
     if (typeof window === "undefined") return false;
     return new URLSearchParams(window.location.search).get("audit") === "open";
   });
+  const [llmSettingsOpen, setLlmSettingsOpen] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return new URLSearchParams(window.location.search).get("llm") === "open";
+  });
   const [feedbackAdminOpen, setFeedbackAdminOpen] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
     return new URLSearchParams(window.location.search).get("feedback") === "open";
@@ -47,6 +52,7 @@ function App() {
     if (typeof window === "undefined") return;
     const onPop = () => {
       setAuditOpen(new URLSearchParams(window.location.search).get("audit") === "open");
+      setLlmSettingsOpen(new URLSearchParams(window.location.search).get("llm") === "open");
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
@@ -219,6 +225,7 @@ function App() {
           onRegisterExternalAgent={registerExternalAgent}
           onDiscoverAgents={discoverAgents}
           onOpenAuditLog={() => setAuditOpen(true)}
+          onOpenLlmSettings={() => setLlmSettingsOpen(true)}
           onOpenFeedbackAdmin={isAdmin ? () => setFeedbackAdminOpen(true) : undefined}
           onReplayTutorial={() => void onboarding.replay()}
           onOpenTutorialAdmin={isAdmin ? () => setTutorialAdminOpen(true) : undefined}
@@ -276,6 +283,11 @@ function App() {
             open={auditOpen}
             accessToken={auth.user?.access_token}
             onClose={() => setAuditOpen(false)}
+          />
+          <LlmSettingsPanel
+            open={llmSettingsOpen}
+            accessToken={auth.user?.access_token}
+            onClose={() => setLlmSettingsOpen(false)}
           />
           {isAdmin && (
             <FeedbackAdminPanel

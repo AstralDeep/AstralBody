@@ -59,6 +59,8 @@ interface DashboardLayoutProps {
     onSetAgentPermissions?: (agentId: string, scopes: Record<string, boolean>, toolOverrides?: Record<string, boolean>) => void;
     onRegisterExternalAgent?: (url: string) => void;
     onOpenAuditLog?: () => void;
+    /** Feature 006 — opens the LLM Settings overlay (per-device personal LLM config). */
+    onOpenLlmSettings?: () => void;
     onOpenFeedbackAdmin?: () => void;
     /** Feature 005 — replays the getting-started tutorial overlay. */
     onReplayTutorial?: () => void;
@@ -103,6 +105,7 @@ export default function DashboardLayout({
     onRegisterExternalAgent,
     onDiscoverAgents,
     onOpenAuditLog,
+    onOpenLlmSettings,
     onOpenFeedbackAdmin,
     onReplayTutorial,
     onOpenTutorialAdmin,
@@ -725,6 +728,26 @@ export default function DashboardLayout({
                                     <ChevronRight size={12} className="text-astral-muted/50 group-hover:text-astral-primary transition-colors flex-shrink-0" />
                                 </button>
                             </Tooltip>
+                        </div>
+                    )}
+
+                    {/* LLM Settings (feature 006-user-llm-config) */}
+                    {onOpenLlmSettings && (
+                        <div>
+                            <button
+                                type="button"
+                                onClick={onOpenLlmSettings}
+                                className="w-full flex items-center gap-2 px-2 py-2 rounded-lg
+                                           hover:bg-white/5 transition-colors group text-left"
+                                title="LLM settings"
+                            >
+                                <div className="w-6 h-6 rounded-md bg-astral-primary/20 flex items-center justify-center flex-shrink-0">
+                                    <KeyRound size={12} className="text-astral-primary" />
+                                </div>
+                                <span className="text-xs font-medium text-white flex-1">LLM settings</span>
+                                <span className="text-[10px] text-astral-muted">your provider</span>
+                                <ChevronRight size={12} className="text-astral-muted/50 group-hover:text-astral-primary transition-colors flex-shrink-0" />
+                            </button>
                         </div>
                     )}
 
