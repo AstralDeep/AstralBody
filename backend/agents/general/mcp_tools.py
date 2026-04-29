@@ -868,10 +868,25 @@ def search_wikipedia(query: str, language: str = "en", session_id: str = "defaul
 def extract_search_terms(query: str, **kwargs) -> str:
     """Extract relevant search terms from a natural language query using LLM."""
     logger.debug(f"Extracting search terms for: {query}")
-    creds = kwargs.get("_credentials", {})
-    api_key = creds.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-    base_url = creds.get("OPENAI_BASE_URL") or os.getenv("OPENAI_BASE_URL")
-    model = os.getenv("LLM_MODEL", "gpt-4o")
+    # Feature 006: prefer the user's personal LLM credentials when the
+    # orchestrator forwarded them; fall back to the agent's encrypted
+    # credential bundle and finally to operator-default env vars.
+    session_llm = kwargs.get("_session_llm_credentials") or {}
+    creds = kwargs.get("_credentials", {}) or {}
+    api_key = (
+        session_llm.get("OPENAI_API_KEY")
+        or (creds.get("OPENAI_API_KEY") if not kwargs.get("_credentials_encrypted") else None)
+        or os.getenv("OPENAI_API_KEY")
+    )
+    base_url = (
+        session_llm.get("OPENAI_BASE_URL")
+        or (creds.get("OPENAI_BASE_URL") if not kwargs.get("_credentials_encrypted") else None)
+        or os.getenv("OPENAI_BASE_URL")
+    )
+    model = (
+        session_llm.get("LLM_MODEL")
+        or os.getenv("LLM_MODEL", "gpt-4o")
+    )
     
     if not api_key:
         logger.warning("OPENAI_API_KEY not found, using raw query")

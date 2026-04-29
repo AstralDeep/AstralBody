@@ -52,6 +52,12 @@ class AgentLifecycleManager:
         """
         self.db = db
         self.orchestrator = orchestrator
+        # Feature 006: agent-generation is a heavy server-side flow that
+        # runs against the operator's default credentials regardless of
+        # which user kicked it off (FR-011 — server-initiated jobs use
+        # operator defaults). Users who want their personal LLM
+        # subscription used for agent generation specifically would
+        # need a separate scope decision; out-of-scope for feature 006.
         self.generator = AgentCodeGenerator(
             llm_client=getattr(orchestrator, 'llm_client', None),
             llm_model=getattr(orchestrator, 'llm_model', None),

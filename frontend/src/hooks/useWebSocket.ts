@@ -332,6 +332,18 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                 window.dispatchEvent(new CustomEvent("audit:append", { detail: data.event }));
                 break;
 
+            case "llm_usage_report":
+                // 006-user-llm-config: per-call token usage for personal-credential
+                // calls. useTokenUsage subscribes to "llm-usage-report" and
+                // accumulates session/today/lifetime/perModel counters.
+                window.dispatchEvent(new CustomEvent("llm-usage-report", { detail: data }));
+                break;
+
+            case "llm_config_ack":
+                // 006-user-llm-config: server ack for llm_config_set / _clear.
+                // Currently no UI consumer needs this; left as a debug hook.
+                break;
+
             case "chat_status":
                 setChatStatus({
                     status: (data.status as "idle" | "thinking" | "executing" | "done") || "idle",
@@ -784,13 +796,39 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                 reconnectAttemptsRef.current = 0;
 
                 setChatStatus({ status: "idle", message: "" });
-                // Send RegisterUI with token and ROTE device capabilities
+                // Send RegisterUI with token and ROTE device capabilities.
+                // 006-user-llm-config: also forward any saved personal LLM
+                // config so the orchestrator's per-WebSocket credential store
+                // is seeded immediately. The key is held in process memory
+                // only and cleared on disconnect (FR-002).
+                let initialLlmConfig: { api_key: string; base_url: string; model: string } | undefined;
+                try {
+                    const raw = window.localStorage.getItem("astralbody.llm.config.v1");
+                    if (raw) {
+                        const parsed = JSON.parse(raw);
+                        if (
+                            parsed && typeof parsed === "object" &&
+                            typeof parsed.apiKey === "string" && parsed.apiKey &&
+                            typeof parsed.baseUrl === "string" && parsed.baseUrl &&
+                            typeof parsed.model === "string" && parsed.model
+                        ) {
+                            initialLlmConfig = {
+                                api_key: parsed.apiKey,
+                                base_url: parsed.baseUrl,
+                                model: parsed.model,
+                            };
+                        }
+                    }
+                } catch {
+                    // Corrupt JSON — register without the field.
+                }
                 ws.send(JSON.stringify({
                     type: "register_ui",
                     token: currentToken,
                     capabilities: ["render", "stream"],
                     session_id: `ui-${Date.now()}`,
                     device: detectDeviceCapabilities(),
+                    ...(initialLlmConfig ? { llm_config: initialLlmConfig } : {}),
                 }));
                 // Fetch history
                 ws.send(JSON.stringify({
@@ -895,6 +933,36 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
             (wsRef.current as WebSocket & { _reconnect?: () => void })._reconnect = connect;
         }
     }, [connect]);
+
+    // 006-user-llm-config: when the settings panel saves or clears the
+    // user's personal config, the useLlmConfig hook fires the
+    // "llm-config-changed" window event. Translate that into the
+    // matching server-side message.
+    useEffect(() => {
+        if (typeof window === "undefined") return;
+        const onChange = (ev: Event) => {
+            const ws = wsRef.current;
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            const detail = (ev as CustomEvent).detail as { action: "set" | "cleared"; config?: { apiKey?: string; baseUrl?: string; model?: string } | null };
+            if (!detail) return;
+            if (detail.action === "cleared") {
+                ws.send(JSON.stringify({ type: "llm_config_clear" }));
+                return;
+            }
+            const c = detail.config;
+            if (!c?.apiKey || !c?.baseUrl || !c?.model) return;
+            ws.send(JSON.stringify({
+                type: "llm_config_set",
+                config: {
+                    api_key: c.apiKey,
+                    base_url: c.baseUrl,
+                    model: c.model,
+                },
+            }));
+        };
+        window.addEventListener("llm-config-changed", onChange);
+        return () => window.removeEventListener("llm-config-changed", onChange);
+    }, []);
 
     const sendMessage = useCallback((message: string, displayMessage?: string, explicitChatId?: string) => {
         if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
