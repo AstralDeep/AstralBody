@@ -31,8 +31,6 @@ logger = logging.getLogger("Orchestrator.Knowledge")
 DEFAULT_KNOWLEDGE_DIR = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "knowledge"
 )
-DEFAULT_LLM_BASE_URL = "http://localhost:11434/v1"
-DEFAULT_LLM_MODEL = "qwen2.5:0.5b"
 DEFAULT_SYNTHESIS_INTERVAL = 1800   # 30 minutes
 DEFAULT_MIN_INTERACTIONS = 20
 ROUTING_HINTS_MAX_CHARS = 1500
@@ -97,23 +95,34 @@ class KnowledgeSynthesizer:
         self.knowledge_dir = knowledge_dir or DEFAULT_KNOWLEDGE_DIR
         self.knowledge_index = knowledge_index
 
-        base_url = os.getenv("KNOWLEDGE_LLM_BASE_URL", DEFAULT_LLM_BASE_URL)
-        api_key = os.getenv("KNOWLEDGE_LLM_API_KEY", "ollama")
-        self.model = os.getenv("KNOWLEDGE_LLM_MODEL", DEFAULT_LLM_MODEL)
+        def _empty_to_none(v):
+            if v is None:
+                return None
+            v = v.strip()
+            return v or None
+
+        base_url = _empty_to_none(os.getenv("OPENAI_BASE_URL"))
+        api_key = _empty_to_none(os.getenv("OPENAI_API_KEY"))
+        self.model = _empty_to_none(os.getenv("KNOWLEDGE_LLM_MODEL")) or _empty_to_none(os.getenv("LLM_MODEL"))
         self.synthesis_interval = int(os.getenv("KNOWLEDGE_SYNTHESIS_INTERVAL", str(DEFAULT_SYNTHESIS_INTERVAL)))
         self.min_interactions = int(os.getenv("KNOWLEDGE_MIN_INTERACTIONS", str(DEFAULT_MIN_INTERACTIONS)))
 
-        try:
-            self.client = OpenAI(
-                api_key=api_key,
-                base_url=base_url,
-                timeout=Timeout(300.0, connect=10.0),
-            )
-            self._available = True
-        except Exception as e:
-            logger.warning(f"Knowledge LLM client init failed: {e}")
+        if not (base_url and api_key and self.model):
+            logger.info("knowledge synthesis disabled — operator LLM not configured")
             self._available = False
             self.client = None
+        else:
+            try:
+                self.client = OpenAI(
+                    api_key=api_key,
+                    base_url=base_url,
+                    timeout=Timeout(300.0, connect=10.0),
+                )
+                self._available = True
+            except Exception as e:
+                logger.warning(f"Knowledge LLM client init failed: {e}")
+                self._available = False
+                self.client = None
 
         self._ensure_dirs()
 
