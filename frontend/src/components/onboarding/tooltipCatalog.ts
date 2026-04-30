@@ -23,6 +23,8 @@ export const tooltipCatalog: Record<string, string> = {
     "sidebar.replay-tour": "Replay the getting-started tour from the beginning.",
     "sidebar.user-guide":
         "Open the full user guide — every dashboard feature, explained.",
+    "sidebar.settings":
+        "Settings — open audit log, LLM, help, and admin tools.",
     "sidebar.new-chat": "Start a new conversation with an agent.",
     "sidebar.toggle": "Show or hide the sidebar.",
     "sidebar.logout": "Sign out of AstralBody.",
