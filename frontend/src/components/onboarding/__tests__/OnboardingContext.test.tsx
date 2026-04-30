@@ -172,6 +172,32 @@ describe("OnboardingContext", () => {
         });
     });
 
+    it("exposes currentStepTargetKey reflecting the active step's target", async () => {
+        // STEPS[0] = "welcome" / target_key=null (target_kind="none")
+        // STEPS[1] = "chat" / target_key="chat.input" (target_kind="static")
+        // STEPS[2] = "finish" / target_key=null
+        setupFetchMock(NOT_STARTED);
+        const holder = makeApiHolder();
+        render(
+            <OnboardingProvider accessToken="t">
+                <Probe onReady={holder.setApi} />
+            </OnboardingProvider>,
+        );
+        await waitFor(() => expect(holder.get().visible).toBe(true));
+        // welcome step: no target
+        expect(holder.get().currentStepTargetKey).toBeNull();
+        // advance to chat step (target_key = "chat.input")
+        await act(async () => { await holder.get().next(); });
+        await waitFor(() => {
+            expect(holder.get().currentStepTargetKey).toBe("chat.input");
+        });
+        // dismiss → overlay hidden → currentStepTargetKey returns to null
+        await act(async () => { holder.get().dismiss(); });
+        await waitFor(() => {
+            expect(holder.get().currentStepTargetKey).toBeNull();
+        });
+    });
+
     it("replay() launches overlay without mutating persisted state", async () => {
         const completedState: OnboardingState = {
             ...NOT_STARTED,

@@ -34,6 +34,16 @@ interface OnboardingContextValue {
     steps: TutorialStep[];
     /** Step currently rendered, or null when the overlay is hidden. */
     currentStep: TutorialStep | null;
+    /**
+     * Target key of the currently-rendered step, or null when the overlay
+     * is hidden / the active step has no target. Mirrors `currentStep`
+     * but exposed as a primitive so consumers (notably the feature 007
+     * SettingsMenu) can react to "the tutorial is now pointing at X"
+     * without needing the whole step object. Equivalent to
+     * `currentStep?.target_key ?? null` — see feature 007 research.md
+     * § Decision 3.
+     */
+    currentStepTargetKey: string | null;
     /** True while the overlay should be visible. */
     visible: boolean;
     loading: boolean;
@@ -234,11 +244,17 @@ export function OnboardingProvider({
         }
     }, [accessToken, refreshState]);
 
+    const currentStepTargetKey = useMemo<string | null>(
+        () => (visible ? currentStep?.target_key ?? null : null),
+        [visible, currentStep],
+    );
+
     const value = useMemo<OnboardingContextValue>(
         () => ({
             state,
             steps,
             currentStep,
+            currentStepTargetKey,
             visible,
             loading: onboardingState.loading,
             next,
@@ -248,7 +264,7 @@ export function OnboardingProvider({
             replay,
             dismiss,
         }),
-        [state, steps, currentStep, visible, onboardingState.loading, next, back, skip, complete, replay, dismiss],
+        [state, steps, currentStep, currentStepTargetKey, visible, onboardingState.loading, next, back, skip, complete, replay, dismiss],
     );
 
     return (
