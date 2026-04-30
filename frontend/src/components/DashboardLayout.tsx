@@ -26,19 +26,50 @@ import {
     User,
     FileCode,
     Trash2,
-    ListChecks,
-    ShieldAlert,
-    Compass,
-    BookOpen,
 } from "lucide-react";
 import { API_URL } from "../config";
 import type { Agent, ChatSession, AgentPermissionsData, ConnectionState } from "../hooks/useWebSocket";
 import AgentPermissionsModal from "./AgentPermissionsModal";
 import CreateAgentModal from "./CreateAgentModal";
 import { listFlaggedTools } from "../api/feedback";
-import { useFeedbackContext } from "./feedback/FeedbackContext";
 import { Tooltip } from "./onboarding/Tooltip";
 import { tooltipCatalog } from "./onboarding/tooltipCatalog";
+import { SettingsMenu } from "./settings/SettingsMenu";
+
+/**
+ * Polls the admin-only flagged-tools endpoint every 60s while the
+ * caller has both an access token and the admin role. Returns 0 when
+ * not authorized or when the call fails (admin endpoints reject
+ * non-admins server-side; we tolerate that silently). Surfaces the
+ * count as an inline badge on the Tool quality menuitem inside
+ * <SettingsMenu> — preserves the affordance from feature 004's
+ * dedicated sidebar button after feature 007 consolidated it.
+ */
+function useFlaggedToolsCount(token: string | undefined, isAdmin: boolean): number {
+    const [count, setCount] = useState(0);
+    useEffect(() => {
+        if (!token || !isAdmin) return;
+        let cancelled = false;
+        const fetchOnce = async () => {
+            try {
+                const r = await listFlaggedTools(token, { limit: 100 });
+                if (!cancelled) setCount(r.items.length);
+            } catch {
+                /* ignore — server-side authz is the source of truth */
+            }
+        };
+        void fetchOnce();
+        const handle = window.setInterval(fetchOnce, 60_000);
+        return () => {
+            cancelled = true;
+            window.clearInterval(handle);
+        };
+    }, [token, isAdmin]);
+    // When token/isAdmin go away, count stays at its last value but the
+    // Tool quality menuitem itself isn't rendered (isAdmin-gated), so the
+    // badge isn't visible — no need to reset.
+    return token && isAdmin ? count : 0;
+}
 
 interface DashboardLayoutProps {
     children: React.ReactNode;
@@ -89,8 +120,7 @@ export default function DashboardLayout({
     onLoadChat,
     onNewChat,
     onDeleteChat,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    isAdmin: _isAdmin,
+    isAdmin = false,
     accessToken,
     userEmail,
     agentPermissions,
@@ -113,6 +143,7 @@ export default function DashboardLayout({
 }: DashboardLayoutProps) {
     const [chatToDelete, setChatToDelete] = useState<string | null>(null);
     const [permModalAgent, setPermModalAgent] = useState<string | null>(null);
+    const flaggedToolsCount = useFlaggedToolsCount(accessToken, isAdmin);
     const [sidebarOpen, setSidebarOpen] = useState(() => {
         const saved = localStorage.getItem("sidebarOpen");
         if (saved !== null) return saved === "true";
@@ -627,16 +658,20 @@ export default function DashboardLayout({
                     >
                         <Bot size={18} className="text-astral-primary" />
                     </button>
-                    {onOpenAuditLog && (
-                        <button
-                            onClick={onOpenAuditLog}
-                            className="p-2.5 rounded-lg hover:bg-white/10 transition-colors"
-                            title="Audit log"
-                        >
-                            <ListChecks size={18} className="text-astral-primary" />
-                        </button>
-                    )}
-                    {onOpenFeedbackAdmin && <FeedbackAdminCollapsedButton onClick={onOpenFeedbackAdmin} />}
+                    {/* Feature 007 — single Settings entry replaces the per-feature
+                        sidebar utility buttons (Audit, LLM, Tool quality, Tutorial admin,
+                        Take the tour, User guide). */}
+                    <SettingsMenu
+                        variant="collapsed"
+                        isAdmin={isAdmin}
+                        flaggedToolsCount={flaggedToolsCount}
+                        onOpenAuditLog={onOpenAuditLog}
+                        onOpenLlmSettings={onOpenLlmSettings}
+                        onOpenFeedbackAdmin={onOpenFeedbackAdmin}
+                        onOpenTutorialAdmin={onOpenTutorialAdmin}
+                        onReplayTutorial={onReplayTutorial}
+                        onOpenUserGuide={onOpenUserGuide}
+                    />
                     <div className="flex-1" />
                     <div className="flex flex-col items-center gap-1 mb-1">
                         <span className={`w-2 h-2 rounded-full ${isConnected ? "bg-green-400" : "bg-red-400"} ${connectionState === "reconnecting" || connectionState === "connecting" ? "animate-pulse" : ""}`}
@@ -710,114 +745,28 @@ export default function DashboardLayout({
                         </Tooltip>
                     </div>
 
-                    {/* Audit log Button (003-agent-audit-log) */}
-                    {onOpenAuditLog && (
-                        <div>
-                            <Tooltip text={tooltipCatalog["sidebar.audit"]}>
-                                <button
-                                    onClick={onOpenAuditLog}
-                                    data-tutorial-target="sidebar.audit"
-                                    className="w-full flex items-center gap-2 px-2 py-2 rounded-lg
-                                               hover:bg-white/5 transition-colors group text-left"
-                                >
-                                    <div className="w-6 h-6 rounded-md bg-astral-primary/20 flex items-center justify-center flex-shrink-0">
-                                        <ListChecks size={12} className="text-astral-primary" />
-                                    </div>
-                                    <span className="text-xs font-medium text-white flex-1">Audit log</span>
-                                    <span className="text-[10px] text-astral-muted">your activity</span>
-                                    <ChevronRight size={12} className="text-astral-muted/50 group-hover:text-astral-primary transition-colors flex-shrink-0" />
-                                </button>
-                            </Tooltip>
-                        </div>
-                    )}
-
-                    {/* LLM Settings (feature 006-user-llm-config) */}
-                    {onOpenLlmSettings && (
-                        <div>
-                            <button
-                                type="button"
-                                onClick={onOpenLlmSettings}
-                                className="w-full flex items-center gap-2 px-2 py-2 rounded-lg
-                                           hover:bg-white/5 transition-colors group text-left"
-                                title="LLM settings"
-                            >
-                                <div className="w-6 h-6 rounded-md bg-astral-primary/20 flex items-center justify-center flex-shrink-0">
-                                    <KeyRound size={12} className="text-astral-primary" />
-                                </div>
-                                <span className="text-xs font-medium text-white flex-1">LLM settings</span>
-                                <span className="text-[10px] text-astral-muted">your provider</span>
-                                <ChevronRight size={12} className="text-astral-muted/50 group-hover:text-astral-primary transition-colors flex-shrink-0" />
-                            </button>
-                        </div>
-                    )}
-
-                    {/* Tool quality (admin-only, feature 004) */}
-                    {onOpenFeedbackAdmin && (
-                        <FeedbackAdminExpandedButton onClick={onOpenFeedbackAdmin} />
-                    )}
-
-                    {/* Tutorial admin (admin-only, feature 005) */}
-                    {onOpenTutorialAdmin && (
-                        <div>
-                            <Tooltip text={tooltipCatalog["sidebar.tutorial-admin"]}>
-                                <button
-                                    onClick={onOpenTutorialAdmin}
-                                    data-tutorial-target="sidebar.tutorial-admin"
-                                    className="w-full flex items-center gap-2 px-2 py-2 rounded-lg
-                                               hover:bg-white/5 transition-colors group text-left"
-                                >
-                                    <div className="w-6 h-6 rounded-md bg-astral-primary/20 flex items-center justify-center flex-shrink-0">
-                                        <BookOpen size={12} className="text-astral-primary" />
-                                    </div>
-                                    <span className="text-xs font-medium text-white flex-1">Tutorial admin</span>
-                                    <span className="text-[10px] text-astral-muted">edit step copy</span>
-                                    <ChevronRight size={12} className="text-astral-muted/50 group-hover:text-astral-primary transition-colors flex-shrink-0" />
-                                </button>
-                            </Tooltip>
-                        </div>
-                    )}
-
-                    {/* Take the tour (replay, feature 005) */}
-                    {onReplayTutorial && (
-                        <div>
-                            <Tooltip text={tooltipCatalog["sidebar.replay-tour"]}>
-                                <button
-                                    onClick={onReplayTutorial}
-                                    data-tutorial-target="sidebar.replay-tour"
-                                    className="w-full flex items-center gap-2 px-2 py-2 rounded-lg
-                                               hover:bg-white/5 transition-colors group text-left"
-                                >
-                                    <div className="w-6 h-6 rounded-md bg-astral-primary/20 flex items-center justify-center flex-shrink-0">
-                                        <Compass size={12} className="text-astral-primary" />
-                                    </div>
-                                    <span className="text-xs font-medium text-white flex-1">Take the tour</span>
-                                    <span className="text-[10px] text-astral-muted">getting started</span>
-                                    <ChevronRight size={12} className="text-astral-muted/50 group-hover:text-astral-primary transition-colors flex-shrink-0" />
-                                </button>
-                            </Tooltip>
-                        </div>
-                    )}
-
-                    {/* User guide (feature 005) */}
-                    {onOpenUserGuide && (
-                        <div>
-                            <Tooltip text={tooltipCatalog["sidebar.user-guide"]}>
-                                <button
-                                    onClick={onOpenUserGuide}
-                                    data-tutorial-target="sidebar.user-guide"
-                                    className="w-full flex items-center gap-2 px-2 py-2 rounded-lg
-                                               hover:bg-white/5 transition-colors group text-left"
-                                >
-                                    <div className="w-6 h-6 rounded-md bg-astral-primary/20 flex items-center justify-center flex-shrink-0">
-                                        <BookOpen size={12} className="text-astral-primary" />
-                                    </div>
-                                    <span className="text-xs font-medium text-white flex-1">User guide</span>
-                                    <span className="text-[10px] text-astral-muted">full reference</span>
-                                    <ChevronRight size={12} className="text-astral-muted/50 group-hover:text-astral-primary transition-colors flex-shrink-0" />
-                                </button>
-                            </Tooltip>
-                        </div>
-                    )}
+                    {/* Settings (feature 007-sidebar-settings-menu) — single
+                        consolidated entry that replaces the previous six
+                        utility buttons (Audit log, LLM settings, Tool quality,
+                        Tutorial admin, Take the tour, User guide). Each item
+                        inside the popover preserves the original
+                        `data-tutorial-target` key so existing tutorial steps
+                        still resolve. */}
+                    <div>
+                        <Tooltip text={tooltipCatalog["sidebar.settings"]}>
+                            <SettingsMenu
+                                variant="expanded"
+                                isAdmin={isAdmin}
+                                flaggedToolsCount={flaggedToolsCount}
+                                onOpenAuditLog={onOpenAuditLog}
+                                onOpenLlmSettings={onOpenLlmSettings}
+                                onOpenFeedbackAdmin={onOpenFeedbackAdmin}
+                                onOpenTutorialAdmin={onOpenTutorialAdmin}
+                                onReplayTutorial={onReplayTutorial}
+                                onOpenUserGuide={onOpenUserGuide}
+                            />
+                        </Tooltip>
+                    </div>
 
                     {/* Recent Chats */}
                     <div>
@@ -1002,73 +951,6 @@ export default function DashboardLayout({
         </div>
     );
 }
-
-// Feature 004 — admin sidebar entry for the Tool Quality / Feedback panel.
-// Polls `listFlaggedTools` every 60 s to surface a count badge.
-function useFeedbackPendingCount(): number {
-    const { token, isAdmin } = useFeedbackContext();
-    const [count, setCount] = useState(0);
-    useEffect(() => {
-        if (!token || !isAdmin) return;
-        let cancelled = false;
-        const fetchOnce = async () => {
-            try {
-                const r = await listFlaggedTools(token, { limit: 100 });
-                if (!cancelled) setCount(r.items.length);
-            } catch {
-                /* ignore */
-            }
-        };
-        void fetchOnce();
-        const handle = window.setInterval(fetchOnce, 60_000);
-        return () => { cancelled = true; window.clearInterval(handle); };
-    }, [token, isAdmin]);
-    return count;
-}
-
-function FeedbackAdminCollapsedButton({ onClick }: { onClick: () => void }) {
-    const count = useFeedbackPendingCount();
-    return (
-        <button
-            onClick={onClick}
-            className="relative p-2.5 rounded-lg hover:bg-white/10 transition-colors"
-            title={`Tool quality — ${count} flagged`}
-        >
-            <ShieldAlert size={18} className="text-astral-primary" />
-            {count > 0 && (
-                <span
-                    className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full
-                               text-[10px] font-bold text-white bg-red-500 flex items-center justify-center"
-                >
-                    {count > 99 ? "99+" : count}
-                </span>
-            )}
-        </button>
-    );
-}
-
-function FeedbackAdminExpandedButton({ onClick }: { onClick: () => void }) {
-    const count = useFeedbackPendingCount();
-    return (
-        <div>
-            <button
-                onClick={onClick}
-                className="w-full flex items-center gap-2 px-2 py-2 rounded-lg
-                           hover:bg-white/5 transition-colors group text-left"
-            >
-                <div className="w-6 h-6 rounded-md bg-astral-primary/20 flex items-center justify-center flex-shrink-0">
-                    <ShieldAlert size={12} className="text-astral-primary" />
-                </div>
-                <span className="text-xs font-medium text-white flex-1">Tool quality</span>
-                <span className={`text-[10px] ${count > 0 ? "text-red-400 font-bold" : "text-astral-muted"}`}>
-                    {count > 0 ? `${count > 99 ? "99+" : count} flagged` : "all healthy"}
-                </span>
-                <ChevronRight size={12} className="text-astral-muted/50 group-hover:text-astral-primary transition-colors flex-shrink-0" />
-            </button>
-        </div>
-    );
-}
-
 
 function StatusItem({
     icon,
