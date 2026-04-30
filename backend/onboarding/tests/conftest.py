@@ -41,6 +41,25 @@ def unique_user(request):
     return f"pytest-{request.node.name}-{uuid.uuid4().hex[:8]}"
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _final_pytest_cleanup(database):
+    yield
+    try:
+        conn = database._get_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM onboarding_state WHERE user_id LIKE 'pytest-%'")
+        cur.execute("DELETE FROM tutorial_step_revision WHERE editor_user_id LIKE 'pytest-%'")
+        cur.execute("DELETE FROM tutorial_step WHERE slug LIKE 'pytest-%'")
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 @pytest.fixture(autouse=True)
 def _isolate_onboarding_state(database, request):
     """Clean any onboarding rows left behind by a prior test for the same user.
