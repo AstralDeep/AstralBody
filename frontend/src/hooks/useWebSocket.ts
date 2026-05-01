@@ -169,6 +169,14 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
     const [connectionState, setConnectionState] = useState<ConnectionState>("disconnected");
     const reconnectAttemptsRef = useRef(0);
     const [agents, setAgents] = useState<Agent[]>([]);
+    // Feature 008-llm-text-only-chat (FR-007a): mirrored from the
+    // backend's agent_list payload. False ⇒ chat is currently in
+    // text-only mode (no agents connected, all tools blocked by user
+    // permissions, or all blocked by security flags) and the
+    // <TextOnlyBanner /> renders. Defensive default true: an
+    // unannotated payload (older backend) should not spuriously show
+    // the banner.
+    const [toolsAvailableForUser, setToolsAvailableForUser] = useState<boolean>(true);
     const [chatStatus, setChatStatus] = useState<ChatStatus>({ status: "idle", message: "" });
     const [uiComponents, setUiComponents] = useState<Record<string, unknown>[]>([]);
     const [messages, setMessages] = useState<{ role: string; content: unknown; _target?: string }[]>([]);
@@ -316,9 +324,20 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                 });
                 break;
 
-            case "agent_list":
-                setAgents((data.agents as Agent[]) || []);
+            case "agent_list": {
+                const incomingAgents = (data.agents as Agent[]) || [];
+                setAgents(incomingAgents);
+                // Feature 008: backend tells us, per-user, whether any
+                // tool would be dispatchable on the next chat turn.
+                // Older backends omit the field — fall back to the
+                // weakest correct heuristic (any agent connected).
+                if (typeof data.tools_available_for_user === "boolean") {
+                    setToolsAvailableForUser(data.tools_available_for_user);
+                } else {
+                    setToolsAvailableForUser(incomingAgents.length > 0);
+                }
                 break;
+            }
 
             case "agent_creation_progress":
                 // Dispatch a custom event so CreateAgentModal can listen
@@ -1502,6 +1521,7 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         isConnected,
         connectionState,
         agents,
+        toolsAvailableForUser,
         chatStatus,
         uiComponents,
         messages,

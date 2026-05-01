@@ -18,6 +18,14 @@ VALUES
      'Browse available agents',
      'Open the Agents panel to see every agent you can talk to, what tools they have, and how to grant or revoke their access.'),
 
+    -- Feature 008-llm-text-only-chat: explicit step nudging users to
+    -- turn on at least one agent so they unlock tool-augmented chat.
+    -- Until they do, AstralBody falls back to text-only chat and
+    -- shows the persistent banner over the chat surface.
+    ('enable-agents', 'user', 35, 'static', 'sidebar.agents',
+     'Turn an agent on',
+     'Open the Agents panel and switch on at least one agent. Until you do, AstralBody talks to the language model in text-only mode — it can chat, but it can''t take actions on your behalf.'),
+
     ('open-audit-log', 'user', 40, 'static', 'sidebar.audit',
      'Review the audit log',
      'Every action an agent takes on your behalf is recorded in your private audit log. You can review and verify what happened at any time.'),
