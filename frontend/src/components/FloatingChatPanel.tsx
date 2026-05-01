@@ -82,6 +82,24 @@ export default function FloatingChatPanel({
     const inputRef = useRef<HTMLInputElement>(null);
     const prevChatIdRef = useRef(activeChatId);
 
+    // Feature 010-fix-page-flash. Capture the message count at FIRST
+    // RENDER so we can skip the entry animation for messages that are
+    // already present (e.g., restored from a historical chat).
+    // `useState` with a lazy initializer runs ONCE on the first render
+    // — messages at indices below `initialMsgCount` skip their entry
+    // animation, indices at or above it animate in normally. `mounted`
+    // is flipped after first commit so the panel container's own
+    // first-paint can also be silent.
+    const [initialMsgCount] = useState<number>(() => messages.length);
+    const [mounted, setMounted] = useState(false);
+    useEffect(() => {
+        // Standard "did mount" flag — first paint renders the panel
+        // with `initial={false}`, later state changes (collapse/expand
+        // toggles) animate normally. Framer-motion only honors
+        // `initial` on first element mount.
+        setMounted(true);
+    }, []);
+
     // Voice Input (STT)
     const [isRecording, setIsRecording] = useState(false);
     const [isTranscribing, setIsTranscribing] = useState(false);
@@ -525,7 +543,7 @@ export default function FloatingChatPanel({
 
             {/* Floating Panel */}
             <motion.div
-                initial={{ opacity: 0, y: 20, scale: 0.95 }}
+                initial={mounted ? { opacity: 0, y: 20, scale: 0.95 } : false}
                 animate={{ opacity: 1, y: 0, scale: 1 }}
                 exit={{ opacity: 0, y: 20, scale: 0.95 }}
                 className="fixed bottom-4 right-4 z-40 w-[380px] sm:w-[420px] max-h-[70vh] max-sm:left-4 max-sm:w-auto
@@ -585,7 +603,7 @@ export default function FloatingChatPanel({
                     {chatMessages.map((msg, i) => (
                         <motion.div
                             key={i}
-                            initial={{ opacity: 0, y: 6 }}
+                            initial={i < initialMsgCount ? false : { opacity: 0, y: 6 }}
                             animate={{ opacity: 1, y: 0 }}
                             transition={{ duration: 0.15 }}
                             className={`flex gap-2 ${msg.role === "user" ? "justify-end" : ""}`}

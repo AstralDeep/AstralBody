@@ -51,7 +51,7 @@ services:
     container_name: astralbody
     ports:
       - "127.0.0.1:8001:8001"
-      - "5173:5173"
+      - "127.0.0.1:5173:5173"
     env_file:
       - .env
     environment:

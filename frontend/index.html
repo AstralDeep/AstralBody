@@ -6,9 +6,39 @@
   <link rel="icon" type="image/png" href="/astra-fav.png" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>AstralDeep</title>
+  <!--
+    Feature 010-fix-page-flash (FR-001 / SC-005). This inline script
+    runs synchronously BEFORE the React bundle loads so the very first
+    paint already carries the user's saved theme. Without it the page
+    flashes from the inline default body background to the themed
+    palette as soon as React's ThemeContext mounts. Do not remove
+    without re-validating cold-load smoke per quickstart.md Scenario 1.
+  -->
+  <script>
+    // Apply saved theme CSS variables synchronously to prevent flash.
+    // Mirrors ThemeContext.loadStoredTheme + applyTheme but runs before React.
+    try {
+      var t = localStorage.getItem('astral-theme');
+      if (t) {
+        var c = JSON.parse(t);
+        if (c && c.bg && c.primary && c.text) {
+          var h2r = function(hex) {
+            var h = hex.replace('#','');
+            return parseInt(h.slice(0,2),16)+' '+parseInt(h.slice(2,4),16)+' '+parseInt(h.slice(4,6),16);
+          };
+          var r = document.documentElement;
+          for (var k in c) { r.style.setProperty('--astral-'+k, h2r(c[k])); }
+          // Also set body bg to match the stored theme
+          document.addEventListener('DOMContentLoaded', function() {
+            document.body.style.background = 'rgb(' + h2r(c.bg) + ')';
+          });
+        }
+      }
+    } catch(e) {}
+  </script>
 </head>
 
-<body>
+<body style="background:#0F1221;color:#F3F4F6">
   <div id="root"></div>
   <script type="module" src="/src/main.tsx"></script>
 </body>
