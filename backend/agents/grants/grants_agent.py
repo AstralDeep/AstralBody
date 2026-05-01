@@ -32,9 +32,16 @@ class GrantsAgent(BaseA2AAgent):
         "Specialist agent for searching federal funding opportunities "
         "(NSF, NIH, DOE, DoD) and matching them to UKy Center for "
         "Applied AI capabilities. Focuses on large-scale start-up "
-        "grants, center grants, and AI research infrastructure."
+        "grants, center grants, and AI research infrastructure. "
+        "Also supports drafting and gap-checking the NSF TechAccess: "
+        "AI-Ready America (NSF 26-508) Kentucky Coordination Hub LOI "
+        "and full proposal, plus program-officer questions, "
+        "page-budget prioritization, and standalone deadline citation."
     )
-    skill_tags = ["grants", "funding", "nsf", "nih", "doe", "dod", "research"]
+    skill_tags = [
+        "grants", "funding", "nsf", "nih", "doe", "dod", "research",
+        "techaccess", "loi", "proposal", "techaccess26508",
+    ]
 
     def __init__(self, port: int = None):
         super().__init__(MCPServer(), port=port, port_env_var="GRANTS_AGENT_PORT")
