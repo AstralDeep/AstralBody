@@ -2,7 +2,7 @@
  * DashboardLayout — Main app shell with sidebar and header.
  * Shows connected agents, their tools, and connection status.
  */
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
     LayoutDashboard,
@@ -31,45 +31,10 @@ import { API_URL } from "../config";
 import type { Agent, ChatSession, AgentPermissionsData, ConnectionState } from "../hooks/useWebSocket";
 import AgentPermissionsModal from "./AgentPermissionsModal";
 import CreateAgentModal from "./CreateAgentModal";
-import { listFlaggedTools } from "../api/feedback";
 import { Tooltip } from "./onboarding/Tooltip";
 import { tooltipCatalog } from "./onboarding/tooltipCatalog";
 import { SettingsMenu } from "./settings/SettingsMenu";
-
-/**
- * Polls the admin-only flagged-tools endpoint every 60s while the
- * caller has both an access token and the admin role. Returns 0 when
- * not authorized or when the call fails (admin endpoints reject
- * non-admins server-side; we tolerate that silently). Surfaces the
- * count as an inline badge on the Tool quality menuitem inside
- * <SettingsMenu> — preserves the affordance from feature 004's
- * dedicated sidebar button after feature 007 consolidated it.
- */
-function useFlaggedToolsCount(token: string | undefined, isAdmin: boolean): number {
-    const [count, setCount] = useState(0);
-    useEffect(() => {
-        if (!token || !isAdmin) return;
-        let cancelled = false;
-        const fetchOnce = async () => {
-            try {
-                const r = await listFlaggedTools(token, { limit: 100 });
-                if (!cancelled) setCount(r.items.length);
-            } catch {
-                /* ignore — server-side authz is the source of truth */
-            }
-        };
-        void fetchOnce();
-        const handle = window.setInterval(fetchOnce, 60_000);
-        return () => {
-            cancelled = true;
-            window.clearInterval(handle);
-        };
-    }, [token, isAdmin]);
-    // When token/isAdmin go away, count stays at its last value but the
-    // Tool quality menuitem itself isn't rendered (isAdmin-gated), so the
-    // badge isn't visible — no need to reset.
-    return token && isAdmin ? count : 0;
-}
+import { useFlaggedToolsCount } from "./useFlaggedToolsCount";
 
 interface DashboardLayoutProps {
     children: React.ReactNode;
@@ -152,7 +117,19 @@ export default function DashboardLayout({
 }: DashboardLayoutProps) {
     const [chatToDelete, setChatToDelete] = useState<string | null>(null);
     const [permModalAgent, setPermModalAgent] = useState<string | null>(null);
-    const flaggedToolsCount = useFlaggedToolsCount(accessToken, isAdmin);
+    const { count: flaggedToolsCount, refresh: refreshFlaggedToolsCount } =
+        useFlaggedToolsCount(accessToken, isAdmin);
+    // When admin opens the FeedbackAdminPanel, that's an "explicit
+    // user action" per spec FR-004, so we invalidate the session cache
+    // and refetch so the badge reflects the current backend state on
+    // close. Only wired up when the parent provides the open callback.
+    const onOpenFeedbackAdminWithRefresh = useMemo(() => {
+        if (!onOpenFeedbackAdmin) return undefined;
+        return () => {
+            refreshFlaggedToolsCount();
+            onOpenFeedbackAdmin();
+        };
+    }, [onOpenFeedbackAdmin, refreshFlaggedToolsCount]);
     const [sidebarOpen, setSidebarOpen] = useState(() => {
         const saved = localStorage.getItem("sidebarOpen");
         if (saved !== null) return saved === "true";
@@ -685,7 +662,7 @@ export default function DashboardLayout({
                         flaggedToolsCount={flaggedToolsCount}
                         onOpenAuditLog={onOpenAuditLog}
                         onOpenLlmSettings={onOpenLlmSettings}
-                        onOpenFeedbackAdmin={onOpenFeedbackAdmin}
+                        onOpenFeedbackAdmin={onOpenFeedbackAdminWithRefresh}
                         onOpenTutorialAdmin={onOpenTutorialAdmin}
                         onReplayTutorial={onReplayTutorial}
                         onOpenUserGuide={onOpenUserGuide}
@@ -778,7 +755,7 @@ export default function DashboardLayout({
                                 flaggedToolsCount={flaggedToolsCount}
                                 onOpenAuditLog={onOpenAuditLog}
                                 onOpenLlmSettings={onOpenLlmSettings}
-                                onOpenFeedbackAdmin={onOpenFeedbackAdmin}
+                                onOpenFeedbackAdmin={onOpenFeedbackAdminWithRefresh}
                                 onOpenTutorialAdmin={onOpenTutorialAdmin}
                                 onReplayTutorial={onReplayTutorial}
                                 onOpenUserGuide={onOpenUserGuide}
