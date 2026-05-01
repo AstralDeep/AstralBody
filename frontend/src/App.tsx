@@ -64,6 +64,7 @@ function App() {
     isConnected,
     connectionState,
     agents,
+    toolsAvailableForUser,
     chatStatus,
     messages,
     sendMessage,
@@ -198,6 +199,12 @@ function App() {
   // ----- Inner shell that consumes OnboardingContext -----------------------
   function Shell() {
     const onboarding = useOnboarding();
+    // Feature 008-llm-text-only-chat: bumped by the chat panel's
+    // text-only banner CTA to ask DashboardLayout to open its
+    // agents modal. A monotonically increasing key is the simplest
+    // way to deliver "open it, again, even if it's already been
+    // opened-then-closed once".
+    const [agentsModalRequestKey, setAgentsModalRequestKey] = useState<number | undefined>(undefined);
     return (
       <>
         <DashboardLayout
@@ -230,6 +237,7 @@ function App() {
           onReplayTutorial={() => void onboarding.replay()}
           onOpenTutorialAdmin={isAdmin ? () => setTutorialAdminOpen(true) : undefined}
           onOpenUserGuide={() => setUserGuideOpen(true)}
+          requestOpenAgentsModalKey={agentsModalRequestKey}
         >
           <FeedbackProvider token={auth.user?.access_token ?? null} ws={wsRef?.current ?? null} isAdmin={isAdmin}>
             <AgentPermissionProvider agents={agents}>
@@ -253,6 +261,8 @@ function App() {
                 activeChatId={activeChatId}
                 accessToken={auth.user?.access_token}
                 deviceCapabilities={deviceCapabilities}
+                toolsAvailableForUser={toolsAvailableForUser}
+                onOpenAgentSettings={() => setAgentsModalRequestKey(Date.now())}
               />
             </AgentPermissionProvider>
           </FeedbackProvider>

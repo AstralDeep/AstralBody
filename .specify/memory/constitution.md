@@ -1,24 +1,26 @@
 <!--
   Sync Impact Report
   ==================
-  Version change: N/A → 1.0.0 (initial creation)
+  Version change: 1.0.0 → 1.1.0 (MINOR — two new principles added)
 
   Principles added:
-    1. Primary Language (Python)
-    2. Frontend Framework (Vite + React/TypeScript)
-    3. Testing Standards (90% coverage, unit + integration)
-    4. Code Quality (PEP 8, ESLint)
-    5. Dependency Management (approval required)
-    6. Documentation (docstrings, /docs endpoint)
-    7. Security (Keycloak, RFC 8693 delegated tokens)
-    8. User Experience (consistent UI, dynamic generation)
+    IX.  Database Migrations (auto-running migration scripts for any schema change)
+    X.   Production Readiness (all merged changes must be production-ready & thoroughly tested)
+
+  Principles modified: None
+  Principles removed:  None
+
+  Sections updated:
+    - Technology Stack: added Database Migrations entry
+    - Development Workflow: added migration-script and production-readiness gates
+    - Governance footer: Last Amended date bumped to 2026-05-01
 
   Templates requiring updates:
-    ✅ .specify/templates/plan-template.md — generic, compatible
+    ✅ .specify/templates/plan-template.md — generic Constitution Check gate, compatible
     ✅ .specify/templates/spec-template.md — generic, compatible
-    ✅ .specify/templates/tasks-template.md — generic, compatible
-    ✅ No command templates found
-    ✅ No runtime guidance docs require changes
+    ✅ .specify/templates/tasks-template.md — already includes migrations task slot (T004)
+    ✅ No command templates require changes
+    ✅ No runtime guidance docs require changes (CLAUDE.md is auto-generated)
 
   Follow-up TODOs: None
 -->
@@ -114,12 +116,80 @@ supporting backend-driven dynamic generation.
 - New primitive components MUST be approved and documented
   before use.
 
+### IX. Database Migrations
+
+Any change to the database schema MUST ship with a migration
+script that runs automatically; ad-hoc SQL against deployed
+environments is prohibited.
+
+- Schema changes (adding/removing tables, columns, indexes,
+  constraints, enums, or types) MUST include a migration
+  script committed in the same pull request as the change.
+- Migrations MUST execute automatically — either on
+  application startup or as a dedicated step in the deployment
+  pipeline. Manual DBA intervention MUST NOT be required for
+  routine schema evolution.
+- The project's migration framework (e.g., Alembic for
+  SQLAlchemy) MUST be the single source of truth for schema
+  state. Direct ALTER/CREATE statements applied outside the
+  migration framework are prohibited.
+- Migrations MUST be idempotent or guarded against
+  re-execution so that repeated deploys are safe.
+- Migrations MUST provide a documented rollback path (down
+  migration or recovery procedure) unless the change is
+  intentionally destructive AND approved by a lead developer
+  in the PR review.
+- Migrations MUST be tested against a representative dataset
+  before merge; a passing migration on an empty database is
+  not sufficient evidence.
+
+**Rationale**: Schema drift between code and database is the
+most common cause of production outages after a deploy.
+Treating migrations as code — versioned, reviewed, and
+auto-applied — keeps every environment reproducible and makes
+rollbacks deterministic.
+
+### X. Production Readiness
+
+Every change merged to the main branch MUST be production-ready
+and thoroughly tested. "Done" means deployable, not "compiles
+and the happy path works."
+
+- No work-in-progress, stubbed, mocked, hard-coded, or
+  debug-only code may be merged. `TODO`/`FIXME` markers MUST
+  reference a tracked issue.
+- Tests MUST exercise the golden path, edge cases, and error
+  conditions for the changed behavior — in addition to
+  satisfying the 90% coverage gate from Principle III.
+- New features MUST include observability appropriate to their
+  surface area (structured logs for failures, metrics for
+  user-visible operations) sufficient to diagnose production
+  incidents without code changes.
+- Configuration MUST support production environments. No
+  hard-coded localhost URLs, developer credentials, dev-only
+  feature flags, or environment-specific branches in code.
+- Changes that affect runtime infrastructure (database,
+  authentication, deployment topology, container images,
+  background workers) MUST be validated end-to-end in a
+  staging environment before merge.
+- UI/frontend changes MUST be exercised in a real browser
+  against the running backend before being declared complete;
+  type-checks and unit tests do not verify feature
+  correctness.
+
+**Rationale**: A change that is "almost done" is a future
+incident. Setting the merge bar at production-ready — not
+"works on my machine" — keeps the main branch continuously
+deployable and prevents stub code from rotting in place.
+
 ## Technology Stack
 
 - **Backend**: Python (FastAPI or equivalent ASGI framework)
 - **Frontend**: Vite + React + TypeScript
 - **Authentication**: Keycloak IAM
 - **Agent Auth**: RFC 8693 token exchange with attenuated scopes
+- **Database Migrations**: Automated migration framework
+  (e.g., Alembic for SQLAlchemy) executed on deploy/startup
 - **Containerization**: Docker / Docker Compose
 - **License**: Apache 2.0
 
@@ -130,6 +200,12 @@ supporting backend-driven dynamic generation.
   merge.
 - PRs introducing new dependencies MUST include lead developer
   approval.
+- PRs that modify the database schema MUST include the
+  corresponding migration script and evidence that it ran
+  successfully against a representative dataset.
+- PRs MUST be production-ready before merge — reviewers MUST
+  reject changes that contain stubs, debug-only code, missing
+  observability for new features, or untested error paths.
 - Constitution compliance MUST be verified during code review.
 - Each PR MUST reference relevant spec/task IDs when
   applicable.
@@ -151,4 +227,4 @@ guidance when conflicts arise.
   adherence to these principles. Violations MUST be resolved
   before merge.
 
-**Version**: 1.0.0 | **Ratified**: 2026-03-11 | **Last Amended**: 2026-03-11
+**Version**: 1.1.0 | **Ratified**: 2026-03-11 | **Last Amended**: 2026-05-01
