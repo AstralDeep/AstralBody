@@ -7,8 +7,8 @@
 INSERT INTO tutorial_step (slug, audience, display_order, target_kind, target_key, title, body)
 VALUES
     ('welcome', 'user', 10, 'none', NULL,
-     'Welcome to AstralBody',
-     'Let''s take a quick tour of how AstralBody helps you collaborate with intelligent agents. This will only take a minute — you can skip at any time.'),
+     'Welcome to AstralDeep',
+     'Let''s take a quick tour of how AstralDeep helps you collaborate with intelligent agents. This will only take a minute — you can skip at any time.'),
 
     ('chat-with-agent', 'user', 20, 'static', 'chat.input',
      'Chat with an agent',
@@ -20,11 +20,11 @@ VALUES
 
     -- Feature 008-llm-text-only-chat: explicit step nudging users to
     -- turn on at least one agent so they unlock tool-augmented chat.
-    -- Until they do, AstralBody falls back to text-only chat and
+    -- Until they do, AstralDeep falls back to text-only chat and
     -- shows the persistent banner over the chat surface.
     ('enable-agents', 'user', 35, 'static', 'sidebar.agents',
      'Turn an agent on',
-     'Open the Agents panel and switch on at least one agent. Until you do, AstralBody talks to the language model in text-only mode — it can chat, but it can''t take actions on your behalf.'),
+     'Open the Agents panel and switch on at least one agent. Until you do, AstralDeep talks to the language model in text-only mode — it can chat, but it can''t take actions on your behalf.'),
 
     ('open-audit-log', 'user', 40, 'static', 'sidebar.audit',
      'Review the audit log',

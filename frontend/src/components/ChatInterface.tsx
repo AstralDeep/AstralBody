@@ -649,7 +649,7 @@ export default function ChatInterface({
                                 <h2 className="text-xl font-semibold text-white mb-2">
                                     AstralDeep
                                 </h2>
-                                <p className="text-sm text-astral-muted max-w-md">
+                                <p className="text-sm text-astral-muted max-w-lg">
                                     Ask anything — your connected agents will search, analyze, and visualize results as interactive UI components. You can attach files, manage agent permissions in the sidebar, and save components for later.
                                 </p>
                             </div>

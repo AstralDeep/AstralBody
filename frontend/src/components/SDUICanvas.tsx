@@ -54,6 +54,32 @@ export default function SDUICanvas({
     // Fullscreen: which component is expanded to full screen (null = none)
     const [fullscreenId, setFullscreenId] = useState<string | null>(null);
 
+    // Feature 010-fix-page-flash. Capture the set of component IDs
+    // present at FIRST RENDER so we can skip the entry animation for
+    // them. `useState` with a lazy initializer runs ONCE on the first
+    // render and the resulting set is a stable reference for the
+    // lifetime of the component — so existing components stay calm
+    // through every later re-render while genuinely new components
+    // (whose ID is not in the set) animate in.
+    //
+    // `mounted` is flipped from false to true after the first commit
+    // so the empty-state branch can skip its entry animation on first
+    // paint and animate normally on later toggles.
+    const [initialIds] = useState<Set<string>>(
+        () => new Set(canvasComponents.map(c => c.id)),
+    );
+    const [mounted, setMounted] = useState(false);
+    useEffect(() => {
+        // Standard "did mount" flag — required so first-paint can render
+        // with `initial={false}` while later toggles into the empty
+        // state animate normally. The single re-render this triggers
+        // is harmless: framer-motion only honors `initial` once per
+        // element mount, so the second render's value is dead code
+        // for animation purposes.
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setMounted(true);
+    }, []);
+
     // Adaptive sizing: tracks whether content overflows the viewport
     // Levels: 0 = normal, 1 = compact (smaller max-h), 2 = all collapsed, 3 = trigger auto-condense
     const [sizeLevel, setSizeLevel] = useState(0);
@@ -495,7 +521,7 @@ export default function SDUICanvas({
                 {canvasComponents.length === 0 ? (
                     <div className="flex flex-col items-center justify-center h-full text-center">
                         <motion.div
-                            initial={{ opacity: 0, y: 20 }}
+                            initial={mounted ? { opacity: 0, y: 20 } : false}
                             animate={{ opacity: 1, y: 0 }}
                             className="space-y-6"
                         >
@@ -536,7 +562,7 @@ export default function SDUICanvas({
                                 key={component.id}
                                 data-component-id={component.id}
                                 layout
-                                initial={{ opacity: 0, y: 20, scale: 0.95 }}
+                                initial={initialIds.has(component.id) ? false : { opacity: 0, y: 20, scale: 0.95 }}
                                 animate={{
                                     opacity: isBeingDragged ? 0.4 : 1,
                                     y: 0,

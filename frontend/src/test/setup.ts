@@ -1,5 +1,6 @@
 import '@testing-library/jest-dom';
-import { vi, afterEach } from 'vitest';
+import { vi, afterEach, beforeEach } from 'vitest';
+import { backgroundFetchCache } from '../lib/backgroundFetchCache';
 
 // Mock global objects
 Object.defineProperty(window, 'matchMedia', {
@@ -44,6 +45,12 @@ Object.defineProperty(window, 'matchMedia', {
   readyState: 0,
   url: '',
 }));
+
+// Reset the module-scoped session fetch cache before every test so
+// cached promises do not leak across tests (feature 010-fix-page-flash).
+beforeEach(() => {
+  backgroundFetchCache._resetForTests();
+});
 
 // Clean up after each test
 afterEach(() => {

@@ -69,7 +69,7 @@ export function OnboardingProvider({
     children,
 }: OnboardingProviderProps) {
     const onboardingState = useOnboardingState(accessToken);
-    const { state, update, replay: replayApi, refresh: refreshState } = onboardingState;
+    const { state, update, replay: replayApi } = onboardingState;
 
     const [activated, setActivated] = useState<boolean>(false);
     const stepsResource = useTutorialSteps(accessToken, activated);
@@ -237,12 +237,13 @@ export function OnboardingProvider({
         if (replayMode) setReplayMode(false);
     }, [replayMode]);
 
-    // Refresh state when the access token first arrives or changes
-    useEffect(() => {
-        if (accessToken) {
-            void refreshState();
-        }
-    }, [accessToken, refreshState]);
+    // Feature 010-fix-page-flash: the previous duplicate accessToken
+    // effect that called `refreshState()` here was a primary cause of
+    // the screen flash on every silent OIDC token refresh — it both
+    // duplicated the fetch in `useOnboardingState` and forced a
+    // subtree re-render via `setLoading`/`setState` propagated through
+    // context. The hook now handles the initial load itself with a
+    // first-token gate, so this effect is intentionally removed.
 
     const currentStepTargetKey = useMemo<string | null>(
         () => (visible ? currentStep?.target_key ?? null : null),
