@@ -82,6 +82,27 @@ logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
 _ORCH_INSTANCE = None  # type: Optional["Orchestrator"]
 
 
+# Feature 008-llm-text-only-chat (FR-006a) — appended to the chat system
+# prompt whenever a turn dispatches with zero usable tools. Tells the LLM
+# (a) it has no tools/agents available, (b) it MUST NOT fabricate tool
+# output, (c) when the user asks for an action that would require an
+# agent, it should briefly state that no agents are enabled and suggest
+# enabling one. The base system prompt for tool-augmented turns is
+# unchanged (FR-011).
+TEXT_ONLY_SYSTEM_PROMPT_ADDENDUM = """
+TEXT-ONLY MODE (no agents currently available):
+- You have NO tools or agents available for this turn. Do NOT emit tool calls.
+- Do NOT fabricate tool output, pretend to have searched/fetched/created anything,
+  or invent file/database/API results. If you don't actually know it, say so.
+- If the user asks for an action that would normally require an agent (reading
+  a file, searching a system, creating/modifying anything outside this chat),
+  briefly note that no agents are currently enabled and suggest the user enable
+  one from the Agents panel. Then offer the best help you can with text alone.
+- For conversational questions, reasoning, summarization, drafting, or general
+  knowledge — answer normally as a text-only chat assistant.
+"""
+
+
 class Orchestrator:
     def __init__(self):
         self.agents: Dict[str, websockets.WebSocketServerProtocol] = {}
@@ -1197,11 +1218,16 @@ class Orchestrator:
                     }))
 
                     # Also broadcast an updated dashboard to all UI clients for this user
-                    # so their total tools count updates immediately
+                    # so their total tools count updates immediately. Feature 008:
+                    # also re-broadcast agent_list so the per-user
+                    # `tools_available_for_user` flag stays in sync with the new
+                    # permissions — this drives the persistent text-only banner
+                    # (FR-005, FR-007a).
                     for client in self.ui_clients:
                         client_user_id = self._get_user_id(client)
                         if client_user_id == user_id:
                             asyncio.create_task(self.send_dashboard(client))
+                            asyncio.create_task(self.send_agent_list(client))
 
 
                 elif msg.action == "update_device":
@@ -1828,11 +1854,35 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 tools_desc.append(tool_def)
                 tool_to_agent[skill.id] = agent_id
 
-        if not tools_desc:
+        # Feature 008-llm-text-only-chat (FR-001/FR-002/FR-010).
+        # When zero tools survive the filter stack, fall through to a
+        # plain LLM chat (text-only mode) instead of the legacy
+        # "No agents connected" warning. Three exclusions:
+        #  - draft test chats (FR-010): preserve the existing
+        #    draft-diagnostic path so misconfigured drafts surface.
+        #  - LLM unavailable: already short-circuited at the top of
+        #    handle_chat_message (FR-003).
+        # The dispatch loop below already accepts an empty tools list
+        # cleanly — _call_llm omits the `tools` kwarg when tools_desc
+        # is falsy. We tag the audit/log signal so operators can
+        # distinguish text-only fallback turns (FR-009).
+        is_text_only = not tools_desc and not draft_agent_id
+        if not tools_desc and draft_agent_id:
             await self.send_ui_render(websocket, [
-                Alert(message="No agents connected. Please wait for agents to register.", variant="warning").to_json()
+                Alert(
+                    message=(
+                        "Draft agent has no usable tools yet. Configure tools "
+                        "and permissions before testing it."
+                    ),
+                    variant="warning",
+                ).to_json()
             ])
             return
+        if is_text_only:
+            logger.info(
+                "Chat dispatch entering text-only mode "
+                f"(chat_id={chat_id} user_id={user_id} tools_attempted=0)"
+            )
 
         try:
             # ------------------------------------------------------------------
@@ -1888,6 +1938,14 @@ COMPONENT UPDATE RULES:
 - When the user asks to MODIFY, UPDATE, REMOVE items from, or CHANGE existing displayed data, re-call the SAME tool that originally created it with the corrected/updated parameters. Do NOT create duplicates.
 - When the user asks for something completely NEW and unrelated, call the appropriate tool normally.
 """
+
+            # Feature 008-llm-text-only-chat (FR-006a). When this turn
+            # is dispatching with no tools, append the text-only
+            # addendum so the LLM (a) does not emit tool calls,
+            # (b) does not fabricate tool output, and (c) tells the
+            # user to enable an agent for action-style requests.
+            if is_text_only:
+                system_prompt += TEXT_ONLY_SYSTEM_PROMPT_ADDENDUM
 
             # Inject knowledge-based routing hints if available
             if flags.is_enabled("knowledge_synthesis") and hasattr(self, 'knowledge_index'):
@@ -1970,8 +2028,14 @@ COMPONENT UPDATE RULES:
                     if was_compacted:
                         logger.info("Context compacted before LLM call")
 
-                # Call LLM
-                llm_msg, usage = await self._call_llm(websocket, messages, tools_desc)
+                # Call LLM. Feature 008: text-only turns tag the audit
+                # event with feature="chat_dispatch_text_only" so
+                # operators can distinguish fallback dispatches from
+                # tool-augmented ones (FR-009).
+                call_feature = "chat_dispatch_text_only" if is_text_only else "tool_dispatch"
+                llm_msg, usage = await self._call_llm(
+                    websocket, messages, tools_desc, feature=call_feature
+                )
                 self._accumulate_usage(chat_id, usage)
                 if not llm_msg:
                     logger.error("LLM returned None, stopping loop.")
@@ -4000,6 +4064,49 @@ COMPONENT UPDATE RULES:
             }
         }))
 
+    def compute_tools_available_for_user(
+        self, user_id: str, draft_agent_id: Optional[str] = None
+    ) -> bool:
+        """Return ``True`` iff at least one tool is currently dispatchable for ``user_id``.
+
+        Mirrors the per-turn filter loop in :meth:`handle_chat_message`
+        (registered agent + system security_flags + per-user
+        :meth:`tool_permissions.is_tool_allowed`). Used by feature 008
+        for two purposes:
+
+        1. The orchestrator decides whether the next chat turn enters
+           the text-only branch (caller passes ``draft_agent_id`` so a
+           draft test chat is scoped correctly per FR-010).
+        2. :meth:`send_agent_list` broadcasts the result as
+           ``tools_available_for_user`` so the frontend can mount the
+           persistent text-only banner (FR-007a).
+
+        Args:
+            user_id: The user whose permissions gate tool availability.
+            draft_agent_id: When set, only that agent's tools are
+                considered (matches the dispatch-time draft scoping).
+                When ``None``, every connected non-draft agent is
+                considered.
+
+        Returns:
+            ``True`` if at least one tool would survive the full filter
+            stack for ``user_id``. ``False`` otherwise — this is the
+            signal that the chat turn would dispatch in text-only mode.
+        """
+        for agent_id, card in self.agent_cards.items():
+            if agent_id not in self.agents:
+                continue
+            if draft_agent_id and agent_id != draft_agent_id:
+                continue
+            agent_flags = self.security_flags.get(agent_id, {})
+            for skill in card.skills:
+                if skill.id in agent_flags and agent_flags[skill.id].get("blocked"):
+                    continue
+                if not self.tool_permissions.is_tool_allowed(user_id, agent_id, skill.id):
+                    continue
+                return True
+        return False
+
     async def send_agent_list(self, websocket):
         """Send list of connected agents."""
         user_id = self._get_user_id(websocket)
@@ -4033,9 +4140,18 @@ COMPONENT UPDATE RULES:
                 entry["metadata"] = card.metadata
             agents.append(entry)
 
+        # Feature 008-llm-text-only-chat (FR-007a, contracts/ws-agent-list.md).
+        # Broadcast a single boolean for this user that collapses the
+        # three reasons a chat would dispatch in text-only mode (no
+        # agents connected, all tools blocked by user permissions, all
+        # blocked by security flags). The frontend uses this to toggle
+        # the persistent text-only banner.
+        tools_available_for_user = self.compute_tools_available_for_user(user_id)
+
         await self._safe_send(websocket, json.dumps({
             "type": "agent_list",
-            "agents": agents
+            "tools_available_for_user": tools_available_for_user,
+            "agents": agents,
         }))
 
     # =========================================================================
