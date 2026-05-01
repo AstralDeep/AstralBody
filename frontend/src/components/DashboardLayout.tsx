@@ -107,6 +107,14 @@ interface DashboardLayoutProps {
     onStartOAuthFlow?: (agentId: string) => Promise<boolean>;
     onSetAgentVisibility?: (agentId: string, isPublic: boolean) => Promise<boolean>;
     onDiscoverAgents?: () => void;
+    /**
+     * Feature 008-llm-text-only-chat: bumped (e.g., from Date.now()) by an
+     * external caller — typically the persistent text-only banner's
+     * "Enable agents" button — to ask DashboardLayout to open its agents
+     * modal. Each new value triggers exactly one open. The default
+     * undefined is a no-op for callers that don't use the affordance.
+     */
+    requestOpenAgentsModalKey?: number;
 }
 
 export default function DashboardLayout({
@@ -140,6 +148,7 @@ export default function DashboardLayout({
     onReplayTutorial,
     onOpenTutorialAdmin,
     onOpenUserGuide,
+    requestOpenAgentsModalKey,
 }: DashboardLayoutProps) {
     const [chatToDelete, setChatToDelete] = useState<string | null>(null);
     const [permModalAgent, setPermModalAgent] = useState<string | null>(null);
@@ -231,6 +240,15 @@ export default function DashboardLayout({
         document.addEventListener("keydown", handleKeyDown);
         return () => document.removeEventListener("keydown", handleKeyDown);
     }, [agentsModalOpen]);
+
+    // Feature 008-llm-text-only-chat: external request to open the
+    // agents modal (e.g., from the text-only banner's "Enable agents"
+    // button). The first render's `undefined` does nothing; every
+    // subsequent change opens the modal once.
+    useEffect(() => {
+        if (requestOpenAgentsModalKey === undefined) return;
+        setAgentsModalOpen(true);
+    }, [requestOpenAgentsModalKey]);
 
     const openPermissionsModal = (agentId: string) => {
         setAgentsModalOpen(false);

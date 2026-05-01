@@ -26,6 +26,7 @@ import { ACCEPT_ATTRIBUTE } from "../lib/attachmentTypes";
 import { useAttachments, formatAttachmentRefs } from "../hooks/useAttachments";
 import { RotateCcw } from "lucide-react";
 import type { ChatStatus, DeviceCapabilityFlags } from "../hooks/useWebSocket";
+import TextOnlyBanner from "./TextOnlyBanner";
 
 interface FloatingChatPanelProps {
     messages: { role: string; content: unknown; _target?: string }[];
@@ -36,6 +37,14 @@ interface FloatingChatPanelProps {
     activeChatId: string | null;
     accessToken?: string;
     deviceCapabilities?: DeviceCapabilityFlags;
+    /**
+     * Feature 008-llm-text-only-chat (FR-007a): false ⇒ render the
+     * persistent text-only banner because the next chat turn would
+     * dispatch with no agents/tools.
+     */
+    toolsAvailableForUser?: boolean;
+    /** Feature 008: opens the existing Agents modal in DashboardLayout. */
+    onOpenAgentSettings?: () => void;
 }
 
 export default function FloatingChatPanel({
@@ -47,6 +56,8 @@ export default function FloatingChatPanel({
     activeChatId,
     accessToken,
     deviceCapabilities = { hasMicrophone: false, hasGeolocation: false, speechServerAvailable: false },
+    toolsAvailableForUser = true,
+    onOpenAgentSettings,
 }: FloatingChatPanelProps) {
     const canUseVoiceInput = deviceCapabilities.hasMicrophone && deviceCapabilities.speechServerAvailable;
     const canUseVoiceOutput = deviceCapabilities.speechServerAvailable;
@@ -560,6 +571,10 @@ export default function FloatingChatPanel({
 
                 {/* Messages */}
                 <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3 min-h-0">
+                    <TextOnlyBanner
+                        toolsAvailableForUser={toolsAvailableForUser}
+                        onOpenAgentSettings={onOpenAgentSettings ?? (() => { /* noop */ })}
+                    />
                     {chatMessages.length === 0 && (
                         <div className="flex flex-col items-center justify-center h-full text-center py-8">
                             <Bot size={24} className="text-astral-muted/30 mb-2" />
