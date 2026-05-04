@@ -247,15 +247,61 @@ export default function CreateAgentModal({ isOpen, onClose, accessToken, onAgent
         }
     }, []);
 
-    // Connect WS when entering step 4 testing, disconnect on close
+    // Connect WS when entering step 4 with the draft in any post-generation
+    // status that supports testing. Previously this gated on "testing" only,
+    // but generation completes at "generated" and nothing ever flipped the
+    // status — the user landed on Step 4 with no socket and silently dropped
+    // messages (feature 012-fix-agent-flows Story 1). Accepting both states
+    // here, plus the explicit /test POST below, closes the loop.
     useEffect(() => {
-        if (step === 4 && draft?.status === "testing") {
+        if (step === 4 && (draft?.status === "generated" || draft?.status === "testing" || draft?.status === "live")) {
             connectTestWs();
         }
         return () => {
             // Don't disconnect on every render, only on unmount
         };
     }, [step, draft?.status, connectTestWs]);
+
+    // Start the draft subprocess when the user lands on Step 4 with a
+    // freshly generated draft. The /test endpoint is idempotent —
+    // start_draft_agent stops any existing subprocess before re-spawning,
+    // and the orchestrator deduplicates the agent_id on discovery — so
+    // calling it whenever we enter Step 4 in "generated" state is safe.
+    // Failures land in draft.status="error" and are rendered by the
+    // error-state branch on Step 4.
+    const ensuredStartedRef = useRef<string | null>(null);
+    useEffect(() => {
+        if (step !== 4 || !draft?.id) return;
+        if (draft.status !== "generated") return;
+        if (ensuredStartedRef.current === draft.id) return;
+        ensuredStartedRef.current = draft.id;
+        (async () => {
+            try {
+                const resp = await fetch(`${API_URL}/api/agents/drafts/${draft.id}/test`, {
+                    method: "POST",
+                    headers: headers(),
+                });
+                if (resp.ok) {
+                    const updated: DraftAgent = await resp.json();
+                    setDraft(updated);
+                } else {
+                    const errBody = await resp.json().catch(() => ({}));
+                    setDraft(prev => prev ? {
+                        ...prev,
+                        status: "error",
+                        error_message: errBody.detail || `Failed to start draft (HTTP ${resp.status})`,
+                    } : prev);
+                }
+            } catch (e) {
+                setDraft(prev => prev ? {
+                    ...prev,
+                    status: "error",
+                    error_message: e instanceof Error ? e.message : String(e),
+                } : prev);
+            }
+        })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [step, draft?.id, draft?.status]);
 
     // Cleanup on close
     useEffect(() => {
@@ -1058,6 +1104,62 @@ export default function CreateAgentModal({ isOpen, onClose, accessToken, onAgent
 
                                 {/* Test chat messages */}
                                 <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                                    {/* Feature 012-fix-agent-flows Story 1+2: explicit
+                                        error state with Retry / Edit Definition / Close
+                                        actions when generation or subprocess startup
+                                        failed. Without this banner the user lands on a
+                                        frozen empty chat and has no recovery path. */}
+                                    {draft.status === "error" && (
+                                        <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-4">
+                                            <div className="flex items-start gap-2 mb-2">
+                                                <AlertTriangle size={16} className="text-red-400 mt-0.5 flex-shrink-0" />
+                                                <div className="min-w-0">
+                                                    <p className="text-sm font-medium text-red-400">Draft agent could not start</p>
+                                                    <p className="text-xs text-red-300/80 mt-1 break-words">
+                                                        {draft.error_message || "An unknown error occurred."}
+                                                    </p>
+                                                </div>
+                                            </div>
+                                            <div className="flex items-center gap-2 mt-3">
+                                                <button
+                                                    type="button"
+                                                    onClick={async () => {
+                                                        if (!draft?.id) return;
+                                                        ensuredStartedRef.current = null;
+                                                        try {
+                                                            const resp = await fetch(`${API_URL}/api/agents/drafts/${draft.id}/test`, {
+                                                                method: "POST",
+                                                                headers: headers(),
+                                                            });
+                                                            if (resp.ok) {
+                                                                const updated: DraftAgent = await resp.json();
+                                                                setDraft(updated);
+                                                            }
+                                                        } catch {
+                                                            // surfaced via the next status update
+                                                        }
+                                                    }}
+                                                    className="px-3 py-1.5 text-xs rounded-lg bg-red-500/20 text-red-300 border border-red-500/30 hover:bg-red-500/30 transition-colors"
+                                                >
+                                                    Retry
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setStep(3)}
+                                                    className="px-3 py-1.5 text-xs rounded-lg bg-white/5 text-white border border-white/10 hover:bg-white/10 transition-colors"
+                                                >
+                                                    Edit Definition
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={handleClose}
+                                                    className="px-3 py-1.5 text-xs rounded-lg text-astral-muted hover:text-white hover:bg-white/5 transition-colors ml-auto"
+                                                >
+                                                    Close
+                                                </button>
+                                            </div>
+                                        </div>
+                                    )}
                                     {testMessages.length === 0 && draft.status === "testing" && (
                                         <div className="flex flex-col items-center justify-center h-full text-center opacity-50">
                                             <Bot size={32} className="text-astral-muted mb-2" />
@@ -1067,7 +1169,16 @@ export default function CreateAgentModal({ isOpen, onClose, accessToken, onAgent
                                             </p>
                                         </div>
                                     )}
-                                    {testMessages.length === 0 && draft.status !== "testing" && (
+                                    {testMessages.length === 0 && draft.status === "generated" && (
+                                        <div className="flex flex-col items-center justify-center h-full text-center opacity-60">
+                                            <Loader2 size={32} className="text-astral-muted mb-2 animate-spin" />
+                                            <p className="text-xs text-astral-muted">Starting your agent...</p>
+                                            <p className="text-[10px] text-astral-muted mt-1">
+                                                This usually takes a few seconds.
+                                            </p>
+                                        </div>
+                                    )}
+                                    {testMessages.length === 0 && draft.status !== "testing" && draft.status !== "generated" && draft.status !== "error" && (
                                         <div className="flex flex-col items-center justify-center h-full text-center opacity-50">
                                             <Play size={32} className="text-astral-muted mb-2" />
                                             <p className="text-xs text-astral-muted">Start testing to begin chatting with your agent</p>
@@ -1117,15 +1228,28 @@ export default function CreateAgentModal({ isOpen, onClose, accessToken, onAgent
                                     <div ref={testChatEndRef} />
                                 </div>
 
-                                {/* Test chat input */}
-                                <form
-                                    onSubmit={(e) => { e.preventDefault(); sendTestMessage(); }}
-                                    className="flex items-center gap-2 px-4 py-3 border-t border-white/5 flex-shrink-0"
-                                >
+                                {/* Test chat input — feature 012-fix-agent-flows:
+                                    deliberately NOT a <form>. A native form
+                                    submit (Enter key, button type=submit) was
+                                    causing the entire modal to remount on every
+                                    response because the form's default submit
+                                    behavior was firing alongside our handler.
+                                    Now uses an onKeyDown handler on the input
+                                    and a type="button" send button. There is
+                                    no form-submit path that React or the
+                                    browser can take. */}
+                                <div className="flex items-center gap-2 px-4 py-3 border-t border-white/5 flex-shrink-0">
                                     <input
                                         type="text"
                                         value={testInput}
                                         onChange={e => setTestInput(e.target.value)}
+                                        onKeyDown={(e) => {
+                                            if (e.key === "Enter" && !e.shiftKey) {
+                                                e.preventDefault();
+                                                e.stopPropagation();
+                                                sendTestMessage();
+                                            }
+                                        }}
                                         placeholder={draft.status === "testing" ? "Ask your agent something..." : "Start testing first..."}
                                         disabled={draft.status !== "testing" || testStatus === "thinking" || testStatus === "executing" || testStatus === "fixing"}
                                         className="flex-1 px-3 py-2 text-sm bg-white/5 border border-white/10 rounded-lg
@@ -1133,14 +1257,15 @@ export default function CreateAgentModal({ isOpen, onClose, accessToken, onAgent
                                                    disabled:opacity-40"
                                     />
                                     <button
-                                        type="submit"
+                                        type="button"
+                                        onClick={(e) => { e.preventDefault(); e.stopPropagation(); sendTestMessage(); }}
                                         disabled={draft.status !== "testing" || !testInput.trim() || testStatus === "thinking" || testStatus === "executing"}
                                         className="p-2 rounded-lg bg-astral-accent/15 text-astral-accent border border-astral-accent/20
                                                    hover:bg-astral-accent/25 disabled:opacity-30 transition-colors"
                                     >
                                         <Send size={14} />
                                     </button>
-                                </form>
+                                </div>
                             </div>
 
                             {/* Right: Controls + Refinement Chat */}

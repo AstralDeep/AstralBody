@@ -227,8 +227,18 @@ export default function DashboardLayout({
         setAgentsModalOpen(true);
     }, [requestOpenAgentsModalKey]);
 
+    // Open the per-agent Permissions modal. We do NOT close the agents modal —
+    // the Permissions modal stacks ON TOP of it (same fixed inset-0, rendered
+    // later in the DOM, with a higher z-index). When the user dismisses the
+    // Permissions modal they're back on the agents list naturally.
+    //
+    // Story 4 background: the previous code called setAgentsModalOpen(false)
+    // here, but the Permissions modal only mounts once async permissions data
+    // arrives — leaving an empty-frame gap that users perceived as the modal
+    // "closing and the page refreshing." Stacking eliminates that gap entirely
+    // and survives the case where the permissions response is delayed or
+    // missing (e.g. for public agents where the user has no row yet).
     const openPermissionsModal = (agentId: string) => {
-        setAgentsModalOpen(false);
         setPermModalAgent(agentId);
         onGetAgentPermissions?.(agentId);
         // Fetch stored credential keys for agents that need them
@@ -542,7 +552,8 @@ export default function DashboardLayout({
                                             return (
                                                 <button
                                                     key={agent.id}
-                                                    onClick={() => openPermissionsModal(agent.id)}
+                                                    type="button"
+                                                    onClick={(e) => { e.stopPropagation(); openPermissionsModal(agent.id); }}
                                                     className="flex items-start gap-3 p-4 rounded-xl border border-white/5 bg-white/[0.02]
                                                                hover:bg-white/5 hover:border-astral-primary/20 transition-all text-left group"
                                                 >
