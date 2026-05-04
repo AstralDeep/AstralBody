@@ -953,27 +953,103 @@ class AgentLifecycleManager:
 
             else:
                 # Clean or medium/low only → auto-approve
+                self._remove_draft_marker(slug)
+                agent_id = f"{slug.replace('_', '-')}-1"
+
+                # Ensure agent process is running. Note: start_draft_agent
+                # writes status=TESTING + sets ownership + populates
+                # orchestrator.agents via discover_agent. We call it FIRST so
+                # those side-effects happen, then restore status=LIVE below
+                # (otherwise the TESTING write inside start_draft_agent would
+                # clobber the LIVE flip on the auto-approval path — feature
+                # 012-fix-agent-flows Story 3).
+                start_failed = False
+                if draft_id not in self._draft_processes or \
+                   self._draft_processes[draft_id].poll() is not None:
+                    try:
+                        started_state = await self.start_draft_agent(draft_id, websocket)
+                        # start_draft_agent doesn't raise on subprocess crash —
+                        # it writes status=ERROR and returns. Detect that here.
+                        if started_state and started_state.get("status") == ERROR:
+                            start_failed = True
+                            logger.warning(
+                                f"Approved draft {draft_id}: subprocess failed "
+                                f"to start after promotion: "
+                                f"{started_state.get('error_message')}"
+                            )
+                    except Exception as e:
+                        start_failed = True
+                        logger.warning(
+                            f"Approved draft {draft_id}: subprocess start raised "
+                            f"({e}); leaving draft in error state."
+                        )
+
+                # If we couldn't bring the agent process up, do NOT promote to
+                # LIVE — that would produce a phantom-live entry the user can't
+                # actually use. Leave the draft in its current (error) state and
+                # surface the failure.
+                if start_failed:
+                    await self._send_progress(
+                        websocket, draft_id, "error",
+                        "Approval succeeded but the agent process failed to "
+                        "start. Try again or refine the agent.",
+                        ERROR,
+                    )
+                    self._append_log(draft_id, "APPROVE: subprocess failed to start; left in error state")
+                    return self.db.get_draft_agent(draft_id)
+
+                # Re-assert ownership in case start_draft_agent was skipped
+                # (process already running) — ownership must always exist
+                # for a live agent so it shows up in send_dashboard.
+                user = self.db.get_user(draft["user_id"])
+                owner_email = user.get("email", draft["user_id"]) if user else draft["user_id"]
+                self.db.set_agent_ownership(agent_id, owner_email=owner_email, is_public=False)
+
+                # Restore LIVE status (guaranteed final write in this branch)
                 self.db.update_draft_agent(
                     draft_id, status=LIVE,
                     security_report=json.dumps(report.to_dict()) if report.findings else None,
                 )
-                self._remove_draft_marker(slug)
+
                 # Live agents: all scopes DISABLED — user must explicitly enable
-                agent_id = f"{slug.replace('_', '-')}-1"
                 if self.orchestrator:
                     self.orchestrator.tool_permissions.set_agent_scopes(
                         draft["user_id"], agent_id,
                         {"tools:read": False, "tools:write": False, "tools:search": False, "tools:system": False}
                     )
+
                 await self._send_progress(websocket, draft_id, "approved",
                                            "Agent approved and is now live!", LIVE,
                                            detail=report.to_dict() if report.findings else None)
                 self._append_log(draft_id, "APPROVED: Agent is now live")
+                logger.info(
+                    f"approve_agent: auto-promoted draft {draft_id} -> "
+                    f"agent_id={agent_id} owner={owner_email}"
+                )
 
-                # Ensure agent is running
-                if draft_id not in self._draft_processes or \
-                   self._draft_processes[draft_id].poll() is not None:
-                    await self.start_draft_agent(draft_id, websocket)
+                # Broadcast updated dashboard + agent_list to all UI clients
+                # of the owning user so the live agents UI updates within
+                # SC-003's 10-second budget without a manual page reload.
+                # Mirrors the per-user broadcast pattern used elsewhere in
+                # orchestrator.py for permission updates.
+                if self.orchestrator:
+                    target_user_id = draft["user_id"]
+                    for client in list(getattr(self.orchestrator, 'ui_clients', [])):
+                        try:
+                            client_user_id = self.orchestrator._get_user_id(client)
+                        except Exception:
+                            client_user_id = None
+                        if client_user_id == target_user_id:
+                            try:
+                                asyncio.create_task(self.orchestrator.send_dashboard(client))
+                                send_agent_list = getattr(self.orchestrator, 'send_agent_list', None)
+                                if send_agent_list:
+                                    asyncio.create_task(send_agent_list(client))
+                            except Exception as broadcast_err:
+                                logger.debug(
+                                    f"approve_agent broadcast skipped for one "
+                                    f"client: {broadcast_err}"
+                                )
 
                 return self.db.get_draft_agent(draft_id)
 
