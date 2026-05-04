@@ -24,6 +24,101 @@ import UserGuidePanel from "./components/guide/UserGuidePanel";
 
 import { WS_URL } from "./config";
 
+// `Shell` is declared at module scope (not inside `App`) so its function
+// reference is stable across `App` re-renders. If it were declared inside
+// `App`, every render would produce a new `Shell` type, and React would
+// unmount/remount the entire subtree — wiping `DashboardLayout`'s local
+// state (e.g., `agentsModalOpen`, `permModalAgent`) every time a WS
+// message updated App-level state. That manifested as the Agents modal
+// closing the moment a user clicked an agent card.
+type ShellProps = {
+  ws: ReturnType<typeof useWebSocket>;
+  auth: { accessToken: string | undefined; signOut: () => void };
+  user: { email: string; isAdmin: boolean };
+  openers: {
+    audit: () => void;
+    llm: () => void;
+    feedback: (() => void) | undefined;
+    tutorial: (() => void) | undefined;
+    guide: () => void;
+  };
+};
+
+function Shell({ ws, auth, user, openers }: ShellProps) {
+  const onboarding = useOnboarding();
+  // Feature 008-llm-text-only-chat: bumped by the chat panel's
+  // text-only banner CTA to ask DashboardLayout to open its
+  // agents modal. A monotonically increasing key is the simplest
+  // way to deliver "open it, again, even if it's already been
+  // opened-then-closed once".
+  const [agentsModalRequestKey, setAgentsModalRequestKey] = useState<number | undefined>(undefined);
+  return (
+    <>
+      <DashboardLayout
+        agents={ws.agents}
+        isConnected={ws.isConnected}
+        connectionState={ws.connectionState}
+        onLogout={auth.signOut}
+        chatHistory={ws.chatHistory}
+        activeChatId={ws.activeChatId}
+        onLoadChat={ws.loadChat}
+        onNewChat={ws.createNewChat}
+        onDeleteChat={ws.deleteChat}
+        isAdmin={user.isAdmin}
+        accessToken={auth.accessToken}
+        agentPermissions={ws.agentPermissions}
+        onGetAgentPermissions={ws.getAgentPermissions}
+        onSetAgentPermissions={ws.setAgentPermissions}
+        agentCredentialKeys={ws.agentCredentialKeys}
+        onFetchAgentCredentials={ws.fetchAgentCredentials}
+        onSaveAgentCredentials={ws.saveAgentCredentials}
+        onDeleteAgentCredential={ws.deleteAgentCredential}
+        onStartOAuthFlow={ws.startOAuthFlow}
+        userEmail={user.email}
+        onSetAgentVisibility={ws.setAgentVisibility}
+        onRegisterExternalAgent={ws.registerExternalAgent}
+        onDiscoverAgents={ws.discoverAgents}
+        onOpenAuditLog={openers.audit}
+        onOpenLlmSettings={openers.llm}
+        onOpenFeedbackAdmin={openers.feedback}
+        onReplayTutorial={() => void onboarding.replay()}
+        onOpenTutorialAdmin={openers.tutorial}
+        onOpenUserGuide={openers.guide}
+        requestOpenAgentsModalKey={agentsModalRequestKey}
+      >
+        <FeedbackProvider token={auth.accessToken ?? null} ws={ws.wsRef?.current ?? null} isAdmin={user.isAdmin}>
+          <AgentPermissionProvider agents={ws.agents}>
+            <SDUICanvas
+              canvasComponents={ws.canvasComponents}
+              onDeleteComponent={ws.deleteSavedComponent}
+              onCombineComponents={ws.combineComponents}
+              onCondenseComponents={ws.condenseComponents}
+              isCombining={ws.isCombining}
+              combineError={ws.combineError}
+              onTablePaginate={ws.sendTablePaginate}
+              onSendMessage={ws.sendMessage}
+              activeChatId={ws.activeChatId}
+            />
+            <FloatingChatPanel
+              messages={ws.messages}
+              chatStatus={ws.chatStatus}
+              onSendMessage={ws.sendMessage}
+              onCancelTask={ws.cancelTask}
+              isConnected={ws.isConnected}
+              activeChatId={ws.activeChatId}
+              accessToken={auth.accessToken}
+              deviceCapabilities={ws.deviceCapabilities}
+              toolsAvailableForUser={ws.toolsAvailableForUser}
+              onOpenAgentSettings={() => setAgentsModalRequestKey(Date.now())}
+            />
+          </AgentPermissionProvider>
+        </FeedbackProvider>
+      </DashboardLayout>
+      <TutorialOverlay />
+    </>
+  );
+}
+
 function App() {
   const auth = useAuth();
   const [auditOpen, setAuditOpen] = useState<boolean>(() => {
@@ -60,44 +155,7 @@ function App() {
 
   // Pass the token to the WebSocket hook.
   // It will only connect when token is available.
-  const {
-    isConnected,
-    connectionState,
-    agents,
-    toolsAvailableForUser,
-    chatStatus,
-    messages,
-    sendMessage,
-    cancelTask,
-    activeChatId,
-    chatHistory,
-    loadChat,
-    createNewChat,
-    deleteChat,
-    canvasComponents,
-    deleteSavedComponent,
-    combineComponents,
-    condenseComponents,
-    isCombining,
-    combineError,
-    agentPermissions,
-    getAgentPermissions,
-    setAgentPermissions,
-    agentCredentialKeys,
-    fetchAgentCredentials,
-    saveAgentCredentials,
-    deleteAgentCredential,
-    startOAuthFlow,
-    setAgentVisibility,
-    registerExternalAgent,
-    discoverAgents,
-    sendTablePaginate,
-    deviceCapabilities,
-    wsRef,
-  } = useWebSocket(
-    WS_URL,
-    auth.user?.access_token
-  );
+  const ws = useWebSocket(WS_URL, auth.user?.access_token);
 
   if (auth.isLoading) {
     return (
@@ -196,82 +254,6 @@ function App() {
     );
   }
 
-  // ----- Inner shell that consumes OnboardingContext -----------------------
-  function Shell() {
-    const onboarding = useOnboarding();
-    // Feature 008-llm-text-only-chat: bumped by the chat panel's
-    // text-only banner CTA to ask DashboardLayout to open its
-    // agents modal. A monotonically increasing key is the simplest
-    // way to deliver "open it, again, even if it's already been
-    // opened-then-closed once".
-    const [agentsModalRequestKey, setAgentsModalRequestKey] = useState<number | undefined>(undefined);
-    return (
-      <>
-        <DashboardLayout
-          agents={agents}
-          isConnected={isConnected}
-          connectionState={connectionState}
-          onLogout={() => void auth.signoutRedirect()}
-          chatHistory={chatHistory}
-          activeChatId={activeChatId}
-          onLoadChat={loadChat}
-          onNewChat={createNewChat}
-          onDeleteChat={deleteChat}
-          isAdmin={isAdmin}
-          accessToken={auth.user?.access_token}
-          agentPermissions={agentPermissions}
-          onGetAgentPermissions={getAgentPermissions}
-          onSetAgentPermissions={setAgentPermissions}
-          agentCredentialKeys={agentCredentialKeys}
-          onFetchAgentCredentials={fetchAgentCredentials}
-          onSaveAgentCredentials={saveAgentCredentials}
-          onDeleteAgentCredential={deleteAgentCredential}
-          onStartOAuthFlow={startOAuthFlow}
-          userEmail={userEmail}
-          onSetAgentVisibility={setAgentVisibility}
-          onRegisterExternalAgent={registerExternalAgent}
-          onDiscoverAgents={discoverAgents}
-          onOpenAuditLog={() => setAuditOpen(true)}
-          onOpenLlmSettings={() => setLlmSettingsOpen(true)}
-          onOpenFeedbackAdmin={isAdmin ? () => setFeedbackAdminOpen(true) : undefined}
-          onReplayTutorial={() => void onboarding.replay()}
-          onOpenTutorialAdmin={isAdmin ? () => setTutorialAdminOpen(true) : undefined}
-          onOpenUserGuide={() => setUserGuideOpen(true)}
-          requestOpenAgentsModalKey={agentsModalRequestKey}
-        >
-          <FeedbackProvider token={auth.user?.access_token ?? null} ws={wsRef?.current ?? null} isAdmin={isAdmin}>
-            <AgentPermissionProvider agents={agents}>
-              <SDUICanvas
-                canvasComponents={canvasComponents}
-                onDeleteComponent={deleteSavedComponent}
-                onCombineComponents={combineComponents}
-                onCondenseComponents={condenseComponents}
-                isCombining={isCombining}
-                combineError={combineError}
-                onTablePaginate={sendTablePaginate}
-                onSendMessage={sendMessage}
-                activeChatId={activeChatId}
-              />
-              <FloatingChatPanel
-                messages={messages}
-                chatStatus={chatStatus}
-                onSendMessage={sendMessage}
-                onCancelTask={cancelTask}
-                isConnected={isConnected}
-                activeChatId={activeChatId}
-                accessToken={auth.user?.access_token}
-                deviceCapabilities={deviceCapabilities}
-                toolsAvailableForUser={toolsAvailableForUser}
-                onOpenAgentSettings={() => setAgentsModalRequestKey(Date.now())}
-              />
-            </AgentPermissionProvider>
-          </FeedbackProvider>
-        </DashboardLayout>
-        <TutorialOverlay />
-      </>
-    );
-  }
-
   return (
     <ThemeProvider>
       <TooltipProvider>
@@ -288,7 +270,18 @@ function App() {
               },
             }}
           />
-          <Shell />
+          <Shell
+            ws={ws}
+            auth={{ accessToken: auth.user?.access_token, signOut: () => void auth.signoutRedirect() }}
+            user={{ email: userEmail, isAdmin }}
+            openers={{
+              audit: () => setAuditOpen(true),
+              llm: () => setLlmSettingsOpen(true),
+              feedback: isAdmin ? () => setFeedbackAdminOpen(true) : undefined,
+              tutorial: isAdmin ? () => setTutorialAdminOpen(true) : undefined,
+              guide: () => setUserGuideOpen(true),
+            }}
+          />
           <AuditLogPanel
             open={auditOpen}
             accessToken={auth.user?.access_token}
