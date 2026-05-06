@@ -12,7 +12,7 @@
  * shows a credentials section.  Tools are locked until all required
  * credentials are provided.
  */
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
     X,
@@ -221,7 +221,7 @@ export default function AgentPermissionsModal({
     // Scope warning confirmation dialog. Triggered by per-tool toggles
     // when the underlying scope is OFF — the user must consent to the
     // permission kind before any tool of that kind goes live.
-    const [pendingScopeToggle, setPendingScopeToggle] = useState<ScopeMeta | null>(null);
+    const [pendingScopeToggle, setPendingScopeToggle] = useState<(ScopeMeta & { triggeringTool?: string }) | null>(null);
 
     // Credential state
     const [credentialValues, setCredentialValues] = useState<Record<string, string>>({});
@@ -310,7 +310,20 @@ export default function AgentPermissionsModal({
 
     /* ---------- Scope helpers ---------- */
 
-    const enabledScopeCount = SCOPE_DEFINITIONS.filter(d => localScopes[d.key]).length;
+    const { enabledToolCount, totalToolCount } = useMemo(() => {
+        let enabled = 0;
+        let total = 0;
+        for (const tool of Object.keys(permissions)) {
+            const isBlocked = securityFlags?.[tool]?.blocked === true;
+            if (isBlocked) continue;
+            total += 1;
+            const requiredScope = toolScopeMap[tool] || "tools:read";
+            const scopeOn = !!localScopes[requiredScope];
+            const overrideEnabled = localToolOverrides[tool] ?? true;
+            if (scopeOn && overrideEnabled) enabled += 1;
+        }
+        return { enabledToolCount: enabled, totalToolCount: total };
+    }, [permissions, securityFlags, toolScopeMap, localScopes, localToolOverrides]);
 
     const baselineOverrides = initialToolOverrides || {};
 
@@ -323,14 +336,6 @@ export default function AgentPermissionsModal({
         setHasChanges(scopeChanged || overrideChanged);
     };
 
-    const applyScopeToggle = (scopeKey: string, value: boolean) => {
-        setLocalScopes(prev => {
-            const updated = { ...prev, [scopeKey]: value };
-            detectChanges(updated, localToolOverrides);
-            return updated;
-        });
-    };
-
     const toggleToolOverride = (toolName: string) => {
         setLocalToolOverrides(prev => {
             const currentlyEnabled = prev[toolName] ?? true; // default = enabled (follows scope)
@@ -341,10 +346,25 @@ export default function AgentPermissionsModal({
     };
 
     const confirmScopeToggle = () => {
-        if (pendingScopeToggle) {
-            applyScopeToggle(pendingScopeToggle.key, true);
-            setPendingScopeToggle(null);
+        if (!pendingScopeToggle) return;
+        const { key: scopeKey, triggeringTool } = pendingScopeToggle;
+        const updatedOverrides = { ...localToolOverrides };
+        if (triggeringTool) {
+            delete updatedOverrides[triggeringTool];
+            for (const t of Object.keys(permissions)) {
+                if (t === triggeringTool) continue;
+                if ((toolScopeMap[t] || "tools:read") !== scopeKey) continue;
+                if (updatedOverrides[t] === true) continue;
+                updatedOverrides[t] = false;
+            }
         }
+        setLocalToolOverrides(updatedOverrides);
+        setLocalScopes(prev => {
+            const nextScopes = { ...prev, [scopeKey]: true };
+            detectChanges(nextScopes, updatedOverrides);
+            return nextScopes;
+        });
+        setPendingScopeToggle(null);
     };
 
     /* ---------- Save ---------- */
@@ -456,7 +476,7 @@ export default function AgentPermissionsModal({
                                         {agentName}
                                     </h2>
                                     <p className="text-[11px] text-astral-muted">
-                                        {enabledScopeCount}/{SCOPE_DEFINITIONS.length} scopes enabled
+                                        {enabledToolCount}/{totalToolCount} tools enabled
                                         {needsCredentials && (
                                             <span className="text-amber-400"> &middot; credentials required</span>
                                         )}
@@ -1004,16 +1024,10 @@ export default function AgentPermissionsModal({
                                                                         // First time enabling something of this kind:
                                                                         // surface the consent warning (FR-011 — pre-toggle
                                                                         // info already shown via the (i) icon, this is the
-                                                                        // explicit confirm step).
-                                                                        setPendingScopeToggle(scopeDef);
-                                                                        // Also clear any stale per-tool override so the
-                                                                        // tool turns ON when the user accepts the scope.
-                                                                        if (localToolOverrides[tool] === false) {
-                                                                            const next = { ...localToolOverrides };
-                                                                            delete next[tool];
-                                                                            setLocalToolOverrides(next);
-                                                                            detectChanges(localScopes, next);
-                                                                        }
+                                                                        // explicit confirm step). Tag the triggering tool
+                                                                        // so confirmScopeToggle only enables this one and
+                                                                        // leaves siblings explicitly disabled.
+                                                                        setPendingScopeToggle({ ...scopeDef, triggeringTool: tool });
                                                                         return;
                                                                     }
                                                                     // Scope is already on — flipping the per-tool override.
@@ -1039,30 +1053,7 @@ export default function AgentPermissionsModal({
                         </div>
 
                         {/* ── Footer ──────────────────────────────────── */}
-                        <div className="flex items-center justify-between px-6 py-4 border-t border-white/5 bg-white/[0.02]">
-                            <div className="flex items-center gap-2 text-[11px] text-astral-muted">
-                                {needsCredentials ? (
-                                    <>
-                                        <Lock size={14} className="text-amber-400" />
-                                        <span className="text-amber-400">{missingCredentials.length} credential{missingCredentials.length > 1 ? "s" : ""} needed</span>
-                                    </>
-                                ) : enabledScopeCount === SCOPE_DEFINITIONS.length ? (
-                                    <>
-                                        <ShieldCheck size={14} className="text-green-400" />
-                                        <span>All scopes enabled</span>
-                                    </>
-                                ) : enabledScopeCount === 0 ? (
-                                    <>
-                                        <ShieldX size={14} className="text-red-400" />
-                                        <span>All scopes disabled</span>
-                                    </>
-                                ) : (
-                                    <>
-                                        <Shield size={14} className="text-amber-400" />
-                                        <span>{enabledScopeCount}/{SCOPE_DEFINITIONS.length} scopes enabled</span>
-                                    </>
-                                )}
-                            </div>
+                        <div className="flex items-center justify-end px-6 py-4 border-t border-white/5 bg-white/[0.02]">
                             <div className="flex items-center gap-2">
                                 <button
                                     onClick={onClose}

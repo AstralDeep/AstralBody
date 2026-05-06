@@ -225,6 +225,58 @@ class TestCleanup:
         assert manager.is_scope_enabled("user1", "agent1", "tools:write") is False
         assert manager.is_scope_enabled("user1", "agent2", "tools:write") is True
 
+    def test_cleanup_stale_tool_overrides_prunes_removed_tool(self, manager):
+        """A tool override for a tool no longer in the live registry is pruned."""
+        manager.set_tool_permission("user1", "agent1", "modify_data", "tools:write", False)
+        manager.set_tool_permission("user1", "agent1", "removed_tool", "tools:read", False)
+        live_tools = ["modify_data", "search_wikipedia", "generate_chart"]
+        deleted = manager.cleanup_stale_tool_overrides("agent1", live_tools)
+        assert deleted >= 1
+        rows = manager.db.fetch_all(
+            "SELECT tool_name FROM tool_overrides WHERE user_id = ? AND agent_id = ?",
+            ("user1", "agent1"),
+        )
+        names = {r['tool_name'] for r in rows}
+        assert "removed_tool" not in names
+        assert "modify_data" in names
+
+    def test_cleanup_stale_tool_overrides_empty_live_list(self, manager):
+        """An empty live tool list deletes every override row for the agent."""
+        manager.set_tool_permission("user1", "agent1", "modify_data", "tools:write", False)
+        manager.set_tool_permission("user1", "agent1", "search_arxiv", "tools:search", False)
+        manager.cleanup_stale_tool_overrides("agent1", [])
+        rows = manager.db.fetch_all(
+            "SELECT tool_name FROM tool_overrides WHERE user_id = ? AND agent_id = ?",
+            ("user1", "agent1"),
+        )
+        assert rows == []
+
+    def test_cleanup_stale_tool_overrides_preserves_other_agents(self, manager):
+        """Cleanup is scoped to the given agent_id; other agents untouched."""
+        manager.register_tool_scopes("agent2", {"some_tool": "tools:read"})
+        manager.set_tool_permission("user1", "agent1", "modify_data", "tools:write", False)
+        manager.set_tool_permission("user1", "agent2", "some_tool", "tools:read", False)
+        manager.cleanup_stale_tool_overrides("agent1", [])
+        agent1_rows = manager.db.fetch_all(
+            "SELECT tool_name FROM tool_overrides WHERE user_id = ? AND agent_id = ?",
+            ("user1", "agent1"),
+        )
+        agent2_rows = manager.db.fetch_all(
+            "SELECT tool_name FROM tool_overrides WHERE user_id = ? AND agent_id = ?",
+            ("user1", "agent2"),
+        )
+        assert agent1_rows == []
+        assert {r['tool_name'] for r in agent2_rows} == {"some_tool"}
+
+    def test_cleanup_stale_tool_overrides_idempotent(self, manager):
+        """Running cleanup twice yields zero deletions on the second call."""
+        manager.set_tool_permission("user1", "agent1", "removed_tool", "tools:read", False)
+        live_tools = ["modify_data"]
+        first = manager.cleanup_stale_tool_overrides("agent1", live_tools)
+        second = manager.cleanup_stale_tool_overrides("agent1", live_tools)
+        assert first >= 1
+        assert second == 0
+
 
 class TestGetAllAgentPermissions:
     def test_returns_all_agents(self, manager):
