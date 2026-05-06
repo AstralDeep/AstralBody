@@ -117,6 +117,14 @@ class Database:
         if not self._column_exists(cursor, 'chats', 'has_saved_components'):
             cursor.execute("ALTER TABLE chats ADD COLUMN has_saved_components BOOLEAN DEFAULT FALSE")
 
+        # Feature 013: bind a chat session to its active agent so the UI can
+        # render the active-agent indicator (FR-006) and detect when the
+        # bound agent becomes unavailable (FR-009). NULL is allowed for
+        # backward compatibility with chats created before this column
+        # existed; the frontend renders an "Unknown agent" state for those.
+        if not self._column_exists(cursor, 'chats', 'agent_id'):
+            cursor.execute("ALTER TABLE chats ADD COLUMN agent_id TEXT NULL")
+
         # Auto-migrate user_id column for all tables
         for table in ['chats', 'messages', 'saved_components', 'chat_files']:
             if not self._column_exists(cursor, table, 'user_id'):
@@ -175,8 +183,18 @@ class Database:
             )
         ''')
 
-        # Tool overrides — per-user, per-agent, per-tool disable overrides
-        # When a scope is enabled but a specific tool should be disabled
+        # Tool overrides — per-user, per-agent, per-tool, per-permission-kind
+        # permission rows (Feature 013).
+        #
+        # Pre-013 semantics: one row per (user, agent, tool) capturing a
+        # tool-wide disable override (legacy "tool_overrides"). Rows have
+        # `permission_kind = NULL`.
+        #
+        # Post-013 semantics: one row per (user, agent, tool, permission_kind)
+        # capturing the per-tool, per-kind enable/disable state (FR-010).
+        # Legacy NULL rows continue to work as tool-wide overrides until
+        # superseded by per-kind rows during user edits or the FR-015
+        # backfill (executed by ToolPermissionManager.backfill_per_tool_rows).
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS tool_overrides (
                 id SERIAL PRIMARY KEY,
@@ -188,6 +206,37 @@ class Database:
                 UNIQUE(user_id, agent_id, tool_name)
             )
         ''')
+
+        # Feature 013: extend tool_overrides with permission_kind. Legacy
+        # rows have NULL kinds; new rows carry the specific scope kind.
+        if not self._column_exists(cursor, 'tool_overrides', 'permission_kind'):
+            cursor.execute("ALTER TABLE tool_overrides ADD COLUMN permission_kind TEXT NULL")
+            # Drop the (user_id, agent_id, tool_name) unique constraint so
+            # multiple per-kind rows can coexist for the same (user, agent,
+            # tool). Replace with a unique index that includes permission_kind
+            # via COALESCE so legacy NULL rows remain unique tool-wide.
+            # PostgreSQL auto-generated constraint names follow the pattern
+            # <table>_<col1>_<col2>_..._key. We use IF EXISTS to be safe in
+            # case the constraint name varies.
+            cursor.execute("""
+                DO $$
+                DECLARE
+                    constraint_rec RECORD;
+                BEGIN
+                    FOR constraint_rec IN
+                        SELECT conname FROM pg_constraint
+                        WHERE conrelid = 'tool_overrides'::regclass
+                          AND contype = 'u'
+                          AND conname <> 'tool_overrides_user_agent_tool_kind_uniq'
+                    LOOP
+                        EXECUTE format('ALTER TABLE tool_overrides DROP CONSTRAINT %I', constraint_rec.conname);
+                    END LOOP;
+                END $$;
+            """)
+            cursor.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS tool_overrides_user_agent_tool_kind_uniq
+                ON tool_overrides (user_id, agent_id, tool_name, COALESCE(permission_kind, ''))
+            """)
 
         # Users table — persists user profiles from Keycloak/OIDC
         cursor.execute('''
@@ -578,6 +627,119 @@ class Database:
         """Get ownership info for all agents."""
         rows = self.fetch_all("SELECT agent_id, owner_email, is_public FROM agent_ownership")
         return [dict(r) for r in rows]
+
+    # ── Chat ↔ Agent Binding (Feature 013) ───────────────────────────────
+
+    def get_chat_agent(self, chat_id: str) -> Optional[str]:
+        """Return the agent_id bound to the chat, or None if unbound (legacy chats)."""
+        row = self.fetch_one("SELECT agent_id FROM chats WHERE id = ?", (chat_id,))
+        if not row:
+            return None
+        return row.get("agent_id")
+
+    def set_chat_agent(self, chat_id: str, agent_id: Optional[str]) -> bool:
+        """Bind (or unbind) a chat to an agent. Returns True if a row was updated."""
+        cursor = self.execute(
+            "UPDATE chats SET agent_id = ? WHERE id = ?",
+            (agent_id, chat_id),
+        )
+        return cursor.rowcount > 0
+
+    # ── Per-User Tool Selection Preference (Feature 013 / FR-024) ────────
+
+    def get_user_tool_selection(self, user_id: str, agent_id: str) -> Optional[List[str]]:
+        """Return the user's saved tool selection for the given agent.
+
+        Returns:
+            A list of tool names if the user has narrowed the selection,
+            or None when the user has not narrowed (orchestrator falls
+            back to the agent's full permission-allowed set per FR-019).
+        """
+        prefs = self.get_user_preferences(user_id)
+        sel_map = prefs.get("tool_selection") or {}
+        if not isinstance(sel_map, dict):
+            return None
+        value = sel_map.get(agent_id)
+        if value is None:
+            return None
+        if not isinstance(value, list):
+            return None
+        return [str(v) for v in value]
+
+    def set_user_tool_selection(
+        self, user_id: str, agent_id: str, tool_names: List[str]
+    ) -> None:
+        """Save the user's tool selection for an agent (FR-024).
+
+        Callers MUST pass a non-empty list — empty selection is blocked
+        at the UI layer (FR-021) and rejected by the API (T035). This
+        helper does not validate against permission scopes; that check
+        belongs at the API boundary.
+        """
+        prefs = self.get_user_preferences(user_id)
+        sel_map = prefs.get("tool_selection")
+        if not isinstance(sel_map, dict):
+            sel_map = {}
+        sel_map[agent_id] = list(tool_names)
+        prefs["tool_selection"] = sel_map
+        self.set_user_preferences(user_id, prefs)
+
+    def clear_user_tool_selection(self, user_id: str, agent_id: str) -> bool:
+        """Clear the user's saved selection for an agent (FR-025 reset).
+
+        Returns True if a saved selection was present and was removed,
+        False if no selection existed (idempotent no-op).
+        """
+        prefs = self.get_user_preferences(user_id)
+        sel_map = prefs.get("tool_selection")
+        if not isinstance(sel_map, dict) or agent_id not in sel_map:
+            return False
+        del sel_map[agent_id]
+        prefs["tool_selection"] = sel_map
+        self.set_user_preferences(user_id, prefs)
+        return True
+
+    # ── Per-User Agent Disable (Feature 013 follow-up) ───────────────────
+    # Lets a user temporarily disable an entire agent without changing its
+    # scopes/permissions or affecting other users. Stored under
+    # `user_preferences.disabled_agents` as a list of agent_ids. Absence
+    # in the list means the agent is enabled (default).
+
+    def get_user_disabled_agents(self, user_id: str) -> List[str]:
+        """Return the list of agent_ids the user has disabled (may be empty)."""
+        prefs = self.get_user_preferences(user_id)
+        value = prefs.get("disabled_agents")
+        if not isinstance(value, list):
+            return []
+        return [str(v) for v in value]
+
+    def is_user_agent_disabled(self, user_id: str, agent_id: str) -> bool:
+        """Return True iff the user has disabled this agent."""
+        return agent_id in self.get_user_disabled_agents(user_id)
+
+    def set_user_agent_disabled(
+        self, user_id: str, agent_id: str, disabled: bool
+    ) -> bool:
+        """Toggle the user's per-agent disabled state.
+
+        Returns True if the stored value changed, False if it was already
+        in the requested state (idempotent).
+        """
+        prefs = self.get_user_preferences(user_id)
+        current = prefs.get("disabled_agents")
+        disabled_list: List[str] = (
+            [str(v) for v in current] if isinstance(current, list) else []
+        )
+        present = agent_id in disabled_list
+        if disabled and not present:
+            disabled_list.append(agent_id)
+        elif not disabled and present:
+            disabled_list = [a for a in disabled_list if a != agent_id]
+        else:
+            return False  # already in the requested state
+        prefs["disabled_agents"] = disabled_list
+        self.set_user_preferences(user_id, prefs)
+        return True
 
     # ── Users ─────────────────────────────────────────────────────────────
 

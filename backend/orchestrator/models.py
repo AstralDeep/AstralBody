@@ -43,6 +43,13 @@ class ChatSummary(BaseModel):
     """Summary of a chat session (metadata only, no messages)."""
     id: str
     title: str
+    agent_id: Optional[str] = Field(
+        None,
+        description=(
+            "Feature 013 / FR-006: the agent currently bound to this chat. "
+            "NULL for legacy chats created before agent binding shipped."
+        ),
+    )
     updated_at: int = Field(..., description="Unix timestamp in milliseconds")
     preview: str = Field("", description="Preview of the last message")
     has_saved_components: Optional[bool] = None
@@ -59,6 +66,13 @@ class ChatDetail(BaseModel):
     """Full chat session with messages."""
     id: str
     title: str
+    agent_id: Optional[str] = Field(
+        None,
+        description=(
+            "Feature 013 / FR-006: the agent currently bound to this chat. "
+            "NULL for legacy chats created before agent binding shipped."
+        ),
+    )
     updated_at: int
     messages: List[ChatMessage] = []
 
@@ -68,9 +82,21 @@ class ChatListResponse(BaseModel):
     chats: List[ChatSummary]
 
 
+class ChatCreateRequest(BaseModel):
+    """Optional body for POST /api/chats. Allows the caller to bind the new
+    chat to a specific agent (Feature 013 / FR-006). When omitted, the chat
+    is unbound and the frontend renders an "Unknown agent — pick one" state.
+    """
+    agent_id: Optional[str] = Field(None, description="Agent to bind this chat to.")
+
+
 class ChatCreateResponse(BaseModel):
     """Response when a new chat is created."""
     chat_id: str
+    agent_id: Optional[str] = Field(
+        None,
+        description="Echo of the agent the chat is bound to (Feature 013).",
+    )
     message: str = "Chat created successfully"
 
 
@@ -157,6 +183,14 @@ class AgentInfo(BaseModel):
     status: str = "connected"
     owner_email: Optional[str] = Field(None, description="Email of the agent owner")
     is_public: bool = Field(False, description="Whether the agent is publicly available to all users")
+    disabled: bool = Field(
+        False,
+        description=(
+            "Feature 013 follow-up: per-user agent disable state. True ⇒ "
+            "the requesting user has muted this agent; the orchestrator "
+            "skips its tools without changing scopes/permissions."
+        ),
+    )
 
 
 class AgentListResponse(BaseModel):
@@ -165,21 +199,50 @@ class AgentListResponse(BaseModel):
 
 
 class AgentPermissionsRequest(BaseModel):
-    """Update scope-based permissions for an agent."""
-    scopes: Dict[str, bool] = Field(..., description="Map of scope to enabled (true/false): tools:read, tools:write, tools:search, tools:system")
-    tool_overrides: Optional[Dict[str, bool]] = Field(None, description="Per-tool enable/disable overrides within enabled scopes")
+    """Update permissions for an agent.
 
-    model_config = {"json_schema_extra": {"examples": [{"scopes": {"tools:read": True, "tools:write": False, "tools:search": True, "tools:system": False}, "tool_overrides": {"some_tool": False}}]}}
+    Feature 013 (preferred): pass ``per_tool_permissions`` to update
+    per-(tool, permission_kind) rows directly. Each entry is
+    ``{tool_name: {permission_kind: enabled}}``. Unspecified tools/kinds
+    are left untouched (partial update).
+
+    Legacy (still accepted for one release): pass ``scopes`` + optional
+    ``tool_overrides`` for the pre-013 four-scope model. When the
+    legacy shape is used, the server also writes equivalent per-tool
+    rows so the new model stays in sync.
+    """
+    scopes: Optional[Dict[str, bool]] = Field(None, description="Legacy four-scope map (tools:read/write/search/system). Accepted for one release.")
+    tool_overrides: Optional[Dict[str, bool]] = Field(None, description="Legacy per-tool enable/disable overrides (paired with scopes).")
+    per_tool_permissions: Optional[Dict[str, Dict[str, bool]]] = Field(
+        None,
+        description=(
+            "Feature 013: per-(tool, permission_kind) toggles. Shape: "
+            "{tool_name: {permission_kind: enabled}}. permission_kind ∈ "
+            "{tools:read, tools:write, tools:search, tools:system}."
+        ),
+    )
+
+    model_config = {"json_schema_extra": {"examples": [
+        {"per_tool_permissions": {"search_web": {"tools:read": True, "tools:search": True}, "send_email": {"tools:write": False}}},
+        {"scopes": {"tools:read": True, "tools:write": False, "tools:search": True, "tools:system": False}, "tool_overrides": {"some_tool": False}},
+    ]}}
 
 
 class AgentPermissionsResponse(BaseModel):
-    """Current scope-based permissions for an agent."""
+    """Current permissions for an agent (Feature 013: per-tool, per-kind)."""
     agent_id: str
     agent_name: str
-    scopes: Dict[str, bool] = Field(default_factory=dict, description="Scope-level permissions (tools:read, tools:write, tools:search, tools:system)")
+    scopes: Dict[str, bool] = Field(default_factory=dict, description="Legacy scope-level permissions (tools:read, tools:write, tools:search, tools:system). Echoed for transitional clients.")
     tool_scope_map: Optional[Dict[str, str]] = Field(None, description="Map of tool_name to required scope")
-    permissions: Dict[str, bool] = Field(default_factory=dict, description="Per-tool permission map derived from scopes + overrides (tool_name: allowed)")
-    tool_overrides: Dict[str, bool] = Field(default_factory=dict, description="Per-tool disable overrides (only disabled tools listed)")
+    permissions: Dict[str, bool] = Field(default_factory=dict, description="Per-tool boolean derived from per-tool, per-kind state (tool_name: allowed). Honors Feature 013 resolution order.")
+    per_tool_permissions: Dict[str, Dict[str, bool]] = Field(
+        default_factory=dict,
+        description=(
+            "Feature 013: resolved per-(tool, permission_kind) state. "
+            "Only the kinds that apply to each tool are present (FR-014)."
+        ),
+    )
+    tool_overrides: Dict[str, bool] = Field(default_factory=dict, description="Legacy per-tool disable overrides (only NULL-kind disable rows listed).")
     tool_descriptions: Optional[Dict[str, str]] = Field(None, description="Map of tool_name to description")
     security_flags: Optional[Dict[str, Any]] = Field(None, description="System-level security flags per tool from proactive review")
 
@@ -187,6 +250,51 @@ class AgentPermissionsResponse(BaseModel):
 class AgentVisibilityRequest(BaseModel):
     """Toggle agent public/private visibility."""
     is_public: bool = Field(..., description="Whether the agent should be publicly available")
+
+
+# ── Feature 013: User Tool-Selection Preference ──────────────────────────
+
+class ToolSelectionResponse(BaseModel):
+    """The user's saved tool selection for an agent.
+
+    ``selected_tools`` is None when the user has not narrowed the selection
+    for this agent (orchestrator falls back to the full permitted set per
+    FR-019). A non-None list is the user's explicit subset.
+    """
+    agent_id: str
+    selected_tools: Optional[List[str]] = Field(
+        None,
+        description="None ≡ no narrowing (default). A list ≡ the user's explicit subset.",
+    )
+
+
+class ToolSelectionUpdate(BaseModel):
+    """Save the user's tool selection for an agent (Feature 013 / FR-024).
+
+    Empty arrays are rejected by the API — zero selection is gated at the
+    UI layer (FR-021). The list MUST be a strict subset of the agent's
+    permission-allowed tools; the server re-validates.
+    """
+    agent_id: str = Field(..., description="The agent the selection applies to.")
+    selected_tools: List[str] = Field(..., description="Non-empty list of tool names.")
+
+
+class AgentEnabledUpdate(BaseModel):
+    """Toggle the user's per-agent disabled state (Feature 013 follow-up).
+
+    Per-user, agent-wide on/off switch. Disabling does NOT change the
+    agent's scopes or permissions — when the user re-enables, the agent
+    resumes with whatever permissions it had before. Lets a user
+    temporarily mute an agent without re-granting scopes later.
+    """
+    agent_id: str = Field(..., description="The agent to toggle.")
+    enabled: bool = Field(..., description="True = enabled (visible to chat); False = disabled.")
+
+
+class AgentEnabledResponse(BaseModel):
+    """Echo of the user's per-agent enabled state."""
+    agent_id: str
+    enabled: bool
 
 
 class CredentialSetRequest(BaseModel):

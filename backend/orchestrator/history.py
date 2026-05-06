@@ -68,14 +68,27 @@ class HistoryManager:
         except Exception as e:
             logger.error(f"Migration failed: {e}")
 
-    def create_chat(self, chat_id: Optional[str] = None, user_id: str = 'legacy') -> str:
-        """Create a new chat session."""
+    def create_chat(
+        self,
+        chat_id: Optional[str] = None,
+        user_id: str = 'legacy',
+        agent_id: Optional[str] = None,
+    ) -> str:
+        """Create a new chat session.
+
+        Feature 013: ``agent_id`` binds the new chat to a specific agent so
+        the UI can render the active-agent indicator (FR-006) and detect
+        unavailability (FR-009). Pass None for unbound chats (legacy
+        behaviour); a NULL ``agent_id`` is later interpreted by the
+        frontend as "Unknown agent — pick one".
+        """
         if not chat_id:
             chat_id = str(uuid.uuid4())
         timestamp = int(time.time() * 1000)
         self.db.execute(
-            "INSERT INTO chats (id, user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            (chat_id, user_id, "New Chat", timestamp, timestamp)
+            "INSERT INTO chats (id, user_id, title, agent_id, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (chat_id, user_id, "New Chat", agent_id, timestamp, timestamp),
         )
         return chat_id
 
@@ -142,6 +155,7 @@ class HistoryManager:
         return {
             "id": chat_row['id'],
             "title": chat_row['title'],
+            "agent_id": chat_row.get("agent_id"),
             "created_at": chat_row['created_at'],
             "updated_at": chat_row['updated_at'],
             "messages": messages
@@ -176,6 +190,7 @@ class HistoryManager:
             results.append({
                 "id": row['id'],
                 "title": row['title'],
+                "agent_id": row.get("agent_id"),
                 "updated_at": row['updated_at'],
                 "preview": preview,
                 "has_saved_components": has_saved
