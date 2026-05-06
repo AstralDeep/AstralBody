@@ -547,6 +547,42 @@ class Database:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_tutorial_step_revision_step_time ON tutorial_step_revision(step_id, edited_at DESC)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_tutorial_step_revision_editor ON tutorial_step_revision(editor_user_id, edited_at DESC)')
 
+        # ------------------------------------------------------------------
+        # Feature 014 — in-chat progress notifications & persistent step trail
+        # ------------------------------------------------------------------
+        # One row per persistent step entry (tool_call / agent_handoff / phase)
+        # captured by ChatStepRecorder. Persisted alongside the chat's
+        # messages so step history rehydrates with the chat.
+        # See specs/014-progress-notifications/data-model.md.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS chat_steps (
+                id TEXT PRIMARY KEY,
+                chat_id TEXT NOT NULL,
+                user_id TEXT NOT NULL DEFAULT 'legacy',
+                turn_message_id INTEGER,
+                kind TEXT NOT NULL,
+                name TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'in_progress',
+                args_truncated TEXT,
+                args_was_truncated BOOLEAN NOT NULL DEFAULT FALSE,
+                result_summary TEXT,
+                result_was_truncated BOOLEAN NOT NULL DEFAULT FALSE,
+                error_message TEXT,
+                started_at BIGINT NOT NULL,
+                ended_at BIGINT,
+                FOREIGN KEY (chat_id) REFERENCES chats (id) ON DELETE CASCADE,
+                FOREIGN KEY (turn_message_id) REFERENCES messages (id) ON DELETE SET NULL
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_chat_steps_chat_id ON chat_steps(chat_id, started_at)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_chat_steps_turn ON chat_steps(turn_message_id)')
+
+        # Render-time cache: number of step rows per turn-anchoring message.
+        # Maintained by ChatStepRecorder on lifecycle transitions so the chat
+        # list endpoint can show counts without joining chat_steps.
+        if not self._column_exists(cursor, 'messages', 'step_count'):
+            cursor.execute("ALTER TABLE messages ADD COLUMN step_count INTEGER NOT NULL DEFAULT 0")
+
         conn.commit()
         conn.close()
 

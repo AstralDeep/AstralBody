@@ -125,6 +125,21 @@ class HistoryManager:
         # Update chat timestamp
         self.db.execute("UPDATE chats SET updated_at = ? WHERE id = ?", (timestamp, chat_id))
 
+    def get_latest_message_id(self, chat_id: str, user_id: str = 'legacy'):
+        """Return the integer id of the most recent message in a chat.
+
+        Added for feature 014 — chat-step recorder needs the
+        ``messages.id`` of the user message that initiated a turn so step
+        rows can FK back to it (see chat_steps.turn_message_id). Returns
+        ``None`` if the chat has no messages.
+        """
+        row = self.db.fetch_one(
+            "SELECT id FROM messages WHERE chat_id = ? AND user_id = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (chat_id, user_id),
+        )
+        return row["id"] if row else None
+
     def update_chat_title(self, chat_id: str, title: str, user_id: str = 'legacy'):
         """Update the title of a specific chat."""
         timestamp = int(time.time() * 1000)
@@ -147,6 +162,7 @@ class HistoryManager:
                 pass # Keep as string
             
             messages.append({
+                "id": row['id'],
                 "role": row['role'],
                 "content": content,
                 "timestamp": row['timestamp']

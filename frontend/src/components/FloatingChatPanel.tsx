@@ -27,13 +27,22 @@ import { ACCEPT_ATTRIBUTE } from "../lib/attachmentTypes";
 import { useAttachments, formatAttachmentRefs } from "../hooks/useAttachments";
 import { RotateCcw } from "lucide-react";
 import type { Agent, ChatStatus, DeviceCapabilityFlags } from "../hooks/useWebSocket";
+import type { ChatStepMap } from "../types/chatSteps";
+import { CosmicProgressIndicator } from "./chat/CosmicProgressIndicator";
+import { ChatStepEntry } from "./chat/ChatStepEntry";
 import TextOnlyBanner from "./TextOnlyBanner";
 import { setUserAgentEnabled } from "../api/toolSelection";
 import { API_URL } from "../config";
 
 interface FloatingChatPanelProps {
-    messages: { role: string; content: unknown; _target?: string }[];
+    messages: { role: string; content: unknown; _target?: string; id?: number }[];
     chatStatus: ChatStatus;
+    /**
+     * Feature 014 — persistent step entries for the active chat (US2).
+     * Map of step id → step. Rendering sorts by ``started_at`` and shows
+     * each entry inline below the latest exchange.
+     */
+    chatSteps?: ChatStepMap;
     onSendMessage: (message: string, displayMessage?: string, explicitChatId?: string) => void;
     onCancelTask: () => void;
     isConnected: boolean;
@@ -101,6 +110,7 @@ interface ToolPickerToolEntry {
 export default function FloatingChatPanel({
     messages,
     chatStatus,
+    chatSteps,
     onSendMessage,
     onCancelTask,
     isConnected,
@@ -344,6 +354,34 @@ export default function FloatingChatPanel({
         const target = msg._target;
         return target === "chat" || target === undefined;
     });
+
+    // Feature 014 — group step entries by their originating user-message id
+    // so each turn's "Calling 'tool-name'" lines render directly under that
+    // turn instead of clustering at the bottom of the chat. Steps whose
+    // turn_message_id has not yet been stamped onto a local user message
+    // (the in-flight turn before user_message_acked arrives) render in a
+    // tail group right before the loading indicator.
+    type ChatStepLike = NonNullable<typeof chatSteps>[string];
+    const allChatStepsList: ChatStepLike[] = chatSteps
+        ? Object.values(chatSteps).sort((a, b) => a.started_at - b.started_at)
+        : [];
+    const stepsByTurnId: Record<number, ChatStepLike[]> = {};
+    const unmatchedSteps: ChatStepLike[] = [];
+    if (allChatStepsList.length > 0) {
+        const stampedIds = new Set<number>();
+        for (const m of chatMessages) {
+            if (m.role === "user" && typeof m.id === "number") stampedIds.add(m.id);
+        }
+        for (const s of allChatStepsList) {
+            const tid = s.turn_message_id;
+            if (typeof tid === "number" && stampedIds.has(tid)) {
+                if (!stepsByTurnId[tid]) stepsByTurnId[tid] = [];
+                stepsByTurnId[tid].push(s);
+            } else {
+                unmatchedSteps.push(s);
+            }
+        }
+    }
 
     // Unread count when panel is collapsed
     const [lastSeenCount, setLastSeenCount] = useState(0);
@@ -883,9 +921,13 @@ export default function FloatingChatPanel({
                         </div>
                     )}
 
-                    {chatMessages.map((msg, i) => (
+                    {chatMessages.map((msg, i) => {
+                        const turnSteps = msg.role === "user" && typeof msg.id === "number"
+                            ? stepsByTurnId[msg.id]
+                            : undefined;
+                        return (
+                        <React.Fragment key={i}>
                         <motion.div
-                            key={i}
                             initial={i < initialMsgCount ? false : { opacity: 0, y: 6 }}
                             animate={{ opacity: 1, y: 0 }}
                             transition={{ duration: 0.15 }}
@@ -932,7 +974,33 @@ export default function FloatingChatPanel({
                                 </div>
                             )}
                         </motion.div>
-                    ))}
+                        {turnSteps && turnSteps.length > 0 && (
+                            <div
+                                data-testid="chat-step-trail-turn"
+                                data-turn-message-id={msg.id}
+                                className="ml-8 space-y-1"
+                            >
+                                {turnSteps.map((step) => (
+                                    <ChatStepEntry key={step.id} step={step} />
+                                ))}
+                            </div>
+                        )}
+                        </React.Fragment>
+                    );
+                    })}
+
+                    {/* Feature 014 — persistent step trail (tail group).
+                        Steps from earlier turns render inline next to their
+                        originating user message above; this tail only
+                        renders steps for the in-flight turn before
+                        user_message_acked stamps the local message id. */}
+                    {unmatchedSteps.length > 0 && (
+                        <div data-testid="chat-step-trail" className="ml-8 space-y-1">
+                            {unmatchedSteps.map((step) => (
+                                <ChatStepEntry key={step.id} step={step} />
+                            ))}
+                        </div>
+                    )}
 
                     {/* Loading state */}
                     <AnimatePresence>
@@ -948,9 +1016,7 @@ export default function FloatingChatPanel({
                                 </div>
                                 <div className="glass-card px-3 py-2 flex items-center gap-2">
                                     <Loader2 size={12} className="text-astral-primary animate-spin" />
-                                    <span className="text-xs text-astral-muted">
-                                        {chatStatus.message || "Processing..."}
-                                    </span>
+                                    <CosmicProgressIndicator chatStatus={chatStatus} />
                                     <button
                                         onClick={onCancelTask}
                                         className="p-1 rounded-md bg-white/5 hover:bg-red-500/20 text-astral-muted hover:text-red-400 transition-colors"

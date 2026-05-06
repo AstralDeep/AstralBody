@@ -144,6 +144,103 @@ async def delete_chat(
     return DeleteResponse(message=f"Chat {chat_id} deleted")
 
 
+@chat_router.get(
+    "/{chat_id}/steps",
+    summary="Load persistent step entries for a chat",
+    description=(
+        "Feature 014 — returns the chronological sequence of step entries "
+        "(tool calls / agent hand-offs / orchestrator phases) recorded for "
+        "this chat. Used by the frontend on initial chat load and on "
+        "WebSocket reconnect to rehydrate the in-chat step trail. All "
+        "fields are PHI-redacted on the way out (defense-in-depth)."
+    ),
+    responses={
+        403: {"model": ErrorResponse},
+        404: {"model": ErrorResponse},
+    },
+)
+async def get_chat_steps(
+    request: Request,
+    chat_id: str,
+    response: Response,
+    user_id: str = Depends(require_user_id),
+):
+    """Return all chat_steps rows for ``chat_id``, redacted and ordered.
+
+    Read-time healing: any row with ``status='in_progress'`` older than
+    30 seconds for which no active task exists is reported as
+    ``status='interrupted'`` (FR-021 reconnect path). The healing is not
+    persisted on this read; an orphaned-row sweep happens elsewhere.
+    """
+    orch = _get_orchestrator(request)
+
+    # Ownership + existence check (matches the get_chat pattern).
+    chat = orch.history.get_chat(chat_id, user_id=user_id)
+    if not chat:
+        # Try to differentiate "exists for another user" vs "does not exist".
+        cross_user = orch.history.db.fetch_one(
+            "SELECT 1 FROM chats WHERE id = ? LIMIT 1", (chat_id,)
+        )
+        if cross_user is not None:
+            raise HTTPException(status_code=403, detail="Chat not owned by user")
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    response.headers["Cache-Control"] = "no-store"
+
+    try:
+        from shared.phi_redactor import redact
+
+        rows = orch.history.db.fetch_all(
+            "SELECT * FROM chat_steps WHERE chat_id = ? AND user_id = ? "
+            "ORDER BY started_at ASC, id ASC",
+            (chat_id, user_id),
+        )
+
+        # Read-time healing: orphan in-progress rows older than 30 s when
+        # there is no active task on this chat — only mutate the response,
+        # not the DB.
+        import time as _time
+        now_ms = int(_time.time() * 1000)
+        active = orch.task_manager.get_active_task(chat_id)
+
+        steps = []
+        for row in rows:
+            row = dict(row)
+            status_value = row.get("status")
+            if (
+                status_value == "in_progress"
+                and active is None
+                and now_ms - int(row.get("started_at", 0)) > 30_000
+            ):
+                status_value = "interrupted"
+            # Defense-in-depth re-redaction on every field that could
+            # ever contain PHI.
+            args_text, _ = redact(row.get("args_truncated"), kind="args")
+            result_text, _ = redact(row.get("result_summary"), kind="result")
+            error_text, _ = redact(row.get("error_message"), kind="error")
+            steps.append({
+                "id": row["id"],
+                "chat_id": row["chat_id"],
+                "turn_message_id": row.get("turn_message_id"),
+                "kind": row["kind"],
+                "name": row["name"],
+                "status": status_value,
+                "args_truncated": args_text,
+                "args_was_truncated": bool(row.get("args_was_truncated", False)),
+                "result_summary": result_text,
+                "result_was_truncated": bool(row.get("result_was_truncated", False)),
+                "error_message": error_text,
+                "started_at": row["started_at"],
+                "ended_at": row.get("ended_at"),
+            })
+        return {"chat_id": chat_id, "steps": steps}
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.error("Failed to load chat steps: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to load steps")
+
+
 @chat_router.post(
     "/{chat_id}/messages",
     response_model=ChatMessageResponse,
