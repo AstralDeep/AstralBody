@@ -748,13 +748,17 @@ class AgentLifecycleManager:
 
     # ─── Auto-Fix Tool Errors ────────────────────────────────────────
 
-    def _get_draft_by_agent_id(self, agent_id: str) -> Optional[Dict[str, Any]]:
-        """Look up a draft agent record by its runtime agent_id (e.g. 'etf-agent-1')."""
+    def _find_draft_by_agent_id(self, agent_id: str) -> Optional[Dict[str, Any]]:
+        """Look up a draft record by runtime agent_id (e.g. 'etf-agent-1'), any status."""
         # agent_id format is "{slug_with_hyphens}-1", reverse to get slug
         if not agent_id.endswith("-1"):
             return None
         slug = agent_id[:-2].replace('-', '_')  # "etf-agent" -> "etf_agent"
-        draft = self.db.get_draft_agent_by_slug(slug)
+        return self.db.get_draft_agent_by_slug(slug)
+
+    def _get_draft_by_agent_id(self, agent_id: str) -> Optional[Dict[str, Any]]:
+        """Draft lookup gated to states where auto-fix is meaningful."""
+        draft = self._find_draft_by_agent_id(agent_id)
         if draft and draft["status"] in (TESTING, GENERATED, LIVE):
             return draft
         return None
