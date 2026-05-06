@@ -962,6 +962,20 @@ export default function DashboardLayout({
                         </Tooltip>
                     </div>
 
+                    {/* New Chat */}
+                    <div>
+                        <button
+                            onClick={() => { onNewChat?.(); if (window.innerWidth < 768) setSidebarOpen(false); }}
+                            className="w-full flex items-center justify-center gap-2 px-3 py-2
+                                       bg-astral-primary/10 border border-astral-primary/20 rounded-md
+                                       text-xs font-medium text-astral-primary
+                                       hover:bg-astral-primary/20 transition-colors"
+                        >
+                            <Plus size={14} />
+                            <span>New Chat</span>
+                        </button>
+                    </div>
+
                     {/* Recent Chats */}
                     <div>
                         <p className="px-2 text-[10px] font-semibold uppercase tracking-widest text-astral-muted mb-2">
@@ -1073,17 +1087,6 @@ export default function DashboardLayout({
                             alt="AstralDeep Logo"
                             className="h-7 w-auto object-contain"
                         />
-                    </div>
-                    <div className="flex items-center gap-2 sm:gap-3">
-                        <button
-                            onClick={() => { onNewChat?.(); if (window.innerWidth < 768) setSidebarOpen(false); }}
-                            className="flex items-center gap-2 px-3 py-1.5 bg-astral-primary/10
-                                     border border-astral-primary/20 rounded-md text-xs font-medium
-                                     text-astral-primary hover:bg-astral-primary/20 transition-colors"
-                        >
-                            <Plus size={14} />
-                            <span className="hidden sm:inline">New Chat</span>
-                        </button>
                     </div>
                 </header>
 
