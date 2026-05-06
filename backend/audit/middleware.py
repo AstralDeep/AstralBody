@@ -25,10 +25,10 @@ from .recorder import get_recorder
 logger = logging.getLogger("Audit.Middleware")
 
 _SKIP_PATH_PREFIXES = (
-    "/api/audit",      # self-recorded
-    "/auth/",          # auth lifecycle handled at the WS register handler
-    "/docs",
-    "/openapi.json",
+    "/api/audit",        # self-recorded
+    "/auth/",            # auth lifecycle handled at the WS register handler
+    "/api/docs",
+    "/api/openapi.json",
     "/.well-known",
     "/metrics",
 )

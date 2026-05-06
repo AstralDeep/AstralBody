@@ -15,14 +15,24 @@ import DynamicRenderer from "./DynamicRenderer";
 import type { TablePaginateEvent } from "./DynamicRenderer";
 import UISavedDrawer from "./UISavedDrawer";
 import AttachmentLibrary from "./AttachmentLibrary";
+import { CosmicProgressIndicator } from "./chat/CosmicProgressIndicator";
+import { ChatStepEntry } from "./chat/ChatStepEntry";
 import { BFF_URL } from "../config";
 import type { ChatStatus, DeviceCapabilityFlags } from "../hooks/useWebSocket";
+import type { ChatStepMap } from "../types/chatSteps";
 import { useAttachments, formatAttachmentRefs } from "../hooks/useAttachments";
 import { ACCEPT_ATTRIBUTE } from "../lib/attachmentTypes";
 
 interface ChatInterfaceProps {
     messages: { role: string; content: unknown }[];
     chatStatus: ChatStatus;
+    /**
+     * Feature 014 — persistent step entries for the active chat (US2).
+     * The map shape is ``{ [step_id]: ChatStep }``; rendering sorts by
+     * ``started_at`` and groups by ``turn_message_id`` to interleave each
+     * turn's steps between the user message and the assistant reply.
+     */
+    chatSteps?: ChatStepMap;
     onSendMessage: (message: string, displayMessage?: string, explicitChatId?: string) => void;
     onCancelTask: () => void;
     isConnected: boolean;
@@ -49,6 +59,7 @@ const SUGGESTIONS = [
 export default function ChatInterface({
     messages,
     chatStatus,
+    chatSteps,
     onSendMessage,
     onCancelTask,
     isConnected,
@@ -711,6 +722,22 @@ export default function ChatInterface({
                     </motion.div>
                 ))}
 
+                {/* Feature 014 — persistent step trail (T025). Rendered as a
+                    chronological block right after the assistant/user
+                    exchange so live and historical entries appear in one
+                    consistent location. Entries persist across reloads
+                    (sourced from `GET /api/chats/{id}/steps`) and update
+                    live via the `chat_step` WebSocket arm. */}
+                {chatSteps && Object.keys(chatSteps).length > 0 && (
+                    <div data-testid="chat-step-trail" className="ml-11 space-y-1.5">
+                        {Object.values(chatSteps)
+                            .sort((a, b) => a.started_at - b.started_at)
+                            .map((step) => (
+                                <ChatStepEntry key={step.id} step={step} />
+                            ))}
+                    </div>
+                )}
+
                 {/* Loading state */}
                 <AnimatePresence>
                     {chatStatus.status !== "idle" && chatStatus.status !== "done" && (
@@ -725,9 +752,7 @@ export default function ChatInterface({
                             </div>
                             <div className="glass-card px-4 py-3 flex items-center gap-3">
                                 <Loader2 size={16} className="text-astral-primary animate-spin" />
-                                <span className="text-sm text-astral-muted">
-                                    {chatStatus.message || "Processing..."}
-                                </span>
+                                <CosmicProgressIndicator chatStatus={chatStatus} />
                                 <button
                                     onClick={onCancelTask}
                                     className="ml-2 p-1.5 rounded-lg bg-white/5 hover:bg-red-500/20 text-astral-muted hover:text-red-400 transition-colors"

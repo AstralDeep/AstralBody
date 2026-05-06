@@ -198,6 +198,12 @@ class Orchestrator:
         # Keyed by id(websocket).
         self._ws_active_chat: Dict[int, str] = {}
 
+        # Feature 014 — per-active-turn step recorders, keyed by id(websocket).
+        # Created at the start of handle_chat_message and torn down at the end
+        # of _serialized_chat. The cancel_task handler reads this map to invoke
+        # cancel_all_in_flight() (FR-020/021).
+        self._chat_recorders: Dict[int, Any] = {}
+
         # A2A external agent connections (JSON-RPC transport)
         self.a2a_clients: Dict[str, Any] = {}  # agent_id -> A2A client
         self.a2a_agent_cards: Dict[str, Any] = {}  # agent_id -> official A2A AgentCard
@@ -946,6 +952,16 @@ class Orchestrator:
 
                 elif msg.action == "cancel_task":
                     self.cancelled_sessions[id(websocket)] = True
+                    # Feature 014 (FR-020/021): mark every in-flight step as
+                    # cancelled so the persistent step trail reflects user
+                    # intent immediately. Best-effort — late-arriving tool
+                    # results are dropped via recorder.is_terminal() checks.
+                    recorder = self._chat_recorders.get(id(websocket))
+                    if recorder is not None:
+                        try:
+                            await recorder.cancel_all_in_flight()
+                        except Exception:  # pragma: no cover — defensive
+                            logger.debug("cancel_all_in_flight failed", exc_info=True)
                     await self._safe_send(websocket, json.dumps({
                         "type": "chat_status",
                         "status": "done",
@@ -1835,11 +1851,51 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     selected_tools=selected_tools,
                 )
             except Exception as e:
+                # Full details (including any upstream HTML payload, stack
+                # trace, etc.) go to structured logs only. The user-facing
+                # message is a generic, safe string — never str(e), which
+                # may contain raw HTML, secrets, or PHI from upstream.
                 logger.error(f"Chat task error: {e}", exc_info=True)
+                # Feature 014: a mid-turn exception left some steps in-flight
+                # with no chance to complete. Mark them cancelled so the UI
+                # does not show a stuck spinner. (The success path does NOT
+                # cancel — every step lifecycle call has already fired by
+                # the time handle_chat_message returns; auto-cancelling on
+                # the success path produced false-cancel labels on
+                # successfully-completed steps.)
+                recorder = self._chat_recorders.get(ws_id)
+                if recorder is not None:
+                    try:
+                        await recorder.cancel_all_in_flight()
+                    except Exception:  # pragma: no cover — defensive
+                        logger.debug("ChatStepRecorder exception flush failed", exc_info=True)
                 await self._safe_send(websocket, json.dumps({
                     "type": "chat_status", "status": "done",
-                    "message": f"Error: {e}"
+                    "message": "Something went wrong while processing your request. Please try again."
                 }))
+                # Surface a clean Alert in the chat so the user sees a
+                # tangible response in the message area, matching the
+                # FR-008 / FR-009 (006) "LLM unavailable" pattern.
+                try:
+                    await self.send_ui_render(websocket, [
+                        Alert(
+                            message="Something went wrong while processing your request. Please try again.",
+                            variant="error",
+                        ).to_json()
+                    ])
+                except Exception:  # pragma: no cover — defensive
+                    pass
+            finally:
+                # Feature 014: clear the per-turn step recorder reference.
+                # We do NOT flush in-flight steps here — the success path
+                # has already terminated them, and the exception path above
+                # explicitly flushes. The cancel_task handler (line ~959)
+                # also flushes for genuine user-initiated cancellations.
+                # If a programmer error left a step in_progress, the
+                # GET /api/chats/{id}/steps endpoint heals stale rows
+                # (>30 s old, no active task) into 'interrupted' on the
+                # next chat load.
+                self._chat_recorders.pop(ws_id, None)
 
     async def handle_chat_message(self, websocket, message: str, chat_id: str, display_message: str = None, user_id: str = None, draft_agent_id: str = None, selected_tools=None):
         """Process a chat message: LLM determines which tools to call (Multi-Turn Re-Act Loop).
@@ -1916,6 +1972,40 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # Save User Message to History. If display_message is provided, save that instead.
         msg_to_save = display_message if display_message else message
         self.history.add_message(chat_id, "user", msg_to_save, user_id=user_id)
+
+        # Feature 014: create a per-turn ChatStepRecorder. The recorder's
+        # WebSocket emits and persistence are PHI-redacted at the boundary
+        # via shared.phi_redactor (FR-009b). Stored on the orchestrator so
+        # the cancel_task handler can flush in-flight steps (FR-020/021)
+        # and execute_tool_and_wait can record per-tool lifecycle events.
+        turn_message_id = None
+        try:
+            from orchestrator.chat_steps import ChatStepRecorder
+
+            turn_message_id = self.history.get_latest_message_id(chat_id, user_id)
+            recorder = ChatStepRecorder(
+                db=self.history.db,
+                websocket=websocket,
+                safe_send=self._safe_send,
+                chat_id=chat_id,
+                user_id=user_id or "legacy",
+                turn_message_id=turn_message_id,
+            )
+            self._chat_recorders[id(websocket)] = recorder
+        except Exception:  # pragma: no cover — defensive; never block a turn
+            logger.warning("Failed to create ChatStepRecorder", exc_info=True)
+
+        # Feature 014: send the persisted message_id back to the frontend so
+        # it can stamp its locally-appended user message and group incoming
+        # `chat_step` events under the correct turn (steps' turn_message_id
+        # FK matches this id). Without this stamp, the frontend cannot
+        # interleave step lines under the right turn in multi-turn chats.
+        if turn_message_id is not None:
+            await self._safe_send(websocket, json.dumps({
+                "type": "user_message_acked",
+                "chat_id": chat_id,
+                "message_id": turn_message_id,
+            }))
 
         # Capture File Upload Mapping
         upload_match = re.search(r"I have uploaded (.*?) to the backend at: `(.*?)`" , message)
@@ -2769,6 +2859,23 @@ COMPONENT UPDATE RULES:
                     client.chat.completions.create,
                     **kwargs
                 )
+                # Defensive: some upstream proxies return a 200 status with
+                # an HTML maintenance page body (e.g. an Apache 503/502 from
+                # an in-front load balancer that swallowed the upstream
+                # error). The OpenAI client happily passes this through as
+                # message content, and it would render as the assistant's
+                # reply. Detect the shape and treat it as a transient
+                # failure so the existing retry + clean-Alert path runs.
+                _msg = response.choices[0].message if response.choices else None
+                _content = (getattr(_msg, "content", None) or "").lstrip()
+                if _content and _content[:200].lower().startswith(
+                    ("<!doctype html", "<html", "<head", "<body")
+                ):
+                    raise RuntimeError(
+                        "LLM upstream returned an HTML page instead of a "
+                        "model response (likely a provider maintenance "
+                        "page); treating as transient."
+                    )
                 usage = getattr(response, "usage", None)
                 # Audit: successful llm_call
                 total_tokens = getattr(usage, "total_tokens", None) if usage else None
@@ -2841,7 +2948,13 @@ COMPONENT UPDATE RULES:
                             websocket, feature=feature, model=call_model,
                             usage=None, outcome="failure",
                         )
-                    raise e
+                    # Return (None, None) so callers fall through to the
+                    # existing user-friendly "Failed to get a response from
+                    # the AI model" Alert. Raising here would surface raw
+                    # upstream payloads (e.g. a provider's 503 HTML page)
+                    # in chat error text — the structured log + audit
+                    # event above retain the full details for operators.
+                    return None, None
 
                 # Exponential backoff: 1s, 2s, 4s, 8s
                 backoff = min(2 ** (attempt - 1), 8)
@@ -3412,7 +3525,51 @@ COMPONENT UPDATE RULES:
 
         Strategy: Always try WebSocket first (fastest, bidirectional), then
         fall back to A2A JSON-RPC if WebSocket is unavailable or fails.
+
+        Feature 014: every tool call is recorded as a persistent step entry
+        via :class:`orchestrator.chat_steps.ChatStepRecorder` so users see
+        what was called in the chat. Recording is purely observational —
+        a missing recorder (e.g. no UI websocket) is not an error.
         """
+        # Feature 014: look up the active per-turn recorder for this UI
+        # websocket so we can stamp start/complete/error around the call.
+        recorder = self._chat_recorders.get(id(ui_websocket)) if ui_websocket is not None else None
+        step_id = None
+        if recorder is not None:
+            try:
+                step_id = await recorder.start("tool_call", tool_name, args)
+            except Exception:  # pragma: no cover — defensive
+                logger.debug("recorder.start failed", exc_info=True)
+                step_id = None
+
+        try:
+            result = await self._dispatch_tool_call(agent_id, tool_name, args, timeout, ui_websocket)
+            if recorder is not None and step_id is not None:
+                # R6: if the step was cancelled mid-flight, drop the result
+                # silently so the assistant reply does not include it.
+                if recorder.is_terminal(step_id):
+                    logger.info(
+                        "tool_call result discarded (step terminal)",
+                        extra={"step_id": step_id, "tool_name": tool_name},
+                    )
+                else:
+                    if result is not None and result.error:
+                        await recorder.error(step_id, result.error.get("message", "tool error"))
+                    else:
+                        # Surface a small result preview if present.
+                        preview = result.result if (result is not None and result.result is not None) else None
+                        await recorder.complete(step_id, preview)
+            return result
+        except Exception as exc:
+            if recorder is not None and step_id is not None and not recorder.is_terminal(step_id):
+                try:
+                    await recorder.error(step_id, exc)
+                except Exception:  # pragma: no cover — defensive
+                    pass
+            raise
+
+    async def _dispatch_tool_call(self, agent_id: str, tool_name: str, args: Dict, timeout: float, ui_websocket) -> Optional[MCPResponse]:
+        """Internal: actually dispatch the tool call (WebSocket → A2A fallback)."""
         # Try WebSocket first
         if agent_id in self.agents:
             result = await self._execute_via_websocket(agent_id, tool_name, args, timeout, ui_websocket=ui_websocket)
@@ -4510,8 +4667,9 @@ COMPONENT UPDATE RULES:
             ),
             version="1.0.0",
             openapi_tags=tags_metadata,
-            docs_url="/docs",
-            redoc_url="/redoc",
+            docs_url="/api/docs",
+            redoc_url=None,
+            openapi_url="/api/openapi.json",
         )
 
         # CORS — configurable via CORS_ORIGINS env var (comma-separated)
