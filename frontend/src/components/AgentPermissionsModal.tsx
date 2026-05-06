@@ -12,7 +12,7 @@
  * shows a credentials section.  Tools are locked until all required
  * credentials are provided.
  */
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
     X,
@@ -312,6 +312,21 @@ export default function AgentPermissionsModal({
 
     const enabledScopeCount = SCOPE_DEFINITIONS.filter(d => localScopes[d.key]).length;
 
+    const { enabledToolCount, totalToolCount } = useMemo(() => {
+        let enabled = 0;
+        let total = 0;
+        for (const tool of Object.keys(permissions)) {
+            const isBlocked = securityFlags?.[tool]?.blocked === true;
+            if (isBlocked) continue;
+            total += 1;
+            const requiredScope = toolScopeMap[tool] || "tools:read";
+            const scopeOn = !!localScopes[requiredScope];
+            const overrideEnabled = localToolOverrides[tool] ?? true;
+            if (scopeOn && overrideEnabled) enabled += 1;
+        }
+        return { enabledToolCount: enabled, totalToolCount: total };
+    }, [permissions, securityFlags, toolScopeMap, localScopes, localToolOverrides]);
+
     const baselineOverrides = initialToolOverrides || {};
 
     const detectChanges = (scopes: Record<string, boolean>, overrides: Record<string, boolean>) => {
@@ -456,7 +471,7 @@ export default function AgentPermissionsModal({
                                         {agentName}
                                     </h2>
                                     <p className="text-[11px] text-astral-muted">
-                                        {enabledScopeCount}/{SCOPE_DEFINITIONS.length} scopes enabled
+                                        {enabledToolCount}/{totalToolCount} tools enabled
                                         {needsCredentials && (
                                             <span className="text-amber-400"> &middot; credentials required</span>
                                         )}

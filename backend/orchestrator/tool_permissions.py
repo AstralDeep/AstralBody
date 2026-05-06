@@ -459,3 +459,36 @@ class ToolPermissionManager:
             "DELETE FROM tool_overrides WHERE user_id = ? AND agent_id = ?",
             (user_id, agent_id)
         )
+
+    def cleanup_stale_tool_overrides(self, agent_id: str, live_tool_names) -> int:
+        """Delete `tool_overrides` rows for tools no longer in the agent's live registry.
+
+        Called on agent (re)registration to converge the DB toward the
+        in-code TOOL_REGISTRY. Prunes both legacy (permission_kind IS NULL)
+        and per-(tool, kind) override rows in a single statement, since the
+        WHERE clause filters only on tool_name — a tool removed from code
+        is gone regardless of its permission_kind variant.
+
+        Args:
+            agent_id: The agent whose stale overrides should be pruned.
+            live_tool_names: Iterable of tool names currently exposed by the agent.
+
+        Returns:
+            Number of rows deleted.
+        """
+        live = list(live_tool_names)
+        if not live:
+            cursor = self.db.execute(
+                "DELETE FROM tool_overrides WHERE agent_id = ?",
+                (agent_id,)
+            )
+        else:
+            placeholders = ",".join(["?"] * len(live))
+            cursor = self.db.execute(
+                f"DELETE FROM tool_overrides WHERE agent_id = ? AND tool_name NOT IN ({placeholders})",
+                (agent_id, *live)
+            )
+        deleted = cursor.rowcount or 0
+        if deleted > 0:
+            logger.info("Pruned %d stale tool_override row(s) for agent=%s", deleted, agent_id)
+        return deleted
