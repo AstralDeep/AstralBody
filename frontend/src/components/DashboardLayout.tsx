@@ -322,17 +322,26 @@ export default function DashboardLayout({
         }
     };
 
-    const totalTools = agents.reduce((sum, a) => {
-        const blockedSet = new Set(
-            Object.entries(a.security_flags || {})
-                .filter(([, f]) => (f as { blocked?: boolean }).blocked)
-                .map(([name]) => name)
-        );
-        if (a.permissions) {
-            return sum + Object.entries(a.permissions).filter(([name, allowed]) => allowed && !blockedSet.has(name)).length;
+    const { enabledToolsCount, totalVisibleToolsCount } = useMemo(() => {
+        let enabled = 0;
+        let total = 0;
+        for (const a of agents) {
+            const blocked = new Set(
+                Object.entries(a.security_flags || {})
+                    .filter(([, f]) => (f as { blocked?: boolean }).blocked)
+                    .map(([n]) => n),
+            );
+            const visibleTools = a.tools.filter(t => !blocked.has(t));
+            total += visibleTools.length;
+            if (isAgentDisabled(a)) continue;
+            if (a.permissions) {
+                enabled += visibleTools.filter(t => a.permissions![t]).length;
+            } else {
+                enabled += visibleTools.length;
+            }
         }
-        return sum + a.tools.filter(t => !blockedSet.has(t)).length;
-    }, 0);
+        return { enabledToolsCount: enabled, totalVisibleToolsCount: total };
+    }, [agents, isAgentDisabled]);
 
     /** Helper: get status info for an agent */
     const getAgentStatus = (agent: Agent) => {
@@ -445,7 +454,7 @@ export default function DashboardLayout({
                                     </div>
                                     <div>
                                         <h2 className="text-base font-semibold text-white">Agents</h2>
-                                        <p className="text-xs text-astral-muted">{agents.length} agent{agents.length !== 1 ? "s" : ""} connected &middot; {totalTools} tools available</p>
+                                        <p className="text-xs text-astral-muted">{agents.length} agent{agents.length !== 1 ? "s" : ""} connected &middot; {enabledToolsCount} / {totalVisibleToolsCount} tools enabled</p>
                                     </div>
                                 </div>
                                 <div className="flex items-center gap-1.5">
@@ -904,8 +913,8 @@ export default function DashboardLayout({
                             />
                             <StatusItem
                                 icon={<Wrench size={14} />}
-                                label="Tools"
-                                value={`${totalTools} available`}
+                                label="Tools Enabled"
+                                value={`${enabledToolsCount} / ${totalVisibleToolsCount}`}
                                 color="text-astral-secondary"
                             />
                         </div>
