@@ -11,12 +11,13 @@
  * - Mobile bottom sheet layout
  * - Chat status indicator
  */
-import React, { useState, useRef, useEffect, useCallback } from "react";
+import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
     Send, Bot, User, MessageSquare, Loader2,
-    Paperclip, X, FileMinus, FileText, Square, Mic, Volume2, VolumeX, Minus, UploadCloud,
+    Paperclip, X, FileMinus, FileText, Square, Mic, Volume2, VolumeX, Minus, UploadCloud, Wrench,
 } from "lucide-react";
+import ToolPicker from "./ToolPicker";
 import { toast } from "sonner";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -25,8 +26,10 @@ import { BFF_URL } from "../config";
 import { ACCEPT_ATTRIBUTE } from "../lib/attachmentTypes";
 import { useAttachments, formatAttachmentRefs } from "../hooks/useAttachments";
 import { RotateCcw } from "lucide-react";
-import type { ChatStatus, DeviceCapabilityFlags } from "../hooks/useWebSocket";
+import type { Agent, ChatStatus, DeviceCapabilityFlags } from "../hooks/useWebSocket";
 import TextOnlyBanner from "./TextOnlyBanner";
+import { setUserAgentEnabled } from "../api/toolSelection";
+import { API_URL } from "../config";
 
 interface FloatingChatPanelProps {
     messages: { role: string; content: unknown; _target?: string }[];
@@ -45,6 +48,54 @@ interface FloatingChatPanelProps {
     toolsAvailableForUser?: boolean;
     /** Feature 008: opens the existing Agents modal in DashboardLayout. */
     onOpenAgentSettings?: () => void;
+    /**
+     * Feature 013 / Story 2 / FR-006, FR-007: the agent currently bound
+     * to the active chat. Resolved by the parent from `chat.agent_id`
+     * plus the agents list.
+     *
+     * - `null` ⇒ the chat is not bound to any agent (legacy chat or
+     *   multi-agent free-mode); the header renders a neutral state.
+     * - `{ id, name, available: true }` ⇒ the agent is reachable; the
+     *   header shows its name and assistant bubbles attribute replies
+     *   to it.
+     * - `{ id, name, available: false }` ⇒ the agent has been deleted,
+     *   deprecated, or had a critical permission revoked; FR-009
+     *   requires the unavailable banner + send-block.
+     */
+    activeAgent?: { id: string; name: string; available: boolean } | null;
+    /** Feature 013 / FR-009: invoked when the user clicks "Start a new chat" in the unavailable banner. */
+    onStartNewChat?: () => void;
+    /**
+     * Feature 013 / Story 4 / FR-016, FR-017: tools the active agent is
+     * permitted to use right now. If omitted, the picker derives its
+     * tool list from `agents` instead (preferred — the picker shows
+     * tools for every enabled agent, not just one bound agent).
+     */
+    permittedTools?: ToolPickerToolEntry[];
+    /**
+     * Feature 013 follow-up: the full agents list. When provided, the
+     * tool picker shows agent on/off toggles and a tool list across
+     * all enabled agents — same UX as the agent manager modal but
+     * inside the chat composer. Drafts are filtered out by the picker.
+     */
+    agents?: Agent[];
+    /**
+     * Feature 013 / FR-024: the user's saved tool selection. `null` ≡
+     * no narrowing. Optional — when omitted, the picker manages its
+     * own selection in local state for this chat session only.
+     */
+    selectedTools?: string[] | null;
+    /** Fired when the user toggles a tool checkbox in the picker (FR-018). */
+    onToolSelectionChange?: (next: string[] | null) => void;
+    /** Fired when the user clicks "Reset to default" in the picker (FR-025). */
+    onToolSelectionReset?: () => void;
+}
+
+interface ToolPickerToolEntry {
+    name: string;
+    description?: string;
+    agentId?: string;
+    agentName?: string;
 }
 
 export default function FloatingChatPanel({
@@ -58,7 +109,142 @@ export default function FloatingChatPanel({
     deviceCapabilities = { hasMicrophone: false, hasGeolocation: false, speechServerAvailable: false },
     toolsAvailableForUser = true,
     onOpenAgentSettings,
+    activeAgent = null,
+    onStartNewChat,
+    permittedTools,
+    agents,
+    selectedTools: selectedToolsProp,
+    onToolSelectionChange,
+    onToolSelectionReset,
 }: FloatingChatPanelProps) {
+    // Feature 013 / FR-009: when the chat is bound to an agent that is no
+    // longer reachable, send is disabled and a banner explains what to do.
+    // `null` activeAgent means the chat is unbound (legacy / fresh) — that
+    // is NOT the same as unavailable; the user can still send.
+    const isAgentUnavailable = activeAgent !== null && activeAgent.available === false;
+    // Feature 013 / Story 4: ToolPicker open state lives here so the
+    // popover anchors correctly to the trigger button below.
+    const [toolPickerOpen, setToolPickerOpen] = useState(false);
+
+    // Feature 013 follow-up: per-user agent on/off state for the picker.
+    // Hydrate from /api/agents on mount so the toggles persist across
+    // reload. Same canonical state as the agent manager modal.
+    const [agentDisabled, setAgentDisabled] = useState<Record<string, boolean>>({});
+    const [agentDisabledHydrated, setAgentDisabledHydrated] = useState(false);
+    useEffect(() => {
+        if (!accessToken) return;
+        let cancelled = false;
+        (async () => {
+            try {
+                const resp = await fetch(`${API_URL}/api/agents`, {
+                    headers: { Authorization: `Bearer ${accessToken}` },
+                });
+                if (!resp.ok) return;
+                const data = await resp.json();
+                if (cancelled) return;
+                const next: Record<string, boolean> = {};
+                for (const a of (data.agents || []) as Array<{ id: string; disabled?: boolean }>) {
+                    if (a.disabled) next[a.id] = true;
+                }
+                setAgentDisabled(next);
+                setAgentDisabledHydrated(true);
+            } catch {
+                /* non-fatal — picker still works against optimistic local state */
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [accessToken]);
+
+    const handleAgentToggle = useCallback(async (agentId: string, enabled: boolean) => {
+        if (!accessToken) return;
+        const before = agentDisabled[agentId];
+        // Optimistic update.
+        setAgentDisabled(prev => ({ ...prev, [agentId]: !enabled }));
+        try {
+            await setUserAgentEnabled(accessToken, agentId, enabled);
+        } catch (err) {
+            // Roll back on failure.
+            setAgentDisabled(prev => {
+                const next = { ...prev };
+                if (typeof before === "boolean") next[agentId] = before;
+                else delete next[agentId];
+                return next;
+            });
+            console.error("Failed to toggle agent enabled state:", err);
+        }
+    }, [accessToken, agentDisabled]);
+
+    // Build the agents list shown in the picker. Drafts are excluded —
+    // they have their own test surface and don't get a per-user toggle.
+    const pickerAgents = useMemo(() => {
+        if (!agents || agents.length === 0) return [];
+        return agents
+            .filter(a => !a.id.startsWith("draft:"))
+            .map(a => ({
+                id: a.id,
+                name: a.name,
+                disabled: Boolean(agentDisabled[a.id]),
+            }));
+    }, [agents, agentDisabled]);
+
+    // Build the tools list shown in the picker. When the parent passed
+    // `permittedTools` directly, use it. Otherwise derive from `agents`
+    // — taking only tools whose agent is enabled AND whose
+    // `permissions[tool] !== false` (i.e., scope/per-tool permissions
+    // allow it).
+    const pickerTools = useMemo<ToolPickerToolEntry[]>(() => {
+        if (Array.isArray(permittedTools)) return permittedTools;
+        if (!agents) return [];
+        const out: ToolPickerToolEntry[] = [];
+        for (const agent of agents) {
+            if (agent.id.startsWith("draft:")) continue;
+            if (agentDisabled[agent.id]) continue;
+            const perms = agent.permissions || {};
+            const descs = agent.tool_descriptions || {};
+            for (const toolName of agent.tools) {
+                if (perms[toolName] === false) continue;
+                out.push({
+                    name: toolName,
+                    description: descs[toolName],
+                    agentId: agent.id,
+                    agentName: agent.name,
+                });
+            }
+        }
+        return out;
+    }, [permittedTools, agents, agentDisabled]);
+
+    // Local fallback selection state when the parent doesn't manage it.
+    // FR-024 persistence is the parent's responsibility; the chat
+    // session-scoped state here keeps the picker functional regardless.
+    const [localSelectedTools, setLocalSelectedTools] = useState<string[] | null>(null);
+    const selectedTools = selectedToolsProp !== undefined ? selectedToolsProp : localSelectedTools;
+    const handleSelectionChange = useCallback((next: string[] | null) => {
+        if (onToolSelectionChange) onToolSelectionChange(next);
+        else setLocalSelectedTools(next);
+    }, [onToolSelectionChange]);
+    const handleSelectionReset = useCallback(() => {
+        if (onToolSelectionReset) onToolSelectionReset();
+        else setLocalSelectedTools(null);
+    }, [onToolSelectionReset]);
+
+    // Show the picker whenever there is at least one connected agent
+    // (or the parent supplied a tool list directly). Even if every
+    // agent is currently disabled, the user needs the popover to
+    // re-enable one of them.
+    const showToolPicker = !isAgentUnavailable && (
+        pickerAgents.length > 0
+        || pickerTools.length > 0
+    );
+    // FR-021: explicit empty selection (length 0, not null) ⇒ block send.
+    const hasZeroSelection = selectedTools !== null && selectedTools !== undefined && selectedTools.length === 0;
+    // FR-018 / picker badge: show a count when the user has narrowed.
+    const isNarrowed = selectedTools !== null && selectedTools !== undefined
+        && pickerTools.length > 0
+        && selectedTools.length < pickerTools.length;
+    // Reference to silence the unused-variable warning when hydration
+    // state isn't read in render — the effect drives setAgentDisabled.
+    void agentDisabledHydrated;
     const canUseVoiceInput = deviceCapabilities.hasMicrophone && deviceCapabilities.speechServerAvailable;
     const canUseVoiceOutput = deviceCapabilities.speechServerAvailable;
     const canUseGeolocation = deviceCapabilities.hasGeolocation;
@@ -192,26 +378,56 @@ export default function FloatingChatPanel({
         if (fileInputRef.current) fileInputRef.current.value = '';
     };
 
-    // Extract text content from assistant component arrays
+    // Extract text content from assistant component arrays. Recurses
+    // into card / list children and pulls through alert/heading/paragraph
+    // payloads so greeting-style replies (which often arrive as a single
+    // alert or paragraph component, not a top-level "text" entry) render
+    // their words instead of the "Processing complete." fallback.
     const extractTextFromComponents = (content: unknown): string => {
         if (typeof content === "string") return content;
-        if (!Array.isArray(content)) return "";
-        let text = "";
-        for (const comp of content as Record<string, unknown>[]) {
-            if (comp.type === "text" && typeof comp.content === "string") {
-                text += comp.content + "\n\n";
-            } else if (comp.type === "card") {
-                const cardContent = comp.content as Record<string, unknown>[] | undefined;
-                if (Array.isArray(cardContent)) {
-                    for (const child of cardContent) {
-                        if (child.type === "text" && typeof child.content === "string") {
-                            text += child.content + "\n\n";
-                        }
-                    }
+        if (!Array.isArray(content)) {
+            // Some assistant payloads are a single component object.
+            if (content && typeof content === "object") {
+                return extractTextFromComponents([content as Record<string, unknown>]);
+            }
+            return "";
+        }
+        const TEXT_BEARING_TYPES = new Set([
+            "text", "paragraph", "heading", "alert", "note", "markdown", "code",
+        ]);
+        const pieces: string[] = [];
+        const walk = (node: unknown): void => {
+            if (typeof node === "string") {
+                if (node.trim()) pieces.push(node);
+                return;
+            }
+            if (Array.isArray(node)) {
+                for (const child of node) walk(child);
+                return;
+            }
+            if (!node || typeof node !== "object") return;
+            const obj = node as Record<string, unknown>;
+            const type = typeof obj.type === "string" ? obj.type : undefined;
+            // Pull explicit text-bearing fields when the type matches.
+            if (type && TEXT_BEARING_TYPES.has(type)) {
+                if (typeof obj.content === "string" && obj.content.trim()) {
+                    pieces.push(obj.content);
+                } else if (typeof obj.message === "string" && obj.message.trim()) {
+                    pieces.push(obj.message);
+                } else if (typeof obj.text === "string" && obj.text.trim()) {
+                    pieces.push(obj.text);
+                } else if (typeof obj.title === "string" && obj.title.trim()) {
+                    pieces.push(obj.title);
                 }
             }
-        }
-        return text.trim() || "Processing complete.";
+            // Recurse into common container payloads regardless of type.
+            if (Array.isArray(obj.content)) walk(obj.content);
+            if (Array.isArray(obj.children)) walk(obj.children);
+            if (Array.isArray(obj.items)) walk(obj.items);
+        };
+        walk(content);
+        const out = pieces.join("\n\n").trim();
+        return out || "(No text content in this response.)";
     };
 
     // Voice helpers (simplified from ChatInterface)
@@ -565,22 +781,51 @@ export default function FloatingChatPanel({
                     )}
                 </AnimatePresence>
 
-                {/* Header */}
-                <div className="flex items-center justify-between px-4 py-3 border-b border-white/10 flex-shrink-0">
-                    <div className="flex items-center gap-2">
-                        <div className="w-6 h-6 rounded-lg bg-gradient-to-br from-astral-primary to-astral-secondary flex items-center justify-center">
-                            <MessageSquare size={12} className="text-white" />
+                {/* Header — shows active agent so the user always knows
+                    who's running this chat (Feature 013 / FR-006). */}
+                <div
+                    className="flex items-center justify-between px-4 py-3 border-b border-white/10 flex-shrink-0"
+                    data-testid="chat-header"
+                >
+                    <div className="flex items-center gap-2 min-w-0">
+                        <div className={`w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0 ${
+                            isAgentUnavailable
+                                ? "bg-white/5 border border-amber-400/30"
+                                : "bg-gradient-to-br from-astral-primary to-astral-secondary"
+                        }`}>
+                            {activeAgent
+                                ? <Bot size={12} className={isAgentUnavailable ? "text-amber-300" : "text-white"} />
+                                : <MessageSquare size={12} className="text-white" />}
                         </div>
-                        <span className="text-sm font-medium text-white">Chat</span>
-                        {chatStatus.status !== "idle" && chatStatus.status !== "done" && (
-                            <span className="text-[10px] text-astral-primary animate-pulse ml-1">
+                        <div className="flex flex-col min-w-0">
+                            {activeAgent ? (
+                                <span
+                                    className={`text-sm font-medium truncate ${
+                                        isAgentUnavailable ? "text-amber-300" : "text-white"
+                                    }`}
+                                    data-testid="active-agent-name"
+                                    title={activeAgent.name}
+                                >
+                                    {activeAgent.name}
+                                </span>
+                            ) : (
+                                <span className="text-sm font-medium text-white">Chat</span>
+                            )}
+                            {isAgentUnavailable && (
+                                <span className="text-[10px] text-amber-300/80" data-testid="active-agent-unavailable-tag">
+                                    Unavailable
+                                </span>
+                            )}
+                        </div>
+                        {chatStatus.status !== "idle" && chatStatus.status !== "done" && !isAgentUnavailable && (
+                            <span className="text-[10px] text-astral-primary animate-pulse ml-1 flex-shrink-0">
                                 {chatStatus.status === "thinking" ? "Thinking..." : "Executing..."}
                             </span>
                         )}
                     </div>
                     <button
                         onClick={() => setIsOpen(false)}
-                        className="p-1 rounded-lg hover:bg-white/10 text-astral-muted hover:text-white transition-colors"
+                        className="p-1 rounded-lg hover:bg-white/10 text-astral-muted hover:text-white transition-colors flex-shrink-0"
                         title="Minimize chat"
                     >
                         <Minus size={16} />
@@ -593,6 +838,44 @@ export default function FloatingChatPanel({
                         toolsAvailableForUser={toolsAvailableForUser}
                         onOpenAgentSettings={onOpenAgentSettings ?? (() => { /* noop */ })}
                     />
+                    {/* Feature 013 / FR-009: agent-unavailable banner.
+                        Visible only when the chat is bound to an agent that
+                        is no longer reachable. Send is also blocked below. */}
+                    {isAgentUnavailable && activeAgent && (
+                        <div
+                            data-testid="agent-unavailable-banner"
+                            className="rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-[11px] text-amber-200"
+                        >
+                            <p className="font-medium">
+                                "{activeAgent.name}" is no longer available.
+                            </p>
+                            <p className="mt-0.5 text-amber-200/80">
+                                The chat history is preserved. Pick another agent or start a new chat to continue.
+                            </p>
+                            <div className="mt-2 flex flex-wrap gap-1.5">
+                                {onStartNewChat && (
+                                    <button
+                                        type="button"
+                                        onClick={onStartNewChat}
+                                        data-testid="agent-unavailable-new-chat"
+                                        className="px-2 py-1 text-[11px] font-medium rounded-md bg-amber-400/15 text-amber-200 hover:bg-amber-400/25 transition-colors"
+                                    >
+                                        Start a new chat
+                                    </button>
+                                )}
+                                {onOpenAgentSettings && (
+                                    <button
+                                        type="button"
+                                        onClick={onOpenAgentSettings}
+                                        data-testid="agent-unavailable-pick-agent"
+                                        className="px-2 py-1 text-[11px] font-medium rounded-md bg-white/5 text-white/80 hover:bg-white/10 transition-colors"
+                                    >
+                                        Pick another agent
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                    )}
                     {chatMessages.length === 0 && (
                         <div className="flex flex-col items-center justify-center h-full text-center py-8">
                             <Bot size={24} className="text-astral-muted/30 mb-2" />
@@ -622,11 +905,25 @@ export default function FloatingChatPanel({
                                         {renderUserMessage(msg.content as string)}
                                     </div>
                                 ) : (
-                                    <div className="text-xs text-astral-text prose prose-invert prose-xs max-w-none [&_p]:text-xs [&_li]:text-xs [&_h1]:text-sm [&_h2]:text-xs [&_h3]:text-xs">
-                                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                            {normalizeLlmMarkdown(extractTextFromComponents(msg.content))}
-                                        </ReactMarkdown>
-                                    </div>
+                                    <>
+                                        {/* Feature 013 / FR-007: attribute every assistant
+                                            reply in this chat to the bound agent so the
+                                            user can see who produced the response. */}
+                                        {activeAgent && (
+                                            <div
+                                                data-testid="assistant-agent-attribution"
+                                                className="text-[10px] text-astral-muted/70 mb-1 truncate"
+                                                title={activeAgent.name}
+                                            >
+                                                {activeAgent.name}
+                                            </div>
+                                        )}
+                                        <div className="text-xs text-astral-text prose prose-invert prose-xs max-w-none [&_p]:text-xs [&_li]:text-xs [&_h1]:text-sm [&_h2]:text-xs [&_h3]:text-xs">
+                                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                                {normalizeLlmMarkdown(extractTextFromComponents(msg.content))}
+                                            </ReactMarkdown>
+                                        </div>
+                                    </>
                                 )}
                             </div>
                             {msg.role === "user" && (
@@ -732,8 +1029,24 @@ export default function FloatingChatPanel({
                                     ref={inputRef}
                                     value={isRecording || isTranscribing ? streamingTranscript || "" : input}
                                     onChange={(e) => { if (!isRecording && !isTranscribing) setInput(e.target.value); }}
-                                    placeholder={isRecording ? "Listening..." : isTranscribing ? "Transcribing..." : isConnected ? "Ask anything..." : "Connecting..."}
-                                    disabled={!isConnected || isRecording || isTranscribing || (chatStatus.status !== "idle" && chatStatus.status !== "done")}
+                                    placeholder={
+                                        isAgentUnavailable
+                                            ? "This agent is no longer available."
+                                            : isRecording
+                                            ? "Listening..."
+                                            : isTranscribing
+                                            ? "Transcribing..."
+                                            : isConnected
+                                            ? "Ask anything..."
+                                            : "Connecting..."
+                                    }
+                                    disabled={
+                                        !isConnected
+                                        || isRecording
+                                        || isTranscribing
+                                        || (chatStatus.status !== "idle" && chatStatus.status !== "done")
+                                        || isAgentUnavailable
+                                    }
                                     data-tutorial-target="chat.input"
                                     className="w-full py-2 bg-transparent text-xs text-white placeholder:text-astral-muted/50 focus:outline-none disabled:opacity-50"
                                 />
@@ -755,9 +1068,76 @@ export default function FloatingChatPanel({
                                         {isSpeaking ? <Volume2 size={14} className="animate-pulse" /> : ttsEnabled ? <Volume2 size={14} /> : <VolumeX size={14} />}
                                     </button>
                                 )}
+
+                                {/* Feature 013 / FR-016 (+ follow-up): in-chat
+                                    Tools & Agents picker. Renders whenever there's
+                                    at least one connected agent so users can flip
+                                    agents on/off and narrow tools per query without
+                                    leaving the chat. */}
+                                {showToolPicker && (
+                                    <div className="relative flex-shrink-0">
+                                        <button
+                                            type="button"
+                                            onClick={() => setToolPickerOpen(prev => !prev)}
+                                            disabled={!isConnected || isAgentUnavailable}
+                                            data-testid="tool-picker-trigger"
+                                            title={isNarrowed
+                                                ? `Tool selection narrowed (${selectedTools?.length}/${pickerTools.length})`
+                                                : "Pick which agents and tools to use for this chat"}
+                                            className={`p-1.5 rounded-md transition-colors flex items-center gap-0.5 ${
+                                                isNarrowed
+                                                    ? "text-astral-primary bg-astral-primary/20"
+                                                    : "text-astral-muted hover:text-white hover:bg-white/10"
+                                            } disabled:opacity-50`}
+                                        >
+                                            <Wrench size={14} />
+                                            {isNarrowed && selectedTools && (
+                                                <span className="text-[9px] font-medium" data-testid="tool-picker-badge">
+                                                    {selectedTools.length}
+                                                </span>
+                                            )}
+                                        </button>
+                                        <ToolPicker
+                                            agents={pickerAgents}
+                                            onAgentToggle={handleAgentToggle}
+                                            permittedTools={pickerTools}
+                                            selectedTools={selectedTools ?? null}
+                                            onChange={handleSelectionChange}
+                                            onReset={() => {
+                                                // Reset = re-enable every disabled agent AND
+                                                // clear the tool narrowing. The popover stays
+                                                // open so the user can keep tweaking from the
+                                                // freshly-default state.
+                                                for (const agent of pickerAgents) {
+                                                    if (agent.disabled) {
+                                                        void handleAgentToggle(agent.id, true);
+                                                    }
+                                                }
+                                                handleSelectionReset();
+                                            }}
+                                            open={toolPickerOpen}
+                                            onClose={() => setToolPickerOpen(false)}
+                                        />
+                                    </div>
+                                )}
                             </div>
                             <button type="submit"
-                                disabled={(!input.trim() && readyAttachments.length === 0) || !isConnected || isProcessingFile || (chatStatus.status !== "idle" && chatStatus.status !== "done")}
+                                disabled={
+                                    (!input.trim() && readyAttachments.length === 0)
+                                    || !isConnected
+                                    || isProcessingFile
+                                    || (chatStatus.status !== "idle" && chatStatus.status !== "done")
+                                    || isAgentUnavailable
+                                    || hasZeroSelection
+                                }
+                                title={
+                                    isAgentUnavailable
+                                        ? "This agent is no longer available — start a new chat or pick another agent."
+                                        : hasZeroSelection
+                                        ? "No tools selected — pick at least one or click Reset in the tool picker."
+                                        : undefined
+                                }
+                                data-testid="chat-send-button"
                                 className="px-3 py-2 rounded-xl bg-astral-primary hover:bg-astral-primary/80 disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex items-center flex-shrink-0"
                             >
                                 <Send size={14} className="text-white" />

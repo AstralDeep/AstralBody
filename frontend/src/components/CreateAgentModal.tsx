@@ -832,23 +832,51 @@ export default function CreateAgentModal({ isOpen, onClose, accessToken, onAgent
                                             <Trash2 size={12} />
                                         </button>
                                     </div>
-                                    <div className="grid grid-cols-2 gap-3">
-                                        <input
-                                            type="text"
-                                            value={tool.name}
-                                            onChange={e => updateTool(ti, "name", e.target.value)}
-                                            placeholder="function_name"
-                                            className="px-2.5 py-1.5 text-xs bg-white/5 border border-white/10 rounded-lg text-white placeholder-astral-muted/50 focus:outline-none focus:border-astral-accent/40"
-                                        />
-                                        <select
-                                            value={tool.scope}
-                                            onChange={e => updateTool(ti, "scope", e.target.value)}
-                                            className="px-2.5 py-1.5 text-xs bg-white/5 border border-white/10 rounded-lg text-white focus:outline-none focus:border-astral-accent/40"
+                                    <input
+                                        type="text"
+                                        value={tool.name}
+                                        onChange={e => updateTool(ti, "name", e.target.value)}
+                                        placeholder="function_name"
+                                        className="w-full px-2.5 py-1.5 text-xs bg-white/5 border border-white/10 rounded-lg text-white placeholder-astral-muted/50 focus:outline-none focus:border-astral-accent/40"
+                                    />
+                                    {/* Feature 013 / US3 (T029): replace the legacy scope
+                                        dropdown with a per-permission selector cluster so
+                                        the author sees every permission kind at a glance
+                                        and the choice is visually explicit. The data
+                                        model is unchanged (one required scope per tool);
+                                        each pill is keyboard-reachable. */}
+                                    <div>
+                                        <span className="text-[10px] text-astral-muted uppercase tracking-wider block mb-1.5">
+                                            Required permission
+                                        </span>
+                                        <div
+                                            role="radiogroup"
+                                            aria-label={`Permission for tool ${ti + 1}`}
+                                            data-testid={`tool-${ti}-permission-cluster`}
+                                            className="flex flex-wrap gap-1.5"
                                         >
-                                            {SCOPES.map(s => (
-                                                <option key={s.value} value={s.value}>{s.label}</option>
-                                            ))}
-                                        </select>
+                                            {SCOPES.map(s => {
+                                                const selected = tool.scope === s.value;
+                                                return (
+                                                    <button
+                                                        key={s.value}
+                                                        type="button"
+                                                        role="radio"
+                                                        aria-checked={selected}
+                                                        data-testid={`tool-${ti}-permission-${s.value}`}
+                                                        onClick={() => updateTool(ti, "scope", s.value)}
+                                                        title={`${s.label} — required for this tool`}
+                                                        className={`px-2.5 py-1 text-[11px] font-medium rounded-md border transition-colors ${
+                                                            selected
+                                                                ? `${s.color} bg-white/[0.06] border-white/20`
+                                                                : "text-astral-muted bg-white/[0.02] border-white/5 hover:bg-white/5 hover:border-white/10"
+                                                        }`}
+                                                    >
+                                                        {s.label}
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
                                     </div>
                                     <textarea
                                         value={tool.description}

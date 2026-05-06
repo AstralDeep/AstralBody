@@ -16,7 +16,6 @@ import {
     Plus,
     Grid,
     X,
-    Shield,
     Menu,
     Search,
     KeyRound,
@@ -31,6 +30,8 @@ import { API_URL } from "../config";
 import type { Agent, ChatSession, AgentPermissionsData, ConnectionState } from "../hooks/useWebSocket";
 import AgentPermissionsModal from "./AgentPermissionsModal";
 import CreateAgentModal from "./CreateAgentModal";
+import { buildMyAgents, buildPublicAgents } from "./agentTabFilters";
+import { setUserAgentEnabled } from "../api/toolSelection";
 import { Tooltip } from "./onboarding/Tooltip";
 import { tooltipCatalog } from "./onboarding/tooltipCatalog";
 import { SettingsMenu } from "./settings/SettingsMenu";
@@ -117,6 +118,37 @@ export default function DashboardLayout({
 }: DashboardLayoutProps) {
     const [chatToDelete, setChatToDelete] = useState<string | null>(null);
     const [permModalAgent, setPermModalAgent] = useState<string | null>(null);
+    // Feature 013 follow-up: per-user, per-agent on/off state. The
+    // canonical value lives server-side in user_preferences; we hydrate
+    // from `GET /api/agents` on modal open and mutate optimistically on
+    // toggle. Each entry records the user's choice; absence ≡ enabled.
+    const [agentDisabledState, setAgentDisabledState] = useState<Record<string, boolean>>({});
+    const isAgentDisabled = useCallback(
+        (a: Agent): boolean => Boolean(agentDisabledState[a.id]),
+        [agentDisabledState],
+    );
+    const toggleAgentEnabled = useCallback(
+        async (agentId: string, currentlyDisabled: boolean) => {
+            if (!accessToken) return;
+            const nextEnabled = currentlyDisabled; // currently disabled ⇒ click enables
+            const before = agentDisabledState[agentId];
+            // Optimistic update so the UI feels instant.
+            setAgentDisabledState(prev => ({ ...prev, [agentId]: !nextEnabled }));
+            try {
+                await setUserAgentEnabled(accessToken, agentId, nextEnabled);
+            } catch (err) {
+                // Roll back on failure so the UI matches reality.
+                setAgentDisabledState(prev => {
+                    const next = { ...prev };
+                    if (typeof before === "boolean") next[agentId] = before;
+                    else delete next[agentId];
+                    return next;
+                });
+                console.error("Failed to update agent enabled state:", err);
+            }
+        },
+        [accessToken, agentDisabledState],
+    );
     const { count: flaggedToolsCount, refresh: refreshFlaggedToolsCount } =
         useFlaggedToolsCount(accessToken, isAdmin);
     // When admin opens the FeedbackAdminPanel, that's an "explicit
@@ -174,12 +206,54 @@ export default function DashboardLayout({
         finally { setDraftsLoading(false); }
     }, [accessToken]);
 
-    // Fetch drafts when switching to Drafts tab or opening modal
+    // Feature 013 / US1: drafts are surfaced under both "My Agents"
+    // (merged with live owned agents per FR-001) and the "Drafts" tab,
+    // so we fetch on either tab being active when the modal is open.
     useEffect(() => {
-        if (agentsModalOpen && agentsTab === "drafts") {
+        if (agentsModalOpen && (agentsTab === "drafts" || agentsTab === "my")) {
             fetchDrafts();
         }
     }, [agentsModalOpen, agentsTab, fetchDrafts]);
+
+    // Feature 013 / US1 / FR-005: when the create-agent modal closes, refresh
+    // drafts so a newly created draft surfaces under "My Agents" without a
+    // manual page reload. Live agent additions arrive via the WebSocket
+    // agent-list update; drafts have their own REST endpoint.
+    const prevCreateAgentOpen = React.useRef(false);
+    useEffect(() => {
+        if (prevCreateAgentOpen.current && !createAgentOpen) {
+            fetchDrafts();
+        }
+        prevCreateAgentOpen.current = createAgentOpen;
+    }, [createAgentOpen, fetchDrafts]);
+
+    // Feature 013 follow-up: hydrate the per-user agent disabled state
+    // when the agents modal opens. The WS-driven `agents` array doesn't
+    // carry per-user prefs, so we read the canonical state from
+    // `GET /api/agents` (which includes the requesting user's
+    // `disabled` per agent).
+    useEffect(() => {
+        if (!agentsModalOpen || !accessToken) return;
+        let cancelled = false;
+        (async () => {
+            try {
+                const resp = await fetch(`${API_URL}/api/agents`, {
+                    headers: { Authorization: `Bearer ${accessToken}` },
+                });
+                if (!resp.ok) return;
+                const data = await resp.json();
+                if (cancelled) return;
+                const next: Record<string, boolean> = {};
+                for (const a of (data.agents || []) as Array<{ id: string; disabled?: boolean }>) {
+                    if (a.disabled) next[a.id] = true;
+                }
+                setAgentDisabledState(next);
+            } catch (err) {
+                console.warn("Failed to hydrate per-user agent enabled state:", err);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [agentsModalOpen, accessToken]);
 
     const deleteDraft = async (draftId: string) => {
         if (!accessToken) return;
@@ -340,8 +414,11 @@ export default function DashboardLayout({
             {/* Agents Grid Modal */}
             <AnimatePresence>
                 {agentsModalOpen && (() => {
-                    const myAgents = agents.filter(a => a.owner_email === userEmail || !a.owner_email);
-                    const publicAgents = agents.filter(a => a.is_public);
+                    // Feature 013 / US1 / FR-001, FR-003 — see ./agentTabFilters.ts
+                    // for the full rules. Helpers extracted so the filter logic
+                    // is unit-testable without rendering the dashboard.
+                    const myAgents = buildMyAgents(agents, drafts, userEmail);
+                    const publicAgents = buildPublicAgents(agents);
                     const filteredAgents = agentsTab === "my" ? myAgents : publicAgents;
 
                     return (
@@ -540,56 +617,158 @@ export default function DashboardLayout({
                                         </p>
                                         <p className="text-xs opacity-60 mt-1">
                                             {agentsTab === "my"
-                                                ? "Agents you create or are assigned to you will appear here."
+                                                ? "Create an agent to get started — they'll appear here regardless of lifecycle state."
                                                 : "When other users make their agents public, they'll appear here."}
                                         </p>
+                                        {agentsTab === "my" && (
+                                            <button
+                                                type="button"
+                                                onClick={() => { setAgentsModalOpen(false); setCreateAgentOpen(true); }}
+                                                className="mt-4 px-3 py-1.5 text-xs font-medium rounded-lg bg-astral-accent/15 text-astral-accent
+                                                           border border-astral-accent/20 hover:bg-astral-accent/25 transition-colors flex items-center gap-1.5"
+                                            >
+                                                <Plus size={12} />
+                                                Create your first agent
+                                            </button>
+                                        )}
                                     </div>
                                 ) : (
                                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                                         {filteredAgents.map((agent) => {
-                                            const { hasMissingCreds, activeTools, statusColor, statusLabel } = getAgentStatus(agent);
+                                            // Feature 013 / US1: draft entries (synthesized in myAgents
+                                            // above) carry _draftStatus / _draftId so we can render a
+                                            // lifecycle badge (FR-002) and route the click to the draft
+                                            // resume flow rather than the live-agent permissions modal.
+                                            const draftEntry = agent as Agent & { _draftStatus?: string; _draftId?: string };
+                                            const isDraft = !!draftEntry._draftStatus;
+                                            // Pre-013 status pill helpers reused from the Drafts tab.
+                                            const draftStatusColors: Record<string, string> = {
+                                                pending: "bg-gray-400", generating: "bg-blue-400 animate-pulse",
+                                                generated: "bg-green-400", testing: "bg-amber-400 animate-pulse",
+                                                analyzing: "bg-blue-400 animate-pulse", approved: "bg-green-400",
+                                                pending_review: "bg-amber-400", rejected: "bg-red-400",
+                                                live: "bg-green-400", error: "bg-red-400",
+                                            };
+                                            const draftStatusLabels: Record<string, string> = {
+                                                pending: "Pending", generating: "Generating...",
+                                                generated: "Ready to Test", testing: "Testing",
+                                                analyzing: "Analyzing...", approved: "Approved",
+                                                pending_review: "Awaiting Review", rejected: "Rejected",
+                                                live: "Live", error: "Error",
+                                            };
+                                            const { hasMissingCreds, statusColor, statusLabel } = isDraft
+                                                ? {
+                                                    hasMissingCreds: false,
+                                                    statusColor: draftStatusColors[draftEntry._draftStatus!] || "bg-gray-400",
+                                                    statusLabel: draftStatusLabels[draftEntry._draftStatus!] || draftEntry._draftStatus!,
+                                                }
+                                                : getAgentStatus(agent);
                                             const isOwner = agent.owner_email === userEmail;
                                             return (
                                                 <button
                                                     key={agent.id}
                                                     type="button"
-                                                    onClick={(e) => { e.stopPropagation(); openPermissionsModal(agent.id); }}
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        if (isDraft && draftEntry._draftId) {
+                                                            openDraftInModal(draftEntry._draftId);
+                                                        } else {
+                                                            openPermissionsModal(agent.id);
+                                                        }
+                                                    }}
                                                     className="flex items-start gap-3 p-4 rounded-xl border border-white/5 bg-white/[0.02]
                                                                hover:bg-white/5 hover:border-astral-primary/20 transition-all text-left group"
                                                 >
-                                                    <div className="w-9 h-9 rounded-lg bg-astral-primary/20 flex items-center justify-center flex-shrink-0 mt-0.5">
-                                                        <Activity size={16} className="text-astral-primary" />
+                                                    <div className={`w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5 ${
+                                                        isDraft ? "bg-astral-accent/20" : "bg-astral-primary/20"
+                                                    }`}>
+                                                        {isDraft
+                                                            ? <FileCode size={16} className="text-astral-accent" />
+                                                            : <Activity size={16} className="text-astral-primary" />}
                                                     </div>
                                                     <div className="flex-1 min-w-0">
                                                         <div className="flex items-center gap-2">
                                                             <p className="text-sm font-medium text-white truncate">{agent.name}</p>
                                                             <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${statusColor} ${hasMissingCreds ? "animate-pulse" : ""}`} title={statusLabel} />
+                                                            {/* Drafts: lifecycle badge (FR-002 — pending / testing / live / etc.).
+                                                                Live agents: per-user on/off toggle in the same slot. The
+                                                                pre-013 "ALL TOOLS ENABLED" / "SECURITY FLAGS" pill is gone
+                                                                — disabling does NOT change scopes / permissions, it just
+                                                                mutes the agent for this user until they re-enable it. */}
+                                                            {isDraft ? (
+                                                                <span className="text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-white/5 text-astral-muted/80">
+                                                                    {statusLabel}
+                                                                </span>
+                                                            ) : (
+                                                                (() => {
+                                                                    const disabled = isAgentDisabled(agent);
+                                                                    return (
+                                                                        <button
+                                                                            type="button"
+                                                                            role="switch"
+                                                                            aria-checked={!disabled}
+                                                                            aria-label={disabled ? `Enable ${agent.name}` : `Disable ${agent.name}`}
+                                                                            data-testid={`agent-toggle-${agent.id}`}
+                                                                            onClick={(e) => {
+                                                                                e.stopPropagation();
+                                                                                void toggleAgentEnabled(agent.id, disabled);
+                                                                            }}
+                                                                            title={disabled
+                                                                                ? "Disabled for you — click to re-enable. Scopes and permissions are preserved."
+                                                                                : "Enabled — click to disable for you only. Scopes and permissions are preserved."}
+                                                                            className={`flex items-center gap-1.5 text-[10px] font-medium px-1.5 py-0.5 rounded-md transition-colors flex-shrink-0 ${
+                                                                                disabled
+                                                                                    ? "bg-white/5 text-astral-muted hover:bg-white/10"
+                                                                                    : "bg-astral-primary/15 text-astral-primary hover:bg-astral-primary/25"
+                                                                            }`}
+                                                                        >
+                                                                            <span
+                                                                                className={`relative w-6 h-3 rounded-full transition-colors ${
+                                                                                    disabled ? "bg-white/15" : "bg-astral-primary"
+                                                                                }`}
+                                                                            >
+                                                                                <span
+                                                                                    className={`absolute top-[1px] w-2.5 h-2.5 rounded-full bg-white transition-all ${
+                                                                                        disabled ? "left-[1px]" : "left-[12px]"
+                                                                                    }`}
+                                                                                />
+                                                                            </span>
+                                                                            {disabled ? "Disabled" : "Enabled"}
+                                                                        </button>
+                                                                    );
+                                                                })()
+                                                            )}
                                                             {hasMissingCreds && (
                                                                 <KeyRound size={10} className="text-amber-400 flex-shrink-0 animate-pulse" />
                                                             )}
-                                                            <span title={agent.is_public ? "Public" : "Private"}>
-                                                                {agent.is_public ? (
-                                                                    <Globe size={10} className="text-green-400/60 flex-shrink-0" />
-                                                                ) : (
-                                                                    <Lock size={10} className="text-astral-muted/40 flex-shrink-0" />
-                                                                )}
-                                                            </span>
+                                                            {!isDraft && (
+                                                                <span title={agent.is_public ? "Public" : "Private"}>
+                                                                    {agent.is_public ? (
+                                                                        <Globe size={10} className="text-green-400/60 flex-shrink-0" />
+                                                                    ) : (
+                                                                        <Lock size={10} className="text-astral-muted/40 flex-shrink-0" />
+                                                                    )}
+                                                                </span>
+                                                            )}
                                                         </div>
                                                         {agent.description && (
                                                             <p className="text-[11px] text-astral-muted mt-0.5 line-clamp-2">{agent.description}</p>
                                                         )}
-                                                        <div className="flex items-center gap-2 mt-1.5">
-                                                            <span className="text-[10px] text-astral-muted/70 flex items-center gap-1">
-                                                                <Wrench size={9} />
-                                                                {activeTools} tool{activeTools !== 1 ? "s" : ""} active
-                                                            </span>
-                                                            {!isOwner && agent.owner_email && (
-                                                                <span className="text-[10px] text-astral-muted/50 truncate">
-                                                                    by {agent.owner_email}
-                                                                </span>
-                                                            )}
-                                                            <Shield size={10} className="text-astral-muted/30 group-hover:text-astral-primary transition-colors" />
-                                                        </div>
+                                                        {(isDraft || (!isOwner && agent.owner_email)) && (
+                                                            <div className="flex items-center gap-2 mt-1.5">
+                                                                {isDraft && (
+                                                                    <span className="text-[10px] text-astral-muted/70 flex items-center gap-1">
+                                                                        <FileCode size={9} />
+                                                                        Draft — open to continue
+                                                                    </span>
+                                                                )}
+                                                                {!isOwner && agent.owner_email && (
+                                                                    <span className="text-[10px] text-astral-muted/50 truncate">
+                                                                        by {agent.owner_email}
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                        )}
                                                     </div>
                                                     <ChevronRight size={14} className="text-astral-muted/30 group-hover:text-astral-primary transition-colors mt-1 flex-shrink-0" />
                                                 </button>

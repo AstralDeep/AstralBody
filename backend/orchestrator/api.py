@@ -15,7 +15,7 @@ import json
 import os
 import time
 import logging
-from typing import Optional
+from typing import Dict, Optional
 
 import aiohttp
 import websockets as ws_client
@@ -25,7 +25,7 @@ from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse, Resp
 from orchestrator.models import (
     ChatMessageRequest, ChatMessageResponse,
     ChatListResponse, ChatSummary,
-    ChatCreateResponse,
+    ChatCreateRequest, ChatCreateResponse,
     ChatDetailResponse, ChatDetail, ChatMessage,
     DeleteResponse,
     ComponentSaveRequest, ComponentSaveResponse, SavedComponent,
@@ -34,6 +34,8 @@ from orchestrator.models import (
     AgentListResponse, AgentInfo, AgentTool,
     AgentPermissionsRequest, AgentPermissionsResponse,
     AgentVisibilityRequest,
+    ToolSelectionResponse, ToolSelectionUpdate,
+    AgentEnabledUpdate, AgentEnabledResponse,
     CredentialSetRequest, CredentialListResponse, CredentialDeleteResponse,
     DashboardResponse,
     ErrorResponse,
@@ -88,15 +90,22 @@ async def list_chats(
     response_model=ChatCreateResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create a new chat",
-    description="Creates a new empty chat session and returns its ID.",
+    description=(
+        "Creates a new empty chat session and returns its ID. "
+        "Feature 013 / FR-006: pass `agent_id` in the body to bind the new "
+        "chat to a specific agent so the UI can render the active-agent "
+        "indicator. Omit to leave the chat unbound."
+    ),
 )
 async def create_chat(
     request: Request,
+    body: Optional[ChatCreateRequest] = None,
     user_id: str = Depends(require_user_id),
 ):
     orch = _get_orchestrator(request)
-    chat_id = orch.history.create_chat(user_id=user_id)
-    return ChatCreateResponse(chat_id=chat_id)
+    agent_id = body.agent_id if body is not None else None
+    chat_id = orch.history.create_chat(user_id=user_id, agent_id=agent_id)
+    return ChatCreateResponse(chat_id=chat_id, agent_id=agent_id)
 
 
 @chat_router.get(
@@ -376,10 +385,16 @@ agent_router = APIRouter(prefix="/api/agents", tags=["Agents"])
     summary="List connected agents",
     description="Returns all agents currently connected to the orchestrator, including their tools, capabilities, and ownership info.",
 )
-async def list_agents(request: Request):
+async def list_agents(
+    request: Request,
+    user_id: str = Depends(require_user_id),
+):
     orch = _get_orchestrator(request)
     db = orch.history.db
     ownership_map = {o["agent_id"]: o for o in db.get_all_agent_ownership()}
+    # Feature 013 follow-up: resolve the requesting user's per-agent
+    # disabled list once so every row in the response carries it.
+    disabled_set = set(db.get_user_disabled_agents(user_id))
     agents = []
     for agent_id, card in orch.agent_cards.items():
         # Hide draft agents that aren't live yet
@@ -398,6 +413,7 @@ async def list_agents(request: Request):
             status="connected",
             owner_email=ownership.get("owner_email"),
             is_public=bool(ownership.get("is_public", False)),
+            disabled=agent_id in disabled_set,
         ))
     return AgentListResponse(agents=agents)
 
@@ -417,12 +433,23 @@ async def get_agent_permissions(
     card = orch.agent_cards.get(agent_id)
     if not card:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+    # Feature 013 / FR-015: on first read after the migration ships, lazily
+    # backfill per-tool rows from the legacy scope state so users don't
+    # have to re-toggle previously consented permissions. Idempotent —
+    # subsequent reads insert nothing.
+    try:
+        orch.tool_permissions.backfill_per_tool_rows(user_id, agent_id)
+    except Exception as e:  # pragma: no cover — defensive logging only
+        logger.warning(f"Per-tool backfill failed for user={user_id} agent={agent_id}: {e}")
     available_tools = [s.id for s in card.skills]
     tool_descriptions = {s.id: s.description for s in card.skills}
     scopes = orch.tool_permissions.get_agent_scopes(user_id, agent_id)
     tool_scope_map = orch.tool_permissions.get_tool_scope_map(agent_id)
     permissions = orch.tool_permissions.get_effective_permissions(
         user_id, agent_id, available_tools
+    )
+    per_tool_permissions = orch.tool_permissions.get_effective_tool_permissions(
+        user_id, agent_id
     )
     tool_overrides = orch.tool_permissions.get_tool_overrides(user_id, agent_id)
     return AgentPermissionsResponse(
@@ -431,6 +458,7 @@ async def get_agent_permissions(
         scopes=scopes,
         tool_scope_map=tool_scope_map,
         permissions=permissions,
+        per_tool_permissions=per_tool_permissions,
         tool_overrides=tool_overrides,
         tool_descriptions=tool_descriptions,
         security_flags=orch.security_flags.get(agent_id, {}),
@@ -453,27 +481,249 @@ async def set_agent_permissions(
     card = orch.agent_cards.get(agent_id)
     if not card:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
-    orch.tool_permissions.set_agent_scopes(user_id, agent_id, body.scopes)
-    if body.tool_overrides is not None:
-        orch.tool_permissions.set_tool_overrides(user_id, agent_id, body.tool_overrides)
+
+    tool_scope_map = orch.tool_permissions.get_tool_scope_map(agent_id)
+    legacy_payload = body.per_tool_permissions is None and (
+        body.scopes is not None or body.tool_overrides is not None
+    )
+
+    # Feature 013 / preferred shape: per-tool, per-kind toggles.
+    if body.per_tool_permissions is not None:
+        # Validate every (tool, kind) pair is applicable to that tool
+        # (FR-014). Reject the whole payload on any mismatch so partial
+        # writes never leave a half-applied state.
+        for tool_name, kind_map in body.per_tool_permissions.items():
+            required = tool_scope_map.get(tool_name)
+            if required is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Tool '{tool_name}' is not registered for agent '{agent_id}'.",
+                )
+            for kind in kind_map.keys():
+                if kind != required:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Permission kind '{kind}' does not apply to tool "
+                            f"'{tool_name}' (required: '{required}')."
+                        ),
+                    )
+        for tool_name, kind_map in body.per_tool_permissions.items():
+            for kind, enabled in kind_map.items():
+                orch.tool_permissions.set_tool_permission(
+                    user_id, agent_id, tool_name, kind, bool(enabled)
+                )
+        # Mirror up to the agent_scopes layer so the legacy filter path
+        # remains coherent: a scope is enabled at the legacy layer iff at
+        # least one tool of that kind is now enabled per-tool.
+        scope_state = orch.tool_permissions.get_agent_scopes(user_id, agent_id)
+        derived: Dict[str, bool] = {**scope_state}
+        per_tool = orch.tool_permissions.get_effective_tool_permissions(user_id, agent_id)
+        for tool_name, kind_map in per_tool.items():
+            for kind, enabled in kind_map.items():
+                if enabled:
+                    derived[kind] = True
+        orch.tool_permissions.set_agent_scopes(user_id, agent_id, derived)
+
+    # Legacy shape for transitional clients — write scopes, then reflect
+    # the change into per-tool rows so the new model stays in sync.
+    elif legacy_payload:
+        if body.scopes is not None:
+            orch.tool_permissions.set_agent_scopes(user_id, agent_id, body.scopes)
+        if body.tool_overrides is not None:
+            orch.tool_permissions.set_tool_overrides(user_id, agent_id, body.tool_overrides)
+        # Re-derive per-tool rows from the new scope+override state.
+        for tool_name, required_scope in tool_scope_map.items():
+            scope_enabled = orch.tool_permissions.is_scope_enabled(
+                user_id, agent_id, required_scope
+            )
+            override_disabled = (body.tool_overrides or {}).get(tool_name, True) is False
+            orch.tool_permissions.set_tool_permission(
+                user_id, agent_id, tool_name, required_scope,
+                bool(scope_enabled and not override_disabled),
+            )
+        logger.warning(
+            "Legacy scope-shaped permissions update accepted for user=%s agent=%s "
+            "(legacy_scope_update=true)",
+            user_id,
+            agent_id,
+        )
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Request body must include either 'per_tool_permissions' or 'scopes'.",
+        )
+
     available_tools = [s.id for s in card.skills]
     tool_descriptions = {s.id: s.description for s in card.skills}
     scopes = orch.tool_permissions.get_agent_scopes(user_id, agent_id)
-    tool_scope_map = orch.tool_permissions.get_tool_scope_map(agent_id)
     permissions = orch.tool_permissions.get_effective_permissions(
         user_id, agent_id, available_tools
     )
+    per_tool_permissions = orch.tool_permissions.get_effective_tool_permissions(
+        user_id, agent_id
+    )
     tool_overrides = orch.tool_permissions.get_tool_overrides(user_id, agent_id)
+    logger.info(
+        "Agent permissions updated: user=%s agent=%s shape=%s tools_changed=%d",
+        user_id,
+        agent_id,
+        "per_tool" if body.per_tool_permissions is not None else "legacy_scope",
+        len(body.per_tool_permissions or {}),
+    )
     return AgentPermissionsResponse(
         agent_id=agent_id,
         agent_name=card.name,
         scopes=scopes,
         tool_scope_map=tool_scope_map,
         permissions=permissions,
+        per_tool_permissions=per_tool_permissions,
         tool_overrides=tool_overrides,
         tool_descriptions=tool_descriptions,
         security_flags=orch.security_flags.get(agent_id, {}),
     )
+
+
+# ── Feature 013: User Tool-Selection Preference ──────────────────────────
+# Per-user, per-agent in-chat tool-picker selection. Persisted as a JSON
+# value under user_preferences.tool_selection.<agent_id>. The orchestrator
+# narrows the LLM's tool list to this subset on each chat dispatch.
+
+user_router = APIRouter(prefix="/api/users/me", tags=["User"])
+
+
+@user_router.get(
+    "/tool-selection",
+    response_model=ToolSelectionResponse,
+    summary="Get the current user's saved tool selection for an agent",
+    description=(
+        "Feature 013 / FR-024: returns the in-chat tool-picker subset the "
+        "user previously saved for the given agent. `selected_tools=null` "
+        "means no narrowing — orchestrator falls back to the full "
+        "permission-allowed set."
+    ),
+)
+async def get_user_tool_selection(
+    request: Request,
+    agent_id: str,
+    user_id: str = Depends(require_user_id),
+):
+    orch = _get_orchestrator(request)
+    if agent_id not in orch.agent_cards:
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+    selected = orch.history.db.get_user_tool_selection(user_id, agent_id)
+    return ToolSelectionResponse(agent_id=agent_id, selected_tools=selected)
+
+
+@user_router.put(
+    "/tool-selection",
+    response_model=ToolSelectionResponse,
+    summary="Save the current user's tool selection for an agent",
+    description=(
+        "Feature 013 / FR-024. Empty arrays are rejected (FR-021 — UI gate). "
+        "The list MUST be a strict subset of the agent's permission-allowed "
+        "tools; tools blocked by scope/per-tool permissions are rejected."
+    ),
+)
+async def set_user_tool_selection(
+    request: Request,
+    body: ToolSelectionUpdate,
+    user_id: str = Depends(require_user_id),
+):
+    orch = _get_orchestrator(request)
+    card = orch.agent_cards.get(body.agent_id)
+    if not card:
+        raise HTTPException(status_code=404, detail=f"Agent '{body.agent_id}' not found")
+    # FR-021 defensive check — UI blocks send when zero, but a stray
+    # empty PUT still must be rejected.
+    if not body.selected_tools:
+        raise HTTPException(
+            status_code=400, detail="empty_selection_not_allowed"
+        )
+    agent_tool_ids = {s.id for s in card.skills}
+    invalid = [t for t in body.selected_tools if t not in agent_tool_ids]
+    if invalid:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Tools not part of agent '{body.agent_id}': {invalid}",
+        )
+    blocked = [
+        t for t in body.selected_tools
+        if not orch.tool_permissions.is_tool_allowed(user_id, body.agent_id, t)
+    ]
+    if blocked:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Tools blocked by scope/per-tool permissions: {blocked}",
+        )
+    orch.history.db.set_user_tool_selection(user_id, body.agent_id, body.selected_tools)
+    logger.info(
+        "Tool selection updated: user=%s agent=%s tools=%d action=set",
+        user_id,
+        body.agent_id,
+        len(body.selected_tools),
+    )
+    return ToolSelectionResponse(
+        agent_id=body.agent_id,
+        selected_tools=body.selected_tools,
+    )
+
+
+@user_router.delete(
+    "/tool-selection",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Reset the current user's tool selection for an agent",
+    description=(
+        "Feature 013 / FR-025: clears the saved selection so subsequent "
+        "queries fall back to the agent's full permission-allowed set."
+    ),
+)
+async def clear_user_tool_selection(
+    request: Request,
+    agent_id: str,
+    user_id: str = Depends(require_user_id),
+):
+    orch = _get_orchestrator(request)
+    if agent_id not in orch.agent_cards:
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+    cleared = orch.history.db.clear_user_tool_selection(user_id, agent_id)
+    logger.info(
+        "Tool selection updated: user=%s agent=%s action=reset cleared=%s",
+        user_id,
+        agent_id,
+        cleared,
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@user_router.put(
+    "/agent-enabled",
+    response_model=AgentEnabledResponse,
+    summary="Toggle the user's per-agent disabled state",
+    description=(
+        "Feature 013 follow-up: per-user, agent-wide on/off switch. "
+        "Disabling an agent removes it from the orchestrator's chat "
+        "dispatch for THIS user only — scopes/per-tool permissions "
+        "are NOT modified, so re-enabling resumes the prior state. "
+        "Other users are unaffected."
+    ),
+)
+async def set_user_agent_enabled(
+    request: Request,
+    body: AgentEnabledUpdate,
+    user_id: str = Depends(require_user_id),
+):
+    orch = _get_orchestrator(request)
+    if body.agent_id not in orch.agent_cards:
+        raise HTTPException(status_code=404, detail=f"Agent '{body.agent_id}' not found")
+    orch.history.db.set_user_agent_disabled(user_id, body.agent_id, not body.enabled)
+    logger.info(
+        "Agent enabled state updated: user=%s agent=%s enabled=%s",
+        user_id,
+        body.agent_id,
+        body.enabled,
+    )
+    return AgentEnabledResponse(agent_id=body.agent_id, enabled=body.enabled)
 
 
 # ── Agent Visibility ──────────────────────────────────────────────────

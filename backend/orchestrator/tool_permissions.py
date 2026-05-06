@@ -205,38 +205,194 @@ class ToolPermissionManager:
     # ── Tool-Level Authorization (used by orchestrator) ─────────────────
 
     def is_tool_allowed(self, user_id: str, agent_id: str, tool_name: str) -> bool:
-        """Check if a specific tool is allowed based on scope + per-tool override.
+        """Check if a specific tool is allowed for this user/agent.
 
-        A tool is allowed if:
-          1. Its scope is enabled, AND
-          2. It has no per-tool disable override.
+        Resolution order (Feature 013 / FR-013):
+          1. If a per-(tool, permission_kind) row exists for the tool's
+             required kind, that explicit row decides — return its value.
+          2. Else, if a legacy tool-wide override row (permission_kind IS
+             NULL) exists and is False, the tool is blocked.
+          3. Else, fall back to the agent-wide scope (`agent_scopes`).
         """
         required_scope = self.get_tool_scope(agent_id, tool_name)
-        if not self.is_scope_enabled(user_id, agent_id, required_scope):
-            return False
-        # Check for per-tool disable override
-        row = self.db.fetch_one(
-            "SELECT enabled FROM tool_overrides WHERE user_id = ? AND agent_id = ? AND tool_name = ?",
-            (user_id, agent_id, tool_name)
+        # 1. Per-(tool, kind) row takes priority
+        kind_row = self.db.fetch_one(
+            """SELECT enabled FROM tool_overrides
+               WHERE user_id = ? AND agent_id = ? AND tool_name = ?
+                 AND permission_kind = ?""",
+            (user_id, agent_id, tool_name, required_scope),
         )
-        if row is not None and not bool(row['enabled']):
+        if kind_row is not None:
+            return bool(kind_row["enabled"])
+        # 2. Legacy tool-wide override (permission_kind IS NULL) can still block
+        legacy_row = self.db.fetch_one(
+            """SELECT enabled FROM tool_overrides
+               WHERE user_id = ? AND agent_id = ? AND tool_name = ?
+                 AND permission_kind IS NULL""",
+            (user_id, agent_id, tool_name),
+        )
+        if legacy_row is not None and not bool(legacy_row["enabled"]):
             return False
-        return True
+        # 3. Fall back to scope
+        return self.is_scope_enabled(user_id, agent_id, required_scope)
+
+    # ── Per-Tool Permissions (Feature 013) ──────────────────────────────
+
+    def get_effective_tool_permissions(
+        self, user_id: str, agent_id: str
+    ) -> Dict[str, Dict[str, bool]]:
+        """Return the resolved per-tool, per-permission-kind permission map.
+
+        Output shape:
+            { tool_name: { permission_kind: enabled } }
+
+        Only the kinds that apply to each tool (i.e., the tool's required
+        scope from the agent's tool→scope map) are included — satisfies
+        FR-014 (no greyed-out toggles for inapplicable kinds).
+
+        Resolution per tool:
+          - If a per-kind row exists, use that boolean.
+          - Else fall back to the agent-wide scope value.
+          - A legacy tool-wide override (permission_kind IS NULL, enabled=False)
+            forces the kind to False.
+        """
+        scope_map = self._tool_scope_map.get(agent_id, {})
+        if not scope_map:
+            return {}
+        scope_state = self.get_agent_scopes(user_id, agent_id)
+        # Pull per-kind rows for this user/agent in one query
+        kind_rows = self.db.fetch_all(
+            """SELECT tool_name, permission_kind, enabled FROM tool_overrides
+               WHERE user_id = ? AND agent_id = ? AND permission_kind IS NOT NULL""",
+            (user_id, agent_id),
+        )
+        kind_lookup: Dict[str, Dict[str, bool]] = {}
+        for row in kind_rows:
+            kind_lookup.setdefault(row["tool_name"], {})[row["permission_kind"]] = bool(
+                row["enabled"]
+            )
+        legacy_rows = self.db.fetch_all(
+            """SELECT tool_name, enabled FROM tool_overrides
+               WHERE user_id = ? AND agent_id = ? AND permission_kind IS NULL""",
+            (user_id, agent_id),
+        )
+        legacy_disabled = {
+            row["tool_name"] for row in legacy_rows if not bool(row["enabled"])
+        }
+        result: Dict[str, Dict[str, bool]] = {}
+        for tool_name, required_scope in scope_map.items():
+            if tool_name in legacy_disabled:
+                effective = False
+            elif tool_name in kind_lookup and required_scope in kind_lookup[tool_name]:
+                effective = kind_lookup[tool_name][required_scope]
+            else:
+                effective = bool(scope_state.get(required_scope, False))
+            result[tool_name] = {required_scope: effective}
+        return result
+
+    def set_tool_permission(
+        self,
+        user_id: str,
+        agent_id: str,
+        tool_name: str,
+        permission_kind: str,
+        enabled: bool,
+    ) -> None:
+        """Set a single per-tool, per-permission-kind permission (Feature 013).
+
+        Args:
+            user_id: The user's identifier.
+            agent_id: The agent's identifier.
+            tool_name: The tool's identifier (must exist on the agent).
+            permission_kind: One of VALID_SCOPES.
+            enabled: True to allow, False to block.
+
+        Raises:
+            ValueError: If ``permission_kind`` is not a valid scope.
+        """
+        if permission_kind not in VALID_SCOPES:
+            raise ValueError(
+                f"Invalid permission_kind {permission_kind!r}; must be one of {VALID_SCOPES}"
+            )
+        now = int(time.time() * 1000)
+        # Use the (user_id, agent_id, tool_name, COALESCE(permission_kind, ''))
+        # unique index added by the migration. ON CONFLICT requires explicit
+        # constraint targeting; use the index-based form.
+        self.db.execute(
+            """INSERT INTO tool_overrides
+               (user_id, agent_id, tool_name, permission_kind, enabled, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT (user_id, agent_id, tool_name, COALESCE(permission_kind, ''))
+               DO UPDATE SET enabled = EXCLUDED.enabled, updated_at = EXCLUDED.updated_at""",
+            (user_id, agent_id, tool_name, permission_kind, bool(enabled), now),
+        )
+        logger.info(
+            "Per-tool permission updated: user=%s agent=%s tool=%s kind=%s enabled=%s",
+            user_id,
+            agent_id,
+            tool_name,
+            permission_kind,
+            bool(enabled),
+        )
+
+    def backfill_per_tool_rows(self, user_id: str, agent_id: str) -> int:
+        """Idempotent 1:1 carry-forward from agent_scopes to per-tool rows (FR-015).
+
+        For every tool the agent exposes, if a per-(tool, kind) row does
+        not yet exist, insert one with ``enabled`` equal to the agent-wide
+        scope state for that tool's required kind. Returns the number of
+        rows inserted (zero on subsequent runs).
+
+        Safe to call repeatedly — subsequent calls are no-ops because
+        rows already exist. Called from the per-tool permissions
+        endpoints on first read so users don't have to re-toggle.
+        """
+        scope_map = self._tool_scope_map.get(agent_id, {})
+        if not scope_map:
+            return 0
+        scope_state = self.get_agent_scopes(user_id, agent_id)
+        existing = self.db.fetch_all(
+            """SELECT tool_name, permission_kind FROM tool_overrides
+               WHERE user_id = ? AND agent_id = ? AND permission_kind IS NOT NULL""",
+            (user_id, agent_id),
+        )
+        existing_pairs = {(r["tool_name"], r["permission_kind"]) for r in existing}
+        now = int(time.time() * 1000)
+        inserted = 0
+        for tool_name, required_scope in scope_map.items():
+            if (tool_name, required_scope) in existing_pairs:
+                continue
+            enabled = bool(scope_state.get(required_scope, False))
+            self.db.execute(
+                """INSERT INTO tool_overrides
+                   (user_id, agent_id, tool_name, permission_kind, enabled, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT (user_id, agent_id, tool_name, COALESCE(permission_kind, ''))
+                   DO NOTHING""",
+                (user_id, agent_id, tool_name, required_scope, enabled, now),
+            )
+            inserted += 1
+        if inserted:
+            logger.info(
+                "Backfilled %d per-tool permission rows for user=%s agent=%s",
+                inserted,
+                user_id,
+                agent_id,
+            )
+        return inserted
 
     def get_allowed_tools(
         self, user_id: str, agent_id: str, available_tools: list
     ) -> list:
         """Return the subset of available tools that the user has allowed.
 
-        A tool is allowed if its scope is enabled AND it has no disable override.
+        Uses :meth:`is_tool_allowed` per-tool so per-(tool, kind) rows
+        added in Feature 013 are honored consistently with the
+        orchestrator's per-turn filter loop.
         """
-        enabled_scopes = self.get_agent_scopes(user_id, agent_id)
-        agent_map = self._tool_scope_map.get(agent_id, {})
-        overrides = self.get_tool_overrides(user_id, agent_id)
         return [
             tool for tool in available_tools
-            if enabled_scopes.get(agent_map.get(tool, "tools:read"), False)
-            and overrides.get(tool, True)  # default True = no override = allowed
+            if self.is_tool_allowed(user_id, agent_id, tool)
         ]
 
     def get_enabled_scope_names(self, user_id: str, agent_id: str) -> List[str]:
@@ -252,19 +408,13 @@ class ToolPermissionManager:
     def get_effective_permissions(
         self, user_id: str, agent_id: str, available_tools: list
     ) -> Dict[str, bool]:
-        """Get effective permissions for all tools based on scope + overrides.
+        """Get effective permissions for all tools (per-tool, per-kind aware).
 
-        Returns a dict of {tool_name: allowed} for every available tool.
-        A tool is allowed if its scope is enabled AND it has no disable override.
+        Returns ``{tool_name: allowed}`` using :meth:`is_tool_allowed` so
+        per-(tool, kind) rows added in Feature 013 are honored.
         """
-        enabled_scopes = self.get_agent_scopes(user_id, agent_id)
-        agent_map = self._tool_scope_map.get(agent_id, {})
-        overrides = self.get_tool_overrides(user_id, agent_id)
         return {
-            tool: (
-                enabled_scopes.get(agent_map.get(tool, "tools:read"), False)
-                and overrides.get(tool, True)
-            )
+            tool: self.is_tool_allowed(user_id, agent_id, tool)
             for tool in available_tools
         }
 
