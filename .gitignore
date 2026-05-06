@@ -10,6 +10,7 @@ Qualifying_Exam/
 backend/knowledge/*
 
 .claude/
+.kilocode/
 
 # General
 .DS_Store
