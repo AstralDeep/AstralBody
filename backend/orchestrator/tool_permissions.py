@@ -182,18 +182,21 @@ class ToolPermissionManager:
         now = int(time.time() * 1000)
         for tool_name, enabled in overrides.items():
             if enabled:
-                # Remove override — tool follows scope default (enabled)
+                # Remove only the legacy NULL-kind row so Feature 013 per-(tool, kind)
+                # rows are preserved.
                 self.db.execute(
-                    "DELETE FROM tool_overrides WHERE user_id = ? AND agent_id = ? AND tool_name = ?",
+                    "DELETE FROM tool_overrides WHERE user_id = ? AND agent_id = ? "
+                    "AND tool_name = ? AND permission_kind IS NULL",
                     (user_id, agent_id, tool_name)
                 )
             else:
-                # Store disable override
+                # Match the 4-col expression-based unique index
+                # (user_id, agent_id, tool_name, COALESCE(permission_kind, '')).
                 self.db.execute(
                     """INSERT INTO tool_overrides
-                       (user_id, agent_id, tool_name, enabled, updated_at)
-                       VALUES (?, ?, ?, ?, ?)
-                       ON CONFLICT (user_id, agent_id, tool_name)
+                       (user_id, agent_id, tool_name, permission_kind, enabled, updated_at)
+                       VALUES (?, ?, ?, NULL, ?, ?)
+                       ON CONFLICT (user_id, agent_id, tool_name, COALESCE(permission_kind, ''))
                        DO UPDATE SET enabled = EXCLUDED.enabled, updated_at = EXCLUDED.updated_at""",
                     (user_id, agent_id, tool_name, False, now)
                 )

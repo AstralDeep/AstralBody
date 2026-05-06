@@ -4174,9 +4174,9 @@ COMPONENT UPDATE RULES:
         return schema
 
     def _is_draft_agent(self, agent_id: str) -> bool:
-        """Check if an agent_id belongs to a non-live draft agent."""
+        """Hide any agent whose agent_id maps to a non-live draft record."""
         if hasattr(self, 'lifecycle_manager'):
-            draft = self.lifecycle_manager._get_draft_by_agent_id(agent_id)
+            draft = self.lifecycle_manager._find_draft_by_agent_id(agent_id)
             if draft and draft["status"] != "live":
                 return True
         return False
