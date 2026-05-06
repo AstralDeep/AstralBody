@@ -57,8 +57,6 @@ services:
     environment:
       DB_HOST: postgres
       DB_PORT: 5432
-      # KNOWLEDGE_LLM_BASE_URL: http://ollama:11434/v1
-      # KNOWLEDGE_LLM_API_KEY: ollama
       HOST_PROC: /host/proc
       HOST_SYS: /host/sys
     volumes:

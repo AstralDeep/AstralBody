@@ -92,6 +92,13 @@ _ORCH_INSTANCE = None  # type: Optional["Orchestrator"]
 TEXT_ONLY_SYSTEM_PROMPT_ADDENDUM = """
 TEXT-ONLY MODE (no agents currently available):
 - You have NO tools or agents available for this turn. Do NOT emit tool calls.
+- Do NOT emit any of the following tokens, in any form, as part of your reply
+  text — they are tool-call markers and will be visible to the user as garbage:
+    <|tool_call|>, <tool_call>, </tool_call>, <|tool_calls_section_begin|>,
+    <|tool_calls_section_end|>, [TOOL_CALLS], [/TOOL_CALLS], <function_call>.
+  If you would have emitted a tool call, instead write a plain-language
+  sentence describing what you would have done and tell the user that no
+  agents are enabled — never the raw token form.
 - Do NOT fabricate tool output, pretend to have searched/fetched/created anything,
   or invent file/database/API results. If you don't actually know it, say so.
 - If the user asks for an action that would normally require an agent (reading
@@ -101,6 +108,62 @@ TEXT-ONLY MODE (no agents currently available):
 - For conversational questions, reasoning, summarization, drafting, or general
   knowledge — answer normally as a text-only chat assistant.
 """
+
+
+# Patterns that represent tool-call tokens leaked into text content. Some
+# open-weight LLMs (Llama-style, Qwen-style, etc.) emit these even when
+# instructed not to — we strip them post-hoc so the user never sees a raw
+# `<|tool_call|>...` artifact in the chat. Order matters only for
+# coverage; each pattern is independent.
+_LEAKED_TOOL_CALL_PATTERNS = [
+    # Llama-style with optional pipe variations:
+    #   <|tool_call|> ... <|tool_call|>
+    #   <|tool_call> ... <tool_call|>
+    re.compile(r"<\|?tool_call\|?>.*?<\|?/?tool_call\|?>", re.IGNORECASE | re.DOTALL),
+    # Qwen / generic XML-style tool call wrappers
+    re.compile(r"<tool_call>.*?</tool_call>", re.IGNORECASE | re.DOTALL),
+    re.compile(r"<function_call>.*?</function_call>", re.IGNORECASE | re.DOTALL),
+    # Llama 3 tool-calls-section markers
+    re.compile(
+        r"<\|tool_calls_section_begin\|>.*?<\|tool_calls_section_end\|>",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    # Mistral / generic bracket form
+    re.compile(r"\[TOOL_CALLS\].*?\[/TOOL_CALLS\]", re.IGNORECASE | re.DOTALL),
+    # Stray dangling open tags with no close
+    re.compile(r"<\|?tool_call\|?>", re.IGNORECASE),
+    re.compile(r"<\|tool_calls_section_(?:begin|end)\|>", re.IGNORECASE),
+    re.compile(r"\[/?TOOL_CALLS\]", re.IGNORECASE),
+]
+
+
+def _sanitize_text_response(content: str) -> str:
+    """Strip leaked tool-call tokens from a text response.
+
+    Some LLMs (especially open-weight Llama-style models) emit their
+    tool-call tokenization as plain text when they're asked to invoke a
+    tool but no tools are available — leaving the user staring at raw
+    `<|tool_call|>...<tool_call|>` markup. The system prompt addendum
+    asks the LLM not to do this, but we cannot rely on prompt
+    compliance, so we strip the patterns here as a defensive layer.
+
+    If the entire response was a leaked tool call (nothing useful left
+    after stripping), returns a friendly fallback so the user gets an
+    actionable message instead of an empty bubble.
+    """
+    if not content:
+        return content
+    cleaned = content
+    for pat in _LEAKED_TOOL_CALL_PATTERNS:
+        cleaned = pat.sub("", cleaned)
+    cleaned = cleaned.strip()
+    if not cleaned:
+        return (
+            "No agents are currently enabled, so I can't run that for you. "
+            "Open the Tools & Agents picker (wrench icon next to the send "
+            "button) and re-enable an agent, then try again."
+        )
+    return cleaned
 
 
 class Orchestrator:
@@ -830,6 +893,19 @@ class Orchestrator:
                     user_message = msg.payload.get("message", "")
                     chat_id = msg.session_id or msg.payload.get("chat_id")
                     draft_agent_id = msg.payload.get("draft_agent_id")
+                    # Feature 013 / FR-018, FR-024: in-chat tool picker
+                    # selection narrows the orchestrator's tool list. None
+                    # / absent ≡ no narrowing (existing default behavior).
+                    # An empty list reaching this point is a defensive
+                    # case (UI gate FR-021 should have blocked send) —
+                    # logged at WARN below in handle_chat_message.
+                    selected_tools_raw = msg.payload.get("selected_tools")
+                    if selected_tools_raw is None or selected_tools_raw == "":
+                        selected_tools = None
+                    elif isinstance(selected_tools_raw, list):
+                        selected_tools = [str(t) for t in selected_tools_raw]
+                    else:
+                        selected_tools = None
 
                     # If no chat_id provided, create one
                     if not chat_id:
@@ -855,6 +931,7 @@ class Orchestrator:
                     await self._serialized_chat(
                         websocket, user_message, chat_id, display_message,
                         user_id=user_id, draft_agent_id=draft_agent_id,
+                        selected_tools=selected_tools,
                     )
 
                 elif msg.action == "cancel_task":
@@ -1735,7 +1812,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     break
         return asyncio.create_task(_heartbeat_loop())
 
-    async def _serialized_chat(self, websocket, message, chat_id, display_message, *, user_id=None, draft_agent_id=None):
+    async def _serialized_chat(self, websocket, message, chat_id, display_message, *, user_id=None, draft_agent_id=None, selected_tools=None):
         """Run handle_chat_message under a per-websocket lock so messages
         are serialized but the WS receive loop is never blocked."""
         ws_id = id(websocket)
@@ -1745,6 +1822,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 await self.handle_chat_message(
                     websocket, message, chat_id, display_message,
                     user_id=user_id, draft_agent_id=draft_agent_id,
+                    selected_tools=selected_tools,
                 )
             except Exception as e:
                 logger.error(f"Chat task error: {e}", exc_info=True)
@@ -1753,11 +1831,43 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     "message": f"Error: {e}"
                 }))
 
-    async def handle_chat_message(self, websocket, message: str, chat_id: str, display_message: str = None, user_id: str = None, draft_agent_id: str = None):
-        """Process a chat message: LLM determines which tools to call (Multi-Turn Re-Act Loop)."""
+    async def handle_chat_message(self, websocket, message: str, chat_id: str, display_message: str = None, user_id: str = None, draft_agent_id: str = None, selected_tools=None):
+        """Process a chat message: LLM determines which tools to call (Multi-Turn Re-Act Loop).
+
+        Feature 013 / FR-018, FR-020, FR-023: ``selected_tools`` is the
+        user's in-chat tool-picker subset. When not None, the per-turn
+        filter loop excludes any tool not in the subset — narrowing only,
+        never widening (scope/per-tool permissions are still enforced).
+        """
         logger.info(f"Processing chat message: '{message}' for chat_id {chat_id}")
         if user_id is None:
             user_id = self._get_user_id(websocket)
+        # Feature 013 defensive: a stray empty selection from the WS
+        # payload is treated as "no narrowing" for this single request,
+        # logged so operators can see if the UI gate (FR-021) ever leaks.
+        if selected_tools is not None and len(selected_tools) == 0:
+            logger.warning(
+                "Chat dispatch received empty selected_tools (chat_id=%s user_id=%s) "
+                "reason=empty_selection_received — treating as no narrowing.",
+                chat_id,
+                user_id,
+            )
+            selected_tools = None
+        # If the user has not narrowed in the WS payload, fall back to
+        # their saved per-user preference (FR-024).
+        if selected_tools is None and user_id is not None and not draft_agent_id:
+            try:
+                # Resolve the chat's bound agent so the saved selection
+                # for THAT agent is applied; if the chat is unbound, no
+                # agent-specific selection applies and the orchestrator
+                # uses its full default.
+                bound_agent_id = self.history.db.get_chat_agent(chat_id) if chat_id else None
+                if bound_agent_id is not None:
+                    saved = self.history.db.get_user_tool_selection(user_id, bound_agent_id)
+                    if saved is not None and len(saved) > 0:
+                        selected_tools = saved
+            except Exception as e:  # pragma: no cover — defensive
+                logger.debug(f"Could not resolve saved tool selection: {e}")
         if not message:
             logger.warning("Empty message received")
             return
@@ -1822,6 +1932,20 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         tools_desc = []
         tool_to_agent = {}  # Map tool name → agent_id
 
+        # Feature 013 follow-up: resolve this user's per-agent disabled
+        # set once so we can skip disabled agents wholesale below. The
+        # draft-test path bypasses this — testing your own draft must
+        # always work even if you've disabled the live version.
+        try:
+            disabled_agents = (
+                set(self.history.db.get_user_disabled_agents(user_id))
+                if user_id and not draft_agent_id
+                else set()
+            )
+        except Exception as e:  # pragma: no cover — defensive
+            logger.debug(f"Could not resolve user disabled-agent list: {e}")
+            disabled_agents = set()
+
         for agent_id, card in self.agent_cards.items():
             if agent_id not in self.agents:
                 continue
@@ -1830,16 +1954,54 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             if draft_agent_id and agent_id != draft_agent_id:
                 continue
 
+            # Per-user agent disable (Feature 013 follow-up): user has
+            # muted this agent; skip ALL its tools without touching
+            # scope/permission state. Logged so operators can see when
+            # it kicks in.
+            if agent_id in disabled_agents:
+                logger.debug(
+                    f"Agent '{agent_id}' excluded user={user_id} reason=user_disabled_agent"
+                )
+                continue
+
+            # Draft test (Feature 013 follow-up): when the user is testing
+            # THEIR OWN draft agent, bypass scope/per-tool permission checks
+            # so they can exercise the agent's tools without first granting
+            # themselves scopes. Strictly isolated to the draft being tested
+            # — `agent_id == draft_agent_id` is the only way this branch
+            # fires, so other agents (live or otherwise) are unaffected.
+            in_draft_test_for_this_agent = (
+                draft_agent_id is not None and agent_id == draft_agent_id
+            )
+
             for skill in card.skills:
-                # System-level security block (overrides user permissions)
+                # System-level security block always wins, even in draft test
+                # — security flags reflect proactive review and we never
+                # want a draft to short-circuit a flagged tool.
                 agent_flags = self.security_flags.get(agent_id, {})
                 if skill.id in agent_flags and agent_flags[skill.id].get("blocked"):
-                    logger.debug(f"Tool '{skill.id}' system-blocked (security) for agent={agent_id}")
+                    logger.debug(
+                        f"Tool '{skill.id}' excluded user={user_id} agent={agent_id} reason=system_blocked"
+                    )
                     continue
 
                 # Check if the user has allowed this tool for this agent
-                if not self.tool_permissions.is_tool_allowed(user_id, agent_id, skill.id):
-                    logger.debug(f"Tool '{skill.id}' blocked for user={user_id} agent={agent_id}")
+                # (Feature 013 / FR-013: per-(tool, kind) row > legacy
+                # NULL-kind override > agent_scopes fallback). Skipped
+                # for the draft being tested — see the comment above.
+                if not in_draft_test_for_this_agent and not self.tool_permissions.is_tool_allowed(user_id, agent_id, skill.id):
+                    logger.debug(
+                        f"Tool '{skill.id}' excluded user={user_id} agent={agent_id} reason=scope_or_override"
+                    )
+                    continue
+
+                # Feature 013 / FR-018, FR-020, FR-023: in-chat tool
+                # picker narrowing. Only ever subtracts — applied AFTER
+                # the scope/permission checks so it cannot widen.
+                if selected_tools is not None and skill.id not in selected_tools:
+                    logger.debug(
+                        f"Tool '{skill.id}' excluded user={user_id} agent={agent_id} reason=user_selection"
+                    )
                     continue
 
                 schema = self._sanitize_tool_schema(skill.input_schema or {"type": "object", "properties": {}})
@@ -2208,7 +2370,22 @@ COMPONENT UPDATE RULES:
                     # No tool calls -> Final Response
                     if task:
                         task.transition(TaskState.COMPLETED, turn_count=turn_count)
-                    content = llm_msg.content or "I'm not sure how to help with that."
+                    # Strip any tool-call tokens that leaked into the
+                    # text response — see _sanitize_text_response. This
+                    # defends against open-weight LLMs that emit raw
+                    # `<|tool_call|>...` markup even when asked not to,
+                    # which is what users see when they disable all
+                    # agents and the LLM still tries to invoke a tool.
+                    raw_content = llm_msg.content or ""
+                    content = _sanitize_text_response(raw_content)
+                    if content != raw_content.strip():
+                        logger.warning(
+                            "Stripped leaked tool-call tokens from text response "
+                            "(chat_id=%s user_id=%s is_text_only=%s raw_len=%d clean_len=%d)",
+                            chat_id, user_id, is_text_only, len(raw_content), len(content),
+                        )
+                    if not content:
+                        content = "I'm not sure how to help with that."
                     
                     parsed_components = None
                     needs_retry = False
@@ -4345,7 +4522,7 @@ COMPONENT UPDATE RULES:
             await self.handle_ui_connection_fastapi(websocket)
 
         # Mount REST API routers
-        from orchestrator.api import chat_router, component_router, agent_router, dashboard_router, draft_router, voice_router, task_router
+        from orchestrator.api import chat_router, component_router, agent_router, dashboard_router, draft_router, voice_router, task_router, user_router
         from orchestrator.auth import auth_router
         from orchestrator.attachments.router import attachments_router
         from audit.api import audit_router
@@ -4356,6 +4533,7 @@ COMPONENT UPDATE RULES:
         app.include_router(chat_router)
         app.include_router(component_router)
         app.include_router(agent_router)
+        app.include_router(user_router)  # Feature 013 — tool-selection prefs
         app.include_router(draft_router)
         app.include_router(dashboard_router)
         app.include_router(auth_router)

@@ -43,6 +43,13 @@ export interface Agent {
     status: string;
     owner_email?: string;
     is_public?: boolean;
+    /**
+     * Feature 013 follow-up: per-user agent on/off switch.
+     * `true` ⇒ the requesting user has muted this agent — orchestrator
+     * skips its tools, but scopes/permissions are NOT modified, so
+     * re-enabling resumes the prior state.
+     */
+    disabled?: boolean;
 }
 
 export interface ChatSession {
@@ -983,7 +990,19 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         return () => window.removeEventListener("llm-config-changed", onChange);
     }, []);
 
-    const sendMessage = useCallback((message: string, displayMessage?: string, explicitChatId?: string) => {
+    const sendMessage = useCallback((
+        message: string,
+        displayMessage?: string,
+        explicitChatId?: string,
+        /**
+         * Feature 013 / FR-018, FR-024: optional in-chat tool subset.
+         * Caller passes a non-empty array to narrow the orchestrator's
+         * tool list for this single request. `null` / undefined / `[]`
+         * means no narrowing — empty arrays are gated at the UI layer
+         * (FR-021) and the field is omitted from the payload.
+         */
+        selectedTools?: string[] | null,
+    ) => {
         if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
 
         const targetChatId = explicitChatId || activeChatId;
@@ -991,15 +1010,23 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         setMessages(prev => [...prev, { role: "user", content: displayMessage || message }]);
         setChatStatus({ status: "thinking", message: "Processing..." });
 
+        const payload: Record<string, unknown> = {
+            message,
+            chat_id: targetChatId,
+            display_message: displayMessage,
+        };
+        // Only include `selected_tools` when the user has actually
+        // narrowed. The orchestrator treats an absent field as "no
+        // narrowing" and applies the saved per-user preference instead.
+        if (Array.isArray(selectedTools) && selectedTools.length > 0) {
+            payload.selected_tools = selectedTools;
+        }
+
         wsRef.current.send(JSON.stringify({
             type: "ui_event",
             action: "chat_message",
             session_id: targetChatId || undefined,
-            payload: {
-                message,
-                chat_id: targetChatId,
-                display_message: displayMessage
-            }
+            payload,
         }));
     }, [activeChatId]);
 

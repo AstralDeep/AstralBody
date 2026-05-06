@@ -36,7 +36,6 @@ import {
     Linkedin,
     Globe,
     ArrowLeft,
-    ChevronDown,
     Info,
 } from "lucide-react";
 import { API_URL } from "../config";
@@ -219,10 +218,9 @@ export default function AgentPermissionsModal({
     const [saving, setSaving] = useState(false);
     const [hasChanges, setHasChanges] = useState(false);
 
-    // Which scope cards are expanded
-    const [expandedScopes, setExpandedScopes] = useState<Record<string, boolean>>({});
-
-    // Scope warning confirmation dialog
+    // Scope warning confirmation dialog. Triggered by per-tool toggles
+    // when the underlying scope is OFF — the user must consent to the
+    // permission kind before any tool of that kind goes live.
     const [pendingScopeToggle, setPendingScopeToggle] = useState<ScopeMeta | null>(null);
 
     // Credential state
@@ -288,7 +286,6 @@ export default function AgentPermissionsModal({
             setLocalToolOverrides(initialToolOverrides ? { ...initialToolOverrides } : {});
             setHasChanges(false);
             setSaving(false);
-            setExpandedScopes({});
             setPendingScopeToggle(null);
             setCredentialValues({});
             setSavingCredentials(false);
@@ -313,30 +310,7 @@ export default function AgentPermissionsModal({
 
     /* ---------- Scope helpers ---------- */
 
-    /** Group tools by their scope for display */
-    const toolsByScope: Record<string, string[]> = {};
-    for (const def of SCOPE_DEFINITIONS) {
-        toolsByScope[def.key] = [];
-    }
-    for (const [tool] of Object.entries(permissions)) {
-        const scope = toolScopeMap[tool];
-        if (scope && toolsByScope[scope]) {
-            toolsByScope[scope].push(tool);
-        }
-    }
-
     const enabledScopeCount = SCOPE_DEFINITIONS.filter(d => localScopes[d.key]).length;
-
-    const requestScopeToggle = (scopeDef: ScopeMeta) => {
-        if (needsCredentials) return;
-        if (!localScopes[scopeDef.key]) {
-            // Turning ON -- show warning first
-            setPendingScopeToggle(scopeDef);
-        } else {
-            // Turning OFF -- no confirmation needed
-            applyScopeToggle(scopeDef.key, false);
-        }
-    };
 
     const baselineOverrides = initialToolOverrides || {};
 
@@ -371,10 +345,6 @@ export default function AgentPermissionsModal({
             applyScopeToggle(pendingScopeToggle.key, true);
             setPendingScopeToggle(null);
         }
-    };
-
-    const toggleExpanded = (scopeKey: string) => {
-        setExpandedScopes(prev => ({ ...prev, [scopeKey]: !prev[scopeKey] }));
     };
 
     /* ---------- Save ---------- */
@@ -901,191 +871,169 @@ export default function AgentPermissionsModal({
                                 </div>
                             )}
 
-                            {/* ── Scope Cards ────────────────────────────── */}
+                            {/* ── Per-Tool Permissions (Feature 013 / FR-010, FR-011, FR-014) ─
+                                One row per tool, exposing only the permission kind that
+                                applies to that tool. The (i) icon is reachable while the
+                                toggle is OFF (FR-011) so the user can read what enabling
+                                will allow before consenting. The localScopes / localToolOverrides
+                                state shape is preserved so the existing save path stays
+                                compatible — the orchestrator's PUT endpoint mirrors
+                                scope+override updates to per-(tool, kind) rows. */}
                             <div className={needsCredentials ? "opacity-40 pointer-events-none select-none" : ""}>
                                 <p className="text-[10px] font-semibold uppercase tracking-widest text-astral-muted flex items-center gap-1.5 mb-3">
                                     <Shield size={10} />
-                                    Permission Scopes
+                                    Tool permissions
                                 </p>
 
                                 {/* General info banner */}
                                 <div className="flex items-start gap-2.5 px-3 py-2.5 rounded-lg bg-blue-500/[0.06] border border-blue-500/10 mb-3">
                                     <Info size={14} className="text-blue-400 flex-shrink-0 mt-0.5" />
                                     <p className="text-[10.5px] text-blue-300/80 leading-relaxed">
-                                        Permission scopes control what this agent's own tools can do.
-                                        Agents can also delegate tasks to other agents — when that happens,
-                                        the called agent's tools operate under <span className="text-blue-300 font-medium">its own</span> scope
-                                        permissions, not the caller's.
+                                        Each tool below shows the kind of permission it needs (Read,
+                                        Write, Search, or System). Hover the <span className="inline-flex"><Info size={10} className="inline" /></span>
+                                        {" "}icon to see what enabling that permission lets the agent do
+                                        — before you turn it on. Toggling one tool does not affect any
+                                        other tool's state.
                                     </p>
                                 </div>
 
-                                <div className="space-y-2">
-                                    {SCOPE_DEFINITIONS.map((scopeDef) => {
-                                        const enabled = !!localScopes[scopeDef.key];
-                                        const tools = toolsByScope[scopeDef.key] || [];
-                                        const expanded = !!expandedScopes[scopeDef.key];
-                                        const blockedTools = tools.filter(t => securityFlags?.[t]?.blocked);
-                                        const hasBlockedTools = blockedTools.length > 0;
-
-                                        return (
-                                            <div key={scopeDef.key}
-                                                className={`rounded-lg border overflow-hidden transition-colors
-                                                    ${enabled
-                                                        ? `${scopeDef.bgClass}/[0.06] border-${scopeDef.color}-500/15`
-                                                        : "bg-white/[0.02] border-white/5"}`}
-                                            >
-                                                {/* Scope card header */}
-                                                <div
-                                                    className="flex items-center gap-3 px-3 py-3 cursor-pointer"
-                                                    onClick={() => requestScopeToggle(scopeDef)}
-                                                >
-                                                    {/* Scope icon */}
-                                                    <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0
-                                                        ${enabled
-                                                            ? `${scopeDef.bgClass}/15 ${scopeDef.colorClass}`
-                                                            : "bg-white/5 text-astral-muted"}`}
-                                                    >
-                                                        {scopeDef.icon}
-                                                    </div>
-
-                                                    {/* Scope info */}
-                                                    <div className="flex-1 min-w-0">
-                                                        <div className="flex items-center gap-2">
-                                                            <p className="text-xs font-medium text-white">
-                                                                {scopeDef.label}
-                                                            </p>
-                                                            {hasBlockedTools && (
-                                                                <span className="text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded-full bg-red-500/15 text-red-400">
-                                                                    {blockedTools.length} blocked
-                                                                </span>
-                                                            )}
-                                                        </div>
-                                                        <p className="text-[10px] text-astral-muted mt-0.5">
-                                                            {scopeDef.description}
-                                                        </p>
-                                                    </div>
-
-                                                    {/* Expand button */}
-                                                    {tools.length > 0 && (
-                                                        <button
-                                                            onClick={(e) => { e.stopPropagation(); toggleExpanded(scopeDef.key); }}
-                                                            className="p-1 text-astral-muted/50 hover:text-astral-muted transition-colors"
-                                                            title={expanded ? "Collapse tools" : "Expand tools"}
-                                                        >
-                                                            <motion.div
-                                                                animate={{ rotate: expanded ? 180 : 0 }}
-                                                                transition={{ duration: 0.2 }}
-                                                            >
-                                                                <ChevronDown size={14} />
-                                                            </motion.div>
-                                                        </button>
-                                                    )}
-
-                                                    {/* Toggle Switch */}
-                                                    <div
-                                                        className={`relative w-9 h-5 rounded-full flex-shrink-0 transition-colors duration-200
-                                                            ${enabled ? scopeDef.bgClass : "bg-white/10"}`}
-                                                    >
-                                                        <motion.div
-                                                            className="absolute top-0.5 w-4 h-4 rounded-full shadow-sm bg-white"
-                                                            animate={{ left: enabled ? "18px" : "2px" }}
-                                                            transition={{ type: "spring", stiffness: 500, damping: 30 }}
-                                                        />
-                                                    </div>
-                                                </div>
-
-                                                {/* Empty scope info */}
-                                                {tools.length === 0 && (
-                                                    <div className="px-3 pb-3 pt-0">
-                                                        <div className="border-t border-white/5 pt-2">
-                                                            <div className="flex items-start gap-2 px-2 py-1.5 rounded-md bg-white/[0.02]">
-                                                                <Info size={11} className="text-astral-muted/60 mt-0.5 flex-shrink-0" />
-                                                                <p className="text-[10px] text-astral-muted/70 leading-relaxed">
-                                                                    This agent has no tools that require <span className="text-astral-muted font-medium">{scopeDef.label.toLowerCase()}</span> access.
-                                                                    If it delegates to another agent that has {scopeDef.label.toLowerCase()} tools, those will use that agent's own scope permissions.
-                                                                </p>
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                )}
-
-                                                {/* Expandable tool list */}
-                                                <AnimatePresence>
-                                                    {expanded && tools.length > 0 && (
-                                                        <motion.div
-                                                            initial={{ height: 0, opacity: 0 }}
-                                                            animate={{ height: "auto", opacity: 1 }}
-                                                            exit={{ height: 0, opacity: 0 }}
-                                                            transition={{ duration: 0.2 }}
-                                                            className="overflow-hidden"
-                                                        >
-                                                            <div className="px-3 pb-3 pt-0">
-                                                                <div className="border-t border-white/5 pt-2 space-y-1">
-                                                                    {tools.map((tool) => {
-                                                                        const flag = securityFlags?.[tool];
-                                                                        const isBlocked = flag?.blocked === true;
-                                                                        const toolEnabled = enabled && (localToolOverrides[tool] ?? true);
-                                                                        return (
-                                                                            <div
-                                                                                key={tool}
-                                                                                className={`flex items-start gap-2 px-2 py-1.5 rounded-md text-xs
-                                                                                    ${isBlocked
-                                                                                        ? "bg-red-500/[0.06] text-red-300"
-                                                                                        : "text-astral-muted"}`}
-                                                                            >
-                                                                                {isBlocked ? (
-                                                                                    <ShieldAlert size={12} className="text-red-400 mt-0.5 flex-shrink-0" />
-                                                                                ) : (
-                                                                                    <button
-                                                                                        type="button"
-                                                                                        onClick={(e) => { e.stopPropagation(); if (enabled) toggleToolOverride(tool); }}
-                                                                                        disabled={!enabled}
-                                                                                        className={`w-3.5 h-3.5 mt-0.5 flex-shrink-0 rounded border flex items-center justify-center transition-colors
-                                                                                            ${toolEnabled
-                                                                                                ? `${scopeDef.bgClass}/30 border-${scopeDef.color}-500/40 hover:${scopeDef.bgClass}/50`
-                                                                                                : enabled
-                                                                                                    ? "bg-white/5 border-white/15 hover:border-white/25"
-                                                                                                    : "bg-white/5 border-white/10 cursor-not-allowed"}`}
-                                                                                        title={enabled ? (toolEnabled ? "Disable this tool" : "Enable this tool") : "Enable the scope first"}
-                                                                                    >
-                                                                                        {toolEnabled && <Check size={9} className={scopeDef.colorClass} />}
-                                                                                    </button>
-                                                                                )}
-                                                                                <div className="min-w-0">
-                                                                                    <p className={`font-medium ${isBlocked ? "text-red-300" : "text-white/80"}`}>
-                                                                                        {formatToolName(tool)}
-                                                                                    </p>
-                                                                                    <p className="text-[10px] text-astral-muted/70 mt-0.5">
-                                                                                        {toolDescriptions[tool] || "No description available"}
-                                                                                    </p>
-                                                                                    {isBlocked && flag && (
-                                                                                        <div className="flex items-center gap-1 mt-1">
-                                                                                            <AlertTriangle size={9} className="text-red-400 flex-shrink-0" />
-                                                                                            <p className="text-[9px] text-red-400/80">
-                                                                                                <span className="font-medium">{SECURITY_CATEGORY_LABELS[flag.category] || flag.category}</span>
-                                                                                                {" -- "}{flag.reason}
-                                                                                            </p>
-                                                                                        </div>
-                                                                                    )}
-                                                                                </div>
-                                                                            </div>
-                                                                        );
-                                                                    })}
-                                                                </div>
-                                                            </div>
-                                                        </motion.div>
-                                                    )}
-                                                </AnimatePresence>
-                                            </div>
-                                        );
-                                    })}
-                                </div>
-
-                                {Object.keys(permissions).length === 0 && (
+                                {Object.keys(permissions).length === 0 ? (
                                     <div className="text-center py-8">
                                         <ShieldX size={24} className="text-astral-muted mx-auto mb-2" />
                                         <p className="text-xs text-astral-muted">No tools registered for this agent</p>
                                     </div>
+                                ) : (
+                                    <ul
+                                        data-testid="per-tool-permission-list"
+                                        className="space-y-1.5 max-h-[420px] overflow-y-auto pr-1"
+                                    >
+                                        {/* Stable order: by required kind, then alphabetically. */}
+                                        {Object.keys(permissions)
+                                            .slice()
+                                            .sort((a, b) => {
+                                                const ka = toolScopeMap[a] || "tools:read";
+                                                const kb = toolScopeMap[b] || "tools:read";
+                                                if (ka !== kb) return ka.localeCompare(kb);
+                                                return a.localeCompare(b);
+                                            })
+                                            .map((tool) => {
+                                                const requiredScope = toolScopeMap[tool] || "tools:read";
+                                                const scopeDef = SCOPE_DEFINITIONS.find(s => s.key === requiredScope) ?? SCOPE_DEFINITIONS[0];
+                                                const flag = securityFlags?.[tool];
+                                                const isBlocked = flag?.blocked === true;
+                                                // Effective enabled state: scope must be on AND no per-tool disable override.
+                                                const scopeOn = !!localScopes[scopeDef.key];
+                                                const overrideEnabled = localToolOverrides[tool] ?? true;
+                                                const enabled = scopeOn && overrideEnabled && !isBlocked;
+                                                return (
+                                                    <li
+                                                        key={tool}
+                                                        data-testid={`per-tool-row-${tool}`}
+                                                        className={`flex items-start gap-3 px-3 py-2.5 rounded-lg border transition-colors ${
+                                                            isBlocked
+                                                                ? "bg-red-500/[0.06] border-red-500/20"
+                                                                : enabled
+                                                                ? `${scopeDef.bgClass}/[0.06] border-${scopeDef.color}-500/15`
+                                                                : "bg-white/[0.02] border-white/5 hover:border-white/10"
+                                                        }`}
+                                                    >
+                                                        {/* Permission-kind icon */}
+                                                        <div className={`w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5 ${
+                                                            enabled
+                                                                ? `${scopeDef.bgClass}/15 ${scopeDef.colorClass}`
+                                                                : "bg-white/5 text-astral-muted"
+                                                        }`}>
+                                                            {scopeDef.icon}
+                                                        </div>
+
+                                                        {/* Tool name + description + permission-kind badge */}
+                                                        <div className="flex-1 min-w-0">
+                                                            <div className="flex items-center gap-2 flex-wrap">
+                                                                <p className={`text-xs font-medium ${isBlocked ? "text-red-300" : "text-white"}`}>
+                                                                    {formatToolName(tool)}
+                                                                </p>
+                                                                <span
+                                                                    className={`text-[9px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded ${
+                                                                        enabled
+                                                                            ? `${scopeDef.bgClass}/20 ${scopeDef.colorClass}`
+                                                                            : "bg-white/5 text-astral-muted"
+                                                                    }`}
+                                                                    title={`Required permission: ${scopeDef.label}`}
+                                                                >
+                                                                    {scopeDef.label}
+                                                                </span>
+                                                                {/* (i) info — reachable BEFORE the toggle is on (FR-011) */}
+                                                                <span
+                                                                    className="text-astral-muted/70 hover:text-astral-primary focus:text-astral-primary transition-colors cursor-help"
+                                                                    tabIndex={0}
+                                                                    role="img"
+                                                                    aria-label={`What ${scopeDef.label} permission grants`}
+                                                                    title={scopeDef.warning}
+                                                                    data-testid={`per-tool-info-${tool}`}
+                                                                >
+                                                                    <Info size={11} />
+                                                                </span>
+                                                            </div>
+                                                            <p className="text-[10.5px] text-astral-muted/80 mt-0.5 leading-relaxed">
+                                                                {toolDescriptions[tool] || "No description available"}
+                                                            </p>
+                                                            {isBlocked && flag && (
+                                                                <div className="flex items-center gap-1 mt-1">
+                                                                    <AlertTriangle size={9} className="text-red-400 flex-shrink-0" />
+                                                                    <p className="text-[9px] text-red-400/80">
+                                                                        <span className="font-medium">{SECURITY_CATEGORY_LABELS[flag.category] || flag.category}</span>
+                                                                        {" — "}{flag.reason}
+                                                                    </p>
+                                                                </div>
+                                                            )}
+                                                        </div>
+
+                                                        {/* Per-tool toggle (FR-010, FR-012). System-blocked tools are
+                                                            never user-toggleable — the proactive review wins. */}
+                                                        {isBlocked ? (
+                                                            <ShieldAlert size={14} className="text-red-400 mt-0.5 flex-shrink-0" />
+                                                        ) : (
+                                                            <button
+                                                                type="button"
+                                                                role="switch"
+                                                                aria-checked={enabled}
+                                                                aria-label={enabled ? `Disable ${formatToolName(tool)}` : `Enable ${formatToolName(tool)}`}
+                                                                data-testid={`per-tool-toggle-${tool}`}
+                                                                onClick={() => {
+                                                                    if (!scopeOn && !enabled) {
+                                                                        // First time enabling something of this kind:
+                                                                        // surface the consent warning (FR-011 — pre-toggle
+                                                                        // info already shown via the (i) icon, this is the
+                                                                        // explicit confirm step).
+                                                                        setPendingScopeToggle(scopeDef);
+                                                                        // Also clear any stale per-tool override so the
+                                                                        // tool turns ON when the user accepts the scope.
+                                                                        if (localToolOverrides[tool] === false) {
+                                                                            const next = { ...localToolOverrides };
+                                                                            delete next[tool];
+                                                                            setLocalToolOverrides(next);
+                                                                            detectChanges(localScopes, next);
+                                                                        }
+                                                                        return;
+                                                                    }
+                                                                    // Scope is already on — flipping the per-tool override.
+                                                                    toggleToolOverride(tool);
+                                                                }}
+                                                                className={`relative w-9 h-5 rounded-full flex-shrink-0 transition-colors duration-200 mt-0.5 ${
+                                                                    enabled ? scopeDef.bgClass : "bg-white/10 hover:bg-white/15"
+                                                                }`}
+                                                            >
+                                                                <motion.div
+                                                                    className="absolute top-0.5 w-4 h-4 rounded-full shadow-sm bg-white"
+                                                                    animate={{ left: enabled ? "18px" : "2px" }}
+                                                                    transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                                                                />
+                                                            </button>
+                                                        )}
+                                                    </li>
+                                                );
+                                            })}
+                                    </ul>
                                 )}
                             </div>
                         </div>

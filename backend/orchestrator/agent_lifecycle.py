@@ -535,6 +535,22 @@ class AgentLifecycleManager:
                 draft["user_id"], agent_id,
                 {"tools:read": True, "tools:write": True, "tools:search": True, "tools:system": True}
             )
+            # Feature 013 follow-up: per-(tool, kind) rows added by the
+            # permissions endpoint backfill take priority over agent_scopes
+            # in is_tool_allowed. If the user opened the permissions modal
+            # BEFORE starting the draft (when scopes default to False),
+            # those rows would be False and would shadow the True scope
+            # state we just wrote — leaving the user with "scopes are
+            # enabled" but tools still blocked. Force the per-tool rows to
+            # match the draft's True scope state so both layers agree.
+            try:
+                tool_scope_map = self.orchestrator.tool_permissions.get_tool_scope_map(agent_id)
+                for tool_name, required_scope in tool_scope_map.items():
+                    self.orchestrator.tool_permissions.set_tool_permission(
+                        draft["user_id"], agent_id, tool_name, required_scope, True
+                    )
+            except Exception as e:  # pragma: no cover — defensive
+                logger.warning(f"Per-tool alignment failed for draft={agent_id}: {e}")
 
         if discovered:
             await self._send_progress(websocket, draft_id, "agent_started",

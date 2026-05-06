@@ -110,6 +110,10 @@ function Shell({ ws, auth, user, openers }: ShellProps) {
               deviceCapabilities={ws.deviceCapabilities}
               toolsAvailableForUser={ws.toolsAvailableForUser}
               onOpenAgentSettings={() => setAgentsModalRequestKey(Date.now())}
+              /* Feature 013 follow-up: pass the live agents list so the
+                 in-chat Tools & Agents picker can render agent on/off
+                 toggles and a tools list across all enabled agents. */
+              agents={ws.agents}
             />
           </AgentPermissionProvider>
         </FeedbackProvider>
