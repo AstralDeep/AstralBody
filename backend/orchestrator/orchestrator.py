@@ -404,6 +404,16 @@ class Orchestrator:
         # Register tool→scope mapping in the permission manager
         self.tool_permissions.register_tool_scopes(card.agent_id, tool_scope_map)
 
+        # Prune tool_overrides rows for tools no longer in the agent's live
+        # registry. Best-effort — a transient DB error must not block agent
+        # registration. Idempotent: subsequent calls find nothing to delete.
+        try:
+            self.tool_permissions.cleanup_stale_tool_overrides(
+                card.agent_id, list(tool_scope_map.keys())
+            )
+        except Exception as e:
+            logger.warning(f"Stale tool_override cleanup failed for {card.agent_id}: {e}")
+
         # Extract streamable tool metadata for live streaming.
         # Two paths: legacy POLL streaming (orchestrator drives cadence) and
         # 001-tool-stream-ui PUSH streaming (tool is an async generator).
@@ -4164,9 +4174,9 @@ COMPONENT UPDATE RULES:
         return schema
 
     def _is_draft_agent(self, agent_id: str) -> bool:
-        """Check if an agent_id belongs to a non-live draft agent."""
+        """Hide any agent whose agent_id maps to a non-live draft record."""
         if hasattr(self, 'lifecycle_manager'):
-            draft = self.lifecycle_manager._get_draft_by_agent_id(agent_id)
+            draft = self.lifecycle_manager._find_draft_by_agent_id(agent_id)
             if draft and draft["status"] != "live":
                 return True
         return False
