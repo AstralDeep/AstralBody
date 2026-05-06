@@ -10,6 +10,8 @@ import type {
     StreamSubscribedMessage,
     StreamSubscriptionRecord,
 } from "../types/streaming";
+import type { ChatStep, ChatStepsByChat } from "../types/chatSteps";
+import { fetchChatSteps } from "../api/chatSteps";
 
 export interface SecurityFlag {
     tool_name: string;
@@ -185,8 +187,12 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
     // the banner.
     const [toolsAvailableForUser, setToolsAvailableForUser] = useState<boolean>(true);
     const [chatStatus, setChatStatus] = useState<ChatStatus>({ status: "idle", message: "" });
+    // Feature 014 — persistent step trail. Keyed by chat_id, then by step_id.
+    // Populated by both the live `chat_step` event and the
+    // `GET /api/chats/{id}/steps` rehydrate path; merged on `step.id`.
+    const [chatSteps, setChatSteps] = useState<ChatStepsByChat>({});
     const [uiComponents, setUiComponents] = useState<Record<string, unknown>[]>([]);
-    const [messages, setMessages] = useState<{ role: string; content: unknown; _target?: string }[]>([]);
+    const [messages, setMessages] = useState<{ role: string; content: unknown; _target?: string; id?: number }[]>([]);
     const [chatHistory, setChatHistory] = useState<ChatSession[]>([]);
     const [activeChatIdState, setActiveChatIdState] = useState<string | null>(null);
     const activeChatIdRef = useRef<string | null>(null);
@@ -377,6 +383,47 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                 });
                 break;
 
+            case "user_message_acked": {
+                // Feature 014: backend persisted the user message and is
+                // sharing its row id so the local message can be stamped
+                // and chat_step events with matching turn_message_id can
+                // be grouped under the right turn (multi-turn chats).
+                const msgId = data.message_id as number | undefined;
+                if (typeof msgId === "number") {
+                    setMessages(prev => {
+                        // Stamp the latest user message that has no id yet.
+                        for (let i = prev.length - 1; i >= 0; i -= 1) {
+                            if (prev[i].role === "user" && prev[i].id === undefined) {
+                                const next = prev.slice();
+                                next[i] = { ...next[i], id: msgId };
+                                return next;
+                            }
+                        }
+                        return prev;
+                    });
+                }
+                break;
+            }
+
+            case "chat_step": {
+                // Feature 014 (US2). Live lifecycle event for one persistent
+                // step entry. The full row arrives every time so we always
+                // overwrite by id; out-of-order delivery is safe.
+                const step = data.step as ChatStep | undefined;
+                const targetChatId = (data.chat_id as string) || step?.chat_id;
+                if (!step || !targetChatId) {
+                    break;
+                }
+                setChatSteps((prev) => {
+                    const existing = prev[targetChatId] ?? {};
+                    return {
+                        ...prev,
+                        [targetChatId]: { ...existing, [step.id]: step },
+                    };
+                });
+                break;
+            }
+
             case "ui_render": {
                 // Don't auto-clear chat status here — the backend sends
                 // an explicit chat_status: "done" when processing is complete.
@@ -517,7 +564,11 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                     const loadedMessages = (data.chat as Record<string, unknown>).messages
                         ? ((data.chat as Record<string, unknown>).messages as Array<Record<string, unknown>>).map(m => ({
                             role: m.role as string,
-                            content: m.content
+                            content: m.content,
+                            // Feature 014: preserve message id so the chat
+                            // surface can group chat_step entries under
+                            // their originating turn (turn_message_id FK).
+                            id: typeof m.id === "number" ? m.id : undefined,
                         }))
                         : [];
                     setMessages(loadedMessages);
@@ -527,6 +578,25 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                     setUiComponents([]);
                     setSavedComponents([]);
                     setCanvasComponents([]);
+
+                    // Feature 014 (T024): rehydrate persistent step entries.
+                    // Live `chat_step` events for this chat will continue to
+                    // merge by step.id, so the order of REST + live arrival
+                    // does not matter.
+                    const loadedChatIdForSteps = (data.chat as Record<string, unknown>).id as string;
+                    if (tokenRef.current && loadedChatIdForSteps) {
+                        fetchChatSteps(tokenRef.current, loadedChatIdForSteps)
+                            .then((steps) => {
+                                setChatSteps((prev) => {
+                                    const map: Record<string, ChatStep> = {};
+                                    for (const s of steps) map[s.id] = s;
+                                    return { ...prev, [loadedChatIdForSteps]: map };
+                                });
+                            })
+                            .catch((err) => {
+                                console.warn("Failed to rehydrate chat steps", err);
+                            });
+                    }
 
                     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
                         wsRef.current.send(JSON.stringify({
@@ -1550,6 +1620,7 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         agents,
         toolsAvailableForUser,
         chatStatus,
+        chatSteps,
         uiComponents,
         messages,
         sendMessage,

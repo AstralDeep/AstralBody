@@ -1,18 +1,19 @@
 ---
 name: knowledge_index
 type: index
-updated_at: "2026-05-01T18:30:43+00:00"
+updated_at: "2026-05-06T17:47:49+00:00"
 ---
 
 # Knowledge Index
 
 ## Techniques
 - [etf_tracker_techniques](techniques/etf_tracker.md) (confidence: 0.515)
-- [general_techniques](techniques/general.md) (confidence: 0.51)
+- [general_techniques](techniques/general.md) (confidence: 0.55)
 - [grant_budgets_techniques](techniques/grant_budgets.md) (confidence: 0.52)
-- [grants_techniques](techniques/grants.md) (confidence: 0.585)
-- [medical_techniques](techniques/medical.md) (confidence: 0.515)
-- [weather_techniques](techniques/weather.md) (confidence: 0.525)
+- [grants_techniques](techniques/grants.md) (confidence: 0.505)
+- [medical_techniques](techniques/medical.md) (confidence: 0.51)
+- [pig_latin_translator_techniques](techniques/pig_latin_translator.md) (confidence: 0.525)
+- [weather_techniques](techniques/weather.md) (confidence: 0.52)
 
 ## Patterns
 - [tool_patterns](patterns/tool_patterns.md)
@@ -23,4 +24,5 @@ updated_at: "2026-05-01T18:30:43+00:00"
 - [grant_budgets_capabilities](capabilities/grant_budgets.md)
 - [grants_capabilities](capabilities/grants.md)
 - [medical_capabilities](capabilities/medical.md)
+- [pig_latin_translator_capabilities](capabilities/pig_latin_translator.md)
 - [weather_capabilities](capabilities/weather.md)

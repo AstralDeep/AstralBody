@@ -102,6 +102,8 @@ function Shell({ ws, auth, user, openers }: ShellProps) {
             <FloatingChatPanel
               messages={ws.messages}
               chatStatus={ws.chatStatus}
+              /* Feature 014 — persistent step trail for the active chat. */
+              chatSteps={ws.activeChatId ? ws.chatSteps[ws.activeChatId] : undefined}
               onSendMessage={ws.sendMessage}
               onCancelTask={ws.cancelTask}
               isConnected={ws.isConnected}
