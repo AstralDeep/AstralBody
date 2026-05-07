@@ -15,7 +15,8 @@ import os
 import sys
 import logging
 import re
-from typing import Dict, List, Optional, Any
+from enum import Enum
+from typing import Any, Dict, List, NamedTuple, Optional
 from dataclasses import asdict
 
 import websockets
@@ -39,6 +40,9 @@ from orchestrator.tool_security import ToolSecurityAnalyzer
 from orchestrator.compaction import compact_messages
 from orchestrator.hooks import HookManager, HookEvent, HookContext
 from orchestrator.task_state import TaskManager, TaskState
+from orchestrator.concurrency_cap import ConcurrencyCap
+
+import uuid as _uuid
 
 from shared.protocol import (
     Message, MCPRequest, MCPResponse, UIEvent, UIRender, UIUpdate,
@@ -130,11 +134,72 @@ _LEAKED_TOOL_CALL_PATTERNS = [
     ),
     # Mistral / generic bracket form
     re.compile(r"\[TOOL_CALLS\].*?\[/TOOL_CALLS\]", re.IGNORECASE | re.DOTALL),
+    # DeepSeek DSML format — note the FULLWIDTH vertical bar (U+FF5C), not regular |.
+    # Matches both the wrapper <｜DSML｜tool_calls>...</｜DSML｜tool_calls> and
+    # standalone <｜DSML｜invoke ...></｜DSML｜invoke> blocks.
+    re.compile(r"<｜DSML｜tool_calls>.*?</｜DSML｜tool_calls>", re.DOTALL),
+    re.compile(r"<｜DSML｜invoke[^>]*>.*?</｜DSML｜invoke>", re.DOTALL),
     # Stray dangling open tags with no close
     re.compile(r"<\|?tool_call\|?>", re.IGNORECASE),
     re.compile(r"<\|tool_calls_section_(?:begin|end)\|>", re.IGNORECASE),
     re.compile(r"\[/?TOOL_CALLS\]", re.IGNORECASE),
+    re.compile(r"</?｜DSML｜[^>]*>"),
 ]
+
+
+# Patterns used to extract the tool NAME from a leak match — independent of
+# which wrapper pattern fired. Used by Orchestrator._diagnose_leaked_tool_calls
+# to translate raw markup into a friendly user-facing alert.
+_LEAK_TOOL_NAME_EXTRACTORS = [
+    # DeepSeek DSML invoke tag: <｜DSML｜invoke name="tool_name">
+    re.compile(r'<｜DSML｜invoke\s+name="([^"]+)"'),
+    # Llama / OpenAI-style JSON tool calls embedded in leak markup
+    re.compile(r'"name"\s*:\s*"([^"]+)"'),
+    # Qwen <tool_call><name>tool_name</name>...
+    re.compile(r"<name>\s*([A-Za-z_][A-Za-z0-9_]*)\s*</name>"),
+    # Mistral [TOOL_CALLS] [{"name": "tool_name", ...}] — covered by the JSON pattern above
+    # Bare function-name=... forms occasionally seen in mistral
+    re.compile(r"function\s*[:=]\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)"),
+]
+
+
+def _tool_names_from_leak(content: str) -> List[str]:
+    """Extract distinct tool names from leaked tool-call markup.
+
+    Tries every pattern in :data:`_LEAK_TOOL_NAME_EXTRACTORS` against the
+    full ``content`` blob. Returns names in first-seen order with duplicates
+    removed. Returns an empty list when no recognizable tool name is found —
+    in that case the caller falls back to silently stripping the markup.
+    """
+    if not content:
+        return []
+    seen: List[str] = []
+    seen_set: set = set()
+    for pat in _LEAK_TOOL_NAME_EXTRACTORS:
+        for match in pat.finditer(content):
+            name = match.group(1)
+            if name and name not in seen_set:
+                seen_set.add(name)
+                seen.append(name)
+    return seen
+
+
+# Diagnostic statuses returned by Orchestrator._diagnose_disabled_tool.
+# Defined at module scope so tests can import them by name.
+class ToolDiagnosticStatus(str, Enum):
+    ENABLED = "enabled"
+    DISABLED_IN_PICKER = "disabled_in_picker"
+    AGENT_DISABLED_BY_USER = "agent_disabled_by_user"
+    PERMISSION_DENIED = "permission_denied"
+    SECURITY_BLOCKED = "security_blocked"
+    UNKNOWN_TOOL = "unknown_tool"
+
+
+class ToolDiagnostic(NamedTuple):
+    status: ToolDiagnosticStatus
+    agent_id: Optional[str]
+    agent_display_name: Optional[str]
+    reason: Optional[str]
 
 
 def _sanitize_text_response(content: str) -> str:
@@ -175,6 +240,10 @@ class Orchestrator:
         self.agent_capabilities: Dict[str, List[Dict]] = {}
         self.pending_requests: Dict[str, asyncio.Future] = {}
         self.pending_ui_sockets: Dict[str, Any] = {}  # request_id -> UI websocket (for progress forwarding)
+        # 015-external-ai-agents: per-(user, agent) concurrency cap for long-running tools (FR-026).
+        self.concurrency_cap = ConcurrencyCap(max_per_user_agent=3)
+        # Maps cap_job_id -> (user_id, agent_id) so terminal ToolProgress can release the right slot.
+        self._pending_cap_entries: Dict[str, tuple] = {}
         self.cancelled_sessions: Dict[str, bool] = {}  # websocket id -> cancelled flag
         self._chat_locks: Dict[int, asyncio.Lock] = {}  # per-websocket lock for chat serialization
         self._registered_events: Dict[int, asyncio.Event] = {}  # gate non-register messages until auth completes
@@ -698,13 +767,34 @@ class Orchestrator:
                 req_id = msg.metadata.get("request_id", "")
                 ui_ws = self.pending_ui_sockets.get(req_id)
                 if ui_ws:
-                    await self._safe_send(ui_ws, json.dumps({
+                    forward_payload = {
                         "type": "tool_progress",
                         "tool_name": msg.tool_name,
                         "agent_id": msg.agent_id,
                         "message": msg.message,
                         "percentage": msg.percentage,
-                    }))
+                    }
+                    # 015: surface phase + terminal flag + result so the UI can render the
+                    # final outcome of long-running jobs without an extra round-trip.
+                    phase = msg.metadata.get("phase")
+                    if phase:
+                        forward_payload["phase"] = phase
+                    if msg.metadata.get("terminal"):
+                        forward_payload["terminal"] = True
+                    result_md = msg.metadata.get("result")
+                    if result_md is not None:
+                        forward_payload["result"] = result_md
+                    await self._safe_send(ui_ws, json.dumps(forward_payload))
+
+                # 015-external-ai-agents: release the concurrency-cap slot when the
+                # upstream job reaches a terminal state (FR-026 / FR-027 / FR-017).
+                cap_job_id = msg.metadata.get("cap_job_id", "")
+                phase = msg.metadata.get("phase", "")
+                if cap_job_id and phase in ("completed", "failed", "status_unknown"):
+                    entry = self._pending_cap_entries.pop(cap_job_id, None)
+                    if entry:
+                        u_id, a_id = entry
+                        await self.concurrency_cap.release(u_id, a_id, cap_job_id)
 
             # 001-tool-stream-ui: forward streaming tool chunks to subscribers
             # via StreamManager. Gated on the feature flag — when off, agents
@@ -2477,12 +2567,17 @@ COMPONENT UPDATE RULES:
                     # which is what users see when they disable all
                     # agents and the LLM still tries to invoke a tool.
                     raw_content = llm_msg.content or ""
+                    # Inspect the raw markup BEFORE stripping so we can name
+                    # the tool the model wanted (DSML / OpenAI-leak / Qwen /
+                    # Mistral / etc.) and surface a friendly disabled-tool
+                    # alert. See Orchestrator._diagnose_leaked_tool_calls.
+                    leak_alerts = self._diagnose_leaked_tool_calls(raw_content, user_id, chat_id)
                     content = _sanitize_text_response(raw_content)
                     if content != raw_content.strip():
                         logger.warning(
                             "Stripped leaked tool-call tokens from text response "
-                            "(chat_id=%s user_id=%s is_text_only=%s raw_len=%d clean_len=%d)",
-                            chat_id, user_id, is_text_only, len(raw_content), len(content),
+                            "(chat_id=%s user_id=%s is_text_only=%s raw_len=%d clean_len=%d alerts=%d)",
+                            chat_id, user_id, is_text_only, len(raw_content), len(content), len(leak_alerts),
                         )
                     if not content:
                         content = "I'm not sure how to help with that."
@@ -2594,24 +2689,28 @@ COMPONENT UPDATE RULES:
                     logger.info("LLM provided final response. conversation complete.")
                     
                     if parsed_components:
-                        response_components = parsed_components
-
                         if self._is_text_only_components(parsed_components):
-                            # Text-only components -- route to chat panel only
+                            # Text-only components -- route to chat panel only.
+                            # Persisted history matches what the user sees so a
+                            # chat reload re-renders the same alert.
+                            response_components = list(leak_alerts) + list(parsed_components)
                             await self.send_ui_render(websocket, response_components, target="chat")
                         else:
-                            # Rich UI components -- send to canvas + chat summary
+                            # Rich UI components -- canvas gets the parsed components,
+                            # chat gets the leak alerts + Analysis card. The persisted
+                            # message includes BOTH so reload shows the canvas + alerts.
                             await self._send_or_replace_components(
-                                websocket, response_components, chat_id, user_id=user_id
+                                websocket, parsed_components, chat_id, user_id=user_id
                             )
-                            chat_summary = [
+                            chat_summary = list(leak_alerts) + [
                                 Card(title="Analysis", content=[
                                     Text(content=content, variant="markdown")
                                 ]).to_json()
                             ]
                             await self.send_ui_render(websocket, chat_summary, target="chat")
+                            response_components = list(leak_alerts) + list(parsed_components)
                     else:
-                        response_components = [
+                        response_components = list(leak_alerts) + [
                             Card(title="Analysis", content=[
                                 Text(content=content, variant="markdown")
                             ]).to_json()
@@ -3109,6 +3208,228 @@ COMPONENT UPDATE RULES:
     MAX_RETRIES = 3
     RETRY_BACKOFF = [1.0, 2.0, 4.0]  # exponential backoff
 
+    def _find_tool_owner(self, tool_name: str) -> Optional[str]:
+        """Return the agent_id that owns ``tool_name`` (any registered agent), or None.
+
+        Searches every entry in ``self.agent_cards`` regardless of filter state —
+        the goal is to identify the owner so we can name it in the disabled-tool
+        alert, not to gate dispatch.
+        """
+        if not tool_name:
+            return None
+        for agent_id, card in self.agent_cards.items():
+            for skill in getattr(card, "skills", []) or []:
+                if getattr(skill, "id", None) == tool_name:
+                    return agent_id
+        return None
+
+    def _diagnose_disabled_tool(
+        self,
+        tool_name: str,
+        user_id: Optional[str],
+        chat_id: Optional[str],
+    ) -> ToolDiagnostic:
+        """Determine why ``tool_name`` may be unavailable for ``user_id`` in ``chat_id``.
+
+        Mirrors the filter stack in handle_chat_message's tool-list build
+        (orchestrator.py around lines 2080–2140). Priority order — first match wins:
+        UNKNOWN_TOOL > AGENT_DISABLED_BY_USER > SECURITY_BLOCKED > PERMISSION_DENIED >
+        DISABLED_IN_PICKER > ENABLED.
+        """
+        agent_id = self._find_tool_owner(tool_name)
+        if not agent_id:
+            return ToolDiagnostic(
+                status=ToolDiagnosticStatus.UNKNOWN_TOOL,
+                agent_id=None,
+                agent_display_name=None,
+                reason=None,
+            )
+        card = self.agent_cards.get(agent_id)
+        agent_display = (
+            getattr(card, "name", None) or agent_id if card is not None else agent_id
+        )
+
+        # 1) User has disabled the whole agent.
+        if user_id:
+            try:
+                disabled = set(self.history.db.get_user_disabled_agents(user_id))
+            except Exception:  # pragma: no cover — defensive
+                disabled = set()
+            if agent_id in disabled:
+                return ToolDiagnostic(
+                    status=ToolDiagnosticStatus.AGENT_DISABLED_BY_USER,
+                    agent_id=agent_id,
+                    agent_display_name=agent_display,
+                    reason=None,
+                )
+
+        # 2) System-blocked (proactive security review).
+        flags = getattr(self, "security_flags", {}).get(agent_id, {}) or {}
+        flag = flags.get(tool_name) or {}
+        if flag.get("blocked"):
+            return ToolDiagnostic(
+                status=ToolDiagnosticStatus.SECURITY_BLOCKED,
+                agent_id=agent_id,
+                agent_display_name=agent_display,
+                reason=flag.get("reason"),
+            )
+
+        # 3) Permission / scope denial.
+        if user_id:
+            try:
+                allowed = self.tool_permissions.is_tool_allowed(user_id, agent_id, tool_name)
+            except Exception:  # pragma: no cover — defensive
+                allowed = True
+            if not allowed:
+                return ToolDiagnostic(
+                    status=ToolDiagnosticStatus.PERMISSION_DENIED,
+                    agent_id=agent_id,
+                    agent_display_name=agent_display,
+                    reason=None,
+                )
+
+        # 4) Per-chat tool picker.
+        if user_id and chat_id:
+            try:
+                bound_agent_id = self.history.db.get_chat_agent(chat_id)
+            except Exception:  # pragma: no cover — defensive
+                bound_agent_id = None
+            if bound_agent_id is not None:
+                try:
+                    saved = self.history.db.get_user_tool_selection(user_id, bound_agent_id)
+                except Exception:  # pragma: no cover — defensive
+                    saved = None
+                if saved is not None and len(saved) > 0 and tool_name not in saved:
+                    return ToolDiagnostic(
+                        status=ToolDiagnosticStatus.DISABLED_IN_PICKER,
+                        agent_id=agent_id,
+                        agent_display_name=agent_display,
+                        reason=None,
+                    )
+
+        return ToolDiagnostic(
+            status=ToolDiagnosticStatus.ENABLED,
+            agent_id=agent_id,
+            agent_display_name=agent_display,
+            reason=None,
+        )
+
+    @staticmethod
+    def _alert_for_disabled_tool(diag: ToolDiagnostic, tool_name: str) -> Alert:
+        """Render a user-facing Alert explaining why ``tool_name`` was unavailable.
+
+        Variants follow existing conventions: 'warning' for things the user
+        can self-correct (picker, agent toggle, permission), 'error' for
+        admin-blocked or unknown-tool states, 'info' for the surprising
+        ENABLED-but-format-mismatch case (only reachable from the leak path).
+        """
+        agent_label = diag.agent_display_name or diag.agent_id or "an installed agent"
+        if diag.status is ToolDiagnosticStatus.DISABLED_IN_PICKER:
+            return Alert(
+                message=(
+                    f"The assistant tried to use the **{tool_name}** tool "
+                    f"(from the **{agent_label}** agent), but that tool is "
+                    f"turned off in your tool picker for this chat. "
+                    f"Re-enable it in the picker to use it."
+                ),
+                variant="warning",
+                title="Tool disabled",
+            )
+        if diag.status is ToolDiagnosticStatus.AGENT_DISABLED_BY_USER:
+            return Alert(
+                message=(
+                    f"The assistant tried to use the **{tool_name}** tool, "
+                    f"but the **{agent_label}** agent is disabled. "
+                    f"Open Agents settings and turn it on to use this tool."
+                ),
+                variant="warning",
+                title="Agent disabled",
+            )
+        if diag.status is ToolDiagnosticStatus.PERMISSION_DENIED:
+            return Alert(
+                message=(
+                    f"The assistant tried to use the **{tool_name}** tool "
+                    f"(from the **{agent_label}** agent), but it is restricted "
+                    f"by permissions. Open the agent's permissions panel and "
+                    f"grant the right scope."
+                ),
+                variant="warning",
+                title="Tool restricted",
+            )
+        if diag.status is ToolDiagnosticStatus.SECURITY_BLOCKED:
+            reason = diag.reason or "system policy"
+            return Alert(
+                message=(
+                    f"The assistant tried to use the **{tool_name}** tool, "
+                    f"but it is system-blocked: {reason}. An administrator "
+                    f"must unblock it before it can be used."
+                ),
+                variant="error",
+                title="Tool blocked",
+            )
+        if diag.status is ToolDiagnosticStatus.UNKNOWN_TOOL:
+            return Alert(
+                message=(
+                    f"The assistant tried to use a tool named **{tool_name}**, "
+                    f"but no installed agent provides it. The model may have "
+                    f"hallucinated the name — try rephrasing your request."
+                ),
+                variant="error",
+                title="Unknown tool",
+            )
+        # ENABLED — only reachable from the leak path (not from the dispatch
+        # gate, which short-circuits before this is rendered).
+        return Alert(
+            message=(
+                f"The assistant emitted tool-call markup that this orchestrator "
+                f"doesn't recognize. The **{tool_name}** tool exists and is "
+                f"enabled — try switching to a model that uses native tool "
+                f"calling, or configure your LLM endpoint to emit OpenAI-format "
+                f"tool calls."
+            ),
+            variant="info",
+            title="Unrecognized tool-call format",
+        )
+
+    def _diagnose_leaked_tool_calls(
+        self,
+        content: str,
+        user_id: Optional[str],
+        chat_id: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        """Inspect ``content`` for leaked tool-call markup and return one Alert
+        (as a serialized component dict) per distinct tool name found.
+
+        Only returns alerts for tool names actually parsed out of the markup —
+        if the leak regex matches but no recognizable tool name can be
+        extracted, returns an empty list (the existing strip behavior remains
+        the only mitigation for that case).
+        """
+        if not content:
+            return []
+        # Quick pre-filter: only walk extractors when at least one leak pattern fired.
+        if not any(p.search(content) for p in _LEAKED_TOOL_CALL_PATTERNS):
+            return []
+        names = _tool_names_from_leak(content)
+        if not names:
+            return []
+        alerts: List[Dict[str, Any]] = []
+        for tool_name in names:
+            diag = self._diagnose_disabled_tool(tool_name, user_id, chat_id)
+            alert = self._alert_for_disabled_tool(diag, tool_name)
+            alerts.append(alert.to_json())
+        return alerts
+
+    def _is_long_running_tool(self, agent_id: Optional[str], tool_name: str) -> bool:
+        """Return True if the agent's card declares this tool as long-running (FR-026)."""
+        if not agent_id:
+            return False
+        card = self.agent_cards.get(agent_id)
+        if not card:
+            return False
+        md = getattr(card, "metadata", {}) or {}
+        return tool_name in (md.get("long_running_tools") or [])
+
     async def execute_single_tool(self, websocket, tool_call, tool_to_agent: Dict, chat_id: str = None, user_id: str = None) -> Optional[MCPResponse]:
         """Execute a single tool call and render its UI components. Returns the Result object."""
         tool_name = tool_call.function.name
@@ -3178,6 +3499,27 @@ COMPONENT UPDATE RULES:
                 "LLM_MODEL": session_llm.model,
             }
 
+        # 5th gate (015): when no `agent_id` was resolved via `tool_to_agent` —
+        # which happens because the tool was filtered out at chat-time tool-list
+        # construction — see whether the tool actually EXISTS on a registered
+        # agent and surface a friendly disabled-tool alert. This catches the
+        # case where the model emitted a call for a tool the user disabled in
+        # the picker (or whose owning agent they disabled wholesale).
+        if not agent_id and tool_name:
+            owner = self._find_tool_owner(tool_name)
+            if owner is not None:
+                diag = self._diagnose_disabled_tool(tool_name, user_id, chat_id)
+                alert = self._alert_for_disabled_tool(diag, tool_name)
+                logger.info(
+                    "Dispatch blocked by disabled-tool gate: tool=%s owner=%s status=%s user=%s chat=%s",
+                    tool_name, owner, diag.status.value, user_id, chat_id,
+                )
+                await self.send_ui_render(websocket, [alert.to_json()], target="chat")
+                return MCPResponse(
+                    error={"message": alert.message, "retryable": False},
+                    ui_components=[alert.to_json()],
+                )
+
         if not agent_id or (agent_id not in self.agents and agent_id not in self.a2a_clients):
             err_msg = f"No agent available for tool '{tool_name}'"
             await self.send_ui_render(websocket, [
@@ -3209,6 +3551,35 @@ COMPONENT UPDATE RULES:
             if hook_resp.action == "modify" and hook_resp.modified_args:
                 args = hook_resp.modified_args
 
+        # 015-external-ai-agents: concurrency cap for long-running tools (FR-026).
+        # Acquired here so a 4th concurrent attempt is rejected without ever
+        # touching the upstream service. Released either on dispatch error
+        # (below) or by the terminal-phase ToolProgress handler.
+        cap_job_id: Optional[str] = None
+        if user_id and agent_id and self._is_long_running_tool(agent_id, tool_name):
+            cap_job_id = f"cap_{tool_name}_{_uuid.uuid4().hex[:8]}"
+            acquired = await self.concurrency_cap.acquire(user_id, agent_id, cap_job_id)
+            if not acquired:
+                inflight = self.concurrency_cap.inflight_jobs(user_id, agent_id)
+                max_n = self.concurrency_cap.max_per_user_agent
+                err_msg = (
+                    f"You already have {max_n} jobs running on '{agent_id}'. "
+                    f"Wait for one to finish or cancel one before starting another. "
+                    f"(Running: {', '.join(inflight)})"
+                )
+                logger.info(
+                    "ConcurrencyCap rejected dispatch: user=%s agent=%s tool=%s",
+                    user_id, agent_id, tool_name,
+                )
+                alert = Alert(message=err_msg, variant="warning")
+                await self.send_ui_render(websocket, [alert.to_json()], target="chat")
+                return MCPResponse(
+                    error={"message": err_msg, "retryable": False},
+                    ui_components=[alert.to_json()],
+                )
+            args["_cap_job_id"] = cap_job_id
+            self._pending_cap_entries[cap_job_id] = (user_id, agent_id)
+
         # Audit: record the tool dispatch (in_progress → success/failure)
         from audit.hooks import ToolDispatchAudit
         claims = self.ui_sessions.get(websocket) if websocket is not None else None
@@ -3235,6 +3606,16 @@ COMPONENT UPDATE RULES:
                     result.correlation_id = _audit_ctx.correlation_id
                 except Exception:
                     pass
+
+        # 015-external-ai-agents: release cap if the dispatch errored or returned
+        # nothing — there will be no terminal ToolProgress to do it. Successful
+        # long-running starts keep the slot held; the JobPoller's terminal
+        # ToolProgress will release it via the handler in handle_agent_messages.
+        if cap_job_id and (result is None or (result is not None and result.error)):
+            try:
+                await self.concurrency_cap.release(user_id, agent_id, cap_job_id)
+            finally:
+                self._pending_cap_entries.pop(cap_job_id, None)
 
         # Hook: POST_TOOL_USE or POST_TOOL_FAILURE
         if flags.is_enabled("hook_system"):
