@@ -310,6 +310,17 @@ class CredentialListResponse(BaseModel):
     agent_name: str
     credential_keys: List[str] = Field(default_factory=list, description="Stored credential key names (no values)")
     required_credentials: List[Dict[str, Any]] = Field(default_factory=list, description="Credentials the agent declares it needs")
+    credential_test: Optional[str] = Field(
+        default=None,
+        description=(
+            "Verdict of the save-time credential probe. Present only when the agent exposes "
+            "a `_credentials_check` tool. One of: 'ok', 'auth_failed', 'unreachable', 'unexpected'."
+        ),
+    )
+    credential_test_detail: Optional[str] = Field(
+        default=None,
+        description="Human-readable explanation of a non-ok credential_test verdict.",
+    )
 
 
 class CredentialDeleteResponse(BaseModel):

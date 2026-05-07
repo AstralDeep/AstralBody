@@ -142,19 +142,42 @@ class BaseA2AAgent:
     def _init_crypto(self):
         """Initialize EC P-256 key pair for end-to-end credential decryption.
 
-        Key persistence order: file on disk > auto-generate.
-        The key file lives alongside the agent code in a data/ subdirectory.
+        Key resolution order:
+        1. ``AGENT_KEY_PATH`` env var (operator override).
+        2. Per-agent path under ``backend/data/agent_keys/<agent_id>.pem``.
+           ``backend/data/`` is bind-mounted from the host in the standard
+           docker-compose setup, so keys survive container recreation —
+           which is critical because all per-user credentials are ECIES-
+           encrypted to this key, and a regenerated key invalidates every
+           saved credential at once.
+        3. Legacy ``<agent_module>/data/agent_key.pem`` — only honored
+           when it already exists, for back-compat with existing installs.
+           Net-new keys never go there because the agent module dir is
+           inside the container's writable layer (not persisted).
         """
-        # Determine key path: prefer AGENT_KEY_PATH env var, else <agent_module>/data/agent_key.pem
-        key_path = os.getenv("AGENT_KEY_PATH")
-        if not key_path:
-            # Derive from the agent subclass's module location
-            agent_module = sys.modules.get(self.__class__.__module__)
-            if agent_module and hasattr(agent_module, "__file__") and agent_module.__file__:
-                agent_dir = os.path.dirname(os.path.abspath(agent_module.__file__))
-            else:
-                agent_dir = os.path.dirname(os.path.abspath(__file__))
-            key_path = os.path.join(agent_dir, "data", "agent_key.pem")
+        backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        central_path = os.path.join(
+            backend_dir, "data", "agent_keys", f"{self.agent_id or 'unknown'}.pem"
+        )
+        legacy_path = None
+        agent_module = sys.modules.get(self.__class__.__module__)
+        if agent_module and hasattr(agent_module, "__file__") and agent_module.__file__:
+            agent_dir = os.path.dirname(os.path.abspath(agent_module.__file__))
+            legacy_path = os.path.join(agent_dir, "data", "agent_key.pem")
+
+        env_path = os.getenv("AGENT_KEY_PATH")
+        if env_path:
+            key_path = env_path
+        elif os.path.exists(central_path):
+            key_path = central_path
+        elif legacy_path and os.path.exists(legacy_path):
+            key_path = legacy_path
+            logger.warning(
+                f"Loading legacy agent key from {legacy_path}; "
+                f"copy it to {central_path} so it survives container recreation."
+            )
+        else:
+            key_path = central_path
 
         if os.path.exists(key_path):
             self._private_key = load_private_key(key_path)
@@ -264,9 +287,25 @@ class BaseA2AAgent:
         path instead of the single-response path. The streaming path emits
         ``ToolStreamData`` chunks until the generator returns or is
         cancelled, then sends ``ToolStreamEnd``.
+
+        015-external-ai-agents: For ``tools/call`` we inject an
+        :class:`AgentRuntime` instance into ``arguments["_runtime"]`` so that
+        tools needing background work (long-running upstream jobs) can call
+        ``runtime.start_long_running_job(poll_fn)`` from synchronous code.
+        Tools that don't accept ``_runtime`` continue to ignore it (the MCP
+        server filters kwargs by signature).
         """
         self._logger.info(f"Processing MCP Request: {msg.method}")
         self._decrypt_credentials_if_needed(msg)
+        if msg.method == "tools/call" and msg.params is not None:
+            from shared.agent_runtime import AgentRuntime
+            args = msg.params.setdefault("arguments", {})
+            args["_runtime"] = AgentRuntime(
+                ws=ws,
+                msg=msg,
+                agent_id=self.agent_id,
+                loop=asyncio.get_running_loop(),
+            )
 
         # --- Streaming dispatch (001-tool-stream-ui) ---
         if (
@@ -538,13 +577,22 @@ class BaseA2AAgent:
         self._logger.info(f"ToolStreamCancel processed for {msg.stream_id}")
 
     def _decrypt_credentials_if_needed(self, msg: MCPRequest):
-        """Decrypt E2E-encrypted credentials in-place before tool dispatch."""
+        """Decrypt E2E-encrypted credentials in-place before tool dispatch.
+
+        If a saved credential cannot be decrypted (typically because the
+        agent's private key was regenerated since the credential was
+        saved), set ``_credentials_stale=True`` so tool code can surface
+        a friendly "please re-save" message instead of the generic "not
+        configured" one — the credentials *are* in the DB, they're just
+        unreadable by this agent process.
+        """
         args = msg.params.get("arguments") if msg.params else None
         if not args or not args.get("_credentials_encrypted"):
             return
 
         encrypted_creds = args.get("_credentials", {})
         plaintext_creds = {}
+        had_decrypt_failure = False
         for key, value in encrypted_creds.items():
             try:
                 if is_e2e_encrypted(value):
@@ -555,8 +603,11 @@ class BaseA2AAgent:
                     plaintext_creds[key] = value
             except Exception as e:
                 self._logger.error(f"Failed to decrypt credential '{key}': {e}")
+                had_decrypt_failure = True
 
         args["_credentials"] = plaintext_creds
+        if had_decrypt_failure:
+            args["_credentials_stale"] = True
         args.pop("_credentials_encrypted", None)
 
     # =========================================================================

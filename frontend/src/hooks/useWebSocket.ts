@@ -24,6 +24,9 @@ export interface RequiredCredential {
     key: string;
     label: string;
     required: boolean;
+    description?: string;
+    type?: string;
+    placeholder?: string;
 }
 
 export interface AgentMetadata {

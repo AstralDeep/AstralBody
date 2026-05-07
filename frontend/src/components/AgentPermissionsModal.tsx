@@ -730,7 +730,11 @@ export default function AgentPermissionsModal({
                                                         <div className="mt-1 ml-10 mr-1">
                                                             <input
                                                                 type="password"
-                                                                placeholder={isStored ? "Enter new value to update..." : `Enter ${cred.label}...`}
+                                                                placeholder={
+                                                                    isStored
+                                                                        ? "Enter new value to update..."
+                                                                        : (cred.placeholder || `Enter ${cred.label}...`)
+                                                                }
                                                                 value={credentialValues[cred.key] || ""}
                                                                 onChange={(e) => setCredentialValues(prev => ({ ...prev, [cred.key]: e.target.value }))}
                                                                 className="w-full px-3 py-1.5 text-xs bg-white/5 border border-white/10 rounded-md
