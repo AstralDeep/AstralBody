@@ -15,7 +15,7 @@ import json
 import os
 import time
 import logging
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import aiohttp
 import websockets as ws_client
@@ -898,12 +898,48 @@ async def set_agent_credentials(
     orch.credential_manager.set_bulk_credentials(user_id, agent_id, body.credentials)
     keys = orch.credential_manager.list_credential_keys(user_id, agent_id)
     required = getattr(card, 'metadata', {}).get("required_credentials", []) if hasattr(card, 'metadata') else []
-    return CredentialListResponse(
+    response = CredentialListResponse(
         agent_id=agent_id,
         agent_name=card.name,
         credential_keys=keys,
         required_credentials=required,
     )
+
+    # Save-time credential probe (FR-008): if the agent exposes a
+    # `_credentials_check` tool, invoke it immediately so the user gets a
+    # success/auth-failed/unreachable verdict back in the same response.
+    skill_names = {getattr(s, "name", None) for s in getattr(card, "skills", [])}
+    if "_credentials_check" in skill_names:
+        try:
+            creds = orch.credential_manager.get_agent_credentials_encrypted(user_id, agent_id)
+            args: Dict[str, Any] = {}
+            if creds:
+                args["_credentials"] = creds
+                args["_credentials_encrypted"] = True
+            mcp_resp = await orch._dispatch_tool_call(
+                agent_id=agent_id,
+                tool_name="_credentials_check",
+                args=args,
+                timeout=5.0,
+                ui_websocket=None,
+            )
+            verdict = "unreachable"
+            detail = None
+            if mcp_resp is None:
+                verdict, detail = "unreachable", "no response from agent"
+            elif mcp_resp.error:
+                verdict, detail = "unreachable", mcp_resp.error.get("message")
+            elif isinstance(mcp_resp.result, dict):
+                verdict = mcp_resp.result.get("credential_test", "unexpected")
+                detail = mcp_resp.result.get("detail")
+            response.credential_test = verdict
+            response.credential_test_detail = detail
+        except Exception as e:
+            # A failed probe must not block the credential save; surface it as unreachable.
+            response.credential_test = "unreachable"
+            response.credential_test_detail = f"Credential probe failed: {e}"
+
+    return response
 
 
 @agent_router.delete(
