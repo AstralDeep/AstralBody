@@ -50,12 +50,17 @@ class ExpressionEvaluator:
         'float': float,
         'str': str,
         'bool': bool,
+        'list': list,
+        'dict': dict,
+        'tuple': tuple,
+        'set': set,
         'len': len,
         'round': round,
         'abs': abs,
         'min': min,
         'max': max,
         'sum': sum,
+        'sorted': sorted,
         'math.sqrt': math.sqrt,
         'math.pow': math.pow,
         'math.exp': math.exp,
@@ -65,9 +70,13 @@ class ExpressionEvaluator:
         'math.tan': math.tan,
         'np.where': np.where,
     }
-    
-    # Allowed attributes (e.g., row.get)
-    ALLOWED_ATTRIBUTES = {'get', 'lower', 'upper', 'strip', 'replace', 'split', 'str', 'contains', 'where'}
+
+    # Allowed attributes (e.g., row.get, row.keys for schema introspection)
+    ALLOWED_ATTRIBUTES = {
+        'get', 'keys', 'values', 'items',
+        'lower', 'upper', 'strip', 'replace', 'split', 'startswith', 'endswith',
+        'str', 'contains', 'where',
+    }
     
     def __init__(self, expression: str, use_ast_validation: bool = True):
         """
@@ -135,12 +144,17 @@ class ExpressionEvaluator:
                 'float': float,
                 'str': str,
                 'bool': bool,
+                'list': list,
+                'dict': dict,
+                'tuple': tuple,
+                'set': set,
                 'len': len,
                 'round': round,
                 'abs': abs,
                 'min': min,
                 'max': max,
                 'sum': sum,
+                'sorted': sorted,
                 'math': math,
                 'np': np,
             },

@@ -194,6 +194,7 @@ def modify_data(
     csv_data: Optional[str] = None,
     filename: Optional[str] = None,
     file_path: Optional[str] = None,
+    file_handle: Optional[str] = None,
     output_format: Optional[str] = None,
     session_id: str = "default",
     user_id: str = "legacy",
@@ -204,7 +205,10 @@ def modify_data(
     Supports row-based calculations, conditional logic, and Excel file formats.
 
     Args:
-        csv_data: Raw CSV string data (optional if file_path is provided).
+        csv_data: Raw CSV string data (optional if file_path/file_handle is provided).
+        file_handle: AstralBody attachment_id for a CSV/Excel uploaded via the
+            chat composer. Resolved to a real on-disk path server-side; preferred
+            over file_path for chat-uploaded files.
         modifications: List of modifications to apply. Each modification can have:
             - action: "add_column", "update_column", "calculate_column"
             - name: Column name
@@ -219,6 +223,13 @@ def modify_data(
     """
     if modifications is None:
         modifications = []
+
+    if file_handle and not file_path:
+        try:
+            from shared.attachment_resolver import resolve_attachment_path
+            file_path = resolve_attachment_path(file_handle, user_id)
+        except ValueError as e:
+            return create_ui_response([Alert(message=str(e), variant="error")])
 
     try:
         # Determine input format
@@ -1355,12 +1366,13 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     "modify_data": {
         "function": modify_data,
         "scope": "tools:write",
-        "description": "Modify CSV/Excel data with basic CRUD operations like dropping columns as well as row-based calculations. Supports add_column, update_column, calculate_column, drop_column, rename_column, filter_rows, and sort_rows. IMPORTANT: If a 'file_path' is available in the chat context, you MUST use it instead of 'csv_data' to ensure the entire file is processed.",
+        "description": "Modify CSV/Excel data with basic CRUD operations like dropping columns as well as row-based calculations. Supports add_column, update_column, calculate_column, drop_column, rename_column, filter_rows, and sort_rows. For files uploaded via the chat composer, pass the attachment_id as 'file_handle'; for ad-hoc local paths use 'file_path'; for tiny pasted data use 'csv_data'. To inspect/analyze an uploaded file (instead of mutating it), use read_spreadsheet first.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "csv_data": {"type": "string", "description": "Raw CSV string data (use only for small/pasted data)"},
-                "file_path": {"type": "string", "description": "Absolute path to the CSV/Excel file on disk (MANDATORY for uploaded files)"},
+                "file_handle": {"type": "string", "description": "AstralBody attachment_id from the chat composer (preferred for uploaded files)"},
+                "file_path": {"type": "string", "description": "Absolute path to the CSV/Excel file on disk (use only when no file_handle is available)"},
                 "modifications": {
                     "type": "array",
                     "items": {
