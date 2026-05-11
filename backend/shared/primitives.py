@@ -81,6 +81,38 @@ class Input(Component):
 
 
 @dataclass
+class ParamPicker(Component):
+    """Interactive parameter form rendered as a card with form fields.
+
+    Each entry in ``fields`` is a dict of the shape::
+
+        {"name": "models_to_train",
+         "label": "Models to train",
+         "kind": "boolean"|"number"|"text"|"checklist"|"select",
+         "default": <starting value>,
+         "options": [...]  # for checklist/select
+         "help": "...",
+         "step": 1  # optional, for number kind
+        }
+
+    On submit the frontend interpolates ``submit_message_template`` with the
+    user's field values and sends the result as a chat message. Two
+    placeholder forms are supported:
+
+    * ``{field_name}`` — replaced with that field's value (JSON-encoded for
+      lists/dicts/bools).
+    * ``{__values_json__}`` — replaced with ``JSON.stringify`` of the entire
+      form state.
+    """
+    type: str = "param_picker"
+    title: str = ""
+    description: str = ""
+    fields: List[Dict[str, Any]] = field(default_factory=list)
+    submit_label: str = "Submit"
+    submit_message_template: str = ""
+
+
+@dataclass
 class Card(Component):
     type: str = "card"
     title: str = ""

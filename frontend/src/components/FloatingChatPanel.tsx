@@ -11,7 +11,7 @@
  * - Mobile bottom sheet layout
  * - Chat status indicator
  */
-import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
     Send, Bot, User, MessageSquare, Loader2,
@@ -275,8 +275,9 @@ export default function FloatingChatPanel({
 
     const bottomRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
-    const inputRef = useRef<HTMLInputElement>(null);
+    const inputRef = useRef<HTMLTextAreaElement>(null);
     const prevChatIdRef = useRef(activeChatId);
+    const toolPickerTriggerRef = useRef<HTMLButtonElement>(null);
 
     // Feature 010-fix-page-flash. Capture the message count at FIRST
     // RENDER so we can skip the entry animation for messages that are
@@ -346,6 +347,14 @@ export default function FloatingChatPanel({
         }
         prevChatIdRef.current = activeChatId;
     }, [activeChatId]);
+
+    // Auto-grow the chat textarea to fit its content; CSS max-h caps it.
+    useLayoutEffect(() => {
+        const el = inputRef.current;
+        if (!el) return;
+        el.style.height = "auto";
+        el.style.height = `${el.scrollHeight}px`;
+    }, [input, streamingTranscript, isRecording, isTranscribing]);
 
     // Filter messages to only show chat-targeted messages (text summaries) and user messages
     const chatMessages = messages.filter(msg => {
@@ -1091,10 +1100,20 @@ export default function FloatingChatPanel({
                                     accept={ACCEPT_ATTRIBUTE}
                                     multiple />
 
-                                <input type="text"
+                                <textarea
                                     ref={inputRef}
+                                    rows={1}
                                     value={isRecording || isTranscribing ? streamingTranscript || "" : input}
                                     onChange={(e) => { if (!isRecording && !isTranscribing) setInput(e.target.value); }}
+                                    onKeyDown={(e) => {
+                                        // Skip while IME composition is active so Enter commits the candidate
+                                        // instead of submitting the message.
+                                        if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+                                        if (e.key === "Enter" && !e.shiftKey) {
+                                            e.preventDefault();
+                                            e.currentTarget.form?.requestSubmit();
+                                        }
+                                    }}
                                     placeholder={
                                         isAgentUnavailable
                                             ? "This agent is no longer available."
@@ -1114,7 +1133,7 @@ export default function FloatingChatPanel({
                                         || isAgentUnavailable
                                     }
                                     data-tutorial-target="chat.input"
-                                    className="w-full py-2 bg-transparent text-xs text-white placeholder:text-astral-muted/50 focus:outline-none disabled:opacity-50"
+                                    className="w-full py-2 bg-transparent text-xs text-white placeholder:text-astral-muted/50 focus:outline-none disabled:opacity-50 resize-none overflow-y-auto max-h-[8rem] leading-5"
                                 />
 
                                 {canUseVoiceInput && (
@@ -1143,6 +1162,7 @@ export default function FloatingChatPanel({
                                 {showToolPicker && (
                                     <div className="relative flex-shrink-0">
                                         <button
+                                            ref={toolPickerTriggerRef}
                                             type="button"
                                             onClick={() => setToolPickerOpen(prev => !prev)}
                                             disabled={!isConnected || isAgentUnavailable}
@@ -1183,6 +1203,7 @@ export default function FloatingChatPanel({
                                             }}
                                             open={toolPickerOpen}
                                             onClose={() => setToolPickerOpen(false)}
+                                            triggerRef={toolPickerTriggerRef}
                                         />
                                     </div>
                                 )}

@@ -22,7 +22,13 @@ class ClassifyAgent(BaseA2AAgent):
     description = (
         "Trains and evaluates Random Forest classifiers on tabular CSV datasets via a "
         "user-configured CLASSify deployment. Each user supplies their own service URL "
-        "and API key; credentials never leave the user's session in plaintext."
+        "and API key; credentials never leave the user's session in plaintext. "
+        "Workflow: submit_dataset (returns column types) -> set_column_types -> "
+        "propose_training_config (renders an interactive picker for the user to choose "
+        "models and tune hyperparameters; the picker's Submit button triggers "
+        "start_training_job automatically) -> start_training_job. Do NOT call "
+        "read_spreadsheet or other file-reading tools before submit_dataset — the "
+        "CLASSify tools read and validate the CSV themselves."
     )
     skill_tags = ["ml", "classification", "training", "external"]
 
