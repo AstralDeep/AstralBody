@@ -25,8 +25,11 @@ import os
 import re
 import shutil
 import sys
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
+
+import pandas as pd
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
@@ -60,6 +63,26 @@ logger = logging.getLogger("ClassifyAgentMCPTools")
 AGENT_ID = "classify-1"
 
 LONG_RUNNING_TOOLS: Set[str] = {"start_training_job"}
+
+# In-process cache: report_uuid -> local CSV path captured at submit time. Lets
+# set_column_types re-read the dataset with pandas (for missing-value detection)
+# without forcing the LLM to re-resolve the file_handle. Bounded so a long-lived
+# agent process can't accumulate paths forever; oldest entries are evicted.
+_REPORT_PATHS: "OrderedDict[str, str]" = OrderedDict()
+_REPORT_PATHS_MAX = 256
+
+
+def _remember_report_path(report_uuid: str, local_path: str) -> None:
+    if not report_uuid or not local_path:
+        return
+    _REPORT_PATHS[report_uuid] = local_path
+    _REPORT_PATHS.move_to_end(report_uuid)
+    while len(_REPORT_PATHS) > _REPORT_PATHS_MAX:
+        _REPORT_PATHS.popitem(last=False)
+
+
+def _forget_report_path(report_uuid: str) -> None:
+    _REPORT_PATHS.pop(report_uuid, None)
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +279,11 @@ def submit_dataset(file_handle: str, **kwargs):
         column_types = column_types_block.get("data_types") if isinstance(column_types_block, dict) else {}
         if not isinstance(column_types, dict):
             column_types = {}
+        # Stash so set_column_types can re-read the CSV without the LLM
+        # needing to forward file_handle (the LLM tends to pass the display
+        # filename instead, which fails attachment resolution).
+        if report_uuid:
+            _remember_report_path(report_uuid, local_path)
         header_text = (
             f"Report UUID: `{report_uuid}`\n\n"
             f"Detected **{len(column_types)} column(s)**:"
@@ -280,31 +308,72 @@ def submit_dataset(file_handle: str, **kwargs):
         return _ui([Alert(message=_user_facing_error(e), variant="error")])
 
 
-def set_column_types(report_uuid: str, column_changes: List[Dict[str, Any]],
-                     class_column: Optional[str] = None, **kwargs):
+def set_column_types(report_uuid: str,
+                     file_handle: Optional[str] = None,
+                     class_column: Optional[str] = None,
+                     column_types: Optional[Dict[str, str]] = None,
+                     missing_strategy: str = "synthetic",
+                     fill_value: Any = None,
+                     excluded_columns: Optional[List[str]] = None,
+                     column_changes: Optional[List[Dict[str, Any]]] = None,
+                     **kwargs):
     """Apply column-type / missing-value / class-column choices to a submitted dataset.
 
-    ``column_changes`` is a list of per-column dicts of the shape:
-        {"column": "feature1", "data_type": "bool", "checked": True,
-         "missing": None | "synthetic" | "constant", "fill_value": None,
-         "class": True}   # optional, set on exactly one entry
+    Default (auto-build) path mirrors ``submission_example.startJob`` exactly:
+    re-reads the CSV via pandas, flags ``missing`` per-column when nulls are
+    present, marks the class column, and POSTs the resulting list. The LLM
+    only needs to forward ``file_handle`` and ``column_types`` from
+    ``submit_dataset``'s response plus the chosen ``class_column``.
 
-    Called after ``submit_dataset`` once the user has confirmed how each
-    column should be treated.
+    Escape hatch: pass a pre-built ``column_changes`` list to bypass the
+    pandas-driven build (useful for power-user overrides and round-trip tests).
     """
     try:
         client = _build_client(kwargs)
-        if not isinstance(column_changes, list):
-            raise ValueError("column_changes must be a list of per-column dicts.")
-        # Defensive: if the LLM passed class_column but didn't flag any entry,
-        # mark the matching one.
-        if class_column and not any(
-            isinstance(c, dict) and c.get("class") is True for c in column_changes
-        ):
-            for entry in column_changes:
-                if isinstance(entry, dict) and entry.get("column") == class_column:
+        if column_changes is not None:
+            if not isinstance(column_changes, list):
+                raise ValueError("column_changes must be a list of per-column dicts.")
+            if class_column and not any(
+                isinstance(c, dict) and c.get("class") is True for c in column_changes
+            ):
+                for entry in column_changes:
+                    if isinstance(entry, dict) and entry.get("column") == class_column:
+                        entry["class"] = True
+                        break
+        else:
+            if not class_column:
+                raise ValueError("class_column is required to auto-build column_changes.")
+            # Prefer the path stashed during submit_dataset; fall back to
+            # resolving file_handle only if the cache is cold (e.g., the agent
+            # process restarted between submit and set-column-types).
+            local_path = _REPORT_PATHS.get(report_uuid)
+            if not local_path:
+                if not file_handle:
+                    raise ValueError(
+                        "No local path on record for this report_uuid; call "
+                        "submit_dataset first, or pass the original file_handle."
+                    )
+                user_id = kwargs.get("user_id")
+                if not user_id:
+                    raise ValueError("user_id is required to resolve attachments.")
+                local_path = resolve_attachment_path(file_handle, user_id)
+            df = pd.read_csv(local_path)
+            if not isinstance(column_types, dict) or not column_types:
+                column_types = {c: "string" for c in df.columns}
+            excluded = set(excluded_columns or [])
+            column_changes = []
+            for col, dtype in column_types.items():
+                has_missing = bool(df[col].isnull().any()) if col in df.columns else False
+                entry = {
+                    "column": col,
+                    "data_type": dtype,
+                    "checked": col not in excluded,
+                    "missing": (missing_strategy if has_missing and missing_strategy != "none" else None),
+                    "fill_value": (fill_value if (has_missing and missing_strategy == "constant") else None),
+                }
+                if col == class_column:
                     entry["class"] = True
-                    break
+                column_changes.append(entry)
         resp = client.post(
             "/reports/set-column-changes",
             data={
@@ -428,33 +497,100 @@ def _make_status_poll(client: "ClassifyHttpClient", report_uuid: str):
 
 
 def start_training_job(report_uuid: str, class_column: str,
-                       options: Optional[List[Dict[str, Any]]] = None,
+                       models_to_train: Optional[List[str]] = None,
+                       parameter_overrides: Optional[Dict[str, Any]] = None,
+                       parameter_tune: bool = False,
                        supervised: bool = True,
-                       autodetermineclusters: bool = False, **kwargs):
+                       autodetermineclusters: bool = False,
+                       unsstate: Optional[int] = None,
+                       options: Optional[List[Dict[str, Any]]] = None,
+                       **kwargs):
     """Start a CLASSify training job and register the JobPoller.
 
     Returns immediately with the ``report_uuid`` and ``status: "started"``.
     The agent's :class:`JobPoller` posts ``tool_progress`` messages into the
     chat as the job runs and a terminal message with metrics on completion.
 
-    ``options`` is a list of ``{"name": ..., "value": ...}`` pairs the LLM
-    composes from the parameter set returned by ``get_ml_options`` (filtered
-    to the user's chosen models / overridden hyperparameters). The four
-    required entries (``report_uuid``, ``class_column``, ``supervised``,
-    ``autodetermineclusters``) are appended here so the LLM doesn't have to
-    remember them.
+    Default (auto-build) path mirrors ``submission_example.startJob``:
+    internally calls ``/reports/get-ml-opts``, filters ``train_group`` to
+    ``models_to_train``, uses upstream defaults for every other parameter
+    (forcing ``parameter_tune`` to False unless overridden in
+    ``parameter_overrides``), and appends the four script-required entries
+    (``report_uuid``, ``class_column``, ``supervised``, ``autodetermineclusters``)
+    using string ``"True"`` / ``"False"`` to match the script byte-for-byte.
+
+    ``unsstate`` is auto-derived from ``supervised`` when not specified:
+    empirical testing against classify.ai.uky.edu shows the live API returns
+    *clustering* parameters at ``unsstate=0`` and *supervised* parameters at
+    ``unsstate=1`` — the opposite of the example script's comment. Pass an
+    explicit ``unsstate`` only when working around further API drift.
+
+    Escape hatch: pass a pre-built ``options`` list to skip the internal
+    ``get-ml-opts`` call (the four required entries are still appended).
     """
     try:
         client = _build_client(kwargs)
-        args: List[Dict[str, Any]] = []
+        models_to_train = models_to_train or ["random_forest", "gradientboosting"]
+        overrides = parameter_overrides or {}
+        if unsstate is None:
+            unsstate = 1 if supervised else 0
         if options:
             if not isinstance(options, list):
                 raise ValueError("options must be a list of {'name','value'} dicts.")
-            args.extend(options)
+            args: List[Dict[str, Any]] = list(options)
+        else:
+            ml_opts_resp = client.get(
+                "/reports/get-ml-opts", params={"unsstate": int(unsstate)},
+            )
+            ml_opts_payload = _safe_json(ml_opts_resp) or {}
+            parameters = ml_opts_payload.get("parameters") or {}
+            logger.info(
+                "CLASSify start_training_job — /get-ml-opts(unsstate=%d) returned %d "
+                "parameter(s); train_group default=%r; models_to_train=%r; "
+                "supervised=%s",
+                int(unsstate), len(parameters),
+                (parameters.get("train_group") or {}).get("default") if isinstance(parameters.get("train_group"), dict) else None,
+                models_to_train, supervised,
+            )
+            args = []
+            for key, meta in parameters.items():
+                meta = meta if isinstance(meta, dict) else {}
+                if key == "train_group":
+                    for model in (meta.get("default") or []):
+                        if model in models_to_train:
+                            args.append({"name": key, "value": model})
+                else:
+                    if key in overrides:
+                        value = overrides[key]
+                    else:
+                        value = meta.get("default")
+                        if key == "parameter_tune":
+                            value = bool(parameter_tune)
+                    args.append({"name": key, "value": value})
+            # Defensive: if the upstream /get-ml-opts response didn't yield any
+            # train_group entries (response shape drift, model-name mismatch,
+            # or empty intersection with models_to_train), seed them directly
+            # from models_to_train so the upstream isn't asked to run a job
+            # with no models selected.
+            if not any(entry.get("name") == "train_group" for entry in args):
+                logger.warning(
+                    "CLASSify /get-ml-opts produced no usable train_group entries "
+                    "(upstream default=%r, requested=%r); falling back to "
+                    "models_to_train directly.",
+                    (parameters.get("train_group") or {}).get("default") if isinstance(parameters.get("train_group"), dict) else None,
+                    models_to_train,
+                )
+                for model in models_to_train:
+                    args.append({"name": "train_group", "value": model})
         args.append({"name": "report_uuid", "value": report_uuid})
         args.append({"name": "class_column", "value": class_column})
-        args.append({"name": "supervised", "value": bool(supervised)})
-        args.append({"name": "autodetermineclusters", "value": bool(autodetermineclusters)})
+        args.append({"name": "supervised", "value": "True" if supervised else "False"})
+        args.append({"name": "autodetermineclusters",
+                     "value": "True" if autodetermineclusters else "False"})
+        logger.info(
+            "CLASSify start_training_job — sending %d option(s) for report %s: %s",
+            len(args), report_uuid, [(e.get("name"), e.get("value")) for e in args],
+        )
         resp = client.post(
             "/reports/start-training-job",
             data={
@@ -478,6 +614,8 @@ def start_training_job(report_uuid: str, class_column: str,
                 "report_uuid": report_uuid,
                 "status": "started",
                 "class_column": class_column,
+                "models_to_train": models_to_train,
+                "parameter_overrides": overrides,
                 "upstream_response": payload,
                 "message": "Training started. Progress will appear here automatically.",
             },
@@ -615,6 +753,7 @@ def delete_dataset(report_uuid: str, **kwargs):
     try:
         client = _build_client(kwargs)
         resp = client.post("/reports/delete", data={"report_uuid": report_uuid})
+        _forget_report_path(report_uuid)
         payload = _safe_json(resp)
         return _ui(
             [Card(
@@ -655,7 +794,15 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
             "Upload a CSV dataset to CLASSify. Returns a report_uuid and the inferred "
             "column data types. Use the returned types to converse with the user about "
             "which column is the class, which to drop, and how to fill missing values "
-            "before calling set_column_types."
+            "before calling set_column_types. "
+            "DO NOT call read_spreadsheet, read_csv, or any other file-reading tool "
+            "before this — submit_dataset returns the column names and inferred types "
+            "directly, and set_column_types handles missing-value detection internally "
+            "via pandas. This is the FIRST step of the CLASSify pipeline; call it as "
+            "soon as the user provides a file_handle. file_handle should be the "
+            "attachment_id the upload mechanism gave you, NOT the display filename. "
+            "After this call, set_column_types only needs the report_uuid — the agent "
+            "remembers the file location automatically."
         ),
         "input_schema": {
             "type": "object",
@@ -672,10 +819,14 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     "set_column_types": {
         "function": set_column_types,
         "description": (
-            "Apply per-column data-type, missing-value, and class-column choices to a "
-            "submitted dataset. Call after the user has confirmed how each column should "
-            "be handled. Use the column_types returned by submit_dataset as the source of "
-            "names + default data types."
+            "Build and apply per-column data-type / missing-value / class-column choices to "
+            "a submitted dataset. Re-reads the CSV via pandas to detect which columns have "
+            "missing values (using the local path stashed during submit_dataset), then "
+            "defaults missing handling to 'synthetic' to mirror CLASSify's recommended "
+            "pipeline (submission_example.py). Pass column_types from submit_dataset's "
+            "response. Do NOT pass file_handle — the agent remembers it from submit_dataset "
+            "automatically. For advanced overrides, pass a hand-built column_changes list "
+            "to bypass automatic building."
         ),
         "input_schema": {
             "type": "object",
@@ -684,21 +835,45 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
                     "type": "string",
                     "description": "Report UUID returned by submit_dataset.",
                 },
-                "column_changes": {
-                    "type": "array",
-                    "description": "List of per-column config dicts. " + _COLUMN_CHANGE_ITEM_DESCRIPTION,
-                    "items": {"type": "object"},
-                },
                 "class_column": {
                     "type": "string",
+                    "description": "Name of the class column.",
+                },
+                "column_types": {
+                    "type": "object",
                     "description": (
-                        "Optional. Name of the class column. If provided and no entry in "
-                        "column_changes has 'class: true', the matching entry is flagged "
-                        "automatically."
+                        "data_types map from submit_dataset._data.column_types "
+                        "(e.g. {'col_a': 'integer', 'col_b': 'string'})."
+                    ),
+                    "additionalProperties": {"type": "string"},
+                },
+                "missing_strategy": {
+                    "type": "string",
+                    "enum": ["synthetic", "constant", "none"],
+                    "default": "synthetic",
+                    "description": (
+                        "How to handle missing cells in columns that contain nulls. "
+                        "'synthetic' is the script's default."
                     ),
                 },
+                "fill_value": {
+                    "description": "Used only when missing_strategy='constant'.",
+                },
+                "excluded_columns": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Columns to mark checked=False (drop from training).",
+                },
+                "column_changes": {
+                    "type": "array",
+                    "description": (
+                        "Optional escape hatch: a hand-built per-column list overrides "
+                        "automatic building. " + _COLUMN_CHANGE_ITEM_DESCRIPTION
+                    ),
+                    "items": {"type": "object"},
+                },
             },
-            "required": ["report_uuid", "column_changes"],
+            "required": ["report_uuid"],
         },
         "scope": "tools:write",
     },
@@ -724,7 +899,11 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     "start_training_job": {
         "function": start_training_job,
         "description": (
-            "Kick off CLASSify training on a previously-configured dataset. Returns the "
+            "Kick off CLASSify training on a previously-configured dataset. Internally "
+            "fetches /reports/get-ml-opts, filters 'train_group' to models_to_train, uses "
+            "upstream defaults for every other parameter (with parameter_tune forced to "
+            "False unless overridden), and appends the four script-required entries "
+            "(report_uuid, class_column, supervised, autodetermineclusters). Returns the "
             "report_uuid immediately and posts progress + final results into the chat "
             "automatically as the job runs."
         ),
@@ -733,14 +912,30 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "report_uuid": {"type": "string", "description": "Report UUID from submit_dataset."},
                 "class_column": {"type": "string", "description": "Name of the class column."},
-                "options": {
+                "models_to_train": {
                     "type": "array",
+                    "items": {"type": "string"},
+                    "default": ["random_forest", "gradientboosting"],
                     "description": (
-                        "List of {'name','value'} entries derived from get_ml_options. "
-                        "Names should be the parameter keys returned by get_ml_options, "
-                        "plus the model identifiers under 'train_group'."
+                        "Models to train; entries that appear in the upstream 'train_group' "
+                        "default list are emitted as separate options entries. Defaults to "
+                        "['random_forest', 'gradientboosting'] (script's default)."
                     ),
-                    "items": {"type": "object"},
+                },
+                "parameter_overrides": {
+                    "type": "object",
+                    "description": (
+                        "Sparse {param_name: value} map; missing keys use upstream defaults."
+                    ),
+                    "additionalProperties": True,
+                },
+                "parameter_tune": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Whether to enable CLASSify's parameter tuning. Default False to "
+                        "mirror the script."
+                    ),
                 },
                 "supervised": {
                     "type": "boolean",
@@ -752,8 +947,18 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
                     "description": "Only meaningful when supervised=False.",
                     "default": False,
                 },
+                "unsstate": {
+                    "type": "integer",
+                    "description": (
+                        "Optional get-ml-opts mode override. Auto-derived from "
+                        "'supervised' by default (1 for supervised, 0 for unsupervised) "
+                        "to match the live CLASSify deployment. Only set this if the "
+                        "deployment's API has drifted again."
+                    ),
+                },
             },
             "required": ["report_uuid", "class_column"],
+            "additionalProperties": False,
         },
         "scope": "tools:write",
     },

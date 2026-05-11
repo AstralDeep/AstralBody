@@ -18,7 +18,8 @@
  *  - An explicitly empty array ⇒ user has deselected everything; the
  *    parent must disable send (FR-021).
  */
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Wrench, RotateCcw, Info, Check, Bot } from "lucide-react";
 
 export interface ToolPickerTool {
@@ -62,6 +63,12 @@ export interface ToolPickerProps {
     open: boolean;
     /** Fires on outside-click / Escape so the parent can close the popover. */
     onClose: () => void;
+    /**
+     * Ref to the trigger button. The popover portals to `document.body` to
+     * escape the chat panel's `overflow-hidden`, so we anchor it manually
+     * using the trigger's bounding rect.
+     */
+    triggerRef?: React.RefObject<HTMLElement | null>;
 }
 
 /**
@@ -78,14 +85,31 @@ export default function ToolPicker({
     onReset,
     open,
     onClose,
+    triggerRef,
 }: ToolPickerProps): React.ReactElement | null {
     const popoverRef = useRef<HTMLDivElement | null>(null);
+    const [rect, setRect] = useState<DOMRect | null>(null);
 
-    // Outside-click closes the popover.
+    // Measure the trigger before paint so the portaled popover never flashes at (0,0).
+    useLayoutEffect(() => {
+        if (!open || !triggerRef?.current) {
+            setRect(null);
+            return;
+        }
+        setRect(triggerRef.current.getBoundingClientRect());
+    }, [open, triggerRef]);
+
+    // Outside-click closes the popover. Trigger clicks are excluded so the
+    // button's own onClick can toggle without this handler racing it closed.
     useEffect(() => {
         if (!open) return;
         const onClick = (e: MouseEvent) => {
-            if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+            const target = e.target as Node;
+            if (
+                popoverRef.current &&
+                !popoverRef.current.contains(target) &&
+                !triggerRef?.current?.contains(target)
+            ) {
                 onClose();
             }
         };
@@ -98,9 +122,24 @@ export default function ToolPicker({
             document.removeEventListener("mousedown", onClick);
             document.removeEventListener("keydown", onKeyDown);
         };
+    }, [open, onClose, triggerRef]);
+
+    // Close on scroll/resize — repositioning is unnecessary because the trigger
+    // lives in a non-scrolling input row, and closing is simpler than tracking
+    // a stale rect through layout changes.
+    useEffect(() => {
+        if (!open) return;
+        const close = () => onClose();
+        window.addEventListener("scroll", close, true);
+        window.addEventListener("resize", close);
+        return () => {
+            window.removeEventListener("scroll", close, true);
+            window.removeEventListener("resize", close);
+        };
     }, [open, onClose]);
 
     if (!open) return null;
+    if (typeof document === "undefined") return null;
 
     // Resolve the displayed checkbox state. When `selectedTools` is null
     // (default), every permitted tool renders checked — that mirrors
@@ -129,13 +168,28 @@ export default function ToolPicker({
         }
     };
 
-    return (
+    // Anchor to the trigger's top-right, 8px above it — matches the original
+    // `bottom-full right-0 mb-2` visual. Clamp height to space above the
+    // trigger so the list scrolls internally instead of running off-screen.
+    // When no triggerRef is provided (e.g., in unit tests), render visible at
+    // the default origin rather than masking the popover entirely.
+    const awaitingRect = !!triggerRef && !rect;
+    const popoverStyle: React.CSSProperties = {
+        top: rect ? rect.top - 8 : 0,
+        left: rect ? rect.right : 0,
+        transform: rect ? "translate(-100%, -100%)" : undefined,
+        maxHeight: rect ? Math.max(0, Math.min(384, rect.top - 16)) : 384,
+        visibility: awaitingRect ? "hidden" : "visible",
+    };
+
+    return createPortal(
         <div
             ref={popoverRef}
             data-testid="tool-picker-popover"
             role="dialog"
             aria-label="Select agents and tools for this chat"
-            className="absolute bottom-full right-0 mb-2 w-80 max-h-96 overflow-y-auto bg-astral-surface border border-white/10 rounded-xl shadow-2xl z-50 p-2"
+            style={popoverStyle}
+            className="fixed w-80 overflow-y-auto bg-astral-surface border border-white/10 rounded-xl shadow-2xl z-50 p-2"
         >
             <div className="flex items-center justify-between px-2 py-1.5 border-b border-white/5 mb-1">
                 <span className="text-xs font-medium text-white flex items-center gap-1.5">
@@ -281,6 +335,7 @@ export default function ToolPicker({
                     No tools selected — sending is disabled. Pick at least one tool or click Reset.
                 </div>
             )}
-        </div>
+        </div>,
+        document.body,
     );
 }

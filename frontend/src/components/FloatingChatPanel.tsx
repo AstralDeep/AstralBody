@@ -277,6 +277,7 @@ export default function FloatingChatPanel({
     const fileInputRef = useRef<HTMLInputElement>(null);
     const inputRef = useRef<HTMLTextAreaElement>(null);
     const prevChatIdRef = useRef(activeChatId);
+    const toolPickerTriggerRef = useRef<HTMLButtonElement>(null);
 
     // Feature 010-fix-page-flash. Capture the message count at FIRST
     // RENDER so we can skip the entry animation for messages that are
@@ -1161,6 +1162,7 @@ export default function FloatingChatPanel({
                                 {showToolPicker && (
                                     <div className="relative flex-shrink-0">
                                         <button
+                                            ref={toolPickerTriggerRef}
                                             type="button"
                                             onClick={() => setToolPickerOpen(prev => !prev)}
                                             disabled={!isConnected || isAgentUnavailable}
@@ -1201,6 +1203,7 @@ export default function FloatingChatPanel({
                                             }}
                                             open={toolPickerOpen}
                                             onClose={() => setToolPickerOpen(false)}
+                                            triggerRef={toolPickerTriggerRef}
                                         />
                                     </div>
                                 )}
