@@ -90,6 +90,55 @@ def test_get_ml_options_renders_card(rmock: HttpMock) -> None:
     assert result["_data"]["parameters"]["train_group"]["default"] == ["random_forest"]
 
 
+def test_get_ml_options_renders_parameter_table(rmock: HttpMock) -> None:
+    """Each parameter must become a row in a Table component, not a JSON dump."""
+    rmock.add("GET", ML_OPTS_URL, status=200, json={
+        "success": True,
+        "message": "",
+        "parameters": {
+            "parameter_tune": {
+                "type": "bool", "default": True,
+                "models": ["spectralclustering", "kmeans", "hdbscan"],
+                "help": "Perform hyperparameter tuning",
+            },
+            "num_clusters": {
+                "type": "int", "default": 2,
+                "models": ["spectralclustering", "kmeans"],
+                "help": "Number of clusters to use",
+            },
+        },
+    })
+    result = mcp_tools.get_ml_options(_credentials=GOOD_CREDS)
+    card = result["_ui_components"][0]
+    # Card.content holds [Text(header), Table(params)]
+    contents = card.get("content", [])
+    types = [c.get("type") for c in contents if isinstance(c, dict)]
+    assert "table" in types
+    table = next(c for c in contents if isinstance(c, dict) and c.get("type") == "table")
+    assert table["headers"] == ["Parameter", "Type", "Default", "Applies to", "Description"]
+    row_names = [r[0] for r in table["rows"]]
+    assert row_names == ["parameter_tune", "num_clusters"]
+    # Default rendering: bool → "True", int → "2"
+    defaults_by_name = {r[0]: r[2] for r in table["rows"]}
+    assert defaults_by_name["parameter_tune"] == "True"
+    assert defaults_by_name["num_clusters"] == "2"
+    # "Applies to" gets a truncation marker only when > 3 entries; both
+    # rows here have ≤ 3 models, so no "and N more" suffix.
+    applies_by_name = {r[0]: r[3] for r in table["rows"]}
+    assert "and " not in applies_by_name["parameter_tune"]
+
+
+def test_get_ml_options_falls_back_when_no_parameters(rmock: HttpMock) -> None:
+    """Unexpected response shape should fall back to the JSON-dump rendering."""
+    rmock.add("GET", ML_OPTS_URL, status=200, json={"success": False, "message": "no opts"})
+    result = mcp_tools.get_ml_options(_credentials=GOOD_CREDS)
+    contents = result["_ui_components"][0].get("content", [])
+    types = [c.get("type") for c in contents if isinstance(c, dict)]
+    # Fallback rendering uses only a Text component, no Table.
+    assert "table" not in types
+    assert "text" in types
+
+
 def test_get_ml_options_renders_alert_on_auth_failure(rmock: HttpMock) -> None:
     rmock.add("GET", ML_OPTS_URL, status=401, body=b"{}")
     result = mcp_tools.get_ml_options(_credentials=GOOD_CREDS)
@@ -122,6 +171,46 @@ def test_submit_dataset_returns_uuid(rmock: HttpMock, tmp_path) -> None:
     assert result["_data"]["column_types"] == {
         "a": "integer", "b": "integer", "target": "string",
     }
+
+
+def test_submit_dataset_writes_debug_copy(rmock: HttpMock, tmp_path, monkeypatch) -> None:
+    csv = tmp_path / "data.csv"
+    csv.write_text("a,b,target\n1,2,X\n")
+    rmock.add("POST", SUBMIT_URL, status=200, json={
+        "report_uuid": "rpt-1",
+        "column_types": {"data_types": {"a": "integer"}},
+    })
+    # Redirect /tmp to a sandbox so the test never touches the real /tmp.
+    sandbox = tmp_path / "fake_tmp"
+    from pathlib import Path as _Path
+    original_pathcls = mcp_tools.Path
+    monkeypatch.setattr(mcp_tools, "Path", lambda p: original_pathcls(str(sandbox)) if p == "/tmp" else original_pathcls(p))
+    result = mcp_tools.submit_dataset(
+        file_handle=str(csv), _credentials=GOOD_CREDS,
+        user_id="alice", session_id="chat-123",
+    )
+    saved = result["_data"]["debug_copy_path"]
+    assert saved is not None, "debug copy should be reported in _data"
+    assert _Path(saved).read_text() == "a,b,target\n1,2,X\n"
+    # Path layout: <sandbox>/alice/chat-123/data.csv
+    assert _Path(saved).parent.name == "chat-123"
+    assert _Path(saved).parent.parent.name == "alice"
+
+
+def test_submit_dataset_sanitizes_path_segments(tmp_path, monkeypatch) -> None:
+    """user_id / session_id containing path-traversal chars are scrubbed."""
+    sandbox = tmp_path / "fake_tmp"
+    from pathlib import Path as _Path
+    original_pathcls = mcp_tools.Path
+    monkeypatch.setattr(mcp_tools, "Path", lambda p: original_pathcls(str(sandbox)) if p == "/tmp" else original_pathcls(p))
+    saved = mcp_tools._save_debug_copy(
+        str(tmp_path / "src.csv") if (tmp_path / "src.csv").write_text("x") or True else None,
+        "src.csv", "../../etc", "..\\windows",
+    )
+    # Even though we passed traversal-y inputs, the sanitized segments stay
+    # within the sandbox.
+    assert saved is not None
+    assert ".." not in _Path(saved).as_posix()
 
 
 def test_submit_dataset_missing_user_id_returns_error(rmock: HttpMock, tmp_path) -> None:
@@ -271,11 +360,48 @@ def test_status_poll_unknown_status_treated_as_failure(rmock: HttpMock) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_get_results_renders_card(rmock: HttpMock) -> None:
+def test_get_results_renders_flat_metrics_table(rmock: HttpMock) -> None:
+    """Flat {metric: value} dict → two-column Metric|Value Table."""
     rmock.add("GET", RESULTS_URL, status=200, json={"accuracy": 0.85, "f1": 0.81})
     result = mcp_tools.get_results(report_uuid="rpt-1", _credentials=GOOD_CREDS)
     assert result["_ui_components"][0].get("variant") != "error"
     assert result["_data"]["results"] == {"accuracy": 0.85, "f1": 0.81}
+    card = result["_ui_components"][0]
+    contents = card.get("content", [])
+    table = next(c for c in contents if isinstance(c, dict) and c.get("type") == "table")
+    assert table["headers"] == ["Metric", "Value"]
+    rows_by_metric = {r[0]: r[1] for r in table["rows"]}
+    assert rows_by_metric["accuracy"] == "0.8500"
+    assert rows_by_metric["f1"] == "0.8100"
+
+
+def test_get_results_renders_per_model_table(rmock: HttpMock) -> None:
+    """Per-model dict → rows = models, columns = union of metric keys."""
+    rmock.add("GET", RESULTS_URL, status=200, json={
+        "random_forest":    {"accuracy": 0.92, "f1": 0.91},
+        "gradient_boosting": {"accuracy": 0.88, "f1": 0.87, "roc_auc": 0.95},
+    })
+    result = mcp_tools.get_results(report_uuid="rpt-1", _credentials=GOOD_CREDS)
+    card = result["_ui_components"][0]
+    contents = card.get("content", [])
+    table = next(c for c in contents if isinstance(c, dict) and c.get("type") == "table")
+    # Headers: "Model" + sorted metric keys (union).
+    assert table["headers"] == ["Model", "accuracy", "f1", "roc_auc"]
+    rows_by_model = {r[0]: r[1:] for r in table["rows"]}
+    assert rows_by_model["random_forest"][0] == "0.9200"
+    # Missing roc_auc for random_forest → rendered as the str of None ("None")
+    assert rows_by_model["random_forest"][2] in ("None", "—")
+
+
+def test_get_results_falls_back_on_non_dict(rmock: HttpMock) -> None:
+    """Non-JSON / non-dict response → falls back to Text dump (no Table)."""
+    rmock.add("GET", RESULTS_URL, status=200, body=b"raw text output, not JSON")
+    result = mcp_tools.get_results(report_uuid="rpt-1", _credentials=GOOD_CREDS)
+    card = result["_ui_components"][0]
+    contents = card.get("content", [])
+    types = [c.get("type") for c in contents if isinstance(c, dict)]
+    assert "table" not in types
+    assert "text" in types
 
 
 def test_get_output_log_truncates_long_text(rmock: HttpMock) -> None:

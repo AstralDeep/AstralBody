@@ -7,7 +7,7 @@
  * - Loading states (thinking, executing)
  * - Dynamic UI rendering for assistant responses via DynamicRenderer
  */
-import React, { useState, useRef, useEffect, useCallback } from "react";
+import React, { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Send, Bot, User, Sparkles, Loader2, ChevronLeft, Paperclip, UploadCloud, X, FileMinus, FileText, Square, Mic, Volume2, VolumeX, FolderOpen, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
@@ -97,6 +97,7 @@ export default function ChatInterface({
 
     const bottomRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
 
     // Voice Input (STT) state — real-time streaming via WebSocket
     const [isRecording, setIsRecording] = useState(false);
@@ -143,6 +144,14 @@ export default function ChatInterface({
         });
         return () => cancelAnimationFrame(frameId);
     }, [messages, chatStatus]);
+
+    // Auto-grow the chat textarea to fit its content; CSS max-h caps it.
+    useLayoutEffect(() => {
+        const el = textareaRef.current;
+        if (!el) return;
+        el.style.height = "auto";
+        el.style.height = `${el.scrollHeight}px`;
+    }, [input, streamingTranscript, isRecording, isTranscribing]);
 
     // Draft auto-save
     useEffect(() => {
@@ -891,10 +900,20 @@ export default function ChatInterface({
                                 multiple
                             />
 
-                            <input
-                                type="text"
+                            <textarea
+                                ref={textareaRef}
+                                rows={1}
                                 value={isRecording || isTranscribing ? streamingTranscript || "" : input}
                                 onChange={(e) => { if (!isRecording && !isTranscribing) setInput(e.target.value); }}
+                                onKeyDown={(e) => {
+                                    // Skip while IME composition is active so Enter commits the candidate
+                                    // instead of submitting the message.
+                                    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+                                    if (e.key === "Enter" && !e.shiftKey) {
+                                        e.preventDefault();
+                                        e.currentTarget.form?.requestSubmit();
+                                    }
+                                }}
                                 placeholder={
                                     isRecording
                                         ? "Listening..."
@@ -906,7 +925,8 @@ export default function ChatInterface({
                                 }
                                 disabled={!isConnected || isRecording || isTranscribing || (chatStatus.status !== "idle" && chatStatus.status !== "done")}
                                 className="w-full py-3 bg-transparent text-sm text-white placeholder:text-astral-muted/50
-                             focus:outline-none disabled:opacity-50"
+                             focus:outline-none disabled:opacity-50 resize-none overflow-y-auto
+                             max-h-[9rem] leading-6"
                                 id="chat-input"
                                 aria-label="Chat message input"
                             />
