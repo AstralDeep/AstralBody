@@ -309,6 +309,8 @@ function renderComponentInner(comp: AnyProps, index: number, onSaveComponent?: (
             return <RenderFileDownload key={key} {...baseProps} />;
         case "color_picker":
             return <RenderColorPicker key={key} {...baseProps} />;
+        case "param_picker":
+            return <RenderParamPicker key={key} {...baseProps} />;
         case "theme_apply":
             return <RenderThemeApply key={key} {...baseProps} />;
         default:
@@ -1053,6 +1055,243 @@ function RenderColorPicker({ label, color_key, value, _source_agent, _source_too
             </div>
             <span className="text-xs text-astral-muted font-mono">{currentValue}</span>
         </div>
+    );
+}
+
+// ── ParamPicker ────────────────────────────────────────────────────
+// Interactive form rendered from a backend ParamPicker primitive. Each
+// `fields` entry has a `kind` (boolean | number | text | checklist | select)
+// and a `default`; local state tracks edits, and the Submit button
+// interpolates `submit_message_template` and forwards it to the chat.
+type ParamPickerField = {
+    name: string;
+    label?: string;
+    kind: "boolean" | "number" | "text" | "checklist" | "select";
+    default?: unknown;
+    options?: unknown[];
+    help?: string;
+    step?: number;
+};
+
+function _formatPlaceholderValue(value: unknown): string {
+    if (value === null || value === undefined) return "null";
+    if (typeof value === "string") return value;
+    return JSON.stringify(value);
+}
+
+function RenderParamPicker({
+    title,
+    description,
+    fields,
+    submit_label,
+    submit_message_template,
+    onSendMessage,
+    _source_agent,
+    _source_tool,
+}: AnyProps) {
+    const { isToolAllowed } = useAgentPermissions();
+    const allowed = isToolAllowed(_source_agent || "", _source_tool || "");
+    const fieldList: ParamPickerField[] = Array.isArray(fields) ? (fields as ParamPickerField[]) : [];
+
+    const initialState: Record<string, unknown> = React.useMemo(() => {
+        const s: Record<string, unknown> = {};
+        for (const f of fieldList) {
+            s[f.name] = f.default;
+        }
+        return s;
+    }, [fieldList]);
+
+    const [state, setState] = useState<Record<string, unknown>>(initialState);
+    const [submitted, setSubmitted] = useState(false);
+
+    const setField = (name: string, value: unknown) => {
+        setState((prev) => ({ ...prev, [name]: value }));
+    };
+
+    const handleSubmit = () => {
+        if (!allowed || submitted) return;
+        const template = typeof submit_message_template === "string" ? submit_message_template : "";
+        const message = template
+            .replace(/\{__values_json__\}/g, JSON.stringify(state, null, 2))
+            .replace(/\{([a-zA-Z0-9_]+)\}/g, (_m, name) => {
+                if (name in state) return _formatPlaceholderValue(state[name]);
+                return `{${name}}`;
+            });
+        if (onSendMessage) {
+            onSendMessage(message);
+            setSubmitted(true);
+        }
+    };
+
+    return (
+        <div className={`bg-white/5 rounded-lg border border-white/10 p-4 my-2 ${!allowed ? "opacity-40 grayscale" : ""}`}>
+            {title ? <div className="text-base font-semibold text-astral-text mb-1">{title}</div> : null}
+            {description ? <div className="text-sm text-astral-muted mb-3 whitespace-pre-wrap">{description}</div> : null}
+            <div className="flex flex-col gap-3 max-h-[28rem] overflow-y-auto pr-1">
+                {fieldList.map((f) => (
+                    <ParamPickerRow
+                        key={f.name}
+                        field={f}
+                        value={state[f.name]}
+                        onChange={(v) => setField(f.name, v)}
+                        disabled={!allowed || submitted}
+                    />
+                ))}
+            </div>
+            <div className="mt-4 flex items-center justify-end gap-2">
+                {submitted ? (
+                    <span className="text-xs text-astral-muted">Submitted — see chat for the training job.</span>
+                ) : null}
+                <button
+                    type="button"
+                    onClick={handleSubmit}
+                    disabled={!allowed || submitted}
+                    title={!allowed ? "This tool's permissions have been revoked" : undefined}
+                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors bg-astral-primary hover:bg-astral-primary/80 text-white ${(!allowed || submitted) ? "opacity-40 cursor-not-allowed" : ""}`}
+                >
+                    {submit_label || "Submit"}
+                </button>
+            </div>
+        </div>
+    );
+}
+
+function ParamPickerRow({
+    field,
+    value,
+    onChange,
+    disabled,
+}: {
+    field: ParamPickerField;
+    value: unknown;
+    onChange: (v: unknown) => void;
+    disabled: boolean;
+}) {
+    const label = field.label || field.name;
+    const help = field.help || "";
+
+    if (field.kind === "boolean") {
+        const checked = Boolean(value);
+        return (
+            <label className="flex items-start gap-3 text-sm">
+                <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={(e) => onChange(e.target.checked)}
+                    disabled={disabled}
+                    className="mt-1 h-4 w-4 rounded border-white/20 bg-white/10"
+                />
+                <div className="flex-1">
+                    <div className="text-astral-text font-medium">{label}</div>
+                    {help ? <div className="text-xs text-astral-muted">{help}</div> : null}
+                </div>
+            </label>
+        );
+    }
+
+    if (field.kind === "number") {
+        const numValue = typeof value === "number" ? value : (value === null || value === undefined ? "" : Number(value));
+        return (
+            <label className="flex flex-col gap-1 text-sm">
+                <span className="text-astral-text font-medium">{label}</span>
+                {help ? <span className="text-xs text-astral-muted">{help}</span> : null}
+                <input
+                    type="number"
+                    value={numValue === "" ? "" : String(numValue)}
+                    step={field.step ?? 1}
+                    onChange={(e) => {
+                        const raw = e.target.value;
+                        if (raw === "") {
+                            onChange(null);
+                        } else {
+                            const n = Number(raw);
+                            onChange(Number.isFinite(n) ? n : raw);
+                        }
+                    }}
+                    disabled={disabled}
+                    className="rounded bg-white/10 border border-white/10 px-2 py-1 text-astral-text w-40"
+                />
+            </label>
+        );
+    }
+
+    if (field.kind === "checklist") {
+        const options: string[] = Array.isArray(field.options) ? field.options.map((o) => String(o)) : [];
+        const selected: string[] = Array.isArray(value) ? (value as unknown[]).map((v) => String(v)) : [];
+        const toggle = (opt: string) => {
+            if (selected.includes(opt)) {
+                onChange(selected.filter((s) => s !== opt));
+            } else {
+                onChange([...selected, opt]);
+            }
+        };
+        return (
+            <div className="flex flex-col gap-1 text-sm">
+                <span className="text-astral-text font-medium">{label}</span>
+                {help ? <span className="text-xs text-astral-muted">{help}</span> : null}
+                {options.length === 0 ? (
+                    <span className="text-xs text-astral-muted italic">(no options provided)</span>
+                ) : (
+                    <div className="flex flex-wrap gap-2 mt-1">
+                        {options.map((opt) => {
+                            const isSel = selected.includes(opt);
+                            return (
+                                <button
+                                    key={opt}
+                                    type="button"
+                                    onClick={() => toggle(opt)}
+                                    disabled={disabled}
+                                    className={`px-2 py-1 rounded text-xs border transition-colors ${
+                                        isSel
+                                            ? "bg-astral-primary/30 border-astral-primary text-white"
+                                            : "bg-white/5 border-white/10 text-astral-muted hover:bg-white/10"
+                                    } ${disabled ? "opacity-50 cursor-not-allowed" : ""}`}
+                                >
+                                    {opt}
+                                </button>
+                            );
+                        })}
+                    </div>
+                )}
+            </div>
+        );
+    }
+
+    if (field.kind === "select") {
+        const options: string[] = Array.isArray(field.options) ? field.options.map((o) => String(o)) : [];
+        const strVal = value === null || value === undefined ? "" : String(value);
+        return (
+            <label className="flex flex-col gap-1 text-sm">
+                <span className="text-astral-text font-medium">{label}</span>
+                {help ? <span className="text-xs text-astral-muted">{help}</span> : null}
+                <select
+                    value={strVal}
+                    onChange={(e) => onChange(e.target.value)}
+                    disabled={disabled}
+                    className="rounded bg-white/10 border border-white/10 px-2 py-1 text-astral-text w-60"
+                >
+                    {options.map((opt) => (
+                        <option key={opt} value={opt}>{opt}</option>
+                    ))}
+                </select>
+            </label>
+        );
+    }
+
+    // text (default fallback)
+    const strVal = value === null || value === undefined ? "" : String(value);
+    return (
+        <label className="flex flex-col gap-1 text-sm">
+            <span className="text-astral-text font-medium">{label}</span>
+            {help ? <span className="text-xs text-astral-muted">{help}</span> : null}
+            <input
+                type="text"
+                value={strVal}
+                onChange={(e) => onChange(e.target.value)}
+                disabled={disabled}
+                className="rounded bg-white/10 border border-white/10 px-2 py-1 text-astral-text w-full"
+            />
+        </label>
     );
 }
 
