@@ -520,6 +520,94 @@ def test_start_training_job_falls_back_when_models_dont_match_upstream(
     assert train_group_values == ["random_forest"]
 
 
+def test_propose_training_config_returns_param_picker(rmock: HttpMock) -> None:
+    """The form should include one field per upstream parameter, plus the two
+    top-level toggles (__supervised__, __autodetermineclusters__)."""
+    rmock.add("GET", ML_OPTS_URL, status=200, json={
+        "parameters": {
+            "train_group": {"type": "string",
+                            "default": ["random_forest", "gradientboosting", "xgboost"]},
+            "parameter_tune": {"type": "bool", "default": True, "help": "Tune?"},
+            "n_iter": {"type": "int", "default": 100, "help": "Iterations"},
+            "loss": {"type": "string", "default": "squared_error"},
+            "clustering_parameter_goal": {
+                "type": "string",
+                "default": ["silhouette_score", "calinski_harabasz_score"],
+            },
+        },
+    })
+    result = mcp_tools.propose_training_config(
+        report_uuid="rpt-pp", class_column="target",
+        _credentials=GOOD_CREDS,
+    )
+    component = result["_ui_components"][0]
+    assert component["type"] == "param_picker"
+    assert component["submit_label"] == "Start training"
+    assert "rpt-pp" in component["submit_message_template"]
+    assert "{train_group}" in component["submit_message_template"]
+    assert "{__values_json__}" in component["submit_message_template"]
+
+    by_name = {f["name"]: f for f in component["fields"]}
+    assert by_name["__supervised__"]["kind"] == "boolean"
+    assert by_name["__supervised__"]["default"] is True
+    assert by_name["__autodetermineclusters__"]["kind"] == "boolean"
+    assert by_name["__autodetermineclusters__"]["default"] is False
+
+    # train_group special-cased: options = upstream list, default = pre-selected
+    # script defaults (intersected with what upstream allows).
+    assert by_name["train_group"]["kind"] == "checklist"
+    assert by_name["train_group"]["options"] == ["random_forest", "gradientboosting", "xgboost"]
+    assert by_name["train_group"]["default"] == ["random_forest", "gradientboosting"]
+
+    # parameter_tune is a boolean even though upstream default is True
+    assert by_name["parameter_tune"]["kind"] == "boolean"
+    assert by_name["parameter_tune"]["default"] is True
+
+    # n_iter is a number with the upstream default
+    assert by_name["n_iter"]["kind"] == "number"
+    assert by_name["n_iter"]["default"] == 100
+
+    # loss is a free-form string field
+    assert by_name["loss"]["kind"] == "text"
+    assert by_name["loss"]["default"] == "squared_error"
+
+    # Non-train_group list defaults become checklists with default == options
+    assert by_name["clustering_parameter_goal"]["kind"] == "checklist"
+    assert by_name["clustering_parameter_goal"]["options"] == \
+        ["silhouette_score", "calinski_harabasz_score"]
+    assert by_name["clustering_parameter_goal"]["default"] == \
+        ["silhouette_score", "calinski_harabasz_score"]
+
+
+def test_propose_training_config_uses_unsstate_1_when_supervised(rmock: HttpMock) -> None:
+    rmock.add("GET", ML_OPTS_URL, status=200, json={
+        "parameters": {"train_group": {"default": ["random_forest"]}},
+    })
+    mcp_tools.propose_training_config(
+        report_uuid="rpt", class_column="target",
+        _credentials=GOOD_CREDS,
+    )
+    ml_calls = [c for c in rmock.calls if c.get("url") == ML_OPTS_URL]
+    assert ml_calls[0].get("params") == {"unsstate": 1}
+
+
+def test_propose_training_config_handles_empty_parameters(rmock: HttpMock) -> None:
+    rmock.add("GET", ML_OPTS_URL, status=200, json={"parameters": {}})
+    result = mcp_tools.propose_training_config(
+        report_uuid="rpt", class_column="target",
+        _credentials=GOOD_CREDS,
+    )
+    # No params → cannot build a useful form → return an error Alert instead
+    # of an empty picker the user could submit by accident.
+    assert result["_ui_components"][0]["variant"] == "error"
+
+
+def test_propose_training_config_registered_as_read_scope() -> None:
+    entry = mcp_tools.TOOL_REGISTRY["propose_training_config"]
+    assert entry["scope"] == "tools:read"
+    assert entry["function"] is mcp_tools.propose_training_config
+
+
 def test_start_training_job_supervised_uses_unsstate_1(rmock: HttpMock) -> None:
     """Live CLASSify returns clustering params at unsstate=0 and supervised
     params at unsstate=1 (opposite of the script's comment). For supervised
@@ -710,6 +798,7 @@ def test_tool_registry_has_required_entries() -> None:
         "submit_dataset",
         "set_column_types",
         "get_ml_options",
+        "propose_training_config",
         "start_training_job",
         "get_job_status",
         "get_results",

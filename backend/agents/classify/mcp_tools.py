@@ -44,7 +44,7 @@ from shared.external_http import (
     ServiceUnreachableError,
     normalize_url,
 )
-from shared.primitives import Alert, Card, Table, Text
+from shared.primitives import Alert, Card, ParamPicker, Table, Text
 
 
 def _ui(components, data=None):
@@ -624,6 +624,140 @@ def start_training_job(report_uuid: str, class_column: str,
         return _ui([Alert(message=_user_facing_error(e), variant="error")])
 
 
+def _humanize_param_name(name: str) -> str:
+    if not name:
+        return ""
+    return name.replace("_", " ").strip().capitalize()
+
+
+def _classify_field_kind(default: Any) -> str:
+    """Pick a ParamPicker field kind based on the upstream default's type."""
+    if isinstance(default, bool):
+        return "boolean"
+    if isinstance(default, (int, float)):
+        return "number"
+    if isinstance(default, list):
+        return "checklist"
+    return "text"
+
+
+_TRAIN_GROUP_DEFAULTS = ["random_forest", "gradientboosting"]
+
+
+def propose_training_config(report_uuid: str, class_column: str,
+                            supervised: bool = True,
+                            autodetermineclusters: bool = False,
+                            unsstate: Optional[int] = None,
+                            **kwargs):
+    """Render an interactive ParamPicker with every hyperparameter from
+    ``/reports/get-ml-opts``. Submitting the form posts a chat message that
+    asks the LLM to dispatch ``start_training_job`` with the chosen values.
+
+    Use this between ``set_column_types`` and ``start_training_job`` so the
+    user can review and adjust training options in a single form instead of
+    answering a stream of clarification questions in chat.
+    """
+    try:
+        client = _build_client(kwargs)
+        if unsstate is None:
+            unsstate = 1 if supervised else 0
+        ml_opts_resp = client.get(
+            "/reports/get-ml-opts", params={"unsstate": int(unsstate)},
+        )
+        ml_opts_payload = _safe_json(ml_opts_resp) or {}
+        parameters = ml_opts_payload.get("parameters") or {}
+        if not isinstance(parameters, dict) or not parameters:
+            return _ui([Alert(
+                message=(
+                    f"CLASSify returned no hyperparameters for unsstate={int(unsstate)}. "
+                    "Cannot build a configuration form."
+                ),
+                variant="error",
+            )])
+
+        fields: List[Dict[str, Any]] = [
+            {
+                "name": "__supervised__",
+                "label": "Supervised learning",
+                "kind": "boolean",
+                "default": bool(supervised),
+                "help": "Off = unsupervised clustering.",
+            },
+            {
+                "name": "__autodetermineclusters__",
+                "label": "Auto-determine cluster count",
+                "kind": "boolean",
+                "default": bool(autodetermineclusters),
+                "help": "Only meaningful when supervised is off.",
+            },
+        ]
+
+        for name, meta in parameters.items():
+            meta = meta if isinstance(meta, dict) else {}
+            default = meta.get("default")
+            help_text = str(meta.get("help") or "")
+            entry: Dict[str, Any] = {
+                "name": name,
+                "label": _humanize_param_name(name),
+                "help": help_text,
+            }
+            if name == "train_group":
+                allowed = default if isinstance(default, list) else []
+                preselected = [m for m in _TRAIN_GROUP_DEFAULTS if m in allowed]
+                if not preselected:
+                    preselected = list(allowed[:2])
+                entry["kind"] = "checklist"
+                entry["options"] = list(allowed)
+                entry["default"] = preselected
+                entry["label"] = "Models to train"
+            elif isinstance(default, list):
+                entry["kind"] = "checklist"
+                entry["options"] = list(default)
+                entry["default"] = list(default)
+            else:
+                entry["kind"] = _classify_field_kind(default)
+                entry["default"] = default
+                if entry["kind"] == "number" and isinstance(default, float):
+                    entry["step"] = 0.01
+            fields.append(entry)
+
+        submit_message_template = (
+            "Please call start_training_job with the following arguments "
+            "(chosen via the parameter picker UI):\n"
+            f"- report_uuid: {report_uuid!r}\n"
+            f"- class_column: {class_column!r}\n"
+            "- models_to_train: {train_group}\n"
+            "- supervised: {__supervised__}\n"
+            "- autodetermineclusters: {__autodetermineclusters__}\n"
+            "- All other settings (every form field except train_group, "
+            "__supervised__, __autodetermineclusters__) go into "
+            "parameter_overrides as a dict:\n"
+            "{__values_json__}\n"
+        )
+
+        return _ui(
+            [ParamPicker(
+                title=f"Configure training for {report_uuid}",
+                description=(
+                    f"Review the {len(parameters)} hyperparameter(s) CLASSify "
+                    f"will use. Adjust any value, then click '{('Start training')}' "
+                    "to launch the job. You can also describe changes in chat."
+                ),
+                fields=fields,
+                submit_label="Start training",
+                submit_message_template=submit_message_template,
+            )],
+            data={
+                "report_uuid": report_uuid,
+                "class_column": class_column,
+                "unsstate": int(unsstate),
+                "parameter_count": len(parameters),
+            },
+        )
+    except (ExternalHttpError, ValueError) as e:
+        return _ui([Alert(message=_user_facing_error(e), variant="error")])
+
+
 def get_job_status(report_uuid: str, **kwargs):
     """Synchronously probe the status of a CLASSify job by report_uuid."""
     try:
@@ -961,6 +1095,44 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
             "additionalProperties": False,
         },
         "scope": "tools:write",
+    },
+    "propose_training_config": {
+        "function": propose_training_config,
+        "description": (
+            "Render an interactive parameter-picker form so the user can review and "
+            "adjust every CLASSify hyperparameter (from /reports/get-ml-opts) before "
+            "training. Submitting the form (Start training button) emits a chat "
+            "message that triggers start_training_job with the user's choices. "
+            "Call this AFTER set_column_types and BEFORE start_training_job — it lets "
+            "the user pick models and tune hyperparameters interactively in one step "
+            "instead of via a long Q&A in chat."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "report_uuid": {"type": "string", "description": "Report UUID from submit_dataset."},
+                "class_column": {"type": "string", "description": "Name of the class column."},
+                "supervised": {
+                    "type": "boolean",
+                    "description": "Default True. Off = unsupervised clustering.",
+                    "default": True,
+                },
+                "autodetermineclusters": {
+                    "type": "boolean",
+                    "description": "Only meaningful when supervised is False.",
+                    "default": False,
+                },
+                "unsstate": {
+                    "type": "integer",
+                    "description": (
+                        "Optional get-ml-opts mode override; auto-derived from supervised."
+                    ),
+                },
+            },
+            "required": ["report_uuid", "class_column"],
+            "additionalProperties": False,
+        },
+        "scope": "tools:read",
     },
     "get_job_status": {
         "function": get_job_status,
