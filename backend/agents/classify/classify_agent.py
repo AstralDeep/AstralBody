@@ -47,7 +47,7 @@ class ClassifyAgent(BaseA2AAgent):
         # 015-external-ai-agents — tools the orchestrator must subject to the
         # FR-026 concurrency cap. Each acquires a slot on dispatch and releases
         # it when the agent's JobPoller emits a terminal ToolProgress.
-        "long_running_tools": ["train_classifier", "retest_model"],
+        "long_running_tools": ["start_training_job"],
     }
 
     def __init__(self, port: int = None):
