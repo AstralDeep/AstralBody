@@ -39,7 +39,7 @@ from shared.external_http import (
     ServiceUnreachableError,
     normalize_url,
 )
-from shared.primitives import Alert, Card, Text
+from shared.primitives import Alert, Card, Table, Text
 
 
 def _ui(components, data=None):
@@ -189,13 +189,18 @@ def submit_dataset(file_handle: str, **kwargs):
         column_types = column_types_block.get("data_types") if isinstance(column_types_block, dict) else {}
         if not isinstance(column_types, dict):
             column_types = {}
-        summary_lines = [f"Report UUID: {report_uuid}", f"Detected {len(column_types)} columns:"]
-        for col, dtype in column_types.items():
-            summary_lines.append(f"  • {col}: {dtype}")
+        header_text = (
+            f"Report UUID: `{report_uuid}`\n\n"
+            f"Detected **{len(column_types)} column(s)**:"
+        )
+        columns_table = Table(
+            headers=["Column", "Detected type"],
+            rows=[[col, dtype] for col, dtype in column_types.items()],
+        )
         return _ui(
             [Card(
                 title=f"Dataset uploaded: {filename}",
-                content=[Text(content="\n".join(summary_lines))],
+                content=[Text(content=header_text), columns_table],
             )],
             data={
                 "report_uuid": report_uuid,
