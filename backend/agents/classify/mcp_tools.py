@@ -520,17 +520,22 @@ def start_training_job(report_uuid: str, class_column: str,
     using string ``"True"`` / ``"False"`` to match the script byte-for-byte.
 
     ``unsstate`` is auto-derived from ``supervised`` when not specified:
-    empirical testing against classify.ai.uky.edu shows the live API returns
-    *clustering* parameters at ``unsstate=0`` and *supervised* parameters at
-    ``unsstate=1`` — the opposite of the example script's comment. Pass an
-    explicit ``unsstate`` only when working around further API drift.
+    ``1`` for supervised, ``0`` for unsupervised — matches both the live
+    classify.ai.uky.edu deployment and the published API docs. Pass an
+    explicit ``unsstate`` only when working around API drift.
+
+    ``parameter_goal`` is special-cased: if the upstream response includes a
+    ``parameter_goal`` entry whose meta dict is keyed by the available goal
+    names (e.g. ``{'f1_macro': ..., 'precision_macro': ..., ...}``), the
+    caller-supplied value from ``parameter_overrides`` is validated against
+    those keys, falling back to ``'f1_macro'``.
 
     Escape hatch: pass a pre-built ``options`` list to skip the internal
     ``get-ml-opts`` call (the four required entries are still appended).
     """
     try:
         client = _build_client(kwargs)
-        models_to_train = models_to_train or ["random_forest", "gradientboosting"]
+        models_to_train = models_to_train or ["randomforest", "gradientboosting"]
         overrides = parameter_overrides or {}
         if unsstate is None:
             unsstate = 1 if supervised else 0
@@ -559,6 +564,10 @@ def start_training_job(report_uuid: str, class_column: str,
                     for model in (meta.get("default") or []):
                         if model in models_to_train:
                             args.append({"name": key, "value": model})
+                elif key == "parameter_goal":
+                    requested = overrides.get("parameter_goal", "f1_macro")
+                    value = requested if requested in meta else "f1_macro"
+                    args.append({"name": key, "value": value})
                 else:
                     if key in overrides:
                         value = overrides[key]
@@ -641,7 +650,7 @@ def _classify_field_kind(default: Any) -> str:
     return "text"
 
 
-_TRAIN_GROUP_DEFAULTS = ["random_forest", "gradientboosting"]
+_TRAIN_GROUP_DEFAULTS = ["randomforest", "gradientboosting"]
 
 
 def propose_training_config(report_uuid: str, class_column: str,
@@ -710,6 +719,15 @@ def propose_training_config(report_uuid: str, class_column: str,
                 entry["options"] = list(allowed)
                 entry["default"] = preselected
                 entry["label"] = "Models to train"
+            elif name == "parameter_goal" and "default" not in meta:
+                option_keys = [k for k in meta.keys() if k not in ("help", "type")]
+                entry["kind"] = "select"
+                entry["options"] = option_keys
+                entry["default"] = (
+                    "f1_macro" if "f1_macro" in option_keys
+                    else (option_keys[0] if option_keys else None)
+                )
+                entry["label"] = "Parameter goal"
             elif isinstance(default, list):
                 entry["kind"] = "checklist"
                 entry["options"] = list(default)
@@ -1049,11 +1067,15 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
                 "models_to_train": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "default": ["random_forest", "gradientboosting"],
+                    "default": ["randomforest", "gradientboosting"],
                     "description": (
                         "Models to train; entries that appear in the upstream 'train_group' "
                         "default list are emitted as separate options entries. Defaults to "
-                        "['random_forest', 'gradientboosting'] (script's default)."
+                        "['randomforest', 'gradientboosting'] (script's default). "
+                        "Supervised models: randomforest, gradientboosting, xgboost, "
+                        "histgradientboosting, bagging, neuralnetwork, tabpfn, sgdclassifier, "
+                        "logisticregression, kneighbors. Unsupervised: spectralclustering, "
+                        "hdbscan, kmeans."
                     ),
                 },
                 "parameter_overrides": {
