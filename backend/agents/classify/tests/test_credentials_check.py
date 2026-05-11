@@ -92,11 +92,11 @@ def test_credentials_check_partial_creds() -> None:
 
 
 def test_get_ml_options_renders_card(rmock: HttpMock) -> None:
-    rmock.add("GET", ML_OPTS_URL, status=200, json={"parameters": {"train_group": {"default": ["random_forest"]}}})
+    rmock.add("GET", ML_OPTS_URL, status=200, json={"parameters": {"train_group": {"default": ["randomforest"]}}})
     result = mcp_tools.get_ml_options(_credentials=GOOD_CREDS)
     assert "_ui_components" in result
     assert result["_ui_components"][0].get("variant") != "error"
-    assert result["_data"]["parameters"]["train_group"]["default"] == ["random_forest"]
+    assert result["_data"]["parameters"]["train_group"]["default"] == ["randomforest"]
 
 
 def test_get_ml_options_renders_parameter_table(rmock: HttpMock) -> None:
@@ -453,7 +453,7 @@ def test_start_training_job_auto_filters_train_group(rmock: HttpMock) -> None:
         "parameters": {
             "train_group": {
                 "type": "string",
-                "default": ["random_forest", "gradientboosting", "xgboost"],
+                "default": ["randomforest", "gradientboosting", "xgboost"],
             },
             "parameter_tune": {"type": "bool", "default": True},
             "num_estimators": {"type": "int", "default": 100},
@@ -468,7 +468,7 @@ def test_start_training_job_auto_filters_train_group(rmock: HttpMock) -> None:
     sent_options = json.loads(rmock.calls[-1]["data"]["options"])
 
     train_group_entries = [e for e in sent_options if e["name"] == "train_group"]
-    assert [e["value"] for e in train_group_entries] == ["random_forest", "gradientboosting"]
+    assert [e["value"] for e in train_group_entries] == ["randomforest", "gradientboosting"]
 
     names_to_values = {e["name"]: e["value"] for e in sent_options if e["name"] != "train_group"}
     assert names_to_values["parameter_tune"] is False
@@ -496,7 +496,7 @@ def test_start_training_job_falls_back_when_train_group_intersection_empty(
     )
     sent_options = json.loads(rmock.calls[-1]["data"]["options"])
     train_group_values = [e["value"] for e in sent_options if e["name"] == "train_group"]
-    assert train_group_values == ["random_forest", "gradientboosting"]
+    assert train_group_values == ["randomforest", "gradientboosting"]
 
 
 def test_start_training_job_falls_back_when_models_dont_match_upstream(
@@ -512,12 +512,12 @@ def test_start_training_job_falls_back_when_models_dont_match_upstream(
     rmock.add("POST", START_JOB_URL, status=200, json={})
     mcp_tools.start_training_job(
         report_uuid="rpt-9", class_column="target",
-        models_to_train=["random_forest"],
+        models_to_train=["randomforest"],
         _credentials=GOOD_CREDS,
     )
     sent_options = json.loads(rmock.calls[-1]["data"]["options"])
     train_group_values = [e["value"] for e in sent_options if e["name"] == "train_group"]
-    assert train_group_values == ["random_forest"]
+    assert train_group_values == ["randomforest"]
 
 
 def test_propose_training_config_returns_param_picker(rmock: HttpMock) -> None:
@@ -526,13 +526,15 @@ def test_propose_training_config_returns_param_picker(rmock: HttpMock) -> None:
     rmock.add("GET", ML_OPTS_URL, status=200, json={
         "parameters": {
             "train_group": {"type": "string",
-                            "default": ["random_forest", "gradientboosting", "xgboost"]},
+                            "default": ["randomforest", "gradientboosting", "xgboost"]},
             "parameter_tune": {"type": "bool", "default": True, "help": "Tune?"},
             "n_iter": {"type": "int", "default": 100, "help": "Iterations"},
             "loss": {"type": "string", "default": "squared_error"},
-            "clustering_parameter_goal": {
-                "type": "string",
-                "default": ["silhouette_score", "calinski_harabasz_score"],
+            "parameter_goal": {
+                "f1_macro": "f1 macro",
+                "precision_macro": "precision macro",
+                "recall_macro": "recall macro",
+                "accuracy": "accuracy",
             },
         },
     })
@@ -556,8 +558,8 @@ def test_propose_training_config_returns_param_picker(rmock: HttpMock) -> None:
     # train_group special-cased: options = upstream list, default = pre-selected
     # script defaults (intersected with what upstream allows).
     assert by_name["train_group"]["kind"] == "checklist"
-    assert by_name["train_group"]["options"] == ["random_forest", "gradientboosting", "xgboost"]
-    assert by_name["train_group"]["default"] == ["random_forest", "gradientboosting"]
+    assert by_name["train_group"]["options"] == ["randomforest", "gradientboosting", "xgboost"]
+    assert by_name["train_group"]["default"] == ["randomforest", "gradientboosting"]
 
     # parameter_tune is a boolean even though upstream default is True
     assert by_name["parameter_tune"]["kind"] == "boolean"
@@ -571,17 +573,17 @@ def test_propose_training_config_returns_param_picker(rmock: HttpMock) -> None:
     assert by_name["loss"]["kind"] == "text"
     assert by_name["loss"]["default"] == "squared_error"
 
-    # Non-train_group list defaults become checklists with default == options
-    assert by_name["clustering_parameter_goal"]["kind"] == "checklist"
-    assert by_name["clustering_parameter_goal"]["options"] == \
-        ["silhouette_score", "calinski_harabasz_score"]
-    assert by_name["clustering_parameter_goal"]["default"] == \
-        ["silhouette_score", "calinski_harabasz_score"]
+    # parameter_goal has the upstream-keyed shape: render as a single-choice
+    # select with options = the goal names and default = 'f1_macro'.
+    assert by_name["parameter_goal"]["kind"] == "select"
+    assert by_name["parameter_goal"]["options"] == \
+        ["f1_macro", "precision_macro", "recall_macro", "accuracy"]
+    assert by_name["parameter_goal"]["default"] == "f1_macro"
 
 
 def test_propose_training_config_uses_unsstate_1_when_supervised(rmock: HttpMock) -> None:
     rmock.add("GET", ML_OPTS_URL, status=200, json={
-        "parameters": {"train_group": {"default": ["random_forest"]}},
+        "parameters": {"train_group": {"default": ["randomforest"]}},
     })
     mcp_tools.propose_training_config(
         report_uuid="rpt", class_column="target",
@@ -609,11 +611,10 @@ def test_propose_training_config_registered_as_read_scope() -> None:
 
 
 def test_start_training_job_supervised_uses_unsstate_1(rmock: HttpMock) -> None:
-    """Live CLASSify returns clustering params at unsstate=0 and supervised
-    params at unsstate=1 (opposite of the script's comment). For supervised
-    training we must therefore call /get-ml-opts with unsstate=1."""
+    """unsstate=1 selects supervised params, unsstate=0 selects clustering —
+    matches the live deployment and the published API docs example."""
     rmock.add("GET", ML_OPTS_URL, status=200, json={
-        "parameters": {"train_group": {"default": ["random_forest"]}},
+        "parameters": {"train_group": {"default": ["randomforest"]}},
     })
     rmock.add("POST", START_JOB_URL, status=200, json={})
     mcp_tools.start_training_job(
@@ -656,7 +657,7 @@ def test_start_training_job_parameter_overrides_win(rmock: HttpMock) -> None:
     """parameter_overrides should beat both upstream defaults and the parameter_tune knob."""
     rmock.add("GET", ML_OPTS_URL, status=200, json={
         "parameters": {
-            "train_group": {"default": ["random_forest"]},
+            "train_group": {"default": ["randomforest"]},
             "parameter_tune": {"default": True},
             "num_estimators": {"default": 100},
         },
@@ -671,6 +672,70 @@ def test_start_training_job_parameter_overrides_win(rmock: HttpMock) -> None:
     names_to_values = {e["name"]: e["value"] for e in sent_options if e["name"] != "train_group"}
     assert names_to_values["num_estimators"] == 500
     assert names_to_values["parameter_tune"] is True
+
+
+_PARAMETER_GOAL_META = {
+    "f1_macro": "f1 macro",
+    "precision_macro": "precision macro",
+    "recall_macro": "recall macro",
+    "accuracy": "accuracy",
+}
+
+
+def test_start_training_job_parameter_goal_uses_override(rmock: HttpMock) -> None:
+    """When parameter_overrides specifies a valid goal, the value is forwarded."""
+    rmock.add("GET", ML_OPTS_URL, status=200, json={
+        "parameters": {
+            "train_group": {"default": ["randomforest"]},
+            "parameter_goal": _PARAMETER_GOAL_META,
+        },
+    })
+    rmock.add("POST", START_JOB_URL, status=200, json={})
+    mcp_tools.start_training_job(
+        report_uuid="rpt-9", class_column="target",
+        parameter_overrides={"parameter_goal": "accuracy"},
+        _credentials=GOOD_CREDS,
+    )
+    sent_options = json.loads(rmock.calls[-1]["data"]["options"])
+    by_name = {e["name"]: e["value"] for e in sent_options if e["name"] != "train_group"}
+    assert by_name["parameter_goal"] == "accuracy"
+
+
+def test_start_training_job_parameter_goal_defaults_to_f1_macro(rmock: HttpMock) -> None:
+    """No override → fall back to 'f1_macro' (matches the docs example)."""
+    rmock.add("GET", ML_OPTS_URL, status=200, json={
+        "parameters": {
+            "train_group": {"default": ["randomforest"]},
+            "parameter_goal": _PARAMETER_GOAL_META,
+        },
+    })
+    rmock.add("POST", START_JOB_URL, status=200, json={})
+    mcp_tools.start_training_job(
+        report_uuid="rpt-9", class_column="target",
+        _credentials=GOOD_CREDS,
+    )
+    sent_options = json.loads(rmock.calls[-1]["data"]["options"])
+    by_name = {e["name"]: e["value"] for e in sent_options if e["name"] != "train_group"}
+    assert by_name["parameter_goal"] == "f1_macro"
+
+
+def test_start_training_job_parameter_goal_invalid_override_falls_back(rmock: HttpMock) -> None:
+    """An override that isn't in the upstream goal keys → fall back to 'f1_macro'."""
+    rmock.add("GET", ML_OPTS_URL, status=200, json={
+        "parameters": {
+            "train_group": {"default": ["randomforest"]},
+            "parameter_goal": _PARAMETER_GOAL_META,
+        },
+    })
+    rmock.add("POST", START_JOB_URL, status=200, json={})
+    mcp_tools.start_training_job(
+        report_uuid="rpt-9", class_column="target",
+        parameter_overrides={"parameter_goal": "made_up_goal"},
+        _credentials=GOOD_CREDS,
+    )
+    sent_options = json.loads(rmock.calls[-1]["data"]["options"])
+    by_name = {e["name"]: e["value"] for e in sent_options if e["name"] != "train_group"}
+    assert by_name["parameter_goal"] == "f1_macro"
 
 
 # ---------------------------------------------------------------------------
@@ -737,8 +802,8 @@ def test_get_results_renders_flat_metrics_table(rmock: HttpMock) -> None:
 def test_get_results_renders_per_model_table(rmock: HttpMock) -> None:
     """Per-model dict → rows = models, columns = union of metric keys."""
     rmock.add("GET", RESULTS_URL, status=200, json={
-        "random_forest":    {"accuracy": 0.92, "f1": 0.91},
-        "gradient_boosting": {"accuracy": 0.88, "f1": 0.87, "roc_auc": 0.95},
+        "randomforest":    {"accuracy": 0.92, "f1": 0.91},
+        "gradientboosting": {"accuracy": 0.88, "f1": 0.87, "roc_auc": 0.95},
     })
     result = mcp_tools.get_results(report_uuid="rpt-1", _credentials=GOOD_CREDS)
     card = result["_ui_components"][0]
@@ -747,9 +812,9 @@ def test_get_results_renders_per_model_table(rmock: HttpMock) -> None:
     # Headers: "Model" + sorted metric keys (union).
     assert table["headers"] == ["Model", "accuracy", "f1", "roc_auc"]
     rows_by_model = {r[0]: r[1:] for r in table["rows"]}
-    assert rows_by_model["random_forest"][0] == "0.9200"
-    # Missing roc_auc for random_forest → rendered as the str of None ("None")
-    assert rows_by_model["random_forest"][2] in ("None", "—")
+    assert rows_by_model["randomforest"][0] == "0.9200"
+    # Missing roc_auc for randomforest → rendered as the str of None ("None")
+    assert rows_by_model["randomforest"][2] in ("None", "—")
 
 
 def test_get_results_falls_back_on_non_dict(rmock: HttpMock) -> None:
