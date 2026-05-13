@@ -208,10 +208,15 @@ class DelegationService:
 
         token_url = f"{self.authority}/protocol/openid-connect/token"
 
-        # Build scope string: scope-level claims + tool-level claims
-        scope_parts = list(enabled_scopes or [])
-        scope_parts.extend(f"tool:{t}" for t in allowed_tools)
-        combined_scopes = " ".join(scope_parts)
+        # Keycloak's astral-agent-service client only registers the four
+        # scope-level claims (tools:read, tools:write, tools:search,
+        # tools:system). Per-tool `tool:<name>` scopes are not pre-registered
+        # and Keycloak rejects them with 400 invalid_scope. Per-tool
+        # authorization is already enforced by the orchestrator's
+        # ``allowed_tools`` filter at dispatch time, and ``is_tool_in_scope``
+        # treats the scope-level claim as sufficient when no per-tool claims
+        # are present in the JWT — so we send only scope-level claims here.
+        combined_scopes = " ".join(enabled_scopes or [])
 
         # RFC 8693 §2.1 — Token Exchange Request parameters
         form_data = {
@@ -227,7 +232,7 @@ class DelegationService:
 
         logger.info(
             f"Exchanging token for agent '{agent_id}' with "
-            f"{len(allowed_tools)} tool scopes"
+            f"{len(allowed_tools)} allowed tool(s) (scope='{combined_scopes}')"
         )
 
         # RFC 9449: Include DPoP proof header to bind the resulting token

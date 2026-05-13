@@ -64,8 +64,30 @@ class MCPServer:
                     error={"code": -32601, "message": f"Unknown tool: {tool_name}", "retryable": False},
                 )
 
+            tool_info = self.tools[tool_name]
+            schema = tool_info.get("input_schema") or {}
+            required = schema.get("required") or []
+            missing = [k for k in required if k not in arguments]
+            if missing:
+                props = schema.get("properties") or {}
+                hints = "; ".join(
+                    f"{k}: {(props.get(k) or {}).get('description', 'no description')}"
+                    for k in missing
+                )
+                return MCPResponse(
+                    request_id=request.request_id,
+                    error={
+                        "code": -32602,
+                        "message": (
+                            f"Missing required argument(s) for '{tool_name}': "
+                            f"{', '.join(missing)}. {hints}"
+                        ),
+                        "retryable": False,
+                    },
+                )
+
             try:
-                tool_fn = self.tools[tool_name]["function"]
+                tool_fn = tool_info["function"]
                 sig = inspect.signature(tool_fn)
                 params = sig.parameters
                 has_var_keyword = any(
@@ -89,7 +111,11 @@ class MCPServer:
                                 break
                         return MCPResponse(
                             request_id=request.request_id,
-                            error={"code": -32000, "message": error_msg, "retryable": True},
+                            error={
+                                "code": -32000,
+                                "message": error_msg,
+                                "retryable": result.get("_retryable", True),
+                            },
                             ui_components=ui_comps,
                         )
                     return MCPResponse(

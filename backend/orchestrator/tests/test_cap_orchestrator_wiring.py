@@ -59,8 +59,8 @@ def test_is_long_running_tool_handles_missing_metadata_field() -> None:
 async def test_cap_state_isolated_per_user_agent() -> None:
     """T045 — user A at cap doesn't block user B; agent A at cap doesn't block agent B."""
     orch = _make_orch_with_cards({
-        "classify-1": _card_with_long_running("classify-1", ["train_classifier"]),
-        "forecaster-1": _card_with_long_running("forecaster-1", ["train_forecaster"]),
+        "classify-1": _card_with_long_running("classify-1", ["start_training_job"]),
+        "forecaster-1": _card_with_long_running("forecaster-1", ["start_training_job"]),
     })
     cap = orch.concurrency_cap
     # User alice fills classify-1.
