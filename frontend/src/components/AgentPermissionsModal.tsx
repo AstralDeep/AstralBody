@@ -729,7 +729,7 @@ export default function AgentPermissionsModal({
                                                     {showCredentialForm && (
                                                         <div className="mt-1 ml-10 mr-1">
                                                             <input
-                                                                type="password"
+                                                                type={cred.key.endsWith("_URL") ? "url" : "password"}
                                                                 placeholder={
                                                                     isStored
                                                                         ? "Enter new value to update..."

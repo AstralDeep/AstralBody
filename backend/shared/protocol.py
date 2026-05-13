@@ -187,8 +187,8 @@ class AgentCard:
             "version": self.version,
             "skills": [
                 {"id": s.id, "name": s.name, "description": s.description,
-                 "input_schema": s.input_schema, "tags": s.tags,
-                 "scope": s.scope}
+                 "input_schema": s.input_schema, "output_schema": s.output_schema,
+                 "tags": s.tags, "scope": s.scope, "metadata": s.metadata}
                 for s in self.skills
             ] if self.skills else []
         }

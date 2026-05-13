@@ -12,6 +12,7 @@ import type {
 } from "../types/streaming";
 import type { ChatStep, ChatStepsByChat } from "../types/chatSteps";
 import { fetchChatSteps } from "../api/chatSteps";
+import { persistUsageEvent, type LLMUsageReportEvent } from "./useTokenUsage";
 
 export interface SecurityFlag {
     tool_name: string;
@@ -369,8 +370,11 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
 
             case "llm_usage_report":
                 // 006-user-llm-config: per-call token usage for personal-credential
-                // calls. useTokenUsage subscribes to "llm-usage-report" and
-                // accumulates session/today/lifetime/perModel counters.
+                // calls. Persist to localStorage here (always-mounted) so the
+                // first frame of a tab isn't dropped when the Settings dialog
+                // hasn't been opened yet. Then dispatch the window event so any
+                // currently-open dialog ticks up live via useTokenUsage.
+                persistUsageEvent(data as unknown as LLMUsageReportEvent);
                 window.dispatchEvent(new CustomEvent("llm-usage-report", { detail: data }));
                 break;
 

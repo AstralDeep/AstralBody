@@ -75,7 +75,7 @@ function localDateString(): string {
     return `${y}-${m}-${day}`;
 }
 
-function readPersistedUsage(): TokenUsage {
+export function readPersistedUsage(): TokenUsage {
     const today = localDateString();
     const empty: TokenUsage = {
         session: 0,
@@ -110,7 +110,7 @@ function readPersistedUsage(): TokenUsage {
     }
 }
 
-function writePersistedUsage(usage: TokenUsage): void {
+export function writePersistedUsage(usage: TokenUsage): void {
     if (typeof window === "undefined") return;
     let existing: PersistedShape = {};
     try {
@@ -152,6 +152,18 @@ export interface UseTokenUsageResult {
  * exposed primarily for unit testing the increment / rollover /
  * failure-path semantics.
  */
+// Apply a usage event to persisted localStorage state. Safe to call before
+// any dialog mounts — the WS layer invokes this so counters survive when
+// the Settings dialog isn't open (otherwise the window-event listener
+// wouldn't exist and the first emission of the tab would be dropped).
+// Only today/lifetime/perModel/unknownCalls are persisted; "session" is
+// in-memory and lives in the hook below.
+export function persistUsageEvent(ev: LLMUsageReportEvent): void {
+    const prev = readPersistedUsage();
+    const next = applyUsageEvent(prev, ev);
+    writePersistedUsage(next);
+}
+
 export function applyUsageEvent(
     prev: TokenUsage,
     ev: LLMUsageReportEvent,
@@ -192,11 +204,7 @@ export function useTokenUsage(): UseTokenUsageResult {
             const ce = e as CustomEvent<LLMUsageReportEvent>;
             const detail = ce.detail;
             if (!detail) return;
-            setUsage((prev) => {
-                const next = applyUsageEvent(prev, detail);
-                writePersistedUsage(next);
-                return next;
-            });
+            setUsage((prev) => applyUsageEvent(prev, detail));
         };
         window.addEventListener("llm-usage-report", onReport);
         return () => window.removeEventListener("llm-usage-report", onReport);

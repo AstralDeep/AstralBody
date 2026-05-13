@@ -45,7 +45,7 @@ class ForecasterAgent(BaseA2AAgent):
             },
         ],
         # 015-external-ai-agents — tools subject to the FR-026 concurrency cap.
-        "long_running_tools": ["train_forecaster", "generate_forecast"],
+        "long_running_tools": ["start_training_job"],
     }
 
     def __init__(self, port: int = None):

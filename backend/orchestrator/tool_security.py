@@ -214,6 +214,7 @@ class ToolSecurityAnalyzer:
         tool_name: str,
         description: str,
         input_schema: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional[SecurityFlag]:
         """Analyze a single tool for security threats.
 
@@ -224,49 +225,54 @@ class ToolSecurityAnalyzer:
             schema_fields = list(input_schema["properties"].keys())
         schema_text = " ".join(schema_fields)
 
+        external_target = ""
+        if metadata:
+            raw_target = metadata.get("external_target")
+            if isinstance(raw_target, str) and raw_target.strip():
+                external_target = raw_target.strip()
+
+        def _build_flag(category: ThreatCategory, reason: str, match_kind: str) -> SecurityFlag:
+            blocked = True
+            final_reason = reason
+            # DESTRUCTIVE tools that explicitly act on an external service
+            # are advisory-only; the per-user `tools:write` permission is
+            # the sole gate.
+            if category is ThreatCategory.DESTRUCTIVE and external_target:
+                blocked = False
+                final_reason = (
+                    f"Destructive operation on external service "
+                    f"'{external_target}' — gated by user permission, "
+                    f"not system-blocked."
+                )
+            flag = SecurityFlag(
+                tool_name=tool_name,
+                category=category,
+                reason=final_reason,
+                blocked=blocked,
+            )
+            severity = "FLAG" if blocked else "ADVISORY"
+            logger.warning(
+                f"SECURITY {severity}: {category.value} on tool "
+                f"'{tool_name}' ({match_kind}) — {final_reason}"
+            )
+            return flag
+
         for pattern_set in self._compiled_patterns:
             # Check tool name
             for regex in pattern_set["name_re"]:
                 if regex.search(tool_name):
-                    flag = SecurityFlag(
-                        tool_name=tool_name,
-                        category=pattern_set["category"],
-                        reason=pattern_set["reason"],
-                    )
-                    logger.warning(
-                        f"SECURITY FLAG: {flag.category.value} on tool "
-                        f"'{tool_name}' (name match) — {flag.reason}"
-                    )
-                    return flag
+                    return _build_flag(pattern_set["category"], pattern_set["reason"], "name match")
 
             # Check description
             for regex in pattern_set["desc_re"]:
                 if regex.search(description):
-                    flag = SecurityFlag(
-                        tool_name=tool_name,
-                        category=pattern_set["category"],
-                        reason=pattern_set["reason"],
-                    )
-                    logger.warning(
-                        f"SECURITY FLAG: {flag.category.value} on tool "
-                        f"'{tool_name}' (description match) — {flag.reason}"
-                    )
-                    return flag
+                    return _build_flag(pattern_set["category"], pattern_set["reason"], "description match")
 
             # Check schema field names
             if schema_text:
                 for regex in pattern_set["schema_re"]:
                     if regex.search(schema_text):
-                        flag = SecurityFlag(
-                            tool_name=tool_name,
-                            category=pattern_set["category"],
-                            reason=pattern_set["reason"],
-                        )
-                        logger.warning(
-                            f"SECURITY FLAG: {flag.category.value} on tool "
-                            f"'{tool_name}' (schema match) — {flag.reason}"
-                        )
-                        return flag
+                        return _build_flag(pattern_set["category"], pattern_set["reason"], "schema match")
 
         return None
 
@@ -282,6 +288,7 @@ class ToolSecurityAnalyzer:
                 tool_name=skill.id or skill.name,
                 description=skill.description or "",
                 input_schema=skill.input_schema,
+                metadata=getattr(skill, "metadata", None),
             )
             if flag:
                 flags[flag.tool_name] = flag

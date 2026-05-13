@@ -12,7 +12,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 
 import { useLlmConfig } from "../hooks/useLlmConfig";
-import { applyUsageEvent, type LLMUsageReportEvent } from "../hooks/useTokenUsage";
+import {
+    applyUsageEvent,
+    persistUsageEvent,
+    readPersistedUsage,
+    type LLMUsageReportEvent,
+} from "../hooks/useTokenUsage";
 
 // Provide a working fetch stub for testConnection (we don't call it in
 // most tests, but the import path requires a global fetch).
@@ -167,5 +172,26 @@ describe("applyUsageEvent — pure increment / rollover / failure semantics", ()
         u = applyUsageEvent(u, evSuccess(50, "model-b"));
         u = applyUsageEvent(u, evSuccess(25, "model-a"));
         expect(u.perModel).toEqual({ "model-a": 125, "model-b": 50 });
+    });
+});
+
+describe("persistUsageEvent — persistence works without a mounted hook", () => {
+    const evSuccess = (n: number, model = "m"): LLMUsageReportEvent => ({
+        feature: "test", model,
+        total_tokens: n, prompt_tokens: n, completion_tokens: 0,
+        outcome: "success", at: new Date().toISOString(),
+    });
+
+    it("writes to localStorage so a later readPersistedUsage sees the accumulated total", () => {
+        // No hook mounted — simulates the dialog being closed when the WS frame arrives.
+        persistUsageEvent(evSuccess(100, "deepseek"));
+        persistUsageEvent(evSuccess(250, "deepseek"));
+
+        const read = readPersistedUsage();
+        // Session is in-memory only — always 0 on fresh read.
+        expect(read.session).toBe(0);
+        expect(read.today).toBe(350);
+        expect(read.lifetime).toBe(350);
+        expect(read.perModel).toEqual({ deepseek: 350 });
     });
 });
