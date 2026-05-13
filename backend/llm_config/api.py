@@ -73,6 +73,41 @@ class TestConnectionResponse(BaseModel):
     upstream_message: Optional[str] = None
 
 
+class ListModelsRequest(BaseModel):
+    """Body of ``POST /api/llm/list-models``.
+
+    Mirrors :class:`TestConnectionRequest` minus the ``model`` field —
+    listing does not need a model id.
+    """
+    api_key: str = Field(..., min_length=1)
+    base_url: str = Field(..., min_length=1)
+
+    @field_validator("base_url")
+    @classmethod
+    def _check_url_scheme(cls, v: str) -> str:
+        v = v.strip()
+        if not (v.startswith("http://") or v.startswith("https://")):
+            raise ValueError("base_url must start with http:// or https://")
+        return v.rstrip("/")
+
+    @field_validator("api_key")
+    @classmethod
+    def _strip_and_check(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("must be non-empty after trim")
+        return v
+
+
+class ListModelsResponse(BaseModel):
+    ok: bool
+    models: list[str]
+    probed_at: str
+    latency_ms: Optional[int] = None
+    error_class: Optional[str] = None
+    upstream_message: Optional[str] = None
+
+
 def _classify_probe_error(exc: BaseException) -> str:
     """Map an OpenAI-SDK exception to a Test-Connection ``error_class``
     per contracts/rest-llm-test.md.
@@ -187,6 +222,82 @@ async def test_connection(
     return TestConnectionResponse(
         ok=ok,
         model=body.model,
+        probed_at=probed_at,
+        latency_ms=latency_ms,
+        error_class=error_class,
+        upstream_message=upstream_message,
+    )
+
+
+@llm_router.post(
+    "/list-models",
+    response_model=ListModelsResponse,
+    summary="List model ids advertised by the user-configured LLM endpoint",
+)
+async def list_models(
+    body: ListModelsRequest,
+    request: Request,
+    user_id: str = Depends(require_user_id),
+    user_payload: dict = Depends(get_current_user_payload),
+) -> ListModelsResponse:
+    """Call ``client.models.list()`` against the supplied credentials and
+    return the sorted set of model ids the endpoint advertises.
+
+    Always returns HTTP 200 — ``ok=False`` indicates the upstream
+    rejected the listing call; HTTP 4xx/5xx is reserved for problems
+    with THIS request itself. No audit event is emitted: listing is a
+    read-only discovery aid that fires on every debounced edit, and the
+    existing ``tested`` audit on the same credentials covers the moment
+    that actually matters (save).
+    """
+    _ = request  # orchestrator not needed here — kept in signature for parity with /test
+    _ = user_id
+    _ = user_payload
+
+    probed_at = datetime.now(timezone.utc).isoformat()
+    started = time.monotonic()
+    error_class: Optional[str] = None
+    upstream_message: Optional[str] = None
+    models: list[str] = []
+    ok = False
+    try:
+        client = OpenAI(
+            api_key=body.api_key,
+            base_url=body.base_url,
+            timeout=PROBE_TIMEOUT_SECONDS,
+            max_retries=0,
+        )
+        page = await asyncio.to_thread(client.models.list)
+        data = getattr(page, "data", None)
+        if data is None:
+            raise ValueError("response missing 'data' list — not an OpenAI-compatible /models endpoint")
+        ids: set[str] = set()
+        for m in data:
+            mid = getattr(m, "id", None)
+            if isinstance(mid, str) and mid:
+                ids.add(mid)
+        models = sorted(ids)
+        ok = True
+    except Exception as exc:
+        ok = False
+        models = []
+        error_class = _classify_probe_error(exc)
+        # A 404 on /models means the endpoint doesn't exist on the host, not
+        # "the model id is wrong" — the shared classifier maps 404→model_not_found
+        # because that's the right meaning for /test. Locally promote to
+        # transport_error so the frontend hint reads "Couldn't load models".
+        if error_class == "model_not_found":
+            error_class = "transport_error"
+        upstream_message = str(exc)[:1024]
+        logger.info(
+            "List Models failed: error_class=%s base_url=%s",
+            error_class, body.base_url,
+        )
+    latency_ms = int((time.monotonic() - started) * 1000)
+
+    return ListModelsResponse(
+        ok=ok,
+        models=models,
         probed_at=probed_at,
         latency_ms=latency_ms,
         error_class=error_class,

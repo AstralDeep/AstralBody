@@ -59,3 +59,44 @@ export async function testLlmConnection(
     }
     return await response.json();
 }
+
+export interface ListModelsRequest {
+    api_key: string;
+    base_url: string;
+}
+
+export interface ListModelsResponse {
+    ok: boolean;
+    models: string[];
+    probed_at: string;
+    latency_ms: number | null;
+    error_class: LlmTestErrorClass | null;
+    upstream_message: string | null;
+}
+
+/**
+ * Probe the user's base URL for an OpenAI-compatible `/models` listing.
+ * Always resolves (does not throw on `ok=false`). Throws only if THIS
+ * request itself failed (auth missing, network error to OUR server,
+ * malformed body) — or if the optional `signal` aborts mid-flight.
+ */
+export async function listLlmModels(
+    token: string,
+    body: ListModelsRequest,
+    signal?: AbortSignal,
+): Promise<ListModelsResponse> {
+    const response = await fetch(`${API_URL}/api/llm/list-models`, {
+        method: "POST",
+        headers: {
+            "Authorization": `Bearer ${token}`,
+            "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+        signal,
+    });
+    if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`List Models request failed (${response.status}): ${text}`);
+    }
+    return await response.json();
+}
