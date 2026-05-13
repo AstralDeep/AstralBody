@@ -47,15 +47,22 @@ from shared.external_http import (
 from shared.primitives import Alert, Card, ParamPicker, Table, Text
 
 
-def _ui(components, data=None):
-    """Build an MCP tool response with UI components + structured data."""
+def _ui(components, data=None, retryable: bool = True):
+    """Build an MCP tool response with UI components + structured data.
+
+    ``retryable`` controls whether the orchestrator should auto-retry on the
+    error branch (only consulted when one of the UI components is a variant
+    "error" Alert). Tools pass ``retryable=False`` after catching an upstream
+    or input-shape error to stop the orchestrator from retrying calls that
+    won't succeed on a fresh attempt.
+    """
     serialized = []
     for c in components:
         if hasattr(c, "to_json"):
             serialized.append(c.to_json())
         else:
             serialized.append(c)
-    return {"_ui_components": serialized, "_data": data}
+    return {"_ui_components": serialized, "_data": data, "_retryable": retryable}
 
 
 logger = logging.getLogger("ClassifyAgentMCPTools")
@@ -305,7 +312,7 @@ def submit_dataset(file_handle: str, **kwargs):
             },
         )
     except (ExternalHttpError, ValueError) as e:
-        return _ui([Alert(message=_user_facing_error(e), variant="error")])
+        return _ui([Alert(message=_user_facing_error(e), variant="error")], retryable=False)
 
 
 def set_column_types(report_uuid: str,
@@ -393,7 +400,7 @@ def set_column_types(report_uuid: str,
                   "column_changes": column_changes},
         )
     except (ExternalHttpError, ValueError) as e:
-        return _ui([Alert(message=_user_facing_error(e), variant="error")])
+        return _ui([Alert(message=_user_facing_error(e), variant="error")], retryable=False)
 
 
 def get_ml_options(unsstate: int = 0, **kwargs):
@@ -450,7 +457,7 @@ def get_ml_options(unsstate: int = 0, **kwargs):
             data=payload,
         )
     except (ExternalHttpError, ValueError) as e:
-        return _ui([Alert(message=_user_facing_error(e), variant="error")])
+        return _ui([Alert(message=_user_facing_error(e), variant="error")], retryable=False)
 
 
 def _make_status_poll(client: "ClassifyHttpClient", report_uuid: str):
@@ -630,7 +637,7 @@ def start_training_job(report_uuid: str, class_column: str,
             },
         )
     except (ExternalHttpError, ValueError) as e:
-        return _ui([Alert(message=_user_facing_error(e), variant="error")])
+        return _ui([Alert(message=_user_facing_error(e), variant="error")], retryable=False)
 
 
 def _humanize_param_name(name: str) -> str:
@@ -682,7 +689,7 @@ def propose_training_config(report_uuid: str, class_column: str,
                     "Cannot build a configuration form."
                 ),
                 variant="error",
-            )])
+            )], retryable=False)
 
         fields: List[Dict[str, Any]] = [
             {
@@ -773,7 +780,7 @@ def propose_training_config(report_uuid: str, class_column: str,
             },
         )
     except (ExternalHttpError, ValueError) as e:
-        return _ui([Alert(message=_user_facing_error(e), variant="error")])
+        return _ui([Alert(message=_user_facing_error(e), variant="error")], retryable=False)
 
 
 def get_job_status(report_uuid: str, **kwargs):
@@ -794,7 +801,7 @@ def get_job_status(report_uuid: str, **kwargs):
             data={"report_uuid": report_uuid, **result},
         )
     except (ExternalHttpError, ValueError) as e:
-        return _ui([Alert(message=_user_facing_error(e), variant="error")])
+        return _ui([Alert(message=_user_facing_error(e), variant="error")], retryable=False)
 
 
 def _render_metric_value(value: Any) -> str:
@@ -877,7 +884,7 @@ def get_results(report_uuid: str, **kwargs):
             data=data,
         )
     except (ExternalHttpError, ValueError) as e:
-        return _ui([Alert(message=_user_facing_error(e), variant="error")])
+        return _ui([Alert(message=_user_facing_error(e), variant="error")], retryable=False)
 
 
 def get_output_log(report_uuid: str, **kwargs):
@@ -897,7 +904,7 @@ def get_output_log(report_uuid: str, **kwargs):
             data={"report_uuid": report_uuid, "log": resp.text if resp.content else ""},
         )
     except (ExternalHttpError, ValueError) as e:
-        return _ui([Alert(message=_user_facing_error(e), variant="error")])
+        return _ui([Alert(message=_user_facing_error(e), variant="error")], retryable=False)
 
 
 def delete_dataset(report_uuid: str, **kwargs):
@@ -915,7 +922,7 @@ def delete_dataset(report_uuid: str, **kwargs):
             data={"report_uuid": report_uuid, "response": payload},
         )
     except (ExternalHttpError, ValueError) as e:
-        return _ui([Alert(message=_user_facing_error(e), variant="error")])
+        return _ui([Alert(message=_user_facing_error(e), variant="error")], retryable=False)
 
 
 # ---------------------------------------------------------------------------
@@ -1199,5 +1206,6 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
             "required": ["report_uuid"],
         },
         "scope": "tools:write",
+        "metadata": {"external_target": "CLASSify"},
     },
 }

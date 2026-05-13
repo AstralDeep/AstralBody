@@ -279,3 +279,17 @@ T026 → T027 → T028 → T029 (T029 [P] with T028)
 - The three agents are intended to ship together but each is independently deployable per FR-024 and FR-025; the task structure honors that independence.
 - Commit after each task (or at minimum at each Checkpoint) per the existing `before_*` git hook convention.
 - Task IDs are stable; do not renumber when inserting new tasks — append at the end and reference dependencies explicitly.
+
+---
+
+## Addendum (Phase 7): Forecaster API contract correction
+
+**Why**: The original Phase 4 Forecaster implementation (T037, T038, T041) was written against an internal mock of the Forecaster service and called endpoints (`/parse_retrain_file`, `/train`, `/generate-new-forecasts`, `/generate-results-summary`, `/generate-recommendations`) that do not exist on the production deployment at `forecaster.ai.uky.edu/`. The agent therefore could not communicate with the real service. The official API docs (`forecaster-api-docs.md`) document a different workflow (`/dataset/submit` → `/dataset/save-columns` → `/dataset/start-training-job` → `/dataset/get-job-status` → `/results/get-metrics` → `/dataset/delete`). This addendum corrects the implementation to match the real API. T037/T038/T041 remain marked complete for historical record; the work below supersedes them.
+
+- [X] T060 Rewrote `backend/agents/forecaster/mcp_tools.py` against the documented Forecaster API (seven tools: `_credentials_check`, `submit_dataset`, `set_column_roles`, `start_training_job`, `get_job_status`, `get_results`, `delete_dataset`). Long-running set is now `{start_training_job}`. The status poller probes `/dataset/get-job-status` and fetches `/results/get-metrics` on `Completed`.
+- [X] T061 Updated `backend/agents/forecaster/forecaster_agent.py` `card_metadata.long_running_tools` to `["start_training_job"]`.
+- [X] T062 [P] Rewrote `backend/agents/forecaster/tests/test_credentials_check.py` — 25+ mocked cases covering: credentials probe (ok-200, ok-404, auth-401, auth-403, unreachable, missing/partial creds, no-key-in-response sentinel); `submit_dataset` (happy path, missing user_id, empty columns defensive, auth-failure alert); `set_column_roles` (categorizedString shape, unknown-role rejection, empty-dict rejection); `start_training_job` (form-encoded options, no-options-defaults-to-empty, non-dict rejection, JobPoller registration); status poller (Completed→succeeded with metrics, Training→in_progress, defensive non-empty→in_progress, empty→failed); `get_results` (per-model table, flat table, auth-failure); `delete_dataset`; registry / metadata sanity.
+- [X] T063 [P] Extended `backend/agents/forecaster/tests/test_e2e_smoke.py` with a full-pipeline live test gated on `FORECASTER_E2E_URL` / `FORECASTER_E2E_API_KEY` / (optional) `FORECASTER_E2E_CSV`. Runs `submit_dataset` → `set_column_roles` → `start_training_job` (linear-regression, 1 epoch) → poll-until-Completed (5-min cap) → `get_results` → `delete_dataset` (in `finally`) against `forecaster.ai.uky.edu/` with `bikerides_day.csv`.
+- [X] T064 [P] Updated `specs/015-external-ai-agents/contracts/forecaster-tools.md` to document the corrected seven-tool contract; the old four-tool contract is fully replaced.
+
+**Checkpoint**: Forecaster agent communicates successfully with the real `forecaster.ai.uky.edu/` service. CLASSify agent unchanged (already production-correct). Feature 015 is now genuinely production-ready against both live deployments.
