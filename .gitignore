@@ -9,6 +9,10 @@ Qualifying_Exam/
 backend/knowledge/*
 backend/knowledge/_index.md
 
+bikerides_day.csv
+dataset_soft.csv
+docker_logs_fixes_known_remaining.md
+
 .claude/
 .kilocode/
 
