@@ -41,14 +41,21 @@ AGENT_ID = "llm-factory-1"
 LONG_RUNNING_TOOLS: Set[str] = set()
 
 
-def _ui(components, data=None):
+def _ui(components, data=None, retryable: bool = True):
+    """Build an MCP tool response with UI components + structured data.
+
+    ``retryable`` controls whether the orchestrator should auto-retry on the
+    error branch. Pass ``retryable=False`` after catching an upstream or
+    input-shape error to stop the orchestrator from wasting attempts on
+    calls that won't succeed on a fresh try.
+    """
     serialized = []
     for c in components:
         if hasattr(c, "to_json"):
             serialized.append(c.to_json())
         else:
             serialized.append(c)
-    return {"_ui_components": serialized, "_data": data}
+    return {"_ui_components": serialized, "_data": data, "_retryable": retryable}
 
 
 class LlmFactoryHttpClient:
@@ -123,7 +130,11 @@ def _user_facing_error(exc: Exception, service: str = "LLM-Factory") -> str:
     if isinstance(exc, ServiceUnreachableError):
         return f"{service} is unreachable. Try again later."
     if isinstance(exc, RateLimitedError):
-        return f"{service} is rate-limiting requests or temporarily unavailable. Try again in a moment."
+        # Carries either a real rate-limit (429) or a 5xx server error — the
+        # exception message includes the upstream status and body snippet, so
+        # surface it verbatim instead of the legacy "rate-limiting" wording
+        # that misled the LLM into endless retries.
+        return f"{service} call failed: {exc}"
     if isinstance(exc, EgressBlockedError):
         return f"{service} URL is not allowed: {exc}"
     if isinstance(exc, BadRequestError):
@@ -173,7 +184,7 @@ def list_models(**kwargs):
             data={"models": models},
         )
     except (ExternalHttpError, ValueError) as e:
-        return _ui([Alert(message=_user_facing_error(e), variant="error")])
+        return _ui([Alert(message=_user_facing_error(e), variant="error")], retryable=False)
 
 
 def chat_with_model(model_id: str, messages: List[Dict[str, str]],
@@ -199,7 +210,7 @@ def chat_with_model(model_id: str, messages: List[Dict[str, str]],
             data={"content": content, "model_id": model_id, "usage": usage},
         )
     except (ExternalHttpError, ValueError) as e:
-        return _ui([Alert(message=_user_facing_error(e), variant="error")])
+        return _ui([Alert(message=_user_facing_error(e), variant="error")], retryable=False)
 
 
 def create_embedding(model_id: str, input: Union[str, List[str]], **kwargs):
@@ -235,7 +246,7 @@ def create_embedding(model_id: str, input: Union[str, List[str]], **kwargs):
             },
         )
     except (ExternalHttpError, ValueError) as e:
-        return _ui([Alert(message=_user_facing_error(e), variant="error")])
+        return _ui([Alert(message=_user_facing_error(e), variant="error")], retryable=False)
 
 
 def transcribe_audio(model_id: str, file_handle: str,
@@ -270,7 +281,7 @@ def transcribe_audio(model_id: str, file_handle: str,
             data={"text": text, "model_id": model_id, "filename": os.path.basename(local_path)},
         )
     except (ExternalHttpError, ValueError) as e:
-        return _ui([Alert(message=_user_facing_error(e), variant="error")])
+        return _ui([Alert(message=_user_facing_error(e), variant="error")], retryable=False)
 
 
 TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
