@@ -16,7 +16,7 @@ import sys
 import logging
 import re
 from enum import Enum
-from typing import Any, Dict, List, NamedTuple, Optional
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 from dataclasses import asdict
 
 import websockets
@@ -2120,7 +2120,16 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         else:
             logger.info(f"Building tool definitions from {len(self.agent_cards)} agents...")
         tools_desc = []
-        tool_to_agent = {}  # Map tool name → agent_id
+        tool_to_agent = {}  # Map LLM-facing function name → agent_id
+        # 015-external-ai-agents: when two registered agents expose the
+        # same tool name (e.g. classify-1 and forecaster-1 both have
+        # `submit_dataset`), we qualify the LLM-facing name with an
+        # `{agent_id}__` prefix so the model can pick unambiguously.
+        # `tool_to_unqualified` maps the qualified LLM-facing name back
+        # to the bare skill id that the owning agent expects to receive
+        # over the MCP dispatch boundary. For non-colliding tools the
+        # qualified and unqualified names are identical.
+        tool_to_unqualified: Dict[str, str] = {}
 
         # Feature 013 follow-up: resolve this user's per-agent disabled
         # set once so we can skip disabled agents wholesale below. The
@@ -2136,6 +2145,10 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             logger.debug(f"Could not resolve user disabled-agent list: {e}")
             disabled_agents = set()
 
+        # Phase A: walk every (agent, skill) pair, run the full gate
+        # stack, and accumulate the survivors. We can't emit yet —
+        # qualification depends on knowing the full set first (Phase B).
+        eligible: List[Tuple[str, Any]] = []
         for agent_id, card in self.agent_cards.items():
             if agent_id not in self.agents:
                 continue
@@ -2194,17 +2207,48 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     )
                     continue
 
-                schema = self._sanitize_tool_schema(skill.input_schema or {"type": "object", "properties": {}})
-                tool_def = {
-                    "type": "function",
-                    "function": {
-                        "name": skill.id,
-                        "description": skill.description,
-                        "parameters": schema
-                    }
+                eligible.append((agent_id, skill))
+
+        # Phase B: detect skill-id collisions across the surviving pairs.
+        # A skill id owned by >1 distinct agent_id needs qualification so
+        # the model can pick a specific provider.
+        skill_id_owners: Dict[str, set] = {}
+        for agent_id, skill in eligible:
+            skill_id_owners.setdefault(skill.id, set()).add(agent_id)
+        colliding_skill_ids: set = {
+            sid for sid, owners in skill_id_owners.items() if len(owners) > 1
+        }
+        if colliding_skill_ids:
+            logger.info(
+                "Tool name collisions detected — qualifying with agent_id prefix: %s",
+                sorted(colliding_skill_ids),
+            )
+
+        # Phase C: emit one tool definition per eligible pair, qualifying
+        # the LLM-facing name when there's a collision.
+        for agent_id, skill in eligible:
+            if skill.id in colliding_skill_ids:
+                # OpenAI function-name grammar is [a-zA-Z0-9_-]{1,64}; our
+                # agent_ids use hyphens, our skill ids use underscores,
+                # and "__" appears in neither — so it's a safe separator.
+                llm_name = f"{agent_id}__{skill.id}"
+                desc = f"[Provider: {agent_id}] {skill.description or ''}"
+            else:
+                llm_name = skill.id
+                desc = skill.description
+
+            schema = self._sanitize_tool_schema(skill.input_schema or {"type": "object", "properties": {}})
+            tool_def = {
+                "type": "function",
+                "function": {
+                    "name": llm_name,
+                    "description": desc,
+                    "parameters": schema
                 }
-                tools_desc.append(tool_def)
-                tool_to_agent[skill.id] = agent_id
+            }
+            tools_desc.append(tool_def)
+            tool_to_agent[llm_name] = agent_id
+            tool_to_unqualified[llm_name] = skill.id
 
         # Feature 008-llm-text-only-chat (FR-001/FR-002/FR-010).
         # When zero tools survive the filter stack, fall through to a
@@ -2437,10 +2481,10 @@ COMPONENT UPDATE RULES:
                     tool_results = []
                     if len(llm_msg.tool_calls) == 1:
                         tc = llm_msg.tool_calls[0]
-                        res = await self.execute_single_tool(websocket, tc, tool_to_agent, chat_id, user_id=user_id)
+                        res = await self.execute_single_tool(websocket, tc, tool_to_agent, chat_id, user_id=user_id, tool_to_unqualified=tool_to_unqualified)
                         if res: tool_results.append(res)
                     else:
-                        res_list = await self.execute_parallel_tools(websocket, llm_msg.tool_calls, tool_to_agent, chat_id, user_id=user_id)
+                        res_list = await self.execute_parallel_tools(websocket, llm_msg.tool_calls, tool_to_agent, chat_id, user_id=user_id, tool_to_unqualified=tool_to_unqualified)
                         tool_results.extend(res_list)
 
                     # Collect tool UI components and tag each (recursively) with source metadata
@@ -3430,16 +3474,23 @@ COMPONENT UPDATE RULES:
         md = getattr(card, "metadata", {}) or {}
         return tool_name in (md.get("long_running_tools") or [])
 
-    async def execute_single_tool(self, websocket, tool_call, tool_to_agent: Dict, chat_id: str = None, user_id: str = None) -> Optional[MCPResponse]:
+    async def execute_single_tool(self, websocket, tool_call, tool_to_agent: Dict, chat_id: str = None, user_id: str = None, tool_to_unqualified: Optional[Dict[str, str]] = None) -> Optional[MCPResponse]:
         """Execute a single tool call and render its UI components. Returns the Result object."""
-        tool_name = tool_call.function.name
+        # The LLM may have emitted a qualified name (e.g. "forecaster-1__submit_dataset")
+        # when two agents own a tool of the same id. Resolve the bare skill id so the
+        # owning agent receives the name it actually registered.
+        llm_tool_name = tool_call.function.name
+        if tool_to_unqualified and llm_tool_name in tool_to_unqualified:
+            tool_name = tool_to_unqualified[llm_tool_name]
+        else:
+            tool_name = llm_tool_name
         try:
             args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
         except json.JSONDecodeError:
             args = {}
 
         # System-level security block (proactive security review)
-        agent_id = tool_to_agent.get(tool_name)
+        agent_id = tool_to_agent.get(llm_tool_name)
         agent_flags = self.security_flags.get(agent_id, {}) if agent_id else {}
         if agent_id and tool_name in agent_flags and agent_flags[tool_name].get("blocked"):
             reason = agent_flags[tool_name].get("reason", "Security threat detected")
@@ -3671,7 +3722,7 @@ COMPONENT UPDATE RULES:
     _PARALLEL_SAFE_SCOPES = frozenset({"tools:read", "tools:search"})
     _MAX_PARALLEL_CONCURRENCY = 10
 
-    async def execute_parallel_tools(self, websocket, tool_calls, tool_to_agent: Dict, chat_id: str = None, user_id: str = None) -> List[Optional[MCPResponse]]:
+    async def execute_parallel_tools(self, websocket, tool_calls, tool_to_agent: Dict, chat_id: str = None, user_id: str = None, tool_to_unqualified: Optional[Dict[str, str]] = None) -> List[Optional[MCPResponse]]:
         """Execute multiple tool calls with concurrency safety.
 
         When tool_concurrency_safety is enabled, read-only tools (tools:read,
@@ -3683,7 +3734,15 @@ COMPONENT UPDATE RULES:
         prepared = []  # list of (index, tc, tool_name, agent_id, args | None, error_coro | None)
 
         for idx, tc in enumerate(tool_calls):
-            tool_name = tc.function.name
+            # Same qualified→unqualified resolution as the single-tool path:
+            # an LLM-emitted name like "forecaster-1__submit_dataset" is mapped
+            # back to the bare skill id "submit_dataset" before dispatch so the
+            # owning agent receives the name it registered.
+            llm_tool_name = tc.function.name
+            if tool_to_unqualified and llm_tool_name in tool_to_unqualified:
+                tool_name = tool_to_unqualified[llm_tool_name]
+            else:
+                tool_name = llm_tool_name
             try:
                 args = json.loads(tc.function.arguments) if tc.function.arguments else {}
             except json.JSONDecodeError:
@@ -3695,7 +3754,7 @@ COMPONENT UPDATE RULES:
                 if user_id:
                     args["user_id"] = user_id
 
-            agent_id = tool_to_agent.get(tool_name)
+            agent_id = tool_to_agent.get(llm_tool_name)
 
             if user_id and agent_id:
                 creds = self.credential_manager.get_agent_credentials_encrypted(user_id, agent_id)

@@ -22,7 +22,12 @@
  */
 import { useCallback, useEffect, useState } from "react";
 
-import { testLlmConnection, type TestConnectionResponse } from "../api/llm";
+import {
+    testLlmConnection,
+    listLlmModels,
+    type TestConnectionResponse,
+    type ListModelsResponse,
+} from "../api/llm";
 
 const STORAGE_KEY = "astralbody.llm.config.v1";
 
@@ -42,6 +47,11 @@ export interface UseLlmConfigResult {
         c: { apiKey: string; baseUrl: string; model: string },
         token: string | undefined,
     ) => Promise<TestConnectionResponse>;
+    listModels: (
+        c: { apiKey: string; baseUrl: string },
+        token: string | undefined,
+        signal?: AbortSignal,
+    ) => Promise<ListModelsResponse>;
 }
 
 function readStorage(): LlmConfig | null {
@@ -144,5 +154,23 @@ export function useLlmConfig(): UseLlmConfigResult {
         [],
     );
 
-    return { config, save, clear, testConnection };
+    const listModels = useCallback(
+        async (
+            c: { apiKey: string; baseUrl: string },
+            token: string | undefined,
+            signal?: AbortSignal,
+        ): Promise<ListModelsResponse> => {
+            if (!token) {
+                throw new Error("Not signed in — cannot list models");
+            }
+            return await listLlmModels(
+                token,
+                { api_key: c.apiKey, base_url: c.baseUrl },
+                signal,
+            );
+        },
+        [],
+    );
+
+    return { config, save, clear, testConnection, listModels };
 }

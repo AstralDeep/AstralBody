@@ -39,7 +39,7 @@ class TestMockDelegationToken:
             user_id="test-user"
         )
         assert "access_token" in result
-        assert result["token_type"] == "Bearer"
+        assert result["token_type"] == "DPoP"
         assert result["expires_in"] == 300
         assert result["agent_id"] == "general-1"
 
