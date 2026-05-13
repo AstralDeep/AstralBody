@@ -3,12 +3,15 @@ plans/
 tmp_uploads/
 backend/tmp/
 docs/*
-CLAUDE.md
 /.ruff_cache/
 Qualifying_Exam/
 .docker-cache/
 backend/knowledge/*
 backend/knowledge/_index.md
+
+bikerides_day.csv
+dataset_soft.csv
+docker_logs_fixes_known_remaining.md
 
 .claude/
 .kilocode/

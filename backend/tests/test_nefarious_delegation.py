@@ -16,6 +16,7 @@ import sys
 import json
 import base64
 import tempfile
+import uuid
 import pytest
 
 # Ensure backend is in path
@@ -49,15 +50,14 @@ def tmp_dir():
 
 @pytest.fixture
 def perm_manager(tmp_dir):
+    # Per-test unique user_id so the shared Postgres backend can't leak
+    # state between tests (or between parallel pytest workers).
     pm = ToolPermissionManager(data_dir=tmp_dir)
-    # Clean up any stale data from previous runs (shared Postgres DB)
-    pm.remove_user_permissions("user-001")
-    # Register the nefarious agent's tool→scope mappings
+    user_id = f"nef-test-{uuid.uuid4().hex[:8]}"
     tool_scope_map = {name: info.get("scope", "tools:read") for name, info in TOOL_REGISTRY.items()}
     pm.register_tool_scopes("nefarious-1", tool_scope_map)
-    yield pm
-    # Tear down: remove test data
-    pm.remove_user_permissions("user-001")
+    yield pm, user_id
+    pm.remove_agent_permissions(user_id, "nefarious-1")
 
 
 ALL_TOOLS = list(TOOL_REGISTRY.keys())
@@ -102,22 +102,24 @@ class TestDelegationBlocksExfiltration:
 
     def test_permission_revoke_removes_from_allowed(self, perm_manager):
         """Disabling tools:system scope filters out exfiltrate_data."""
+        pm, user_id = perm_manager
         # Enable read and write scopes, but NOT system (where exfiltrate_data lives)
-        perm_manager.set_agent_scopes("user-001", "nefarious-1", {
+        pm.set_agent_scopes(user_id, "nefarious-1", {
             "tools:read": True,
             "tools:write": True,
             "tools:search": False,
             "tools:system": False,
         })
 
-        allowed = perm_manager.get_allowed_tools("user-001", "nefarious-1", ALL_TOOLS)
+        allowed = pm.get_allowed_tools(user_id, "nefarious-1", ALL_TOOLS)
         assert BAD_TOOL not in allowed
         for tool in LEGIT_TOOLS:
             assert tool in allowed
 
     def test_delegation_token_excludes_revoked_tool(self, service, perm_manager):
         """Delegation token scope does NOT contain exfiltrate_data."""
-        perm_manager.set_agent_scopes("user-001", "nefarious-1", {
+        pm, user_id = perm_manager
+        pm.set_agent_scopes(user_id, "nefarious-1", {
             "tools:read": True,
             "tools:write": True,
             "tools:search": False,
@@ -125,13 +127,13 @@ class TestDelegationBlocksExfiltration:
         })
 
         # Get allowed tools (what the orchestrator would pass to delegation)
-        allowed = perm_manager.get_allowed_tools("user-001", "nefarious-1", ALL_TOOLS)
+        allowed = pm.get_allowed_tools(user_id, "nefarious-1", ALL_TOOLS)
 
         # Create delegation token with only allowed tools
         result = service._create_mock_delegation_token(
             agent_id="nefarious-1",
             allowed_tools=allowed,
-            user_id="user-001"
+            user_id=user_id
         )
 
         scope = result["scope"]
@@ -143,17 +145,18 @@ class TestDelegationBlocksExfiltration:
 
     def test_is_tool_in_scope_blocks_exfiltration(self, service, perm_manager):
         """DelegationService.is_tool_in_scope returns False for blocked tool."""
-        perm_manager.set_agent_scopes("user-001", "nefarious-1", {
+        pm, user_id = perm_manager
+        pm.set_agent_scopes(user_id, "nefarious-1", {
             "tools:read": True,
             "tools:write": True,
             "tools:search": False,
             "tools:system": False,
         })
-        allowed = perm_manager.get_allowed_tools("user-001", "nefarious-1", ALL_TOOLS)
+        allowed = pm.get_allowed_tools(user_id, "nefarious-1", ALL_TOOLS)
         result = service._create_mock_delegation_token(
             agent_id="nefarious-1",
             allowed_tools=allowed,
-            user_id="user-001"
+            user_id=user_id
         )
 
         # Parse the scopes from the token
@@ -168,16 +171,17 @@ class TestDelegationBlocksExfiltration:
 
     def test_token_act_claim_identifies_nefarious_agent(self, service, perm_manager):
         """Delegation token act claim identifies the nefarious agent."""
+        pm, user_id = perm_manager
         # Enable all scopes for this test
-        perm_manager.set_agent_scopes("user-001", "nefarious-1", {
+        pm.set_agent_scopes(user_id, "nefarious-1", {
             "tools:read": True, "tools:write": True,
             "tools:search": True, "tools:system": True,
         })
-        allowed = perm_manager.get_allowed_tools("user-001", "nefarious-1", ALL_TOOLS)
+        allowed = pm.get_allowed_tools(user_id, "nefarious-1", ALL_TOOLS)
         result = service._create_mock_delegation_token(
             agent_id="nefarious-1",
             allowed_tools=allowed,
-            user_id="user-001"
+            user_id=user_id
         )
 
         # Decode the JWT payload
@@ -187,7 +191,7 @@ class TestDelegationBlocksExfiltration:
         payload = json.loads(base64.urlsafe_b64decode(payload_b64))
 
         assert payload["act"]["sub"] == "agent:nefarious-1"
-        assert payload["sub"] == "user-001"
+        assert payload["sub"] == user_id
 
 
 # ── Test 3: Direct Execution (proves delegation is the gatekeeper) ────────────
@@ -249,66 +253,71 @@ class TestPermissionToggle:
 
     def test_toggle_off_blocks(self, service, perm_manager):
         """Disabling tools:system scope removes exfiltrate_data from delegation scope."""
-        perm_manager.set_agent_scopes("user-001", "nefarious-1", {
+        pm, user_id = perm_manager
+        pm.set_agent_scopes(user_id, "nefarious-1", {
             "tools:read": True, "tools:write": True,
             "tools:search": False, "tools:system": False,
         })
-        allowed = perm_manager.get_allowed_tools("user-001", "nefarious-1", ALL_TOOLS)
+        allowed = pm.get_allowed_tools(user_id, "nefarious-1", ALL_TOOLS)
         result = service._create_mock_delegation_token(
-            agent_id="nefarious-1", allowed_tools=allowed, user_id="user-001"
+            agent_id="nefarious-1", allowed_tools=allowed, user_id=user_id
         )
         assert f"tool:{BAD_TOOL}" not in result["scope"]
 
     def test_toggle_on_allows(self, service, perm_manager):
         """Enabling tools:system scope adds exfiltrate_data back to delegation scope."""
+        pm, user_id = perm_manager
         # First disable, then re-enable
-        perm_manager.set_agent_scopes("user-001", "nefarious-1", {
+        pm.set_agent_scopes(user_id, "nefarious-1", {
             "tools:read": True, "tools:write": True,
             "tools:search": False, "tools:system": False,
         })
-        perm_manager.set_agent_scopes("user-001", "nefarious-1", {
+        pm.set_agent_scopes(user_id, "nefarious-1", {
             "tools:read": True, "tools:write": True,
             "tools:search": False, "tools:system": True,
         })
 
-        allowed = perm_manager.get_allowed_tools("user-001", "nefarious-1", ALL_TOOLS)
+        allowed = pm.get_allowed_tools(user_id, "nefarious-1", ALL_TOOLS)
         result = service._create_mock_delegation_token(
-            agent_id="nefarious-1", allowed_tools=allowed, user_id="user-001"
+            agent_id="nefarious-1", allowed_tools=allowed, user_id=user_id
         )
         assert f"tool:{BAD_TOOL}" in result["scope"]
 
     def test_default_permissions_allow_none(self, service, perm_manager):
         """Default: all scopes disabled, so no tools allowed."""
-        allowed = perm_manager.get_allowed_tools("user-001", "nefarious-1", ALL_TOOLS)
+        pm, user_id = perm_manager
+        allowed = pm.get_allowed_tools(user_id, "nefarious-1", ALL_TOOLS)
         # Default is all scopes disabled, so no tools should be allowed
         assert len(allowed) == 0
 
     def test_all_scopes_enabled_allows_all(self, service, perm_manager):
         """Enabling all scopes allows all tools including the bad one."""
-        perm_manager.set_agent_scopes("user-001", "nefarious-1", {
+        pm, user_id = perm_manager
+        pm.set_agent_scopes(user_id, "nefarious-1", {
             "tools:read": True, "tools:write": True,
             "tools:search": True, "tools:system": True,
         })
-        allowed = perm_manager.get_allowed_tools("user-001", "nefarious-1", ALL_TOOLS)
+        allowed = pm.get_allowed_tools(user_id, "nefarious-1", ALL_TOOLS)
         assert len(allowed) == 5
         result = service._create_mock_delegation_token(
-            agent_id="nefarious-1", allowed_tools=allowed, user_id="user-001"
+            agent_id="nefarious-1", allowed_tools=allowed, user_id=user_id
         )
         for tool in ALL_TOOLS:
             assert f"tool:{tool}" in result["scope"]
 
     def test_selective_revoke_only_affects_target(self, service, perm_manager):
         """Disabling tools:system doesn't affect read/write tools."""
-        perm_manager.set_agent_scopes("user-001", "nefarious-1", {
+        pm, user_id = perm_manager
+        pm.set_agent_scopes(user_id, "nefarious-1", {
             "tools:read": True, "tools:write": True,
             "tools:search": False, "tools:system": False,
         })
 
         # Read tools still allowed
-        assert perm_manager.is_tool_allowed("user-001", "nefarious-1", "read_user_profile") is True
-        assert perm_manager.is_tool_allowed("user-001", "nefarious-1", "read_system_logs") is True
+        assert pm.is_tool_allowed(user_id, "nefarious-1", "read_user_profile") is True
+        assert pm.is_tool_allowed(user_id, "nefarious-1", "read_system_logs") is True
         # Write tools still allowed
-        assert perm_manager.is_tool_allowed("user-001", "nefarious-1", "write_user_notes") is True
-        assert perm_manager.is_tool_allowed("user-001", "nefarious-1", "update_user_settings") is True
+        assert pm.is_tool_allowed(user_id, "nefarious-1", "write_user_notes") is True
+        assert pm.is_tool_allowed(user_id, "nefarious-1", "update_user_settings") is True
         # Only bad tool is blocked (tools:system scope)
-        assert perm_manager.is_tool_allowed("user-001", "nefarious-1", BAD_TOOL) is False
+        assert pm.is_tool_allowed(user_id, "nefarious-1", BAD_TOOL) is False
