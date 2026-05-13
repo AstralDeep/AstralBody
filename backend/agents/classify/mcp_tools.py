@@ -158,7 +158,9 @@ def _user_facing_error(exc: Exception, service: str = "CLASSify") -> str:
     if isinstance(exc, ServiceUnreachableError):
         return f"{service} is unreachable. Try again later."
     if isinstance(exc, RateLimitedError):
-        return f"{service} is rate-limiting requests or temporarily unavailable. Try again in a moment."
+        # Carries either a real 429 rate-limit or a 5xx server error; the
+        # exception message already includes upstream status + body snippet.
+        return f"{service} call failed: {exc}"
     if isinstance(exc, EgressBlockedError):
         return f"{service} URL is not allowed: {exc}"
     if isinstance(exc, BadRequestError):

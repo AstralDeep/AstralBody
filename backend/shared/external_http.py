@@ -216,8 +216,16 @@ def request(
     status = resp.status_code
     if status in (401, 403):
         raise AuthFailedError(f"Authentication failed ({status})")
-    if status == 429 or 500 <= status < 600:
-        raise RateLimitedError(f"Upstream returned {status}")
+    if status == 429:
+        snippet = (resp.text or "")[:500]
+        raise RateLimitedError(f"Rate-limited by upstream ({status}): {snippet}")
+    if 500 <= status < 600:
+        # 5xx is mapped to RateLimitedError for retry purposes (the orchestrator's
+        # retry policy treats it as transient), but the message must NOT claim
+        # rate-limiting — surface the upstream's body so the LLM and user can
+        # see what actually went wrong (e.g. "model doesn't support embeddings").
+        snippet = (resp.text or "")[:500]
+        raise RateLimitedError(f"Upstream server error ({status}): {snippet}")
     if 400 <= status < 500:
         snippet = (resp.text or "")[:500]
         raise BadRequestError(f"Upstream returned {status}: {snippet}")
