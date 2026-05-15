@@ -320,6 +320,12 @@ class RegisterUI(Message):
     # browser localStorage at register time. Shape: {api_key, base_url, model}.
     # Stored only in per-WebSocket memory on the server (never persisted).
     llm_config: Optional[Dict[str, Any]] = None
+    # Feature 016-persistent-login (FR-015): True when the client reached
+    # the authenticated state via a silent resume from a stored credential
+    # (i.e., the OIDC `onSigninCallback` did NOT fire on this page load).
+    # False (default) for fresh interactive logins and for older clients
+    # that pre-date this feature. Drives the audit action_type selection.
+    resumed: bool = False
 
     def to_json(self) -> str:
         return json.dumps(asdict(self))
@@ -327,6 +333,10 @@ class RegisterUI(Message):
     @staticmethod
     def from_json(json_str: str) -> 'RegisterUI':
         data = json.loads(json_str)
+        # Filter unknown keys so older servers parsing newer payloads (and
+        # vice versa) don't crash on additive fields.
+        valid_fields = {f.name for f in RegisterUI.__dataclass_fields__.values()}
+        data = {k: v for k, v in data.items() if k in valid_fields}
         return RegisterUI(**data)
 
 

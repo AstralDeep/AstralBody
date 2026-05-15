@@ -4,6 +4,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { toast } from "sonner";
 import { API_URL } from "../config";
+import { JUST_INTERACTIVE_KEY } from "../auth/persistentLogin";
 import { mergeStreamChunk } from "../utils/streamMerge";
 import type {
     UIStreamDataMessage,
@@ -925,12 +926,34 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                 } catch {
                     // Corrupt JSON — register without the field.
                 }
+                // Feature 016 (FR-015): tell the server whether we
+                // reached this WS connect via a fresh interactive
+                // login or via a silent resume from a stored
+                // credential. The `astralbody.justInteractive` flag is
+                // set by onSigninCallback (in auth/oidcConfig.ts) and
+                // cleared on first read here, so:
+                //   - first connect after fresh login → resumed=false
+                //   - reconnects on the same page → resumed=true (we
+                //     did NOT re-authenticate; still on the same
+                //     authenticated session)
+                //   - cold launch with a stored credential → resumed=true
+                let resumed = true;
+                try {
+                    if (window.sessionStorage.getItem(JUST_INTERACTIVE_KEY) === "1") {
+                        window.sessionStorage.removeItem(JUST_INTERACTIVE_KEY);
+                        resumed = false;
+                    }
+                } catch {
+                    // sessionStorage rejection: default to resumed=true
+                    // — small audit-attribution loss, no functional regression.
+                }
                 ws.send(JSON.stringify({
                     type: "register_ui",
                     token: currentToken,
                     capabilities: ["render", "stream"],
                     session_id: `ui-${Date.now()}`,
                     device: detectDeviceCapabilities(),
+                    resumed,
                     ...(initialLlmConfig ? { llm_config: initialLlmConfig } : {}),
                 }));
                 // Fetch history
