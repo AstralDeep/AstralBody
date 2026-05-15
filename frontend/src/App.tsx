@@ -10,8 +10,17 @@ import FloatingChatPanel from "./components/FloatingChatPanel";
 import AuditLogPanel from "./components/audit/AuditLogPanel";
 import LlmSettingsPanel from "./components/llm/LlmSettingsPanel";
 import { useWebSocket } from "./hooks/useWebSocket";
-import { AlertCircle } from "lucide-react";
-import { Toaster } from "sonner";
+import { AlertCircle, WifiOff } from "lucide-react";
+import { Toaster, toast } from "sonner";
+// Feature 016-persistent-login
+import {
+  signOut as persistentSignOut,
+  retryWithBackoff,
+  reportSessionResumeFailed,
+} from "./auth/persistentLogin";
+import { oidcConfig as productionOidcConfig } from "./auth/oidcConfig";
+import { PERSISTENCE_DISABLED_EVENT } from "./auth/safeStorageStore";
+import { REVOCATION_QUEUED_OFFLINE_EVENT } from "./auth/revocationQueue";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import { AgentPermissionProvider } from "./contexts/AgentPermissionContext";
 import { FeedbackProvider } from "./components/feedback/FeedbackContext";
@@ -159,9 +168,104 @@ function App() {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
+  // Feature 016 (FR-006 / FR-009b): replay any auth-persistence
+  // window events that fired BEFORE the Toaster mounted (e.g., during
+  // onSigninCallback). main.tsx stashes the flag in sessionStorage.
+  // We also attach a live listener for the same events so subsequent
+  // failures during the session still produce toasts.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const showPersistenceDisabled = () => {
+      toast.warning(
+        "We could not save your sign-in on this device. You'll be asked to sign in again next time.",
+        { duration: 8000 },
+      );
+    };
+    const showRevocationOffline = () => {
+      toast.info(
+        "Signed out locally. Server confirmation pending — will retry when network returns.",
+        { duration: 6000 },
+      );
+    };
+
+    try {
+      if (window.sessionStorage.getItem("astralbody.toast.persistenceDisabled") === "1") {
+        window.sessionStorage.removeItem("astralbody.toast.persistenceDisabled");
+        showPersistenceDisabled();
+      }
+      if (window.sessionStorage.getItem("astralbody.toast.revocationQueuedOffline") === "1") {
+        window.sessionStorage.removeItem("astralbody.toast.revocationQueuedOffline");
+        showRevocationOffline();
+      }
+    } catch {
+      /* defensive */
+    }
+
+    window.addEventListener(PERSISTENCE_DISABLED_EVENT, showPersistenceDisabled);
+    window.addEventListener(REVOCATION_QUEUED_OFFLINE_EVENT, showRevocationOffline);
+    return () => {
+      window.removeEventListener(PERSISTENCE_DISABLED_EVENT, showPersistenceDisabled);
+      window.removeEventListener(REVOCATION_QUEUED_OFFLINE_EVENT, showRevocationOffline);
+    };
+  }, []);
+
   // Pass the token to the WebSocket hook.
   // It will only connect when token is available.
   const ws = useWebSocket(WS_URL, auth.user?.access_token);
+
+  // Feature 016 (FR-011): wrap silent-renew with 3-attempt 1s/3s/9s
+  // exponential backoff. oidc-client-ts emits `silentRenewError` on the
+  // UserManager events bus when a refresh fails; we retry transient
+  // failures, abort on definitive 4xx (token already invalid).
+  const useMockAuthEarly = import.meta.env.VITE_USE_MOCK_AUTH === 'true';
+  useEffect(() => {
+    if (typeof window === "undefined" || useMockAuthEarly) return;
+    if (!auth.isAuthenticated) return;
+    // react-oidc-context exposes `auth.events` for low-level events;
+    // when present we attach a handler that, on silentRenewError,
+    // attempts a bounded retry via retryWithBackoff. Older versions
+    // may not expose `events`; in that case the library's own
+    // automaticSilentRenew (already enabled in oidcConfig) handles
+    // the renew lifecycle and our retry budget is a no-op.
+    const events = (auth as { events?: { addSilentRenewError?: (cb: (e: Error) => void) => void; removeSilentRenewError?: (cb: (e: Error) => void) => void } }).events;
+    if (!events || !events.addSilentRenewError) return;
+    const onSilentRenewError = (err: Error) => {
+      void retryWithBackoff(
+        async () => {
+          if (typeof (auth as { signinSilent?: () => Promise<unknown> }).signinSilent === "function") {
+            await (auth as { signinSilent: () => Promise<unknown> }).signinSilent();
+          } else {
+            throw err;
+          }
+        },
+        (e: unknown) => {
+          // Definitive failures: server told us the long-lived
+          // credential is invalid. Match Keycloak's `invalid_grant`
+          // error string.
+          const msg = e instanceof Error ? e.message : String(e);
+          return /invalid_grant|invalid_token|400|401|403/i.test(msg);
+        },
+      ).catch((finalErr: unknown) => {
+        const lastError = finalErr instanceof Error ? finalErr.message : String(finalErr);
+        const isDefinitive = /invalid_grant|invalid_token|400|401|403/i.test(lastError);
+        void reportSessionResumeFailed(
+          {
+            reason: isDefinitive ? "definitive-4xx" : "retry-budget-exhausted",
+            attempts: isDefinitive ? 0 : 3,
+            last_error: lastError.slice(0, 500),
+          },
+          auth.user?.access_token,
+        );
+        toast.error("We could not refresh your sign-in. Please sign in again.", { duration: 8000 });
+        void auth.signoutRedirect();
+      });
+    };
+    events.addSilentRenewError(onSilentRenewError);
+    return () => {
+      events.removeSilentRenewError?.(onSilentRenewError);
+    };
+  }, [auth, useMockAuthEarly]);
 
   if (auth.isLoading) {
     return (
@@ -183,6 +287,48 @@ function App() {
   }
 
   if (!auth.isAuthenticated) {
+    // Feature 016 (FR-016 / T038): if the browser is offline and we
+    // have an anchor record (i.e., the user is in the middle of a
+    // silent resume but can't reach Keycloak), surface a clear
+    // offline state with a retry control rather than dropping them
+    // on the LoginScreen which would require typing a password they
+    // can't submit while offline anyway.
+    const isOffline = typeof navigator !== "undefined" && navigator.onLine === false;
+    if (isOffline) {
+      let hasAnchor = false;
+      try {
+        hasAnchor = !!window.localStorage.getItem("astralbody.persistentLogin.v1");
+      } catch {
+        /* defensive */
+      }
+      if (hasAnchor) {
+        return (
+          <div className="min-h-screen bg-astral-bg flex flex-col items-center justify-center text-white p-6 text-center">
+            <WifiOff size={48} className="text-yellow-400 mb-4" aria-hidden="true" />
+            <h1 className="text-2xl font-bold mb-2">You're offline</h1>
+            <p className="text-astral-muted mb-6 max-w-md">
+              We're keeping you signed in but couldn't reach the server to refresh your session.
+              Check your network connection and try again.
+            </p>
+            <button
+              onClick={() => {
+                if (typeof (auth as { signinSilent?: () => Promise<unknown> }).signinSilent === "function") {
+                  void (auth as { signinSilent: () => Promise<unknown> }).signinSilent().catch(() => {
+                    // Fall through silently — the UI stays on this
+                    // offline screen until the retry succeeds.
+                  });
+                } else if (typeof window !== "undefined") {
+                  window.location.reload();
+                }
+              }}
+              className="bg-astral-primary text-white px-6 py-2 rounded-lg hover:bg-astral-primary/90 transition-colors"
+            >
+              Retry
+            </button>
+          </div>
+        );
+      }
+    }
     return <LoginScreen />;
   }
 
@@ -278,7 +424,31 @@ function App() {
           />
           <Shell
             ws={ws}
-            auth={{ accessToken: auth.user?.access_token, signOut: () => void auth.signoutRedirect() }}
+            auth={{
+              accessToken: auth.user?.access_token,
+              // Feature 016 (FR-009 / T031): the sign-out path now
+              // goes through persistentSignOut() which (a) synchronously
+              // clears local credentials, (b) enqueues server-side
+              // revocation with offline-tolerant retry, (c) then
+              // delegates to signoutRedirect(). In mock-auth mode the
+              // mock context's signoutRedirect is sufficient.
+              signOut: () => {
+                if (useMockAuth) {
+                  void auth.signoutRedirect();
+                } else {
+                  const cfg = productionOidcConfig as unknown as { authority: string; client_id: string };
+                  void persistentSignOut(
+                    {
+                      signoutRedirect: () => auth.signoutRedirect(),
+                      user: auth.user
+                        ? { refresh_token: (auth.user as { refresh_token?: string }).refresh_token }
+                        : null,
+                    },
+                    { authority: cfg.authority, client_id: cfg.client_id },
+                  );
+                }
+              },
+            }}
             user={{ email: userEmail, isAdmin }}
             openers={{
               audit: () => setAuditOpen(true),

@@ -871,6 +871,29 @@ class Orchestrator:
                     except Exception as _e:
                         logger.debug(f"WS register audit record failed: {_e}")
 
+                    # Feature 016 (FR-015): Record the persistent-login-aware
+                    # entry-point action. The client tells us via msg.resumed
+                    # whether it reached this WS connect via a silent resume
+                    # from a stored credential (True) or via a fresh
+                    # interactive Keycloak login (False — also the legacy
+                    # default for older clients). Three distinct action_type
+                    # values let the audit log distinguish these flows.
+                    try:
+                        from audit.hooks import record_auth_event
+                        resumed_flag = bool(getattr(msg, "resumed", False))
+                        action = "session_resumed" if resumed_flag else "login_interactive"
+                        await record_auth_event(
+                            claims={**user_data, "_pl_resumed": resumed_flag},
+                            action=action,
+                            description=(
+                                "Silent session resumed from stored credential"
+                                if resumed_flag
+                                else "Interactive login completed; new session established"
+                            ),
+                        )
+                    except Exception as _e:
+                        logger.debug(f"persistent-login audit record failed: {_e}")
+
                     # Feature 006: pick up any LLM credentials the browser
                     # forwarded with this register_ui (the user's browser
                     # localStorage is the source of truth for personal config).
@@ -921,6 +944,55 @@ class Orchestrator:
                     await self.send_dashboard(websocket)
                 else:
                     logger.warning("UI registration failed: Invalid or missing token")
+                    # Feature 016 (FR-015): When the client said it was
+                    # silently resuming (resumed=True) but the server
+                    # rejected the token, record auth.session_resume_failed
+                    # so the audit log captures the failure. Best-effort
+                    # attribution via base64-decode of the JWT payload; on
+                    # failure record as anonymous.
+                    try:
+                        resumed_flag = bool(getattr(msg, "resumed", False))
+                        if resumed_flag:
+                            attribution_claims = None
+                            if token:
+                                try:
+                                    import base64
+                                    parts = token.split(".")
+                                    if len(parts) == 3:
+                                        payload_b64 = parts[1]
+                                        payload_b64 += "=" * ((4 - len(payload_b64) % 4) % 4)
+                                        payload_json = base64.b64decode(payload_b64).decode("utf-8")
+                                        attribution_claims = json.loads(payload_json)
+                                except Exception:
+                                    attribution_claims = None
+                            from audit.hooks import record_auth_event
+                            from audit.recorder import get_recorder, make_correlation_id, now_utc
+                            from audit.schemas import AuditEventCreate
+                            if attribution_claims and attribution_claims.get("sub"):
+                                await record_auth_event(
+                                    claims=attribution_claims,
+                                    action="session_resume_failed",
+                                    description="Silent session resume rejected (invalid/expired token)",
+                                    outcome="failure",
+                                    outcome_detail="ws_register token rejected",
+                                )
+                            else:
+                                rec = get_recorder()
+                                if rec is not None:
+                                    await rec.record(AuditEventCreate(
+                                        actor_user_id="anonymous",
+                                        auth_principal="anonymous",
+                                        event_class="auth",
+                                        action_type="auth.session_resume_failed",
+                                        description="Silent session resume rejected; token unattributable",
+                                        correlation_id=make_correlation_id(),
+                                        outcome="failure",
+                                        outcome_detail="ws_register token rejected (no claims recoverable)",
+                                        inputs_meta={"resumed": True},
+                                        started_at=now_utc(),
+                                    ))
+                    except Exception as _e:
+                        logger.debug(f"session_resume_failed audit record failed: {_e}")
                     # Ungate waiting tasks so they hit the auth check naturally
                     evt = self._registered_events.get(id(websocket))
                     if evt:

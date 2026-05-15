@@ -19,11 +19,11 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel, Field
 
 from orchestrator.auth import require_user_id, get_current_user_payload
 
@@ -242,3 +242,106 @@ async def get_audit_event(
             logger.debug("audit_view detail self-record failed: %s", exc)
 
     return dto
+
+
+# ---------------------------------------------------------------------------
+# Feature 016 — Persistent-login: session-resume-failed audit endpoint
+# ---------------------------------------------------------------------------
+
+class SessionResumeFailedBody(BaseModel):
+    """Body of POST /api/audit/session-resume-failed.
+
+    Posted by the frontend (a) after the FR-011 retry budget is
+    exhausted on the silent-resume path, (b) when the FR-013 hard-max
+    365-day clear path discards a stored credential, and (c) when the
+    FR-007 deployment-origin check fails. In all three cases the WS is
+    not yet authenticated, so the audit row cannot be written via the
+    normal WS-register path.
+    """
+    reason: Literal[
+        "retry-budget-exhausted",
+        "definitive-4xx",
+        "token-expired",
+        "deployment-mismatch",
+    ]
+    attempts: int = Field(default=0, ge=0, le=3)
+    last_error: str = Field(default="", max_length=500)
+
+
+@audit_router.post(
+    "/session-resume-failed",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Record an auth.session_resume_failed audit event",
+    description=(
+        "Records `event_class='auth', action_type='auth.session_resume_failed'`."
+        " Accepts an unauthenticated body — when no bearer token is present, the"
+        " row is attributed to `actor_user_id='anonymous'`. Used by the frontend"
+        " after the silent-resume retry budget is exhausted, after a hard-max"
+        " 365-day clear, or after a deployment-mismatch clear."
+    ),
+    responses={
+        204: {"description": "Recorded"},
+        400: {"description": "Malformed body"},
+    },
+)
+async def post_session_resume_failed(
+    request: Request,
+    body: SessionResumeFailedBody,
+):
+    # Best-effort identity attribution. The caller's bearer token is
+    # almost certainly invalid (that is *why* the resume failed), so we
+    # do NOT cryptographically validate it — we only decode the payload
+    # claims to attribute the audit row. If decoding fails the row is
+    # attributed to "anonymous".
+    actor_user_id = "anonymous"
+    auth_principal = "anonymous"
+    try:
+        auth_header = request.headers.get("authorization") or request.headers.get("Authorization") or ""
+        if auth_header.lower().startswith("bearer "):
+            raw_token = auth_header.split(" ", 1)[1].strip()
+            if raw_token:
+                import base64
+                import json as _json
+                parts = raw_token.split(".")
+                if len(parts) == 3:
+                    payload_b64 = parts[1] + "=" * ((4 - len(parts[1]) % 4) % 4)
+                    decoded = _json.loads(base64.b64decode(payload_b64).decode("utf-8"))
+                    sub = decoded.get("sub")
+                    if sub:
+                        actor_user_id = sub
+                        auth_principal = decoded.get("preferred_username") or sub
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.debug("session-resume-failed identity lookup failed: %s", exc)
+
+    recorder = get_recorder()
+    if recorder is None:
+        # No recorder wired (tests, degraded mode). Acknowledge the request
+        # silently so the frontend's fire-and-forget call doesn't retry.
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    try:
+        await recorder.record(AuditEventCreate(
+            actor_user_id=actor_user_id,
+            auth_principal=auth_principal,
+            event_class="auth",
+            action_type="auth.session_resume_failed",
+            description=(
+                "Silent session resume failed; frontend reported "
+                f"reason={body.reason!r}, attempts={body.attempts}"
+            ),
+            correlation_id=make_correlation_id(),
+            outcome="failure",
+            outcome_detail=body.last_error or body.reason,
+            inputs_meta={
+                "reason": body.reason,
+                "attempts": body.attempts,
+                "resumed": True,
+            },
+            started_at=now_utc(),
+        ))
+    except Exception as exc:  # pragma: no cover
+        logger.debug("session-resume-failed self-record failed: %s", exc)
+        # Still return 204 — the frontend cannot do anything with a server
+        # error here, and the audit gap will surface in metrics anyway.
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
