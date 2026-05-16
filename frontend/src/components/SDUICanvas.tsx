@@ -525,7 +525,7 @@ export default function SDUICanvas({
                         initial={{ opacity: 0 }}
                         animate={{ opacity: 1 }}
                         exit={{ opacity: 0 }}
-                        className="absolute inset-0 z-10 bg-astral-bg/60 backdrop-blur-sm flex items-center justify-center"
+                        className="fixed inset-0 z-10 bg-astral-bg/60 backdrop-blur-sm flex items-center justify-center"
                     >
                         <div className="flex flex-col items-center gap-3">
                             <Loader2 size={32} className="text-astral-primary animate-spin" />
