@@ -7,7 +7,7 @@
  *  - chat_status "done"/"idle" drains the queue
  *  - cancelTask clears the queue
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 
 // Test the message queue logic in isolation (module-scoped refs)
 // We can't easily mount the hook, so we test the pattern directly.

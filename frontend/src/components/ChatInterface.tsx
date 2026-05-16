@@ -141,11 +141,6 @@ export default function ChatInterface({
         const frameId = requestAnimationFrame(() => {
             bottomRef.current?.scrollIntoView({ behavior: "smooth" });
         });
-        // Clear loading indicator when new messages arrive
-        if (isWaitingForResponse) {
-            setIsWaitingForResponse(false);
-            if (waitingTimerRef.current) { clearTimeout(waitingTimerRef.current); waitingTimerRef.current = null; }
-        }
         return () => cancelAnimationFrame(frameId);
     }, [messages, chatStatus]);
 
