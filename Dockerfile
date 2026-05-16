@@ -21,8 +21,13 @@ RUN find /app -name ".env" -exec sed -i 's/\r$//' {} +
 # Set memory limit for Node to prevent swap thrashing during Vite build
 ENV NODE_OPTIONS="--max-old-space-size=4096"
 
-# Source .env before build to ensure Vite sees the variables
-RUN set -a && . /app/.env && set +a && npm run build
+# Extract only VITE_* vars from .env and export them for the build.
+# Using a temp script avoids shell issues with special characters in
+# non-VITE values (passwords, secrets, etc.)
+RUN grep '^VITE_' /app/.env > /tmp/vite-env.sh && \
+    sed -i 's/^/export /' /tmp/vite-env.sh && \
+    . /tmp/vite-env.sh && \
+    npm run build
 
 # ==========================================
 # Stage 2: Final Image (Backend + Nginx)
