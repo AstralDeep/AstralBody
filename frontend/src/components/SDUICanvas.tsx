@@ -435,7 +435,7 @@ export default function SDUICanvas({
     };
 
     return (
-        <div className="flex-1 flex flex-col relative" style={{ minHeight: 0 }}>
+        <div className="flex flex-col">
             {/* Toolbar — only visible when components exist */}
             {canvasComponents.length > 0 && (
                 <div className="flex items-center justify-between px-4 sm:px-6 py-3 border-b border-white/10 bg-astral-bg/50 backdrop-blur-sm flex-shrink-0">
@@ -551,7 +551,7 @@ export default function SDUICanvas({
             {/* Canvas Grid — 019-cohesive-ui: grouped by chat_id */}
             <div
                 ref={scrollContainerRef}
-                className={`flex-1 overflow-y-auto px-4 sm:px-6 py-4 ${
+                className={`px-4 sm:px-6 py-4 ${
                     canvasComponents.length > 0
                         ? ''
                         : ''
