@@ -42,6 +42,7 @@ interface ChatInterfaceProps {
     onDeleteSavedComponent: (componentId: string) => void;
     onCombineComponents: (sourceId: string, targetId: string) => void;
     onCondenseComponents: (componentIds: string[]) => void;
+    onCancelCombine: () => void;
     isCombining: boolean;
     combineError: string | null;
     accessToken?: string;
@@ -69,6 +70,7 @@ export default function ChatInterface({
     onDeleteSavedComponent,
     onCombineComponents,
     onCondenseComponents,
+    onCancelCombine,
     isCombining,
     combineError,
     accessToken,
@@ -1030,6 +1032,7 @@ export default function ChatInterface({
                 onDeleteComponent={onDeleteSavedComponent}
                 onCombineComponents={onCombineComponents}
                 onCondenseComponents={onCondenseComponents}
+                onCancelCombine={onCancelCombine}
                 isCombining={isCombining}
                 combineError={combineError}
                 activeChatId={activeChatId}

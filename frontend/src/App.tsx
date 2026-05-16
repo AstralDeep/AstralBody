@@ -102,6 +102,7 @@ function Shell({ ws, auth, user, openers }: ShellProps) {
               onDeleteComponent={ws.deleteSavedComponent}
               onCombineComponents={ws.combineComponents}
               onCondenseComponents={ws.condenseComponents}
+              onCancelCombine={ws.cancelCombine}
               isCombining={ws.isCombining}
               combineError={ws.combineError}
               onTablePaginate={ws.sendTablePaginate}

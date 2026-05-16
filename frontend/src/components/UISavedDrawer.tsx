@@ -31,6 +31,7 @@ interface UISavedDrawerProps {
   onDeleteComponent: (componentId: string) => void;
   onCombineComponents: (sourceId: string, targetId: string) => void;
   onCondenseComponents: (componentIds: string[]) => void;
+  onCancelCombine: () => void;
   isCombining: boolean;
   combineError: string | null;
   activeChatId: string | null;
@@ -43,6 +44,7 @@ export default function UISavedDrawer({
   onDeleteComponent,
   onCombineComponents,
   onCondenseComponents,
+  onCancelCombine,
   isCombining,
   combineError,
 }: UISavedDrawerProps) {
@@ -434,10 +436,21 @@ export default function UISavedDrawer({
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             className="fixed inset-0 z-10 bg-astral-bg/60 backdrop-blur-sm flex items-center justify-center"
+            onClick={onCancelCombine}
           >
-            <div className="flex flex-col items-center gap-3">
+            <div
+              className="flex flex-col items-center gap-3 bg-astral-surface border border-white/10 rounded-xl p-6 shadow-xl"
+              onClick={(e) => e.stopPropagation()}
+            >
               <Loader2 size={32} className="text-astral-primary animate-spin" />
               <span className="text-sm text-astral-muted">Combining components...</span>
+              <button
+                type="button"
+                onClick={onCancelCombine}
+                className="mt-2 px-4 py-2 text-xs font-medium rounded-lg bg-white/10 text-astral-muted hover:bg-white/20 hover:text-white transition-colors"
+              >
+                Cancel
+              </button>
             </div>
           </motion.div>
         )}
