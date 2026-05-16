@@ -1,6 +1,10 @@
 """
 Keycloak Token Exchange Verification Script
 Tests the RFC 8693 token exchange setup end-to-end.
+
+**Manual script only** — requires a running Keycloak instance and valid
+client secrets. Do NOT run in CI or automated testing. Invoke directly
+via `python verify_keycloak_exchange.py` with the .env file present.
 """
 import os
 import sys
@@ -8,24 +12,30 @@ import json
 import asyncio
 import base64
 import aiohttp
+import argparse
 
-# Load .env from project root (two levels up from tests/)
-env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".env")
-if os.path.exists(env_path):
-    with open(env_path, "r") as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                os.environ[k] = v
 
-AUTHORITY = os.getenv("VITE_KEYCLOAK_AUTHORITY", "")
-CLIENT_ID = os.getenv("VITE_KEYCLOAK_CLIENT_ID", "")
-CLIENT_SECRET = os.getenv("KEYCLOAK_CLIENT_SECRET", "")
-AGENT_SERVICE_CLIENT_ID = os.getenv("AGENT_SERVICE_CLIENT_ID", "astral-agent-service")
-AGENT_SERVICE_CLIENT_SECRET = os.getenv("AGENT_SERVICE_CLIENT_SECRET", "")
+def load_env(env_path: str):
+    """Load .env from disk; fail early if missing."""
+    if os.path.exists(env_path):
+        with open(env_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    os.environ[k] = v
+    else:
+        print(f"ERROR: .env file not found at {env_path}")
+        print("Create one with KEYCLOAK_CLIENT_SECRET and other vars.")
+        sys.exit(1)
 
-TOKEN_URL = f"{AUTHORITY}/protocol/openid-connect/token"
+
+AUTHORITY = ""
+CLIENT_ID = ""
+CLIENT_SECRET = ""
+AGENT_SERVICE_CLIENT_ID = "astral-agent-service"
+AGENT_SERVICE_CLIENT_SECRET = ""
+TOKEN_URL = ""
 
 
 def decode_jwt(token):
@@ -75,7 +85,6 @@ async def step1b_get_frontend_token():
             if resp.status != 200:
                 print(f"  INFO: astral-frontend does not have service accounts ({body.get('error')})")
                 print(f"  This is expected — it's a frontend OIDC client.")
-                print(f"  To test with a real user token, log into the app and copy your access_token.")
                 return None
             token = body["access_token"]
             payload = decode_jwt(token)
@@ -85,12 +94,9 @@ async def step1b_get_frontend_token():
 
 
 async def step2_exchange_token_with(subject_token, from_client_id, from_client_secret):
-    """Exchange a token for a delegation token (RFC 8693). 
-    The 'audience' is the OTHER client (the one we're delegating to).
-    """
-    # Determine audience: if exchanging FROM frontend → TO agent-service, and vice versa
+    """Exchange a token for a delegation token (RFC 8693)."""
     audience = AGENT_SERVICE_CLIENT_ID if from_client_id == CLIENT_ID else CLIENT_ID
-    
+
     print()
     print("=" * 60)
     print("STEP 2: RFC 8693 Token Exchange")
@@ -165,7 +171,6 @@ async def main():
     frontend_token = await step1b_get_frontend_token()
 
     # Step 2: Exchange the service token to test the token exchange flow
-    # Use whichever token we got
     exchange_token = frontend_token or service_token
     exchange_client_id = CLIENT_ID if frontend_token else AGENT_SERVICE_CLIENT_ID
     exchange_client_secret = CLIENT_SECRET if frontend_token else AGENT_SERVICE_CLIENT_SECRET
@@ -199,4 +204,17 @@ async def main():
 
 
 if __name__ == "__main__":
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".env")
+    load_env(env_path)
+
+    AUTHORITY = os.getenv("VITE_KEYCLOAK_AUTHORITY", "")
+    CLIENT_ID = os.getenv("VITE_KEYCLOAK_CLIENT_ID", "")
+    CLIENT_SECRET = os.getenv("KEYCLOAK_CLIENT_SECRET", "")
+    AGENT_SERVICE_CLIENT_ID = os.getenv("AGENT_SERVICE_CLIENT_ID", "astral-agent-service")
+    AGENT_SERVICE_CLIENT_SECRET = os.getenv("AGENT_SERVICE_CLIENT_SECRET", "")
+    TOKEN_URL = f"{AUTHORITY}/protocol/openid-connect/token"
+
     asyncio.run(main())
+else:
+    # When imported (e.g. by pytest collection), skip silently
+    pass
