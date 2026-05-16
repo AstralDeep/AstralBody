@@ -94,6 +94,7 @@ const baseProps = {
     onDeleteComponent: vi.fn(),
     onCombineComponents: vi.fn(),
     onCondenseComponents: vi.fn(),
+    onCancelCombine: vi.fn(),
     isCombining: false,
     combineError: null,
     onSendMessage: vi.fn(),
