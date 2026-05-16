@@ -8,15 +8,15 @@ INSERT INTO tutorial_step (slug, audience, display_order, target_kind, target_ke
 VALUES
     ('welcome', 'user', 10, 'none', NULL,
      'Welcome to AstralDeep',
-     'Let''s take a quick tour of how AstralDeep helps you collaborate with intelligent agents. This will only take a minute — you can skip at any time.'),
+     'A quick tour of how intelligent agents help you work. Take a minute now or come back later — your call.'),
 
     ('chat-with-agent', 'user', 20, 'static', 'chat.input',
      'Chat with an agent',
-     'Type a message here to start a conversation. Your message is routed to an agent that can use tools, look things up, and render rich UI back to you.'),
+     'Type a message here to start a conversation. Your agent can search, analyze, and render rich results back to you.'),
 
     ('open-agents-panel', 'user', 30, 'static', 'sidebar.agents',
      'Browse available agents',
-     'Open the Agents panel to see every agent you can talk to, what tools they have, and how to grant or revoke their access.'),
+     'Open the Agents panel to see who you can talk to, what tools they have, and how to manage their access.'),
 
     -- Feature 008-llm-text-only-chat: explicit step nudging users to
     -- turn on at least one agent so they unlock tool-augmented chat.
@@ -24,19 +24,19 @@ VALUES
     -- shows the persistent banner over the chat surface.
     ('enable-agents', 'user', 35, 'static', 'sidebar.agents',
      'Turn an agent on',
-     'Open the Agents panel and switch on at least one agent. Until you do, AstralDeep talks to the language model in text-only mode — it can chat, but it can''t take actions on your behalf.'),
+     'Switch on at least one agent to unlock tool-augmented chat. Without it, your agent can talk but can''t act.'),
 
     ('open-audit-log', 'user', 40, 'static', 'sidebar.audit',
      'Review the audit log',
-     'Every action an agent takes on your behalf is recorded in your private audit log. You can review and verify what happened at any time.'),
+     'Every agent action is recorded in your private audit log. Check it anytime to verify what happened.'),
 
     ('give-feedback', 'user', 50, 'static', 'feedback.control',
      'Tell us what worked',
-     'When an agent shows you something useful — or something wrong — use the feedback control to flag it. Your feedback shapes how the system improves over time.'),
+     'Use the feedback control to flag useful or broken results. Your input shapes how the system improves.'),
 
     ('finish', 'user', 60, 'none', NULL,
      'You''re all set',
-     'You can replay this tour any time from the sidebar. Happy chatting!')
+     'That''s the tour! Replay it anytime from the sidebar. Happy chatting.')
 
 ON CONFLICT (slug) DO NOTHING;
 

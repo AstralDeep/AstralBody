@@ -42,6 +42,8 @@ class OnboardingStateResponse(BaseModel):
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     skipped_at: Optional[datetime] = None
+    dismissed_at: Optional[datetime] = None
+    dismiss_count: int = 0
 
     @field_validator("status")
     @classmethod

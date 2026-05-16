@@ -256,6 +256,7 @@ export function TutorialOverlay() {
                     onNext={() => void next()}
                     onBack={back}
                     onSkip={() => void skip()}
+                    onDismissNotNow={() => void onboarding.dismissNotNow()}
                     titleId={titleId}
                     bodyId={bodyId}
                 />

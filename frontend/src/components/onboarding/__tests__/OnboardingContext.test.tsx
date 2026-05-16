@@ -11,6 +11,8 @@ const NOT_STARTED: OnboardingState = {
     started_at: null,
     completed_at: null,
     skipped_at: null,
+    dismissed_at: null,
+    dismiss_count: 0,
 };
 
 const STEPS: TutorialStep[] = [
@@ -53,6 +55,18 @@ function setupFetchMock(initialState: OnboardingState) {
                 started_at: state.started_at ?? "2026-04-28T00:00:00Z",
                 completed_at: body.status === "completed" ? "2026-04-28T00:01:00Z" : state.completed_at,
                 skipped_at: body.status === "skipped" ? "2026-04-28T00:01:00Z" : state.skipped_at,
+                dismissed_at: null,
+                dismiss_count: 0,
+            };
+            state = next;
+            return new Response(JSON.stringify(next), { status: 200 });
+        }
+        if (url.endsWith("/api/onboarding/dismiss") && init?.method === "POST") {
+            // Set dismissed_at to a recent time so auto-launch doesn't re-fire
+            const next: OnboardingState = {
+                ...state,
+                dismissed_at: new Date().toISOString(),
+                dismiss_count: (state.dismiss_count || 0) + 1,
             };
             state = next;
             return new Response(JSON.stringify(next), { status: 200 });
@@ -217,5 +231,61 @@ describe("OnboardingContext", () => {
         expect(getState().status).toBe("completed");
         const replayCalls = calls.filter((c) => c.url.endsWith("/replay"));
         expect(replayCalls.length).toBe(1);
+    });
+
+    it("dismissNotNow() calls the dismiss endpoint and hides overlay", async () => {
+        const { calls } = setupFetchMock(NOT_STARTED);
+        const holder = makeApiHolder();
+        render(
+            <OnboardingProvider accessToken="t">
+                <Probe onReady={holder.setApi} />
+            </OnboardingProvider>,
+        );
+        await waitFor(() => expect(holder.get().visible).toBe(true));
+        await act(async () => { await holder.get().dismissNotNow(); });
+        await waitFor(() => {
+            expect(holder.get().visible).toBe(false);
+        });
+        const dismissCalls = calls.filter((c) => c.url.endsWith("/api/onboarding/dismiss"));
+        expect(dismissCalls.length).toBe(1);
+    });
+
+    it("does not auto-launch when dismissed within last 24 hours", async () => {
+        const recentlyDismissed: OnboardingState = {
+            ...NOT_STARTED,
+            dismissed_at: new Date(Date.now() - 3600 * 1000).toISOString(), // 1 hour ago
+            dismiss_count: 1,
+        };
+        setupFetchMock(recentlyDismissed);
+        const holder = makeApiHolder();
+        render(
+            <OnboardingProvider accessToken="t">
+                <Probe onReady={holder.setApi} />
+            </OnboardingProvider>,
+        );
+        await waitFor(() => {
+            expect(holder.get().state.status).toBe("not_started");
+        });
+        // Should NOT have auto-launched
+        expect(holder.get().visible).toBe(false);
+    });
+
+    it("does auto-launch when dismissed more than 24 hours ago", async () => {
+        const oldDismissed: OnboardingState = {
+            ...NOT_STARTED,
+            dismissed_at: new Date(Date.now() - 25 * 3600 * 1000).toISOString(), // 25 hours ago
+            dismiss_count: 1,
+        };
+        setupFetchMock(oldDismissed);
+        const holder = makeApiHolder();
+        render(
+            <OnboardingProvider accessToken="t">
+                <Probe onReady={holder.setApi} />
+            </OnboardingProvider>,
+        );
+        await waitFor(() => {
+            expect(holder.get().visible).toBe(true);
+        });
+        expect(holder.get().currentStep?.slug).toBe("welcome");
     });
 });

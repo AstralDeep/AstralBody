@@ -37,6 +37,8 @@ const NOT_STARTED: OnboardingState = {
     started_at: null,
     completed_at: null,
     skipped_at: null,
+    dismissed_at: null,
+    dismiss_count: 0,
 };
 
 interface UpdatePayload {
@@ -51,6 +53,7 @@ export interface UseOnboardingStateResult {
     refresh: () => Promise<void>;
     update: (p: UpdatePayload) => Promise<OnboardingState | null>;
     replay: () => Promise<void>;
+    dismiss: () => Promise<OnboardingState | null>;
 }
 
 export function useOnboardingState(
@@ -144,6 +147,26 @@ export function useOnboardingState(
         }
     }, [buildHeaders]);
 
+    const dismiss = useCallback(async (): Promise<OnboardingState | null> => {
+        if (!tokenRef.current) return null;
+        try {
+            const r = await fetch(`${API_URL}/api/onboarding/dismiss`, {
+                method: "POST",
+                headers: buildHeaders(),
+            });
+            if (!r.ok) {
+                throw new Error(`onboarding/dismiss POST ${r.status}`);
+            }
+            const body = (await r.json()) as OnboardingState;
+            backgroundFetchCache.invalidate(ONBOARDING_STATE_CACHE_KEY);
+            setState(body);
+            return body;
+        } catch (e) {
+            setError(e instanceof Error ? e.message : String(e));
+            return null;
+        }
+    }, [buildHeaders]);
+
     // Initial-load gate: fire exactly once when we first observe a
     // non-empty access token. Subsequent silent OIDC refreshes change
     // the token identity but do NOT re-trigger the fetch. The cache
@@ -179,5 +202,5 @@ export function useOnboardingState(
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [accessToken]);
 
-    return { state, loading, error, refresh, update, replay };
+    return { state, loading, error, refresh, update, replay, dismiss };
 }
