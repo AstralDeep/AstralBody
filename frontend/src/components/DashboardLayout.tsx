@@ -1105,7 +1105,7 @@ export default function DashboardLayout({
                 </header>
 
                 {/* Page Content */}
-                <div className="flex-1 overflow-hidden">{children}</div>
+                <div className="flex-1 min-h-0">{children}</div>
             </main>
 
             {/* Create Agent Modal */}
