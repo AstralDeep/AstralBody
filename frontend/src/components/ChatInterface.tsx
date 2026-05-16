@@ -656,7 +656,7 @@ export default function ChatInterface({
 
     return (
         <div
-            className="flex flex-col h-full relative"
+            className="flex flex-col flex-1 min-h-0 relative"
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
