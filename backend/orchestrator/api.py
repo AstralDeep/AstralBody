@@ -1935,3 +1935,76 @@ async def get_task_state(chat_id: str, request: Request):
         latest = max(all_tasks, key=lambda t: t.updated_at)
         return latest.to_dict()
     return {"state": "none", "chat_id": chat_id}
+
+
+# =============================================================================
+# 020-async-queries: Background task status endpoints
+# =============================================================================
+
+async_task_router = APIRouter(prefix="/api/async-tasks", tags=["AsyncTasks"])
+
+
+@async_task_router.get(
+    "/{task_id}",
+    summary="Get background task status",
+    description="Returns the status of an async background query task.",
+)
+async def get_async_task(task_id: str, request: Request):
+    orch = _get_orchestrator(request)
+    bg_task = await orch.async_task_manager.get(task_id)
+    if bg_task is None:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=404,
+            content={"error": "Task not found", "task_id": task_id},
+        )
+    return {
+        "task_id": bg_task.task_id,
+        "chat_id": bg_task.chat_id,
+        "status": bg_task.status.value,
+        "created_at": bg_task.created_at.isoformat(),
+        "completed_at": bg_task.completed_at.isoformat() if bg_task.completed_at else None,
+        "output_count": len(bg_task.outputs),
+        "errors": bg_task.errors,
+    }
+
+
+@async_task_router.get(
+    "",
+    summary="List background tasks",
+    description="Returns a list of background tasks for the current user.",
+)
+async def list_async_tasks(request: Request):
+    orch = _get_orchestrator(request)
+    user_id = get_current_user_id(request)
+    tasks = await orch.async_task_manager.list_for_user(user_id, limit=20)
+    return {
+        "tasks": [
+            {
+                "task_id": t.task_id,
+                "chat_id": t.chat_id,
+                "status": t.status.value,
+                "created_at": t.created_at.isoformat(),
+                "completed_at": t.completed_at.isoformat() if t.completed_at else None,
+                "output_count": len(t.outputs),
+            }
+            for t in tasks
+        ],
+    }
+
+
+@async_task_router.post(
+    "/{task_id}/cancel",
+    summary="Cancel a background task",
+    description="Requests cancellation of a running background task.",
+)
+async def cancel_async_task(task_id: str, request: Request):
+    orch = _get_orchestrator(request)
+    cancelled = await orch.async_task_manager.cancel(task_id)
+    if not cancelled:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=404,
+            content={"error": "Task not found or already completed", "task_id": task_id},
+        )
+    return {"status": "cancelled", "task_id": task_id}
