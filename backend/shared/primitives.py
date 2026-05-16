@@ -32,6 +32,7 @@ class Component:
             'plotly_chart': PlotlyChart, 'collapsible': Collapsible,
             'color_picker': ColorPicker, 'theme_apply': ThemeApply,
             'file_upload': FileUpload, 'file_download': FileDownload,
+            'audio': Audio,
         }
         cls = type_map.get(comp_type, Component)
         if cls == Component:
@@ -335,6 +336,24 @@ class FileDownload(Component):
     label: str = "Download File"
     url: str = ""
     filename: Optional[str] = None
+
+
+@dataclass
+class Audio(Component):
+    """Audio player primitive for sound-enabled agents (US-21).
+
+    Supports inline base64 data, URLs, generated speech, and MIDI.
+    Agents (e.g. piano agent, TTS agent) emit this primitive to play
+    sound in the SDUI canvas.
+    """
+    type: str = "audio"
+    src: str = ""
+    contentType: Optional[str] = None  # audio/mpeg, audio/wav, audio/midi, etc.
+    autoplay: bool = False
+    loop: bool = False
+    label: Optional[str] = None         # optional title above the player
+    showControls: bool = True
+    description: Optional[str] = None   # optional caption/description
 
 
 def create_ui_response(components: List[Component]) -> Dict[str, Any]:
