@@ -526,9 +526,24 @@ class Database:
                 started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 completed_at TIMESTAMPTZ,
-                skipped_at TIMESTAMPTZ
+                skipped_at TIMESTAMPTZ,
+                dismissed_at TIMESTAMPTZ,
+                dismiss_count INTEGER NOT NULL DEFAULT 0
             )
         ''')
+
+        # Migration: US-17 — add dimissed_at / dismiss_count columns for
+        # "not now" cooldown. Safe to run idempotently.
+        for col, col_def in [
+            ("dismissed_at", "TIMESTAMPTZ"),
+            ("dismiss_count", "INTEGER NOT NULL DEFAULT 0"),
+        ]:
+            try:
+                cursor.execute(
+                    f"ALTER TABLE onboarding_state ADD COLUMN IF NOT EXISTS {col} {col_def}"
+                )
+            except Exception:
+                conn.rollback()
 
         # tutorial_step_revision — append-only history of admin edits.
         # Full before/after snapshots live here; the audit log only carries
