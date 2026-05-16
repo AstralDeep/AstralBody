@@ -16,7 +16,7 @@
 
 @layer base {
   html, body, #root {
-    @apply h-dvh;
+    @apply h-dvh overflow-hidden;
   }
 
   body {
