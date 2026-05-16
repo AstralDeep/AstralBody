@@ -115,7 +115,6 @@ export default function ChatInterface({
     const audioRef = useRef<HTMLAudioElement | null>(null);
     const lastSpokenMsgIdx = useRef<number>(-1);
 
-    // Geolocation — silently acquire once when capability is confirmed
     const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
 
     useEffect(() => {
@@ -142,6 +141,11 @@ export default function ChatInterface({
         const frameId = requestAnimationFrame(() => {
             bottomRef.current?.scrollIntoView({ behavior: "smooth" });
         });
+        // Clear loading indicator when new messages arrive
+        if (isWaitingForResponse) {
+            setIsWaitingForResponse(false);
+            if (waitingTimerRef.current) { clearTimeout(waitingTimerRef.current); waitingTimerRef.current = null; }
+        }
         return () => cancelAnimationFrame(frameId);
     }, [messages, chatStatus]);
 
