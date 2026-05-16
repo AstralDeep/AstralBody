@@ -441,7 +441,7 @@ export default function DashboardLayout({
                             animate={{ opacity: 1, scale: 1 }}
                             exit={{ opacity: 0, scale: 0.95 }}
                             transition={{ duration: 0.15 }}
-                            className="bg-astral-surface border border-white/10 rounded-xl shadow-2xl max-w-2xl w-full mx-4 max-h-[80vh] flex flex-col"
+                            className="bg-astral-surface border border-white/10 rounded-xl shadow-2xl max-w-4xl w-full mx-4 max-h-[85vh] flex flex-col"
                             role="dialog"
                             aria-modal="true"
                             aria-label="Connected agents"
@@ -697,14 +697,42 @@ export default function DashboardLayout({
                                                             : <Activity size={16} className="text-astral-primary" />}
                                                     </div>
                                                     <div className="flex-1 min-w-0">
-                                                        <div className="flex items-center gap-2">
-                                                            <p className="text-sm font-medium text-white truncate">{agent.name}</p>
-                                                            <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${statusColor} ${hasMissingCreds ? "animate-pulse" : ""}`} title={statusLabel} />
-                                                            {/* Drafts: lifecycle badge (FR-002 — pending / testing / live / etc.).
-                                                                Live agents: per-user on/off toggle in the same slot. The
-                                                                pre-013 "ALL TOOLS ENABLED" / "SECURITY FLAGS" pill is gone
-                                                                — disabling does NOT change scopes / permissions, it just
-                                                                mutes the agent for this user until they re-enable it. */}
+                                                        {/* Row 1: name + status dot + action icons */}
+                                                        <div className="flex items-start gap-2">
+                                                            <p className="text-sm font-medium text-white break-words flex-1">{agent.name}</p>
+                                                            <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 mt-1.5 ${statusColor} ${hasMissingCreds ? "animate-pulse" : ""}`} title={statusLabel} />
+                                                            {hasMissingCreds && (
+                                                                <KeyRound size={10} className="text-amber-400 flex-shrink-0 mt-1.5 animate-pulse" />
+                                                            )}
+                                                            {!isDraft && (
+                                                                <>
+                                                                    <button
+                                                                        type="button"
+                                                                        title="Configure tools &amp; permissions"
+                                                                        aria-label={`Configure ${agent.name} tools`}
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation();
+                                                                            openPermissionsModal(agent.id);
+                                                                        }}
+                                                                        className="p-0.5 rounded hover:bg-white/10 transition-colors flex-shrink-0 mt-0.5"
+                                                                    >
+                                                                        <SettingsIcon size={13} className="text-astral-muted/50 hover:text-astral-primary transition-colors" />
+                                                                    </button>
+                                                                    <span title={agent.is_public ? "Public" : "Private"} className="mt-0.5">
+                                                                        {agent.is_public ? (
+                                                                            <Globe size={10} className="text-green-400/60 flex-shrink-0" />
+                                                                        ) : (
+                                                                            <Lock size={10} className="text-astral-muted/40 flex-shrink-0" />
+                                                                        )}
+                                                                    </span>
+                                                                </>
+                                                            )}
+                                                        </div>
+                                                        {agent.description && (
+                                                            <p className="text-[11px] text-astral-muted mt-0.5 line-clamp-2">{agent.description}</p>
+                                                        )}
+                                                        {/* Row 2: toggle + owner info */}
+                                                        <div className="flex items-center gap-2 mt-2">
                                                             {isDraft ? (
                                                                 <span className="text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-white/5 text-astral-muted/80">
                                                                     {statusLabel}
@@ -726,7 +754,7 @@ export default function DashboardLayout({
                                                                             title={disabled
                                                                                 ? "Disabled for you — click to re-enable. Scopes and permissions are preserved."
                                                                                 : "Enabled — click to disable for you only. Scopes and permissions are preserved."}
-                                                                            className={`flex items-center gap-1.5 text-[10px] font-medium px-1.5 py-0.5 rounded-md transition-colors flex-shrink-0 ${
+                                                                            className={`flex items-center gap-1.5 text-[10px] font-medium px-1.5 py-0.5 rounded-md transition-colors ${
                                                                                 disabled
                                                                                     ? "bg-white/5 text-astral-muted hover:bg-white/10"
                                                                                     : "bg-astral-primary/15 text-astral-primary hover:bg-astral-primary/25"
@@ -748,51 +776,22 @@ export default function DashboardLayout({
                                                                     );
                                                                 })()
                                                             )}
-                                                            {hasMissingCreds && (
-                                                                <KeyRound size={10} className="text-amber-400 flex-shrink-0 animate-pulse" />
-                                                            )}
-                                                            {!isDraft && (
+                                                            {(isDraft || (!isOwner && agent.owner_email)) && (
                                                                 <>
-                                                                    <button
-                                                                        type="button"
-                                                                        title="Configure tools &amp; permissions"
-                                                                        aria-label={`Configure ${agent.name} tools`}
-                                                                        onClick={(e) => {
-                                                                            e.stopPropagation();
-                                                                            openPermissionsModal(agent.id);
-                                                                        }}
-                                                                        className="p-0.5 rounded hover:bg-white/10 transition-colors flex-shrink-0"
-                                                                    >
-                                                                        <SettingsIcon size={12} className="text-astral-muted/50 hover:text-astral-primary transition-colors" />
-                                                                    </button>
-                                                                    <span title={agent.is_public ? "Public" : "Private"}>
-                                                                        {agent.is_public ? (
-                                                                            <Globe size={10} className="text-green-400/60 flex-shrink-0" />
-                                                                        ) : (
-                                                                            <Lock size={10} className="text-astral-muted/40 flex-shrink-0" />
-                                                                        )}
-                                                                    </span>
+                                                                    {isDraft && (
+                                                                        <span className="text-[10px] text-astral-muted/70 flex items-center gap-1">
+                                                                            <FileCode size={9} />
+                                                                            Draft — open to continue
+                                                                        </span>
+                                                                    )}
+                                                                    {!isOwner && agent.owner_email && (
+                                                                        <span className="text-[10px] text-astral-muted/50 truncate">
+                                                                            by {agent.owner_email}
+                                                                        </span>
+                                                                    )}
                                                                 </>
                                                             )}
                                                         </div>
-                                                        {agent.description && (
-                                                            <p className="text-[11px] text-astral-muted mt-0.5 line-clamp-2">{agent.description}</p>
-                                                        )}
-                                                        {(isDraft || (!isOwner && agent.owner_email)) && (
-                                                            <div className="flex items-center gap-2 mt-1.5">
-                                                                {isDraft && (
-                                                                    <span className="text-[10px] text-astral-muted/70 flex items-center gap-1">
-                                                                        <FileCode size={9} />
-                                                                        Draft — open to continue
-                                                                    </span>
-                                                                )}
-                                                                {!isOwner && agent.owner_email && (
-                                                                    <span className="text-[10px] text-astral-muted/50 truncate">
-                                                                        by {agent.owner_email}
-                                                                    </span>
-                                                                )}
-                                                            </div>
-                                                        )}
                                                     </div>
                                                     <ChevronRight size={14} className="text-astral-muted/30 group-hover:text-astral-primary transition-colors mt-1 flex-shrink-0" />
                                                 </button>
