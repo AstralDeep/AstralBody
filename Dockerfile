@@ -21,11 +21,10 @@ RUN find /app -name ".env" -exec sed -i 's/\r$//' {} +
 # Set memory limit for Node to prevent swap thrashing during Vite build
 ENV NODE_OPTIONS="--max-old-space-size=4096"
 
-# Extract only VITE_* vars from .env and export them for the build.
-# Using a temp script avoids shell issues with special characters in
-# non-VITE values (passwords, secrets, etc.)
-RUN grep '^VITE_' /app/.env > /tmp/vite-env.sh && \
-    sed -i 's/^/export /' /tmp/vite-env.sh && \
+# Strip Windows line endings, then extract only VITE_* vars.
+# awk wraps each value in single quotes to guard against shell metacharacters.
+RUN find /app -name ".env" -exec sed -i 's/\r$//' {} + && \
+    awk -F= '/^VITE_/ {printf "export %s='\''%s'\''\n", $1, substr($0, index($0,$2))}' /app/.env > /tmp/vite-env.sh && \
     . /tmp/vite-env.sh && \
     npm run build
 
