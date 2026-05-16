@@ -204,6 +204,30 @@ async def post_onboarding_replay(
     return Response(status_code=204)
 
 
+@onboarding_user_router.post(
+    "/api/onboarding/dismiss",
+    response_model=OnboardingStateResponse,
+    summary="Record a 'not now' dismissal — cooldown before prompting again",
+)
+async def post_dismiss_onboarding(
+    request: Request,
+    user_id: str = Depends(require_user_id),
+    payload: dict = Depends(get_current_user_payload),
+):
+    """
+    US-17: Record a soft dismissal. After 2 dismissals the tour is permanently skipped.
+    Until then, the tour will re-prompt after a 24-hour cooldown (enforced by the frontend).
+    """
+    _reject_user_overrides(request)
+    repo = _repo(request)
+    new_state = repo.record_dismissal(user_id, max_dismissals=2)
+    logger.info(
+        "User %s dismissed tutorial (count=%d, status=%s)",
+        user_id, new_state.dismiss_count, new_state.status,
+    )
+    return new_state
+
+
 @onboarding_user_router.get(
     "/api/tutorial/steps",
     response_model=TutorialStepListResponse,

@@ -55,6 +55,8 @@ interface OnboardingContextValue {
     replay: () => Promise<void>;
     /** Hide the overlay without recording a state change (used by Escape). */
     dismiss: () => void;
+    /** Soft dismiss ("Not now") — records the dismissal with cooldown. */
+    dismissNotNow: () => Promise<void>;
 }
 
 const OnboardingContext = createContext<OnboardingContextValue | null>(null);
@@ -69,7 +71,7 @@ export function OnboardingProvider({
     children,
 }: OnboardingProviderProps) {
     const onboardingState = useOnboardingState(accessToken);
-    const { state, update, replay: replayApi } = onboardingState;
+    const { state, update, replay: replayApi, dismiss: apiDismiss } = onboardingState;
 
     const [activated, setActivated] = useState<boolean>(false);
     const stepsResource = useTutorialSteps(accessToken, activated);
@@ -82,18 +84,32 @@ export function OnboardingProvider({
     const autoLaunchedRef = useRef<boolean>(false);
 
     // ----------------------------------------------------------------------
-    // Auto-launch on first sign-in: status==="not_started" + steps loaded
+    // Auto-launch on first sign-in: status==="not_started" + steps loaded.
+    // US-17: Respect the 24h cooldown after a "not now" dismissal.
+    // Auto-launch is also suppressed once the user has dismissed twice
+    // (the backend will have transitioned to status=skipped).
     // ----------------------------------------------------------------------
     useEffect(() => {
         if (autoLaunchedRef.current) return;
         if (onboardingState.loading) return;
         if (!accessToken) return;
-        if (state.status === "not_started") {
-            autoLaunchedRef.current = true;
-            // eslint-disable-next-line react-hooks/set-state-in-effect
-            setActivated(true);
+        if (state.status !== "not_started") return;
+
+        // Check 24h cooldown from last dismissal
+        if (state.dismissed_at != null && state.dismiss_count > 0) {
+            const dismissedMs = new Date(state.dismissed_at).getTime();
+            const elapsedMs = Date.now() - dismissedMs;
+            const cooldownMs = 24 * 60 * 60 * 1000; // 24 hours
+            if (elapsedMs < cooldownMs) {
+                // Still in cooldown — don't launch
+                return;
+            }
         }
-    }, [state.status, onboardingState.loading, accessToken]);
+
+        autoLaunchedRef.current = true;
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setActivated(true);
+    }, [state.status, state.dismissed_at, state.dismiss_count, onboardingState.loading, accessToken]);
 
     // ----------------------------------------------------------------------
     // Resume-on-reload: when status==="in_progress", show overlay at the
@@ -237,6 +253,25 @@ export function OnboardingProvider({
         if (replayMode) setReplayMode(false);
     }, [replayMode]);
 
+    /**
+     * Soft dismiss ("Not now") — persists a dismissal count via the backend
+     * and hides the overlay. The tutorial re-prompts after a 24h cooldown.
+     * After 2 dismissals, the backend auto-transitions to "skipped".
+     */
+    const dismissNotNow = useCallback(async () => {
+        if (replayMode) {
+            setVisible(false);
+            setReplayMode(false);
+            return;
+        }
+        await apiDismiss();
+        setVisible(false);
+        setActivated(false);
+        initialLaunchDoneRef.current = false;
+        // Reset auto-launch gate so the cooldown check applies on next visit
+        autoLaunchedRef.current = false;
+    }, [replayMode, apiDismiss]);
+
     // Feature 010-fix-page-flash: the previous duplicate accessToken
     // effect that called `refreshState()` here was a primary cause of
     // the screen flash on every silent OIDC token refresh — it both
@@ -264,8 +299,9 @@ export function OnboardingProvider({
             complete,
             replay,
             dismiss,
+            dismissNotNow,
         }),
-        [state, steps, currentStep, currentStepTargetKey, visible, onboardingState.loading, next, back, skip, complete, replay, dismiss],
+        [state, steps, currentStep, currentStepTargetKey, visible, onboardingState.loading, next, back, skip, complete, replay, dismiss, dismissNotNow],
     );
 
     return (
