@@ -1388,6 +1388,20 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         }));
     }, []);
 
+    const cancelCombine = useCallback(() => {
+        if (condenseTimeoutRef.current) {
+            clearTimeout(condenseTimeoutRef.current);
+        }
+        wsRef.current?.send(JSON.stringify({
+            type: "ui_event",
+            action: "cancel_combine"
+        }));
+        setIsCombining(false);
+        setCombineError("Cancelled");
+        setTimeout(() => setCombineError(null), 2000);
+        condenseTimeoutRef.current = null;
+    }, []);
+
     const getAgentPermissions = useCallback((agentId: string) => {
         if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
         wsRef.current.send(JSON.stringify({
@@ -1694,6 +1708,7 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         loadSavedComponents,
         combineComponents,
         condenseComponents,
+        cancelCombine,
         isCombining,
         combineError,
         agentPermissions,
