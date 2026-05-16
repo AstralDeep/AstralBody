@@ -20,6 +20,7 @@ import {
     Search,
     KeyRound,
     ChevronRight,
+    Settings as SettingsIcon,
     Globe,
     Lock,
     User,
@@ -751,13 +752,27 @@ export default function DashboardLayout({
                                                                 <KeyRound size={10} className="text-amber-400 flex-shrink-0 animate-pulse" />
                                                             )}
                                                             {!isDraft && (
-                                                                <span title={agent.is_public ? "Public" : "Private"}>
-                                                                    {agent.is_public ? (
-                                                                        <Globe size={10} className="text-green-400/60 flex-shrink-0" />
-                                                                    ) : (
-                                                                        <Lock size={10} className="text-astral-muted/40 flex-shrink-0" />
-                                                                    )}
-                                                                </span>
+                                                                <>
+                                                                    <button
+                                                                        type="button"
+                                                                        title="Configure tools &amp; permissions"
+                                                                        aria-label={`Configure ${agent.name} tools`}
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation();
+                                                                            openPermissionsModal(agent.id);
+                                                                        }}
+                                                                        className="p-0.5 rounded hover:bg-white/10 transition-colors flex-shrink-0"
+                                                                    >
+                                                                        <SettingsIcon size={12} className="text-astral-muted/50 hover:text-astral-primary transition-colors" />
+                                                                    </button>
+                                                                    <span title={agent.is_public ? "Public" : "Private"}>
+                                                                        {agent.is_public ? (
+                                                                            <Globe size={10} className="text-green-400/60 flex-shrink-0" />
+                                                                        ) : (
+                                                                            <Lock size={10} className="text-astral-muted/40 flex-shrink-0" />
+                                                                        )}
+                                                                    </span>
+                                                                </>
                                                             )}
                                                         </div>
                                                         {agent.description && (
