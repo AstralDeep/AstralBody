@@ -1,3 +1,14 @@
+"""
+Manual integration smoke test for the upload → chat workflow.
+
+This test requires a running backend (ports 8002, env ORCHESTRATOR_PORT)
+and is not suitable for automated CI. It's kept as a reference for manual
+end-to-end validation during development.
+
+To run:
+    python tests/test_upload_integration.py
+"""
+
 import requests
 import asyncio
 import websockets
@@ -9,33 +20,29 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Mark as skipped in automated runs — this is a manual smoke test
+pytestmark = pytest.mark.skip(reason="Manual smoke test — requires running backend services")
+
 
 @pytest.mark.asyncio
 @pytest.mark.integration
 async def test_workflow():
     chat_id = str(uuid.uuid4())
-    print(f"Generated chat_id: {chat_id}")
-    
-    # 1. Upload a file
+
     file_content = b"header1,header2\nval1,val2"
     files = {"file": ("test_data.csv", file_content)}
     data = {"session_id": chat_id}
-    
-    print("Uploading file to port 8002 (BFF)...")
+
     res = requests.post("http://localhost:8002/api/upload", files=files, data=data)
-    print("Upload status:", res.status_code)
-    print("Upload response:", res.json())
-    
-    # 2. Check if file is saved correctly without UUID renaming
+    if res.status_code != 200:
+        raise AssertionError(f"Upload failed: {res.status_code}")
+
     backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     file_path = os.path.join(backend_dir, "tmp", chat_id, "test_data.csv")
-    print(f"Checking if file exists at {file_path}: {os.path.exists(file_path)}")
-    
-    # 3. Simulate frontend sending a message with this chat_id to the orchestrator (ws://localhost:{os.getenv('ORCHESTRATOR_PORT')})
-    # The orchestrator should create the chat because it doesn't exist yet
-    print("Sending message to Orchestrator...")
-    async with websockets.connect(f"ws://localhost:{os.getenv('ORCHESTRATOR_PORT')}") as ws:
-        # We don't necessarily need to register_ui to test chat message
+    assert os.path.exists(file_path), f"File not saved at {file_path}"
+
+    orchestrator_port = os.getenv('ORCHESTRATOR_PORT', '8000')
+    async with websockets.connect(f"ws://localhost:{orchestrator_port}") as ws:
         msg = {
             "type": "ui_event",
             "action": "chat_message",
@@ -46,22 +53,17 @@ async def test_workflow():
             }
         }
         await ws.send(json.dumps(msg))
-        
-        # We expect a chat_created message or something similar
-        # plus the response from the LLM
+
         for _ in range(5):
             try:
                 recv_msg = await asyncio.wait_for(ws.recv(), timeout=5.0)
                 recv_data = json.loads(recv_msg)
-                print(f"WS Received type: {recv_data.get('type')}")
                 if recv_data.get('type') == 'chat_created':
-                    print("Received chat_created successfully!")
-                    print(recv_data)
-                elif recv_data.get('type') == 'chat_status':
-                    print(f"Status: {recv_data.get('status')} - {recv_data.get('message')}")
-            except Exception as e:
-                print("WS loop error or timeout:", e)
+                    assert recv_data is not None
+                    return
+            except Exception:
                 break
+
 
 if __name__ == "__main__":
     asyncio.run(test_workflow())
