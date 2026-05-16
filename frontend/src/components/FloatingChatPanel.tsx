@@ -535,73 +535,95 @@ export default function FloatingChatPanel({
             const processor = audioCtx.createScriptProcessor(4096, 1, 1);
             let streamingActive = false;
             let gotTranscription = false;
+            let retryCount = 0;
+            const maxRetries = 2;
 
             const wsScheme = window.location.protocol === "https:" ? "wss" : "ws";
             const voiceWsUrl = `${wsScheme}://${window.location.host}/api/voice/stream`;
-            const voiceWs = new WebSocket(voiceWsUrl);
-            voiceWsRef.current = voiceWs;
 
-            voiceWs.onopen = () => { streamingActive = true; };
+            const connectVoiceWebSocket = () => {
+                const voiceWs = new WebSocket(voiceWsUrl);
+                voiceWsRef.current = voiceWs;
 
-            processor.onaudioprocess = (e) => {
-                if (streamingActive && voiceWs.readyState === WebSocket.OPEN) {
-                    let samples = e.inputBuffer.getChannelData(0);
-                    if (nativeSR !== targetSR) {
-                        const ratio = nativeSR / targetSR;
-                        const newLen = Math.floor(samples.length / ratio);
-                        const resampled = new Float32Array(newLen);
-                        for (let i = 0; i < newLen; i++) resampled[i] = samples[Math.floor(i * ratio)];
-                        samples = resampled;
+                voiceWs.onopen = () => { streamingActive = true; retryCount = 0; };
+
+                processor.onaudioprocess = (e) => {
+                    if (streamingActive && voiceWsRef.current?.readyState === WebSocket.OPEN) {
+                        let samples = e.inputBuffer.getChannelData(0);
+                        if (nativeSR !== targetSR) {
+                            const ratio = nativeSR / targetSR;
+                            const newLen = Math.floor(samples.length / ratio);
+                            const resampled = new Float32Array(newLen);
+                            for (let i = 0; i < newLen; i++) resampled[i] = samples[Math.floor(i * ratio)];
+                            samples = resampled;
+                        }
+                        voiceWsRef.current.send(float32ToPcm16(samples));
                     }
-                    voiceWs.send(float32ToPcm16(samples));
-                }
-            };
-            source.connect(processor);
-            processor.connect(audioCtx.destination);
+                };
 
-            voiceWs.onmessage = (event) => {
-                try {
-                    const msg = JSON.parse(event.data);
-                    if (msg.type === "transcription.delta") {
-                        setStreamingTranscript((prev) => prev + msg.text);
-                    } else if (msg.type === "transcription.done") {
-                        gotTranscription = true;
-                        const finalText = msg.text?.trim();
-                        setStreamingTranscript("");
-                        setIsRecording(false);
-                        setIsTranscribing(false);
-                        processor.disconnect(); source.disconnect(); audioCtx.close();
+                voiceWs.onmessage = (event) => {
+                    try {
+                        const msg = JSON.parse(event.data);
+                        if (msg.type === "transcription.delta") {
+                            setStreamingTranscript((prev) => prev + msg.text);
+                        } else if (msg.type === "transcription.done") {
+                            gotTranscription = true;
+                            const finalText = msg.text?.trim();
+                            setStreamingTranscript("");
+                            setIsRecording(false);
+                            setIsTranscribing(false);
+                            processor.disconnect(); source.disconnect(); audioCtx.close();
+                            audioContextRef.current = null;
+                            stream.getTracks().forEach((t) => t.stop());
+                            mediaStreamRef.current = null;
+                            if (mediaRecorderRef.current?.state === "recording") mediaRecorderRef.current.stop();
+                            voiceWs.close(); voiceWsRef.current = null;
+                            if (finalText) onSendMessage(enrichWithLocation(finalText), finalText);
+                            else toast.error("No speech detected");
+                        } else if (msg.type === "error") {
+                            streamingActive = false; voiceWs.close();
+                        }
+                    } catch { /* ignore */ }
+                };
+
+                voiceWs.onerror = () => {
+                    console.warn(`Voice WS error (retry ${retryCount}/${maxRetries})`);
+                    streamingActive = false;
+                };
+
+                voiceWs.onclose = () => {
+                    voiceWsRef.current = null;
+                    if (gotTranscription) {
+                        try { processor.disconnect(); } catch { /* */ }
+                        try { source.disconnect(); } catch { /* */ }
+                        try { audioCtx.close(); } catch { /* */ }
                         audioContextRef.current = null;
+                        return;
+                    }
+                    if (!streamingActive || retryCount >= maxRetries) {
+                        try { processor.disconnect(); } catch { /* */ }
+                        try { source.disconnect(); } catch { /* */ }
+                        try { audioCtx.close(); } catch { /* */ }
+                        audioContextRef.current = null;
+                        if (mediaRecorderRef.current?.state === "recording") mediaRecorderRef.current.stop();
                         stream.getTracks().forEach((t) => t.stop());
                         mediaStreamRef.current = null;
-                        if (mediaRecorderRef.current?.state === "recording") mediaRecorderRef.current.stop();
-                        voiceWs.close(); voiceWsRef.current = null;
-                        if (finalText) onSendMessage(enrichWithLocation(finalText), finalText);
-                        else toast.error("No speech detected");
-                    } else if (msg.type === "error") {
-                        streamingActive = false; voiceWs.close();
+                        setIsRecording(false);
+                        if (audioChunksRef.current.length > 0) {
+                            const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
+                            sendAudioForTranscription(audioBlob);
+                        } else { setIsTranscribing(false); setStreamingTranscript(""); }
+                        return;
                     }
-                } catch { /* ignore */ }
+                    retryCount++;
+                    const delay = Math.pow(2, retryCount) * 500;
+                    setTimeout(connectVoiceWebSocket, delay);
+                };
             };
 
-            voiceWs.onerror = () => { streamingActive = false; };
-            voiceWs.onclose = () => {
-                voiceWsRef.current = null;
-                try { processor.disconnect(); } catch { /* */ }
-                try { source.disconnect(); } catch { /* */ }
-                try { audioCtx.close(); } catch { /* */ }
-                audioContextRef.current = null;
-                if (!gotTranscription) {
-                    if (mediaRecorderRef.current?.state === "recording") mediaRecorderRef.current.stop();
-                    stream.getTracks().forEach((t) => t.stop());
-                    mediaStreamRef.current = null;
-                    setIsRecording(false);
-                    if (audioChunksRef.current.length > 0) {
-                        const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
-                        sendAudioForTranscription(audioBlob);
-                    } else { setIsTranscribing(false); setStreamingTranscript(""); }
-                }
-            };
+            connectVoiceWebSocket();
+            source.connect(processor);
+            processor.connect(audioCtx.destination);
 
             setIsRecording(true);
             setStreamingTranscript("");
