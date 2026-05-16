@@ -307,6 +307,8 @@ function renderComponentInner(comp: AnyProps, index: number, onSaveComponent?: (
             return <RenderFileUpload key={key} {...baseProps} />;
         case "file_download":
             return <RenderFileDownload key={key} {...baseProps} />;
+        case "audio":
+            return <RenderAudio key={key} {...baseProps} />;
         case "color_picker":
             return <RenderColorPicker key={key} {...baseProps} />;
         case "param_picker":
@@ -1541,6 +1543,39 @@ function RenderFileDownload({ label, url, filename }: AnyProps) {
                 )}
                 <span>{isDownloading ? "Downloading..." : (label || "Download File")}</span>
             </button>
+        </div>
+    );
+}
+
+// ── RenderAudio ────────────────────────────────────────────────────
+function RenderAudio({ src, contentType, autoplay, loop, label, showControls, description }: AnyProps) {
+    const audioRef = useRef<HTMLAudioElement>(null);
+    const hasSrc = typeof src === 'string' && src.length > 0;
+
+    // Determine a safe type attribute value
+    const mimeType = (typeof contentType === 'string' && contentType.length > 0)
+        ? contentType
+        : undefined;
+
+    return (
+        <div className="audio-component rounded-lg border border-white/10 bg-white/5 p-3">
+            {label && <div className="text-sm font-medium text-white/90 mb-2">{label}</div>}
+            {hasSrc ? (
+                <audio
+                    ref={audioRef}
+                    controls={showControls !== false}
+                    autoPlay={autoplay === true}
+                    loop={loop === true}
+                    className="w-full"
+                    style={{ minHeight: 40 }}
+                >
+                    <source src={src} type={mimeType} />
+                    Your browser does not support the audio element.
+                </audio>
+            ) : (
+                <div className="text-white/40 text-xs italic">No audio source provided</div>
+            )}
+            {description && <div className="text-xs text-white/50 mt-2">{description}</div>}
         </div>
     );
 }
