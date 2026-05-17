@@ -849,7 +849,10 @@ export default function DashboardLayout({
                         <Plus size={18} className="text-astral-primary" />
                     </button>
                     <button
-                        onClick={() => setAgentsModalOpen(true)}
+                        onClick={() => {
+                            if (window.innerWidth < 768) setSidebarOpen(false);
+                            setAgentsModalOpen(true);
+                        }}
                         className="p-2.5 rounded-lg hover:bg-white/10 transition-colors"
                         title={`Agents — ${agents.length} connected`}
                     >
@@ -868,6 +871,9 @@ export default function DashboardLayout({
                         onOpenTutorialAdmin={onOpenTutorialAdmin}
                         onReplayTutorial={onReplayTutorial}
                         onOpenUserGuide={onOpenUserGuide}
+                        onOpenChange={(open) => {
+                            if (open && window.innerWidth < 768) setSidebarOpen(false);
+                        }}
                     />
                     <div className="flex-1" />
                     <div className="flex flex-col items-center gap-1 mb-1">
@@ -927,7 +933,10 @@ export default function DashboardLayout({
                     <div>
                         <Tooltip text={tooltipCatalog["sidebar.agents"]}>
                             <button
-                                onClick={() => setAgentsModalOpen(true)}
+                                onClick={() => {
+                                    if (window.innerWidth < 768) setSidebarOpen(false);
+                                    setAgentsModalOpen(true);
+                                }}
                                 data-tutorial-target="sidebar.agents"
                                 className="w-full flex items-center gap-2 px-2 py-2 rounded-lg
                                            hover:bg-white/5 transition-colors group text-left"
@@ -961,6 +970,9 @@ export default function DashboardLayout({
                                 onOpenTutorialAdmin={onOpenTutorialAdmin}
                                 onReplayTutorial={onReplayTutorial}
                                 onOpenUserGuide={onOpenUserGuide}
+                                onOpenChange={(open) => {
+                                    if (open && window.innerWidth < 768) setSidebarOpen(false);
+                                }}
                             />
                         </Tooltip>
                     </div>

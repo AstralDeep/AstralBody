@@ -135,6 +135,23 @@ describe("ToolPicker — outside click / Escape closes the popover", () => {
     });
 });
 
+describe("ToolPicker — scroll handling", () => {
+    it("does NOT fire onClose when a scroll originates inside the popover", () => {
+        const onClose = vi.fn();
+        renderPicker({ onClose });
+        const popover = screen.getByTestId("tool-picker-popover");
+        popover.dispatchEvent(new Event("scroll", { bubbles: true }));
+        expect(onClose).not.toHaveBeenCalled();
+    });
+
+    it("fires onClose when an outside element scrolls", () => {
+        const onClose = vi.fn();
+        renderPicker({ onClose });
+        window.dispatchEvent(new Event("scroll"));
+        expect(onClose).toHaveBeenCalledTimes(1);
+    });
+});
+
 describe("ToolPicker — empty agent (no tools)", () => {
     it("renders an empty-state message when permittedTools is empty", () => {
         renderPicker({ permittedTools: [] });
