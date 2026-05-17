@@ -356,13 +356,14 @@ export default function FloatingChatPanel({
         el.style.height = `${el.scrollHeight}px`;
     }, [input, streamingTranscript, isRecording, isTranscribing]);
 
-    // Filter messages to only show chat-targeted messages (text summaries) and user messages
-    const chatMessages = messages.filter(msg => {
+    // Filter messages to only show chat-targeted messages (text summaries) and user messages.
+    // Memoized so the array reference is stable when `messages` hasn't changed — otherwise
+    // the auto-scroll effect below would re-fire on every keystroke in the input.
+    const chatMessages = useMemo(() => messages.filter(msg => {
         if (msg.role === "user") return true;
-        // Show assistant messages that are targeted to "chat" or have no target (legacy/loaded history)
         const target = msg._target;
         return target === "chat" || target === undefined;
-    });
+    }), [messages]);
 
     // Feature 014 — group step entries by their originating user-message id
     // so each turn's "Calling 'tool-name'" lines render directly under that

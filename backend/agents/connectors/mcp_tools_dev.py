@@ -1,10 +1,13 @@
 """
 Developer tools for the Claude Connectors Agent — US-22.
 
-Code review and constitution critique for spec-driven development.
+Code review (AST-based for Python, regex-based for other languages) and
+constitution critique (markdown-section-aware) for spec-driven development.
 """
+import ast
 import logging
-from typing import Dict, Any
+import re
+from typing import Dict, Any, List, Tuple
 
 from shared.primitives import (
     Alert, Collapsible, Text, Container, Divider,
@@ -33,74 +36,182 @@ _CODE_REVIEW_METADATA = {
 }
 
 
+_DANGEROUS_PY_CALLS = {"eval", "exec", "compile"}
+_ADVISORY_PY_IMPORTS = {"pickle", "marshal", "subprocess", "shelve"}
+
+
+class _PyAuditor(ast.NodeVisitor):
+    """Walk a Python AST and collect structured findings.
+
+    Generates concrete, line-anchored signal that the previous regex pass
+    couldn't see — call expressions vs. tokens in strings, bare ``except:``
+    clauses, function size, advisory imports.
+    """
+
+    def __init__(self):
+        self.security: List[str] = []
+        self.issues: List[str] = []
+        self.suggestions: List[str] = []
+
+    def visit_Call(self, node: ast.Call) -> None:
+        func = node.func
+        name = None
+        if isinstance(func, ast.Name):
+            name = func.id
+        elif isinstance(func, ast.Attribute):
+            name = func.attr
+        if name in _DANGEROUS_PY_CALLS:
+            self.security.append(
+                f"Line {node.lineno}: {name}() call — code-injection risk if any argument is user-supplied."
+            )
+        if isinstance(func, ast.Attribute) and func.attr == "system":
+            value = func.value
+            if isinstance(value, ast.Name) and value.id == "os":
+                self.security.append(
+                    f"Line {node.lineno}: os.system() — shell execution; prefer subprocess.run([...], shell=False)."
+                )
+        self.generic_visit(node)
+
+    def _check_import_names(self, names: List[ast.alias], lineno: int) -> None:
+        for alias in names:
+            mod = (alias.name or "").split(".", 1)[0]
+            if mod in _ADVISORY_PY_IMPORTS:
+                self.security.append(
+                    f"Line {lineno}: imports '{alias.name}' — review usage (unpickling untrusted data / shell-out are common pitfalls)."
+                )
+
+    def visit_Import(self, node: ast.Import) -> None:
+        self._check_import_names(node.names, node.lineno)
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        mod = (node.module or "").split(".", 1)[0]
+        if mod in _ADVISORY_PY_IMPORTS:
+            self.security.append(
+                f"Line {node.lineno}: imports from '{node.module}' — review usage."
+            )
+        self.generic_visit(node)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.type is None:
+            self.issues.append(
+                f"Line {node.lineno}: bare 'except:' swallows every exception including KeyboardInterrupt — narrow the clause."
+            )
+        self.generic_visit(node)
+
+    def _check_function(self, node) -> None:
+        body_stmts = sum(1 for _ in ast.walk(node)) - 1
+        if body_stmts > 120:
+            self.suggestions.append(
+                f"Line {node.lineno}: '{node.name}' is large ({body_stmts} AST nodes) — consider splitting."
+            )
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._check_function(node)
+        self.generic_visit(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._check_function(node)
+        self.generic_visit(node)
+
+
+def _regex_pass(code: str, language: str, focus: str) -> Tuple[List[str], List[str], List[str]]:
+    issues: List[str] = []
+    suggestions: List[str] = []
+    security: List[str] = []
+
+    lines = code.split("\n")
+    if len(lines) > 200:
+        issues.append(f"File is {len(lines)} lines. Consider splitting into modules.")
+        suggestions.append("Break large files into focused modules (< 200 lines each).")
+    if any(len(line) > 120 for line in lines):
+        issues.append("Some lines exceed 120 characters.")
+        suggestions.append("Wrap long lines at 100-120 characters for readability.")
+    if "\t" in code:
+        issues.append("Tab characters detected.")
+        suggestions.append("Convert tabs to spaces (PEP 8 recommends 4 spaces).")
+
+    lang = (language or "").lower()
+    if lang in ("python", "py"):
+        if "eval(" in code or "exec(" in code:
+            security.append("eval()/exec() token detected — potential code injection risk.")
+        if "password" in code.lower() or "secret" in code.lower() or "api_key" in code.lower():
+            security.append("Hardcoded credentials detected. Use environment variables or a secret manager.")
+    elif lang in ("javascript", "js", "typescript", "ts"):
+        if "innerHTML" in code or "dangerouslySetInnerHTML" in code:
+            security.append("Unsafe HTML insertion detected. Use textContent or sanitize with DOMPurify.")
+        if "localStorage" in code:
+            security.append("localStorage usage — never store sensitive tokens or credentials.")
+
+    if focus == "performance" and "for " in code and ("list.append" in code or "push(" in code):
+        suggestions.append("Consider list comprehensions or array methods for performance on large datasets.")
+
+    return issues, suggestions, security
+
+
 def handle_code_review(args: Dict[str, Any]) -> Dict[str, Any]:
     code = args.get("code", "")
     language = args.get("language", "unknown")
     focus = args.get("focus", "general")
 
-    issues = []
-    suggestions = []
-    security_notes = []
+    issues, suggestions, security_notes = _regex_pass(code, language, focus)
 
-    lines = code.strip().split("\n")
-    line_count = len(lines)
+    if language and language.lower() in ("python", "py"):
+        try:
+            tree = ast.parse(code)
+            auditor = _PyAuditor()
+            auditor.visit(tree)
+            issues.extend(auditor.issues)
+            suggestions.extend(auditor.suggestions)
+            security_notes.extend(auditor.security)
+        except SyntaxError as e:
+            issues.append(f"Python parse error: {e.msg} (line {e.lineno})")
 
-    if line_count > 200:
-        issues.append(f"File is {line_count} lines. Consider splitting into modules.")
-        suggestions.append("Break large files into focused modules (< 200 lines each).")
+    # De-duplicate while preserving order.
+    def _dedupe(items: List[str]) -> List[str]:
+        seen, out = set(), []
+        for item in items:
+            if item not in seen:
+                seen.add(item)
+                out.append(item)
+        return out
 
-    if any(len(line) > 120 for line in lines):
-        issues.append("Some lines exceed 120 characters. Consider wrapping.")
-        suggestions.append("Wrap long lines at 100-120 characters for readability.")
-
-    if "\t" in code:
-        issues.append("Tab characters detected. Use spaces for indentation.")
-        suggestions.append("Convert tabs to spaces (PEP 8 recommends 4 spaces).")
-
-    if language.lower() in ("python", "py"):
-        if "eval(" in code or "exec(" in code:
-            security_notes.append("eval()/exec() usage detected — potential code injection risk.")
-        if "password" in code.lower() or "secret" in code.lower() or "api_key" in code.lower():
-            security_notes.append("Hardcoded credentials detected. Use environment variables or a secret manager.")
-        if "subprocess" in code or "os.system" in code:
-            security_notes.append("Shell command execution detected. Validate and sanitize all inputs.")
-    elif language.lower() in ("javascript", "js", "typescript", "ts"):
-        if "innerHTML" in code or "dangerouslySetInnerHTML" in code:
-            security_notes.append("Unsafe HTML insertion detected. Use textContent or sanitize with DOMPurify.")
-        if "localStorage" in code:
-            security_notes.append("localStorage usage — never store sensitive tokens or credentials.")
-
-    if focus == "performance":
-        if "for " in code and ("list.append" in code or "push(" in code):
-            suggestions.append("Consider list comprehensions or array methods for performance on large datasets.")
+    issues = _dedupe(issues)
+    suggestions = _dedupe(suggestions)
+    security_notes = _dedupe(security_notes)
 
     components = [
-        Text(content=f"Code Review — {language}" + (f" (focus: {focus})" if focus != "general" else ""), variant="h2"),
+        Text(
+            content=f"Code Review — {language}" + (f" (focus: {focus})" if focus != "general" else ""),
+            variant="h2",
+        ),
     ]
-
     if issues:
         for issue in issues:
             components.append(Alert(variant="warning", title="Issue", message=issue))
     else:
-        components.append(Alert(variant="success", title="No issues found", message="No structural issues detected."))
+        components.append(Alert(
+            variant="success",
+            title="No issues found",
+            message="No structural issues detected.",
+        ))
 
     if suggestions:
-        suggestion_content = Container(children=[
-            Text(content=f"• {s}") for s in suggestions
-        ])
-        components.append(Collapsible(title="Suggestions", content=[suggestion_content]))
-
+        components.append(Collapsible(
+            title="Suggestions",
+            content=[Container(children=[Text(content=f"• {s}") for s in suggestions])],
+        ))
     if security_notes:
-        security_content = Container(children=[
-            Text(content=note) for note in security_notes
-        ])
-        components.append(Collapsible(title="Security Notes", content=[security_content]))
+        components.append(Collapsible(
+            title="Security Notes",
+            content=[Container(children=[Text(content=note) for note in security_notes])],
+        ))
 
     return create_ui_response(components)
 
 
 # ---------------------------------------------------------------------------
-# Constitution Critique
+# Constitution Critique (markdown-section-aware)
 # ---------------------------------------------------------------------------
 
 _CONSTITUTION_METADATA = {
@@ -130,29 +241,67 @@ CONSTITUTION_PRINCIPLES = [
     ("X - Code Quality", "Code must be typed, tested, and documented."),
 ]
 
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
+
+
+def _split_sections(spec: str) -> Dict[str, str]:
+    """Return a {heading_text_lower: body_text_lower} map.
+
+    A section's body is everything between its heading and the next
+    heading of equal-or-shallower depth. Headings themselves are excluded
+    from the body — fixes false positives like "tests" appearing inside a
+    "Why this won't need tests" heading.
+    """
+    headings = list(_HEADING_RE.finditer(spec))
+    if not headings:
+        return {"_full_": spec.lower()}
+
+    sections: Dict[str, str] = {}
+    for i, match in enumerate(headings):
+        heading = match.group(2).strip().lower()
+        body_start = match.end()
+        body_end = headings[i + 1].start() if i + 1 < len(headings) else len(spec)
+        sections[heading] = spec[body_start:body_end].lower()
+    return sections
+
+
+def _spec_mentions(sections: Dict[str, str], *needles: str) -> bool:
+    """Return True if any needle appears in any section body OR in a heading."""
+    for heading, body in sections.items():
+        if any(n in heading for n in needles):
+            return True
+        if any(n in body for n in needles):
+            return True
+    return False
+
 
 def handle_constitution_critique(args: Dict[str, Any]) -> Dict[str, Any]:
     spec = args.get("spec", "")
     spec_title = args.get("spec_title", "Untitled Spec")
     constitution_version = args.get("constitution_version", "1.1.0")
 
-    spec_lower = spec.lower()
-    findings = []
+    sections = _split_sections(spec)
+    findings: List[Tuple[str, str, str]] = []
 
-    if "test" not in spec_lower or "testing" not in spec_lower:
+    if not _spec_mentions(sections, "test", "testing", "pytest", "jest"):
         findings.append(("X", "warn", "No test plan mentioned. Constitution X requires tests."))
-    if "privacy" not in spec_lower and "pii" not in spec_lower and "phi" not in spec_lower:
+    if not _spec_mentions(sections, "privacy", "pii", "phi", "redact"):
         findings.append(("II", "warn", "No mention of data privacy/PII/PHI handling. Review Constitution II."))
-    if "audit" not in spec_lower:
+    if not _spec_mentions(sections, "audit"):
         findings.append(("IV", "info", "No audit trail considerations. Review Constitution IV."))
-    if "library" in spec_lower or "package" in spec_lower or "dependency" in spec_lower:
+    if _spec_mentions(sections, "library", "package", "dependency", "third-party"):
         findings.append(("V", "info", "External dependencies mentioned. Ensure Constitution V compliance."))
-    if "migration" not in spec_lower and "database" in spec_lower:
+    if _spec_mentions(sections, "database", "schema", "table") and not _spec_mentions(sections, "migration"):
         findings.append(("IX", "warn", "Database changes planned but no migration strategy mentioned. Constitution IX."))
+    if _spec_mentions(sections, "ai", "llm", "model") and not _spec_mentions(sections, "label", "disclosure", "watermark", "tagged"):
+        findings.append(("III", "info", "AI/LLM usage mentioned without an explicit labeling/disclosure strategy. Review Constitution III."))
 
     components = [
         Text(content=f"Constitution Critique: {spec_title}", variant="h2"),
-        Text(content=f"Constitution v{constitution_version} — {len(CONSTITUTION_PRINCIPLES)} principles checked", variant="caption"),
+        Text(
+            content=f"Constitution v{constitution_version} — {len(CONSTITUTION_PRINCIPLES)} principles checked across {len(sections)} section(s)",
+            variant="caption",
+        ),
         Divider(),
     ]
 
@@ -161,12 +310,16 @@ def handle_constitution_critique(args: Dict[str, Any]) -> Dict[str, Any]:
             variant = "warning" if level == "warn" else "info"
             components.append(Alert(variant=variant, title=f"Principle {principle}", message=note))
     else:
-        components.append(Alert(variant="success", title="No issues found", message="Spec passes basic constitutional checks."))
+        components.append(Alert(
+            variant="success",
+            title="No issues found",
+            message="Spec passes basic constitutional checks.",
+        ))
 
-    ref_content = Container(children=[
-        Text(content=f"{name}: {desc}") for name, desc in CONSTITUTION_PRINCIPLES
-    ])
-    components.append(Collapsible(title="Constitution Reference", content=[ref_content]))
+    components.append(Collapsible(
+        title="Constitution Reference",
+        content=[Container(children=[Text(content=f"{name}: {desc}") for name, desc in CONSTITUTION_PRINCIPLES])],
+    ))
 
     return create_ui_response(components)
 
