@@ -1,22 +1,60 @@
 """
 Office tools for the Claude Connectors Agent — US-22.
 
-Excel generation, PowerPoint outlines, Word documents, Outlook emails,
-and pitch templates. All output as SDUI primitives.
+Excel/CSV generation, PowerPoint outlines, Word/Markdown documents, Outlook
+emails (Microsoft Graph when credentialed; preview otherwise), and pitch
+templates. All output as SDUI primitives.
 """
 import csv
 import io
-import json
 import logging
 import os
-from typing import Dict, Any, List
+import re
+from typing import Dict, Any
 
 from shared.primitives import (
-    Table, Alert, Collapsible, FileDownload, Text, Container, Divider, Button,
+    Table, Alert, Collapsible, FileDownload, Text, Container, Divider,
     create_ui_response,
 )
+from shared.external_http import request as http_request, ExternalHttpError
+
+from agents.connectors._external import verdict_for_exception, user_facing_error
 
 logger = logging.getLogger("Connectors.Office")
+
+
+# ---------------------------------------------------------------------------
+# Download URL helper (mirrors the medical agent's pattern)
+# ---------------------------------------------------------------------------
+
+_SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _safe_filename(name: str, default: str = "file") -> str:
+    cleaned = _SAFE_NAME_RE.sub("_", (name or "").strip()) or default
+    return cleaned[:120]
+
+
+def _write_download_file(args: Dict[str, Any], filename: str, contents: bytes) -> str:
+    """Persist ``contents`` under the orchestrator's per-session tmp dir and
+    return a download URL the frontend can fetch via the existing
+    ``/api/download/{session_id}/{filename}`` endpoint.
+
+    ``user_id`` / ``session_id`` come from the orchestrator-injected kwargs;
+    we fall back to ``"legacy"`` / ``"default"`` for direct unit-test calls.
+    """
+    user_id = args.get("user_id") or "legacy"
+    session_id = args.get("session_id") or "default"
+
+    backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+    download_dir = os.path.join(backend_dir, "tmp", user_id, session_id)
+    os.makedirs(download_dir, exist_ok=True)
+    file_path = os.path.join(download_dir, filename)
+    with open(file_path, "wb") as f:
+        f.write(contents)
+
+    bff_port = int(os.getenv("ORCHESTRATOR_PORT", 8001))
+    return f"http://localhost:{bff_port}/api/download/{session_id}/{filename}"
 
 
 # ---------------------------------------------------------------------------
@@ -45,27 +83,19 @@ def handle_excel_generate(args: Dict[str, Any]) -> Dict[str, Any]:
     rows = args.get("rows", [])
     description = args.get("description", "")
 
-    # Build CSV for download
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(columns)
     for row in rows:
         writer.writerow(row)
 
-    table = Table(
-        headers=columns,
-        rows=rows,
-    )
-    download = FileDownload(
-        label=f"Download {title}.csv",
-        url="",
-        filename=f"{title}.csv",
-    )
+    filename = f"{_safe_filename(title, 'spreadsheet')}.csv"
+    download_url = _write_download_file(args, filename, buf.getvalue().encode("utf-8"))
 
     return create_ui_response([
         Text(content=description or title, variant="h3"),
-        table,
-        download,
+        Table(headers=columns, rows=rows),
+        FileDownload(label=f"Download {filename}", url=download_url, filename=filename),
     ])
 
 
@@ -99,9 +129,7 @@ def handle_ppt_outline(args: Dict[str, Any]) -> Dict[str, Any]:
     slides = args.get("slides", [])
     description = args.get("description", "")
 
-    components = [
-        Text(content=title, variant="h2"),
-    ]
+    components = [Text(content=title, variant="h2")]
     if description:
         components.append(Text(content=description, variant="body"))
 
@@ -115,7 +143,6 @@ def handle_ppt_outline(args: Dict[str, Any]) -> Dict[str, Any]:
         ))
 
     components.append(Text(content=f"Total: {len(slides)} slides", variant="caption"))
-
     return create_ui_response(components)
 
 
@@ -149,48 +176,70 @@ def handle_word_document(args: Dict[str, Any]) -> Dict[str, Any]:
     sections = args.get("sections", [])
     include_download = args.get("include_download", True)
 
-    components = [
-        Text(content=title, variant="h2"),
-    ]
+    components = [Text(content=title, variant="h2")]
 
+    md_parts = [f"# {title}\n"]
     for section in sections:
         heading = section.get("heading", "")
         content = section.get("content", "")
-        collapsible = Collapsible(
-            title=heading,
-            content=[Text(content=content)],
-        )
-        components.append(collapsible)
+        components.append(Collapsible(title=heading, content=[Text(content=content)]))
+        md_parts.append(f"## {heading}\n\n{content}\n")
 
     if include_download:
+        filename = f"{_safe_filename(title, 'document')}.md"
+        download_url = _write_download_file(args, filename, "\n".join(md_parts).encode("utf-8"))
         components.append(FileDownload(
-            label=f"Download {title}.md",
-            url="",
-            filename=f"{title}.md",
+            label=f"Download {filename}",
+            url=download_url,
+            filename=filename,
         ))
 
     return create_ui_response(components)
 
 
 # ---------------------------------------------------------------------------
-# Outlook / Email
+# Outlook / Email — Microsoft Graph when credentialed, preview otherwise
 # ---------------------------------------------------------------------------
 
 _OUTLOOK_METADATA = {
     "name": "outlook_email",
-    "description": "Compose a professional email with preview. Returns a formatted email draft ready for review.",
+    "description": (
+        "Compose an email. If MS_GRAPH_ACCESS_TOKEN is configured (Mail.Send scope), "
+        "send it via Microsoft Graph; otherwise return a preview only."
+    ),
     "input_schema": {
         "type": "object",
         "properties": {
-            "to": {"type": "string", "description": "Recipient email address or name"},
+            "to": {"type": "string", "description": "Recipient email address (or comma-separated list)"},
             "subject": {"type": "string", "description": "Email subject line"},
             "body": {"type": "string", "description": "Email body content"},
-            "cc": {"type": "string", "description": "CC recipients"},
+            "cc": {"type": "string", "description": "CC recipients (comma-separated)"},
             "priority": {"type": "string", "enum": ["normal", "high", "low"]},
+            "send": {"type": "boolean", "description": "If true and credentials present, actually send; default false (preview only)"},
         },
         "required": ["to", "subject", "body"],
     },
 }
+
+_GRAPH_BASE = "https://graph.microsoft.com/v1.0"
+
+
+def _split_recipients(raw: str) -> list:
+    if not raw:
+        return []
+    return [{"emailAddress": {"address": a.strip()}} for a in re.split(r"[,;]\s*", raw) if a.strip()]
+
+
+def _email_preview(to: str, subject: str, body: str, cc: str, priority: str) -> list:
+    return [Container(children=[
+        Alert(variant="info", title=f"To: {to}", message=f"Subject: {subject}"),
+        Text(
+            content=f"Priority: {priority}" + (f"  |  CC: {cc}" if cc else ""),
+            variant="body",
+        ),
+        Divider(),
+        Text(content=body, variant="body"),
+    ])]
 
 
 def handle_outlook_email(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -199,19 +248,102 @@ def handle_outlook_email(args: Dict[str, Any]) -> Dict[str, Any]:
     body = args.get("body", "")
     cc = args.get("cc", "")
     priority = args.get("priority", "normal")
+    send = bool(args.get("send", False))
 
-    email_preview = Container(children=[
-        Alert(
-            variant="info",
-            title=f"To: {to}",
-            message=f"Subject: {subject}",
-        ),
-        Text(content=f"Priority: {priority}" + (f"  |  CC: {cc}" if cc else ""), variant="body"),
-        Divider(),
-        Text(content=body, variant="body"),
-    ])
+    creds = args.get("_credentials") or {}
+    token = creds.get("MS_GRAPH_ACCESS_TOKEN", "")
 
-    return create_ui_response([email_preview])
+    preview = _email_preview(to, subject, body, cc, priority)
+
+    if not send:
+        if not token:
+            preview.append(Alert(
+                variant="info",
+                title="Preview only",
+                message=(
+                    "Add a Microsoft Graph access token (Mail.Send scope) in the agent's "
+                    "settings to enable sending. Re-run with send=true after configuring."
+                ),
+            ))
+        else:
+            preview.append(Alert(
+                variant="info",
+                title="Preview only",
+                message="Credentials configured. Re-run with send=true to actually send via Microsoft Graph.",
+            ))
+        return create_ui_response(preview)
+
+    if not token:
+        preview.append(Alert(
+            variant="warning",
+            title="Cannot send",
+            message="MS_GRAPH_ACCESS_TOKEN is not configured. Save it in the agent's settings.",
+        ))
+        return create_ui_response(preview)
+
+    importance = {"high": "high", "low": "low"}.get(priority, "normal")
+    message = {
+        "message": {
+            "subject": subject,
+            "importance": importance,
+            "body": {"contentType": "Text", "content": body},
+            "toRecipients": _split_recipients(to),
+        },
+        "saveToSentItems": True,
+    }
+    if cc:
+        message["message"]["ccRecipients"] = _split_recipients(cc)
+
+    try:
+        resp = http_request(
+            "POST",
+            f"{_GRAPH_BASE}/me/sendMail",
+            api_key=token,
+            json_body=message,
+        )
+    except ExternalHttpError as e:
+        preview.append(Alert(
+            variant="warning",
+            title="Send failed",
+            message=user_facing_error(e, "Microsoft Graph"),
+        ))
+        return create_ui_response(preview)
+
+    # Graph returns 202 Accepted on success.
+    if resp.status_code in (200, 202):
+        preview.append(Alert(
+            variant="success",
+            title="Sent",
+            message=f"Email sent via Microsoft Graph (HTTP {resp.status_code}).",
+        ))
+    else:
+        preview.append(Alert(
+            variant="warning",
+            title=f"Unexpected response (HTTP {resp.status_code})",
+            message=(resp.text or "")[:300],
+        ))
+    return create_ui_response(preview)
+
+
+_OUTLOOK_CHECK_METADATA = {
+    "name": "outlook_credentials_check",
+    "description": "Probe the saved Microsoft Graph access token with a cheap GET /me.",
+    "input_schema": {"type": "object", "properties": {}, "additionalProperties": True},
+}
+
+
+def handle_outlook_credentials_check(args: Dict[str, Any]) -> Dict[str, Any]:
+    creds = args.get("_credentials") or {}
+    token = creds.get("MS_GRAPH_ACCESS_TOKEN", "")
+    if not token:
+        return {"credential_test": "unconfigured", "detail": "MS_GRAPH_ACCESS_TOKEN is not set."}
+    try:
+        resp = http_request("GET", f"{_GRAPH_BASE}/me", api_key=token)
+    except ExternalHttpError as e:
+        return verdict_for_exception(e)
+    if resp.status_code == 200:
+        return {"credential_test": "ok"}
+    return {"credential_test": "unexpected", "detail": f"HTTP {resp.status_code}"}
 
 
 # ---------------------------------------------------------------------------
@@ -312,16 +444,13 @@ def handle_pitch_template(args: Dict[str, Any]) -> Dict[str, Any]:
         Text(content=title, variant="h2"),
         Text(content=f"Template type: {template_type}", variant="caption"),
     ]
-
     for slide in template["slides"]:
         bullets = "\n".join(f"• {b}" for b in slide["bullets"])
         components.append(Collapsible(
             title=slide["title"],
             content=[Text(content=bullets)],
         ))
-
     components.append(Text(content="Edit each slide to add your specifics.", variant="caption"))
-
     return create_ui_response(components)
 
 
@@ -334,5 +463,6 @@ OFFICE_TOOL_REGISTRY = {
     "powerpoint_outline": {"function": handle_ppt_outline, **_PPT_METADATA},
     "word_document": {"function": handle_word_document, **_WORD_METADATA},
     "outlook_email": {"function": handle_outlook_email, **_OUTLOOK_METADATA},
+    "outlook_credentials_check": {"function": handle_outlook_credentials_check, **_OUTLOOK_CHECK_METADATA},
     "pitch_template": {"function": handle_pitch_template, **_PITCH_METADATA},
 }
