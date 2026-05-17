@@ -20,7 +20,6 @@ import {
     Search,
     KeyRound,
     ChevronRight,
-    Settings as SettingsIcon,
     Globe,
     Lock,
     User,
@@ -700,33 +699,23 @@ export default function DashboardLayout({
                                                         {/* Row 1: name + status dot + action icons */}
                                                         <div className="flex items-start gap-2">
                                                             <p className="text-sm font-medium text-white break-words flex-1">{agent.name}</p>
-                                                            <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 mt-1.5 ${statusColor} ${hasMissingCreds ? "animate-pulse" : ""}`} title={statusLabel} />
-                                                            {hasMissingCreds && (
-                                                                <KeyRound size={10} className="text-amber-400 flex-shrink-0 mt-1.5 animate-pulse" />
-                                                            )}
-                                                            {!isDraft && (
-                                                                <>
-                                                                    <button
-                                                                        type="button"
-                                                                        title="Configure tools &amp; permissions"
-                                                                        aria-label={`Configure ${agent.name} tools`}
-                                                                        onClick={(e) => {
-                                                                            e.stopPropagation();
-                                                                            openPermissionsModal(agent.id);
-                                                                        }}
-                                                                        className="p-0.5 rounded hover:bg-white/10 transition-colors flex-shrink-0 mt-0.5"
-                                                                    >
-                                                                        <SettingsIcon size={13} className="text-astral-muted/50 hover:text-astral-primary transition-colors" />
-                                                                    </button>
-                                                                    <span title={agent.is_public ? "Public" : "Private"} className="mt-0.5">
-                                                                        {agent.is_public ? (
-                                                                            <Globe size={10} className="text-green-400/60 flex-shrink-0" />
-                                                                        ) : (
-                                                                            <Lock size={10} className="text-astral-muted/40 flex-shrink-0" />
-                                                                        )}
-                                                                    </span>
-                                                                </>
-                                                            )}
+                                                            <div className="flex items-center gap-1.5 flex-shrink-0 mt-0.5">
+                                                                <span className={`w-1.5 h-1.5 rounded-full ${statusColor} ${hasMissingCreds ? "animate-pulse" : ""}`} title={statusLabel} />
+                                                                {hasMissingCreds && (
+                                                                    <KeyRound size={10} className="text-amber-400 animate-pulse" />
+                                                                )}
+                                                                {!isDraft && (
+                                                                    <>
+                                                                        <span title={agent.is_public ? "Public" : "Private"}>
+                                                                            {agent.is_public ? (
+                                                                                <Globe size={10} className="text-green-400/60" />
+                                                                            ) : (
+                                                                                <Lock size={10} className="text-astral-muted/40" />
+                                                                            )}
+                                                                        </span>
+                                                                    </>
+                                                                )}
+                                                            </div>
                                                         </div>
                                                         {agent.description && (
                                                             <p className="text-[11px] text-astral-muted mt-0.5 line-clamp-2">{agent.description}</p>
@@ -793,7 +782,7 @@ export default function DashboardLayout({
                                                             )}
                                                         </div>
                                                     </div>
-                                                    <ChevronRight size={14} className="text-astral-muted/30 group-hover:text-astral-primary transition-colors mt-1 flex-shrink-0" />
+                                                    <ChevronRight size={14} className="text-astral-muted/30 group-hover:text-astral-primary transition-colors h-full flex-shrink-0" />
                                                 </button>
                                             );
                                         })}

@@ -8,6 +8,7 @@ Qualifying_Exam/
 .docker-cache/
 backend/knowledge/*
 backend/knowledge/_index.md
+tasks.xlsx
 
 bikerides_day.csv
 dataset_soft.csv
