@@ -42,6 +42,7 @@ interface ChatInterfaceProps {
     onDeleteSavedComponent: (componentId: string) => void;
     onCombineComponents: (sourceId: string, targetId: string) => void;
     onCondenseComponents: (componentIds: string[]) => void;
+    onCancelCombine: () => void;
     isCombining: boolean;
     combineError: string | null;
     accessToken?: string;
@@ -69,6 +70,7 @@ export default function ChatInterface({
     onDeleteSavedComponent,
     onCombineComponents,
     onCondenseComponents,
+    onCancelCombine,
     isCombining,
     combineError,
     accessToken,
@@ -115,7 +117,6 @@ export default function ChatInterface({
     const audioRef = useRef<HTMLAudioElement | null>(null);
     const lastSpokenMsgIdx = useRef<number>(-1);
 
-    // Geolocation — silently acquire once when capability is confirmed
     const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
 
     useEffect(() => {
@@ -242,22 +243,117 @@ export default function ChatInterface({
             const source = audioCtx.createMediaStreamSource(stream);
             const processor = audioCtx.createScriptProcessor(4096, 1, 1);
 
+            // Open streaming WebSocket with auto-retry (exponential backoff)
+            const wsScheme = window.location.protocol === "https:" ? "wss" : "ws";
+            const voiceWsUrl = `${wsScheme}://${window.location.host}/api/voice/stream`;
+
+            let retryCount = 0;
+            const maxRetries = 2;
             let streamingActive = false;
             let gotTranscription = false;
 
-            // Open streaming WebSocket
-            const wsScheme = window.location.protocol === "https:" ? "wss" : "ws";
-            const voiceWsUrl = `${wsScheme}://${window.location.host}/api/voice/stream`;
-            const voiceWs = new WebSocket(voiceWsUrl);
-            voiceWsRef.current = voiceWs;
+            const connectVoiceWebSocket = () => {
+                const voiceWs = new WebSocket(voiceWsUrl);
+                voiceWsRef.current = voiceWs;
 
-            voiceWs.onopen = () => {
-                streamingActive = true;
+                voiceWs.onopen = () => {
+                    streamingActive = true;
+                    retryCount = 0;
+                };
+
+                voiceWs.onmessage = (event) => {
+                    try {
+                        const msg = JSON.parse(event.data);
+                        if (msg.type === "transcription.delta") {
+                            setStreamingTranscript((prev) => prev + msg.text);
+                        } else if (msg.type === "transcription.done") {
+                            gotTranscription = true;
+                            const finalText = msg.text?.trim();
+                            setStreamingTranscript("");
+                            setIsRecording(false);
+                            setIsTranscribing(false);
+                            // Clean up audio pipeline
+                            processor.disconnect();
+                            source.disconnect();
+                            audioCtx.close();
+                            audioContextRef.current = null;
+                            stream.getTracks().forEach((t) => t.stop());
+                            mediaStreamRef.current = null;
+                            if (mediaRecorderRef.current?.state === "recording") {
+                                mediaRecorderRef.current.stop();
+                            }
+                            voiceWs.close();
+                            voiceWsRef.current = null;
+                            if (finalText) {
+                                onSendMessage(enrichWithLocation(finalText), finalText);
+                            } else {
+                                toast.error("No speech detected");
+                            }
+                        } else if (msg.type === "error") {
+                            console.warn("Voice stream server error:", msg.message);
+                            streamingActive = false;
+                            voiceWs.close();
+                        }
+                    } catch {
+                        // Ignore parse errors
+                    }
+                };
+
+                voiceWs.onerror = () => {
+                    console.warn(`Voice stream WebSocket error (retry ${retryCount}/${maxRetries})`);
+                    streamingActive = false;
+                };
+
+                voiceWs.onclose = () => {
+                    voiceWsRef.current = null;
+                    // Clean up audio pipeline if we're done or if retries exhausted
+                    if (gotTranscription) {
+                        // Normal completion — clean up
+                        try { processor.disconnect(); } catch { /* already disconnected */ }
+                        try { source.disconnect(); } catch { /* already disconnected */ }
+                        try { audioCtx.close(); } catch { /* already closed */ }
+                        audioContextRef.current = null;
+                        return;
+                    }
+
+                    if (!streamingActive || retryCount >= maxRetries) {
+                        // Exhausted retries or connection was actively refused
+                        try { processor.disconnect(); } catch { /* already disconnected */ }
+                        try { source.disconnect(); } catch { /* already disconnected */ }
+                        try { audioCtx.close(); } catch { /* already closed */ }
+                        audioContextRef.current = null;
+
+                        // Fall back to batch transcription
+                        if (mediaRecorderRef.current?.state === "recording") {
+                            mediaRecorderRef.current.stop();
+                        }
+                        stream.getTracks().forEach((t) => t.stop());
+                        mediaStreamRef.current = null;
+                        setIsRecording(false);
+                        if (audioChunksRef.current.length > 0) {
+                            console.info("Falling back to batch transcription");
+                            const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
+                            sendAudioForTranscription(audioBlob);
+                        } else {
+                            setIsTranscribing(false);
+                            setStreamingTranscript("");
+                        }
+                        return;
+                    }
+
+                    // Retry with exponential backoff
+                    retryCount++;
+                    const delay = Math.pow(2, retryCount) * 500;
+                    console.info(`Retrying voice WebSocket in ${delay}ms (attempt ${retryCount}/${maxRetries})`);
+                    setTimeout(connectVoiceWebSocket, delay);
+                };
             };
+
+            connectVoiceWebSocket();
 
             // Stream raw PCM16 audio to the WebSocket, downsampling if needed
             processor.onaudioprocess = (e) => {
-                if (streamingActive && voiceWs.readyState === WebSocket.OPEN) {
+                if (streamingActive && voiceWsRef.current?.readyState === WebSocket.OPEN) {
                     let samples = e.inputBuffer.getChannelData(0);
                     // Downsample from native rate (e.g. 48kHz) to 24kHz
                     if (nativeSR !== targetSR) {
@@ -270,81 +366,11 @@ export default function ChatInterface({
                         samples = resampled;
                     }
                     const pcm16 = float32ToPcm16(samples);
-                    voiceWs.send(pcm16);
+                    voiceWsRef.current.send(pcm16);
                 }
             };
             source.connect(processor);
             processor.connect(audioCtx.destination);
-
-            voiceWs.onmessage = (event) => {
-                try {
-                    const msg = JSON.parse(event.data);
-                    if (msg.type === "transcription.delta") {
-                        setStreamingTranscript((prev) => prev + msg.text);
-                    } else if (msg.type === "transcription.done") {
-                        gotTranscription = true;
-                        const finalText = msg.text?.trim();
-                        setStreamingTranscript("");
-                        setIsRecording(false);
-                        setIsTranscribing(false);
-                        // Clean up audio pipeline
-                        processor.disconnect();
-                        source.disconnect();
-                        audioCtx.close();
-                        audioContextRef.current = null;
-                        stream.getTracks().forEach((t) => t.stop());
-                        mediaStreamRef.current = null;
-                        if (mediaRecorderRef.current?.state === "recording") {
-                            mediaRecorderRef.current.stop();
-                        }
-                        voiceWs.close();
-                        voiceWsRef.current = null;
-                        if (finalText) {
-                            onSendMessage(enrichWithLocation(finalText), finalText);
-                        } else {
-                            toast.error("No speech detected");
-                        }
-                    } else if (msg.type === "error") {
-                        console.warn("Voice stream server error:", msg.message);
-                        streamingActive = false;
-                        voiceWs.close();
-                    }
-                } catch {
-                    // Ignore parse errors
-                }
-            };
-
-            voiceWs.onerror = () => {
-                console.warn("Voice stream WebSocket error");
-                streamingActive = false;
-            };
-
-            voiceWs.onclose = () => {
-                voiceWsRef.current = null;
-                // Clean up audio pipeline
-                try { processor.disconnect(); } catch { /* already disconnected */ }
-                try { source.disconnect(); } catch { /* already disconnected */ }
-                try { audioCtx.close(); } catch { /* already closed */ }
-                audioContextRef.current = null;
-
-                if (!gotTranscription) {
-                    // Streaming failed — fall back to batch transcription
-                    if (mediaRecorderRef.current?.state === "recording") {
-                        mediaRecorderRef.current.stop();
-                    }
-                    stream.getTracks().forEach((t) => t.stop());
-                    mediaStreamRef.current = null;
-                    setIsRecording(false);
-                    if (audioChunksRef.current.length > 0) {
-                        console.info("Falling back to batch transcription");
-                        const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
-                        sendAudioForTranscription(audioBlob);
-                    } else {
-                        setIsTranscribing(false);
-                        setStreamingTranscript("");
-                    }
-                }
-            };
 
             setIsRecording(true);
             setStreamingTranscript("");
@@ -1006,6 +1032,7 @@ export default function ChatInterface({
                 onDeleteComponent={onDeleteSavedComponent}
                 onCombineComponents={onCombineComponents}
                 onCondenseComponents={onCondenseComponents}
+                onCancelCombine={onCancelCombine}
                 isCombining={isCombining}
                 combineError={combineError}
                 activeChatId={activeChatId}

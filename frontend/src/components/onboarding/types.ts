@@ -18,6 +18,8 @@ export interface OnboardingState {
     started_at: string | null;
     completed_at: string | null;
     skipped_at: string | null;
+    dismissed_at: string | null;
+    dismiss_count: number;
 }
 
 export type StepAudience = "user" | "admin";

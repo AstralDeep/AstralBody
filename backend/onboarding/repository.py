@@ -70,6 +70,7 @@ class OnboardingRepository:
                 """
                 SELECT s.user_id, s.status, s.last_step_id, s.started_at,
                        s.updated_at, s.completed_at, s.skipped_at,
+                       s.dismissed_at, s.dismiss_count,
                        t.slug AS last_step_slug
                 FROM onboarding_state s
                 LEFT JOIN tutorial_step t ON t.id = s.last_step_id
@@ -87,6 +88,8 @@ class OnboardingRepository:
                 started_at=row["started_at"],
                 completed_at=row["completed_at"],
                 skipped_at=row["skipped_at"],
+                dismissed_at=row.get("dismissed_at"),
+                dismiss_count=row.get("dismiss_count", 0),
             )
         finally:
             conn.close()
@@ -155,6 +158,60 @@ class OnboardingRepository:
         finally:
             conn.close()
         return self.get_state(user_id), prior_status
+
+    def record_dismissal(self, user_id: str, max_dismissals: int = 2) -> OnboardingStateResponse:
+        """Record a 'not now' dismissal.
+
+        Increments dismiss_count and sets dismissed_at. If dismiss_count
+        reaches max_dismissals, auto-transitions status to 'skipped' so
+        the tour stops prompting.
+        """
+        conn = self._db._get_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT dismiss_count FROM onboarding_state WHERE user_id = %s FOR UPDATE",
+                (user_id,),
+            )
+            existing = cur.fetchone()
+            new_count = (existing["dismiss_count"] + 1) if existing else 1
+
+            if new_count >= max_dismissals:
+                cur.execute(
+                    """
+                    INSERT INTO onboarding_state (user_id, status, dismissed_at, dismiss_count, updated_at)
+                    VALUES (%s, 'skipped', now(), %s, now())
+                    ON CONFLICT (user_id) DO UPDATE SET
+                        status = 'skipped',
+                        dismissed_at = now(),
+                        dismiss_count = %s,
+                        updated_at = now(),
+                        skipped_at = CASE
+                            WHEN onboarding_state.skipped_at IS NULL THEN now()
+                            ELSE onboarding_state.skipped_at
+                        END
+                    """,
+                    (user_id, new_count, new_count),
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO onboarding_state (user_id, status, dismissed_at, dismiss_count, updated_at)
+                    VALUES (%s, 'not_started', now(), %s, now())
+                    ON CONFLICT (user_id) DO UPDATE SET
+                        dismissed_at = now(),
+                        dismiss_count = %s,
+                        updated_at = now()
+                    """,
+                    (user_id, new_count, new_count),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return self.get_state(user_id)
 
     # ------------------------------------------------------------------
     # Tutorial steps — read paths

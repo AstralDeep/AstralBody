@@ -126,15 +126,21 @@ export default function ToolPicker({
 
     // Close on scroll/resize — repositioning is unnecessary because the trigger
     // lives in a non-scrolling input row, and closing is simpler than tracking
-    // a stale rect through layout changes.
+    // a stale rect through layout changes. Scrolls *inside* the popover's own
+    // list are ignored so the user can reach items below the fold.
     useEffect(() => {
         if (!open) return;
-        const close = () => onClose();
-        window.addEventListener("scroll", close, true);
-        window.addEventListener("resize", close);
+        const onScroll = (e: Event) => {
+            const target = e.target;
+            if (target instanceof Node && popoverRef.current?.contains(target)) return;
+            onClose();
+        };
+        const onResize = () => onClose();
+        window.addEventListener("scroll", onScroll, true);
+        window.addEventListener("resize", onResize);
         return () => {
-            window.removeEventListener("scroll", close, true);
-            window.removeEventListener("resize", close);
+            window.removeEventListener("scroll", onScroll, true);
+            window.removeEventListener("resize", onResize);
         };
     }, [open, onClose]);
 

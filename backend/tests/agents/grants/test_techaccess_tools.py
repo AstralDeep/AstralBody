@@ -173,7 +173,7 @@ def test_draft_loi_accepts_clean_descriptor(tools):
 
 def test_draft_loi_includes_pi_and_personnel_block(tools):
     out = tools.draft_loi(
-        pi_email="cody.bumgardner@uky.edu",
+        pi_email="researcher@example.edu",
         senior_personnel=[
             {"name": "Dr. Jane Doe", "affiliation": "UK", "role": "Co-PI"},
         ],
@@ -181,7 +181,7 @@ def test_draft_loi_includes_pi_and_personnel_block(tools):
     titles = _component_titles(out)
     assert "PI and Senior Personnel" in titles
     text = _all_text(out)
-    assert "cody.bumgardner@uky.edu" in text
+    assert "researcher@example.edu" in text
     assert "Dr. Jane Doe" in text
 
 

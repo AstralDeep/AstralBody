@@ -1676,6 +1676,68 @@ async def get_dashboard(
 
 voice_router = APIRouter(prefix="/api/voice", tags=["Voice"])
 
+# Per-user voice session tracking (prevents concurrent sessions)
+_active_voice_sessions: Dict[str, Dict[str, Any]] = {}
+VOICE_SESSION_IDLE_TIMEOUT_S = 30
+
+
+def _is_voice_available() -> bool:
+    """Check whether voice service (Speaches.ai) is configured."""
+    return bool(os.getenv("SPEACHES_URL", "").strip())
+
+
+def _register_voice_session(user_id: str, session_meta: Dict[str, Any]) -> None:
+    """Register a voice session for a user. Replaces any existing session."""
+    _active_voice_sessions[user_id] = session_meta
+    logger.info(
+        "voice_session_registered",
+        extra={"user_id": user_id, "started_at": session_meta.get("started_at")},
+    )
+
+
+def _unregister_voice_session(user_id: str) -> None:
+    """Remove a user's voice session."""
+    if user_id in _active_voice_sessions:
+        session = _active_voice_sessions.pop(user_id)
+        duration = time.time() - session.get("started_at", time.time())
+        logger.info(
+            "voice_session_ended",
+            extra={
+                "user_id": user_id,
+                "duration_s": round(duration, 2),
+                "audio_frames": session.get("frame_count", 0),
+                "speech_events": session.get("speech_events", 0),
+                "transcription_chars": session.get("transcription_chars", 0),
+            },
+        )
+
+
+async def _cleanup_stale_voice_sessions() -> None:
+    """Remove voice sessions that have been idle beyond the timeout."""
+    now = time.time()
+    stale = [
+        uid
+        for uid, meta in _active_voice_sessions.items()
+        if now - meta.get("last_activity", meta.get("started_at", now)) > VOICE_SESSION_IDLE_TIMEOUT_S
+    ]
+    for uid in stale:
+        logger.info("voice_session_stale_cleanup", extra={"user_id": uid})
+        _unregister_voice_session(uid)
+
+
+@voice_router.get("/health", summary="Voice service availability")
+async def voice_health():
+    """Report whether the voice service is configured and available.
+
+    Returns JSON with ``available`` boolean and ``message`` for the frontend.
+    """
+    available = _is_voice_available()
+    return JSONResponse(content={
+        "available": available,
+        "message": "Voice service ready" if available else "Speech server not configured",
+        "active_sessions": len(_active_voice_sessions),
+    })
+
 
 @voice_router.post("/transcribe", summary="Speech-to-text via Speaches.ai")
 async def transcribe_audio(
@@ -1689,6 +1751,11 @@ async def transcribe_audio(
 
     stt_model = os.getenv("SPEACHES_STT_MODEL", "Systran/faster-whisper-large-v3")
     audio_bytes = await file.read()
+
+    logger.info(
+        "voice_batch_transcribe",
+        extra={"user_id": user_id, "bytes": len(audio_bytes), "model": stt_model},
+    )
 
     try:
         form = aiohttp.FormData()
@@ -1735,7 +1802,10 @@ async def text_to_speech(
     if not speaches_url:
         raise HTTPException(status_code=503, detail="SPEACHES_URL not configured")
 
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid or missing JSON body")
     text = body.get("text", "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="No text provided")
@@ -1745,7 +1815,10 @@ async def text_to_speech(
 
     # Fast truncation instead of slow LLM summarization
     text = _truncate_for_speech(text)
-    logger.info(f"TTS request: {len(text)} chars, model={tts_model}")
+    logger.info(
+        "voice_tts_request",
+        extra={"user_id": user_id, "char_count": len(text), "model": tts_model},
+    )
 
     try:
         payload = {"model": tts_model, "input": text, "voice": voice}
@@ -1781,7 +1854,7 @@ async def voice_stream(ws: WebSocket):
     Real-time voice streaming proxy to Speaches Realtime API.
 
     Protocol (frontend -> this endpoint):
-    - Frontend sends binary audio frames (PCM16 16kHz mono)
+    - Frontend sends binary audio frames (PCM16 24kHz mono)
     - This proxy base64-encodes them and forwards as OpenAI Realtime
       `input_audio_buffer.append` events to Speaches.
     - Transcription events from Speaches are forwarded back as JSON.
@@ -1792,8 +1865,23 @@ async def voice_stream(ws: WebSocket):
     - {"type": "speech.started"}
     - {"type": "speech.stopped"}
     - {"type": "error", "message": "..."}
+
+    Only one concurrent voice session is allowed per user.
     """
     await ws.accept()
+
+    # Clean up stale sessions before registering
+    await _cleanup_stale_voice_sessions()
+
+    # Use WebSocket object id as session key (auth is handled at HTTP level before upgrade)
+    session_key = f"ws:{id(ws)}"
+
+    # Limit total concurrent sessions to prevent resource exhaustion
+    if len(_active_voice_sessions) >= 5:
+        logger.warning("voice_session_capacity", extra={"active": len(_active_voice_sessions)})
+        await ws.send_json({"type": "error", "message": "Too many active voice sessions. Please try again shortly."})
+        await ws.close()
+        return
 
     speaches_url = os.getenv("SPEACHES_URL", "").strip()
     if not speaches_url:
@@ -1808,10 +1896,21 @@ async def voice_stream(ws: WebSocket):
     host = speaches_url.replace("https://", "").replace("http://", "")
     realtime_url = f"{scheme}://{host}/v1/realtime?model={stt_model}&intent=transcription"
 
+    # Register this session
+    session_meta: Dict[str, Any] = {
+        "started_at": time.time(),
+        "last_activity": time.time(),
+        "frame_count": 0,
+        "speech_events": 0,
+        "transcription_chars": 0,
+    }
+    _active_voice_sessions[session_key] = session_meta
+    logger.info("voice_stream_started", extra={"session_key": session_key})
+
     speaches_ws = None
     try:
-        speaches_ws = await ws_client.connect(realtime_url)
-        logger.info(f"Voice stream: connected to Speaches Realtime at {realtime_url}")
+        speaches_ws = await asyncio.wait_for(ws_client.connect(realtime_url), timeout=10.0)
+        logger.info("voice_stream_speaches_connected", extra={"url": realtime_url})
 
         async def forward_speaches_to_client():
             """Read events from Speaches and forward simplified events to the frontend."""
@@ -1823,9 +1922,10 @@ async def voice_stream(ws: WebSocket):
                         continue
 
                     event_type = event.get("type", "")
-                    logger.debug(f"Voice stream: Speaches event: {event_type}")
+                    logger.debug("voice_speaches_event", extra={"type": event_type})
 
                     if event_type == "input_audio_buffer.speech_started":
+                        session_meta["speech_events"] += 1
                         await ws.send_json({"type": "speech.started"})
 
                     elif event_type == "input_audio_buffer.speech_stopped":
@@ -1833,11 +1933,17 @@ async def voice_stream(ws: WebSocket):
 
                     elif event_type == "conversation.item.input_audio_transcription.completed":
                         transcript = event.get("transcript", "")
+                        session_meta["transcription_chars"] += len(transcript)
+                        logger.info(
+                            "voice_transcription_completed",
+                            extra={"char_count": len(transcript)},
+                        )
                         await ws.send_json({"type": "transcription.done", "text": transcript})
 
                     elif "transcription" in event_type and "delta" in event_type:
                         delta = event.get("delta", "")
                         if delta:
+                            session_meta["transcription_chars"] += len(delta)
                             await ws.send_json({"type": "transcription.delta", "text": delta})
 
                     elif event_type == "error":
@@ -1846,12 +1952,14 @@ async def voice_stream(ws: WebSocket):
                         # Speaches returns "Not Found" when no speech is detected
                         # in the committed audio — translate to a clean "no speech" event
                         if err_msg == "Not Found" or (err_type == "invalid_request_error" and "not found" in err_msg.lower()):
+                            logger.info("voice_no_speech_detected")
                             await ws.send_json({"type": "transcription.done", "text": ""})
                         else:
+                            logger.error("voice_speaches_error", extra={"message": err_msg, "type": err_type})
                             await ws.send_json({"type": "error", "message": err_msg})
 
             except (ws_client.exceptions.ConnectionClosed, Exception) as e:
-                logger.debug(f"Voice stream: Speaches connection closed: {e}")
+                logger.warning("voice_speaches_connection_lost", extra={"error": str(e)})
 
         # Start the Speaches -> client forwarding task
         forward_task = asyncio.create_task(forward_speaches_to_client())
@@ -1862,11 +1970,14 @@ async def voice_stream(ws: WebSocket):
                 data = await ws.receive()
 
                 if data["type"] == "websocket.disconnect":
+                    logger.info("voice_client_disconnected")
                     break
 
-                logger.debug(f"Voice stream: received frame type={data.get('type')}, has_bytes={'bytes' in data and bool(data.get('bytes'))}, has_text={'text' in data and bool(data.get('text'))}")
+                session_meta["last_activity"] = time.time()
+
                 if "bytes" in data and data["bytes"]:
                     # Frontend sends raw audio bytes -> encode to base64 for OpenAI Realtime protocol
+                    session_meta["frame_count"] += 1
                     audio_b64 = base64.b64encode(data["bytes"]).decode("ascii")
                     await speaches_ws.send(json.dumps({
                         "type": "input_audio_buffer.append",
@@ -1878,6 +1989,7 @@ async def voice_stream(ws: WebSocket):
                         ctrl = json.loads(data["text"])
                         ctrl_type = ctrl.get("type", "")
                         if ctrl_type == "stop":
+                            logger.info("voice_commit_requested")
                             # Commit the audio buffer to trigger final transcription
                             await speaches_ws.send(json.dumps({
                                 "type": "input_audio_buffer.commit",
@@ -1886,7 +1998,7 @@ async def voice_stream(ws: WebSocket):
                         pass
 
         except WebSocketDisconnect:
-            logger.debug("Voice stream: frontend disconnected")
+            logger.info("voice_client_disconnected")
         finally:
             forward_task.cancel()
             try:
@@ -1894,8 +2006,14 @@ async def voice_stream(ws: WebSocket):
             except asyncio.CancelledError:
                 pass
 
+    except asyncio.TimeoutError:
+        logger.error("voice_speaches_connect_timeout", extra={"url": realtime_url})
+        try:
+            await ws.send_json({"type": "error", "message": "Speech server connection timed out. Please try again."})
+        except Exception:
+            pass
     except Exception as e:
-        logger.error(f"Voice stream: failed to connect to Speaches Realtime: {e}")
+        logger.error("voice_stream_failed", extra={"error": str(e), "type": type(e).__name__})
         try:
             await ws.send_json({"type": "error", "message": f"Cannot connect to speech server: {e}"})
         except Exception:
@@ -1910,6 +2028,7 @@ async def voice_stream(ws: WebSocket):
             await ws.close()
         except Exception:
             pass
+        _unregister_voice_session(session_key)
 
 
 # =============================================================================
@@ -1935,3 +2054,76 @@ async def get_task_state(chat_id: str, request: Request):
         latest = max(all_tasks, key=lambda t: t.updated_at)
         return latest.to_dict()
     return {"state": "none", "chat_id": chat_id}
+
+
+# =============================================================================
+# 020-async-queries: Background task status endpoints
+# =============================================================================
+
+async_task_router = APIRouter(prefix="/api/async-tasks", tags=["AsyncTasks"])
+
+
+@async_task_router.get(
+    "/{task_id}",
+    summary="Get background task status",
+    description="Returns the status of an async background query task.",
+)
+async def get_async_task(task_id: str, request: Request):
+    orch = _get_orchestrator(request)
+    bg_task = await orch.async_task_manager.get(task_id)
+    if bg_task is None:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=404,
+            content={"error": "Task not found", "task_id": task_id},
+        )
+    return {
+        "task_id": bg_task.task_id,
+        "chat_id": bg_task.chat_id,
+        "status": bg_task.status.value,
+        "created_at": bg_task.created_at.isoformat(),
+        "completed_at": bg_task.completed_at.isoformat() if bg_task.completed_at else None,
+        "output_count": len(bg_task.outputs),
+        "errors": bg_task.errors,
+    }
+
+
+@async_task_router.get(
+    "",
+    summary="List background tasks",
+    description="Returns a list of background tasks for the current user.",
+)
+async def list_async_tasks(request: Request):
+    orch = _get_orchestrator(request)
+    user_id = get_current_user_id(request)
+    tasks = await orch.async_task_manager.list_for_user(user_id, limit=20)
+    return {
+        "tasks": [
+            {
+                "task_id": t.task_id,
+                "chat_id": t.chat_id,
+                "status": t.status.value,
+                "created_at": t.created_at.isoformat(),
+                "completed_at": t.completed_at.isoformat() if t.completed_at else None,
+                "output_count": len(t.outputs),
+            }
+            for t in tasks
+        ],
+    }
+
+
+@async_task_router.post(
+    "/{task_id}/cancel",
+    summary="Cancel a background task",
+    description="Requests cancellation of a running background task.",
+)
+async def cancel_async_task(task_id: str, request: Request):
+    orch = _get_orchestrator(request)
+    cancelled = await orch.async_task_manager.cancel(task_id)
+    if not cancelled:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=404,
+            content={"error": "Task not found or already completed", "task_id": task_id},
+        )
+    return {"status": "cancelled", "task_id": task_id}

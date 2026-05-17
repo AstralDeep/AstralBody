@@ -307,6 +307,8 @@ function renderComponentInner(comp: AnyProps, index: number, onSaveComponent?: (
             return <RenderFileUpload key={key} {...baseProps} />;
         case "file_download":
             return <RenderFileDownload key={key} {...baseProps} />;
+        case "audio":
+            return <RenderAudio key={key} {...baseProps} />;
         case "color_picker":
             return <RenderColorPicker key={key} {...baseProps} />;
         case "param_picker":
@@ -327,11 +329,7 @@ function renderChildren(items: unknown, onSaveComponent?: (componentData: Record
 // ── Container ──────────────────────────────────────────────────────
 function RenderContainer({ children, content, onSaveComponent, onSendMessage, onTablePaginate }: AnyProps) {
     const kids = children || content || [];
-    return (
-        <div className="flex flex-col gap-4 relative group">
-            {renderChildren(kids, onSaveComponent, onSendMessage, onTablePaginate)}
-        </div>
-    );
+    return <>{renderChildren(kids, onSaveComponent, onSendMessage, onTablePaginate)}</>;
 }
 
 // ── Markdown helpers ───────────────────────────────────────────────
@@ -478,12 +476,7 @@ function RenderText({ content, variant = "body" }: AnyProps) {
 function RenderCard({ title, children, content, onSaveComponent, onSendMessage, onTablePaginate }: AnyProps) {
     const kids = children || content || [];
     return (
-        <motion.div
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.3 }}
-            className="glass-card p-3 sm:p-5 relative"
-        >
+        <div>
             {title && (
                 <div className="mb-3">
                     <h3 className="text-base font-semibold text-astral-text flex items-center gap-2">
@@ -493,7 +486,7 @@ function RenderCard({ title, children, content, onSaveComponent, onSendMessage, 
                 </div>
             )}
             <div className="space-y-3">{renderChildren(kids, onSaveComponent, onSendMessage, onTablePaginate)}</div>
-        </motion.div>
+        </div>
     );
 }
 
@@ -550,7 +543,7 @@ function RenderTable({ headers, rows, title: compTitle, label,
     };
 
     return (
-        <div className="rounded-lg border border-white/5">
+        <div className="rounded-lg border border-white/10">
             <div className="p-3 border-b border-white/5 bg-astral-primary/5 flex items-center justify-between">
                 <div className="text-sm font-medium text-astral-text"><InlineMd text={title} /></div>
                 {hasPagination && (
@@ -766,7 +759,7 @@ function RenderList({ items, ordered, variant = "default" }: AnyProps) {
         return (
             <div className="space-y-3">
                 {items.map((item: AnyProps, i: number) => (
-                    <div key={i} className="p-3 bg-white/5 rounded-lg border border-white/5 hover:bg-white/10 transition-colors">
+                    <div key={i} className="p-3 hover:bg-white/5 transition-colors">
                         <div className="flex justify-between items-start gap-4">
                             <div className="space-y-1 w-full">
                                 <h4 className="text-sm font-semibold text-astral-text flex items-center justify-between">
@@ -1339,7 +1332,7 @@ function RenderCollapsible({ title, children, content, default_open, onSaveCompo
             initial={{ opacity: 0, y: 4 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.15 }}
-            className="rounded-lg border border-white/[0.06] overflow-hidden bg-white/[0.015] group/collapsible"
+            className="overflow-hidden group/collapsible"
         >
             <button
                 onClick={() => setIsOpen(!isOpen)}
@@ -1541,6 +1534,39 @@ function RenderFileDownload({ label, url, filename }: AnyProps) {
                 )}
                 <span>{isDownloading ? "Downloading..." : (label || "Download File")}</span>
             </button>
+        </div>
+    );
+}
+
+// ── RenderAudio ────────────────────────────────────────────────────
+function RenderAudio({ src, contentType, autoplay, loop, label, showControls, description }: AnyProps) {
+    const audioRef = useRef<HTMLAudioElement>(null);
+    const hasSrc = typeof src === 'string' && src.length > 0;
+
+    // Determine a safe type attribute value
+    const mimeType = (typeof contentType === 'string' && contentType.length > 0)
+        ? contentType
+        : undefined;
+
+    return (
+        <div className="audio-component rounded-lg border border-white/10 bg-white/5 p-3">
+            {label && <div className="text-sm font-medium text-white/90 mb-2">{label}</div>}
+            {hasSrc ? (
+                <audio
+                    ref={audioRef}
+                    controls={showControls !== false}
+                    autoPlay={autoplay === true}
+                    loop={loop === true}
+                    className="w-full"
+                    style={{ minHeight: 40 }}
+                >
+                    <source src={src} type={mimeType} />
+                    Your browser does not support the audio element.
+                </audio>
+            ) : (
+                <div className="text-white/40 text-xs italic">No audio source provided</div>
+            )}
+            {description && <div className="text-xs text-white/50 mt-2">{description}</div>}
         </div>
     );
 }
