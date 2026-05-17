@@ -3,15 +3,16 @@
  *
  * Displays streamed UI components in a responsive grid with:
  * - Drag-and-drop to combine components (HTML5 DnD + touch)
- * - Collapse/expand individual components
+ * - Hover-activated floating toolbar (delete, fullscreen)
  * - "Condense" button to merge all compatible components
- * - Auto-arranging responsive grid layout
+ * - Response-group dividers based on chat_id grouping
+ * - Global compact/expand toggle
  *
  * Derived from UISavedDrawer.tsx, adapted as the primary content area.
  */
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { ChevronDown, ChevronUp, Trash2, Loader2, Layers, GripVertical, AlertCircle, Sparkles, Minimize2, Maximize2, X } from "lucide-react";
+import { Trash2, Loader2, Layers, AlertCircle, Sparkles, Minimize2, Maximize2, X } from "lucide-react";
 import DynamicRenderer from "./DynamicRenderer";
 import type { TablePaginateEvent } from "./DynamicRenderer";
 import type { SavedComponent } from "../hooks/useWebSocket";
@@ -28,6 +29,7 @@ interface SDUICanvasProps {
     onDeleteComponent: (componentId: string) => void;
     onCombineComponents: (sourceId: string, targetId: string) => void;
     onCondenseComponents: (componentIds: string[]) => void;
+    onCancelCombine: () => void;
     isCombining: boolean;
     combineError: string | null;
     onTablePaginate?: (event: TablePaginateEvent) => void;
@@ -40,19 +42,24 @@ export default function SDUICanvas({
     onDeleteComponent,
     onCombineComponents,
     onCondenseComponents,
+    onCancelCombine,
     isCombining,
     combineError,
     onTablePaginate,
     onSendMessage,
     activeChatId,
 }: SDUICanvasProps) {
-    const [collapsedComponents, setCollapsedComponents] = useState<Set<string>>(new Set());
+    // 019-cohesive-ui: global compact mode replaces per-component collapse
+    const [compactMode, setCompactMode] = useState(false);
     const [dragOverId, setDragOverId] = useState<string | null>(null);
     const [draggedId, setDraggedId] = useState<string | null>(null);
     const dragCounterRef = useRef<Map<string, number>>(new Map());
 
     // Fullscreen: which component is expanded to full screen (null = none)
     const [fullscreenId, setFullscreenId] = useState<string | null>(null);
+
+    // Overflow escalation: tracks size levels for auto-condense
+    const autoCondenseTriggeredRef = useRef(false);
 
     // Feature 010-fix-page-flash. Capture the set of component IDs
     // present at FIRST RENDER so we can skip the entry animation for
@@ -70,21 +77,15 @@ export default function SDUICanvas({
     );
     const [mounted, setMounted] = useState(false);
     useEffect(() => {
-        // Standard "did mount" flag — required so first-paint can render
-        // with `initial={false}` while later toggles into the empty
-        // state animate normally. The single re-render this triggers
-        // is harmless: framer-motion only honors `initial` once per
-        // element mount, so the second render's value is dead code
-        // for animation purposes.
-        // eslint-disable-next-line react-hooks/set-state-in-effect
         setMounted(true);
     }, []);
 
     // Adaptive sizing: tracks whether content overflows the viewport
-    // Levels: 0 = normal, 1 = compact (smaller max-h), 2 = all collapsed, 3 = trigger auto-condense
     const [sizeLevel, setSizeLevel] = useState(0);
-    const autoCondenseTriggeredRef = useRef(false);
     const prevComponentCountRef = useRef(0);
+
+    // 019-cohesive-ui: hover state for floating toolbar per component
+    const [hoveredId, setHoveredId] = useState<string | null>(null);
 
     // Touch drag-and-drop state
     const touchDragRef = useRef<{
@@ -117,7 +118,6 @@ export default function SDUICanvas({
     useEffect(() => {
         const prevCount = prevComponentCountRef.current;
         const curCount = canvasComponents.length;
-        // Reset when components are removed (e.g. after condense) or cleared
         if (curCount < prevCount || curCount === 0) {
             setSizeLevel(0);
             autoCondenseTriggeredRef.current = false;
@@ -133,14 +133,11 @@ export default function SDUICanvas({
         const isOverflowing = container.scrollHeight > container.clientHeight + 20;
 
         if (isOverflowing && sizeLevel === 0) {
-            // Step 1: switch to compact mode (smaller max-heights)
             setSizeLevel(1);
         } else if (isOverflowing && sizeLevel === 1) {
-            // Step 2: auto-collapse all components
             setSizeLevel(2);
-            setCollapsedComponents(new Set(canvasComponents.map(c => c.id)));
+            setCompactMode(true);
         } else if (isOverflowing && sizeLevel === 2 && !autoCondenseTriggeredRef.current && !isCombining) {
-            // Step 3: trigger auto-condense
             autoCondenseTriggeredRef.current = true;
             const ids = canvasComponents.map(c => c.id);
             onCondenseComponents(ids);
@@ -150,27 +147,52 @@ export default function SDUICanvas({
     // Run overflow check after render when components change or size level changes
     useEffect(() => {
         if (canvasComponents.length < 2) return;
-        // Delay to let the DOM settle after render
         const timer = setTimeout(checkOverflow, 300);
         return () => clearTimeout(timer);
     }, [canvasComponents.length, sizeLevel, checkOverflow]);
 
-    // Get max-height for component content based on current size level and component count
+    // 019-cohesive-ui: group components by chat_id for response grouping
+    // Components sharing the same chat_id render as contiguous blocks
+    const groupedComponents = React.useMemo(() => {
+        const groups: { chatId: string; components: typeof canvasComponents }[] = [];
+        for (const comp of canvasComponents) {
+            const chatId = comp.chat_id || '__standalone__';
+            const lastGroup = groups[groups.length - 1];
+            if (lastGroup && lastGroup.chatId === chatId) {
+                lastGroup.components.push(comp);
+            } else {
+                groups.push({ chatId, components: [comp] });
+            }
+        }
+        return groups;
+    }, [canvasComponents]);
+
+    // Get max-height for component content based on mode
     const getContentMaxHeight = () => {
         const count = canvasComponents.length;
-        if (sizeLevel >= 2) return '0px'; // collapsed
+        if (compactMode) return '120px';
+        if (sizeLevel >= 2) return '0px';
         if (sizeLevel === 1 || count > 6) return '150px';
         if (count > 4) return '200px';
-        return '400px';
+        return 'none';
     };
 
     const getComponentSpan = (type: string) => {
         const count = canvasComponents.length;
 
-        // In collapsed or compact mode, everything fits in single cells
+        if (compactMode) {
+            // Compact: everything single column, tighter packing
+            switch (type.toLowerCase()) {
+                case 'bar_chart': case 'line_chart': case 'pie_chart':
+                case 'plotly_chart': case 'table':
+                    return 'col-span-1 md:col-span-2';
+                default:
+                    return 'col-span-1';
+            }
+        }
+
         if (sizeLevel >= 2) return 'col-span-1';
         if (sizeLevel === 1) {
-            // Compact: charts/tables get 2 cols max, everything else single
             switch (type.toLowerCase()) {
                 case 'bar_chart': case 'line_chart': case 'pie_chart':
                 case 'plotly_chart': case 'table':
@@ -241,26 +263,18 @@ export default function SDUICanvas({
 
     const getGridColsClass = () => {
         const count = canvasComponents.length;
+        if (compactMode) {
+            return 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5';
+        }
         if (sizeLevel >= 2) {
-            // Collapsed mode: pack tightly
             return 'grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6';
         }
         if (sizeLevel === 1 || count > 6) {
-            // Compact mode: more columns
             return 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5';
         }
         if (count <= 2) return 'grid-cols-1 md:grid-cols-2';
         if (count <= 4) return 'grid-cols-1 md:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4';
         return 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5';
-    };
-
-    const toggleCollapse = (id: string) => {
-        setCollapsedComponents(prev => {
-            const next = new Set(prev);
-            if (next.has(id)) next.delete(id);
-            else next.add(id);
-            return next;
-        });
     };
 
     // HTML5 Drag and Drop handlers
@@ -421,7 +435,7 @@ export default function SDUICanvas({
     };
 
     return (
-        <div className="flex-1 flex flex-col overflow-hidden relative">
+        <div className="flex flex-col">
             {/* Toolbar — only visible when components exist */}
             {canvasComponents.length > 0 && (
                 <div className="flex items-center justify-between px-4 sm:px-6 py-3 border-b border-white/10 bg-astral-bg/50 backdrop-blur-sm flex-shrink-0">
@@ -434,11 +448,25 @@ export default function SDUICanvas({
                         </span>
                     </div>
                     <div className="flex items-center gap-2">
+                        {/* 019-cohesive-ui: global compact toggle replaces per-component collapse */}
+                        <button
+                            onClick={() => setCompactMode(!compactMode)}
+                            className={`px-2.5 py-1.5 text-xs font-medium rounded-lg
+                                         border transition-all duration-200 flex items-center gap-1.5
+                                         ${compactMode
+                                             ? 'bg-astral-primary/10 border-astral-primary/30 text-astral-primary'
+                                             : 'bg-white/5 border-white/10 text-astral-muted hover:border-white/20 hover:text-white'
+                                         }`}
+                            title={compactMode ? "Expand all" : "Compact view"}
+                        >
+                            {compactMode ? <Maximize2 size={12} /> : <Minimize2 size={12} />}
+                            {compactMode ? "Expanded" : "Compact"}
+                        </button>
                         {sizeLevel > 0 && (
                             <button
                                 onClick={() => {
                                     setSizeLevel(0);
-                                    setCollapsedComponents(new Set());
+                                    setCompactMode(false);
                                     autoCondenseTriggeredRef.current = false;
                                 }}
                                 className="px-2.5 py-1.5 text-xs font-medium rounded-lg
@@ -499,22 +527,33 @@ export default function SDUICanvas({
                         initial={{ opacity: 0 }}
                         animate={{ opacity: 1 }}
                         exit={{ opacity: 0 }}
-                        className="absolute inset-0 z-10 bg-astral-bg/60 backdrop-blur-sm flex items-center justify-center"
+                        className="fixed inset-0 z-10 bg-astral-bg/60 backdrop-blur-sm flex items-center justify-center"
+                        onClick={onCancelCombine}
                     >
-                        <div className="flex flex-col items-center gap-3">
+                        <div
+                            className="flex flex-col items-center gap-3 bg-astral-surface border border-white/10 rounded-xl p-6 shadow-xl"
+                            onClick={(e) => e.stopPropagation()}
+                        >
                             <Loader2 size={32} className="text-astral-primary animate-spin" />
                             <span className="text-sm text-astral-muted">Combining components...</span>
+                            <button
+                                type="button"
+                                onClick={onCancelCombine}
+                                className="mt-2 px-3 py-1.5 text-xs font-medium rounded-lg bg-white/10 text-astral-muted hover:bg-white/20 hover:text-white transition-colors"
+                            >
+                                Cancel
+                            </button>
                         </div>
                     </motion.div>
                 )}
             </AnimatePresence>
 
-            {/* Canvas Grid */}
+            {/* Canvas Grid — 019-cohesive-ui: grouped by chat_id */}
             <div
                 ref={scrollContainerRef}
-                className={`flex-1 overflow-y-auto px-4 sm:px-6 py-4 ${
+                className={`px-4 sm:px-6 py-4 ${
                     canvasComponents.length > 0
-                        ? `grid ${getGridColsClass()} ${sizeLevel >= 1 ? 'gap-2' : 'gap-4'} content-start items-start grid-flow-row-dense`
+                        ? ''
                         : ''
                 }`}
             >
@@ -552,105 +591,110 @@ export default function SDUICanvas({
                         </motion.div>
                     </div>
                 ) : (
-                    canvasComponents.map((component) => {
-                        const isCollapsed = collapsedComponents.has(component.id);
-                        const isDraggedOver = dragOverId === component.id;
-                        const isBeingDragged = draggedId === component.id;
-
-                        return (
-                            <motion.div
-                                key={component.id}
-                                data-component-id={component.id}
-                                layout
-                                initial={initialIds.has(component.id) ? false : { opacity: 0, y: 20, scale: 0.95 }}
-                                animate={{
-                                    opacity: isBeingDragged ? 0.4 : 1,
-                                    y: 0,
-                                    scale: isDraggedOver ? 1.02 : 1,
-                                }}
-                                exit={{ opacity: 0, y: -10, scale: 0.95 }}
-                                transition={{ duration: 0.2 }}
-                                draggable={!isCombining}
-                                onDragStart={(e) => handleDragStart(e as unknown as React.DragEvent, component.id)}
-                                onDragEnd={handleDragEnd}
-                                onDragEnter={(e) => handleDragEnter(e as unknown as React.DragEvent, component.id)}
-                                onDragOver={(e) => handleDragOver(e as unknown as React.DragEvent, component.id)}
-                                onDragLeave={(e) => handleDragLeave(e as unknown as React.DragEvent, component.id)}
-                                onDrop={(e) => handleDrop(e as unknown as React.DragEvent, component.id)}
-                                className={`
-                                    ${getComponentSpan(component.component_type)}
-                                    rounded-xl border transition-all duration-200
-                                    ${isDraggedOver
-                                        ? 'border-purple-400/60 bg-purple-500/10 shadow-lg shadow-purple-500/10'
-                                        : 'border-white/8 bg-white/[0.03] hover:border-white/15'
-                                    }
-                                    ${isBeingDragged ? 'cursor-grabbing' : 'cursor-grab'}
-                                `}
-                            >
-                                {/* Card Header */}
-                                <div className="flex items-center gap-2 px-3 py-2.5">
-                                    <div
-                                        className="touch-none flex-shrink-0 p-1 -m-1 cursor-grab active:cursor-grabbing"
-                                        onTouchStart={(e) => handleTouchStart(e, component.id)}
-                                        onTouchMove={handleTouchMove}
-                                        onTouchEnd={handleTouchEnd}
-                                        onTouchCancel={handleTouchCancel}
-                                    >
-                                        <GripVertical size={14} className="text-astral-muted/40" />
-                                    </div>
-                                    <div className="flex-1 min-w-0">
-                                        <h4 className="text-sm font-medium text-white truncate">
-                                            {component.title}
-                                        </h4>
-                                        <span className="text-[10px] text-astral-muted/60 uppercase tracking-wider">
-                                            {component.component_type}
+                    <div className="flex flex-col gap-6">
+                        {/* 019-cohesive-ui: render groups with dividers between different chat responses */}
+                        {groupedComponents.map((group, groupIdx) => (
+                            <React.Fragment key={group.chatId || `group-${groupIdx}`}>
+                                {/* Divider between chat response groups */}
+                                {groupIdx > 0 && (
+                                    <div className="flex items-center gap-3">
+                                        <div className="flex-1 h-px bg-white/5" />
+                                        <span className="text-[10px] text-astral-muted/40 uppercase tracking-wider whitespace-nowrap">
+                                            New response
                                         </span>
-                                    </div>
-                                    <div className="flex items-center gap-1">
-                                        <button
-                                            onClick={() => toggleCollapse(component.id)}
-                                            className="p-1 rounded hover:bg-white/10 text-astral-muted hover:text-white transition-colors"
-                                            title={isCollapsed ? "Expand" : "Collapse"}
-                                        >
-                                            {isCollapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
-                                        </button>
-                                        <button
-                                            onClick={() => setFullscreenId(component.id)}
-                                            className="p-1 rounded hover:bg-white/10 text-astral-muted hover:text-white transition-colors"
-                                            title="View full screen"
-                                        >
-                                            <Maximize2 size={14} />
-                                        </button>
-                                        <button
-                                            onClick={() => onDeleteComponent(component.id)}
-                                            className="p-1 rounded hover:bg-red-500/20 text-astral-muted hover:text-red-400 transition-colors"
-                                            title="Delete component"
-                                        >
-                                            <Trash2 size={14} />
-                                        </button>
-                                    </div>
-                                </div>
-
-                                {/* Drop zone indicator */}
-                                {isDraggedOver && (
-                                    <div className="px-3 pb-2">
-                                        <div className="border-2 border-dashed border-purple-400/40 rounded-lg p-2 text-center">
-                                            <span className="text-xs text-purple-300/80">Drop to combine</span>
-                                        </div>
+                                        <div className="flex-1 h-px bg-white/5" />
                                     </div>
                                 )}
+                                {/* Component grid within this group */}
+                                <div className={`grid ${getGridColsClass()} ${compactMode ? 'gap-2' : 'gap-3'}`}>
+                                    {group.components.map((component) => {
+                                        const isDraggedOver = dragOverId === component.id;
+                                        const isBeingDragged = draggedId === component.id;
+                                        const isHovered = hoveredId === component.id;
 
-                                {/* Card Content */}
-                                <AnimatePresence>
-                                    {!isCollapsed && (
-                                        <motion.div
-                                            initial={{ height: 0, opacity: 0 }}
-                                            animate={{ height: "auto", opacity: 1 }}
-                                            exit={{ height: 0, opacity: 0 }}
-                                            transition={{ duration: 0.2 }}
-                                            className="overflow-hidden"
-                                        >
-                                            <div className="px-3 pb-3 border-t border-white/5 pt-2">
+                                        return (
+                                            <motion.div
+                                                key={component.id}
+                                                data-component-id={component.id}
+                                                layout
+                                                initial={initialIds.has(component.id) ? false : { opacity: 0, y: 20, scale: 0.95 }}
+                                                animate={{
+                                                    opacity: isBeingDragged ? 0.4 : 1,
+                                                    y: 0,
+                                                    scale: isDraggedOver ? 1.02 : 1,
+                                                }}
+                                                exit={{ opacity: 0, y: -10, scale: 0.95 }}
+                                                transition={{ duration: 0.2 }}
+                                                draggable={!isCombining}
+                                                onDragStart={(e) => handleDragStart(e as unknown as React.DragEvent, component.id)}
+                                                onDragEnd={handleDragEnd}
+                                                onDragEnter={(e) => handleDragEnter(e as unknown as React.DragEvent, component.id)}
+                                                onDragOver={(e) => handleDragOver(e as unknown as React.DragEvent, component.id)}
+                                                onDragLeave={(e) => handleDragLeave(e as unknown as React.DragEvent, component.id)}
+                                                onDrop={(e) => handleDrop(e as unknown as React.DragEvent, component.id)}
+                                                onMouseEnter={() => setHoveredId(component.id)}
+                                                onMouseLeave={() => setHoveredId(null)}
+                                                onTouchStart={(e) => handleTouchStart(e, component.id)}
+                                                onTouchMove={handleTouchMove}
+                                                onTouchEnd={handleTouchEnd}
+                                                onTouchCancel={handleTouchCancel}
+                                                className={`
+                                                    ${getComponentSpan(component.component_type)}
+                                                    rounded-xl relative transition-all duration-200
+                                                    ${isDraggedOver
+                                                        ? 'ring-2 ring-purple-400/60 bg-purple-500/5'
+                                                        : compactMode
+                                                            ? 'bg-white/[0.01]'
+                                                            : 'bg-white/[0.02]'
+                                                    }
+                                                    ${isBeingDragged ? 'cursor-grabbing' : 'cursor-grab'}
+                                                    ${compactMode ? 'p-2' : 'p-3 sm:p-4'}
+                                                `}
+                                            >
+                                                {/* 019-cohesive-ui: hover-activated floating toolbar */}
+                                                <AnimatePresence>
+                                                    {isHovered && !isCombining && (
+                                                        <motion.div
+                                                            initial={{ opacity: 0 }}
+                                                            animate={{ opacity: 1 }}
+                                                            exit={{ opacity: 0 }}
+                                                            transition={{ duration: 0.15 }}
+                                                            className="absolute -top-2 -right-2 z-10 flex items-center gap-0.5"
+                                                        >
+                                                            <button
+                                                                onClick={(e) => { e.stopPropagation(); setFullscreenId(component.id); }}
+                                                                className="p-1.5 rounded-lg bg-astral-surface border border-white/10 text-astral-muted hover:text-white hover:bg-white/10 shadow-lg backdrop-blur-sm transition-colors"
+                                                                title="View full screen"
+                                                            >
+                                                                <Maximize2 size={13} />
+                                                            </button>
+                                                            <button
+                                                                onClick={(e) => { e.stopPropagation(); onDeleteComponent(component.id); }}
+                                                                className="p-1.5 rounded-lg bg-astral-surface border border-white/10 text-astral-muted hover:text-red-400 hover:bg-red-500/10 shadow-lg backdrop-blur-sm transition-colors"
+                                                                title="Delete component"
+                                                            >
+                                                                <Trash2 size={13} />
+                                                            </button>
+                                                        </motion.div>
+                                                    )}
+                                                </AnimatePresence>
+
+                                                {/* Drop zone indicator */}
+                                                {isDraggedOver && (
+                                                    <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
+                                                        <div className="border-2 border-dashed border-purple-400/40 rounded-lg px-3 py-1.5 bg-purple-500/10 backdrop-blur-sm">
+                                                            <span className="text-xs text-purple-300/80">Drop to combine</span>
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {/* Component Content — borderless, title-only header */}
+                                                {/* 019-cohesive-ui: subtle title bar, no collapse/delete/drag buttons */}
+                                                <div className="mb-2">
+                                                    <h4 className="text-xs font-medium text-astral-muted/70 truncate">
+                                                        {component.title}
+                                                    </h4>
+                                                </div>
                                                 <div style={{ maxHeight: getContentMaxHeight() }} className="overflow-y-auto rounded-lg">
                                                     <DynamicRenderer
                                                         components={
@@ -663,13 +707,13 @@ export default function SDUICanvas({
                                                         onTablePaginate={onTablePaginate}
                                                     />
                                                 </div>
-                                            </div>
-                                        </motion.div>
-                                    )}
-                                </AnimatePresence>
-                            </motion.div>
-                        );
-                    })
+                                            </motion.div>
+                                        );
+                                    })}
+                                </div>
+                            </React.Fragment>
+                        ))}
+                    </div>
                 )}
             </div>
 
@@ -677,7 +721,7 @@ export default function SDUICanvas({
             {canvasComponents.length >= 2 && !isCombining && (
                 <div className="px-5 py-2 border-t border-white/5 text-center flex-shrink-0">
                     <p className="text-[10px] text-astral-muted/50">
-                        Drag onto another to combine · use grip handle on touch devices
+                        Drag to combine · grab anywhere on touch devices
                     </p>
                 </div>
             )}

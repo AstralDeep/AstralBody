@@ -233,6 +233,9 @@ def _sanitize_text_response(content: str) -> str:
 
 class Orchestrator:
     def __init__(self):
+        # 020-async-queries: background task manager for async chat processing
+        from orchestrator.async_tasks import BackgroundTaskManager
+        self.async_task_manager = BackgroundTaskManager()
         self.agents: Dict[str, websockets.WebSocketServerProtocol] = {}
         self.ui_clients: List[websockets.WebSocketServerProtocol] = []
         self.ui_sessions: Dict[websockets.WebSocketServerProtocol, Dict] = {}
@@ -1103,14 +1106,25 @@ class Orchestrator:
                             }))
 
                     display_message = msg.payload.get("display_message")
-                    self.cancelled_sessions[id(websocket)] = False
-                    # Use serialized wrapper so concurrent chat messages
-                    # for the same session are processed one at a time.
-                    await self._serialized_chat(
-                        websocket, user_message, chat_id, display_message,
-                        user_id=user_id, draft_agent_id=draft_agent_id,
-                        selected_tools=selected_tools,
-                    )
+                    async_mode = msg.payload.get("async_mode", False)
+
+                    # 020-async-queries: if async_mode is True, dispatch as
+                    # a background task instead of blocking the WS.
+                    if async_mode:
+                        await self._dispatch_async_chat(
+                            websocket, user_message, chat_id, display_message,
+                            user_id=user_id, draft_agent_id=draft_agent_id,
+                            selected_tools=selected_tools,
+                        )
+                    else:
+                        self.cancelled_sessions[id(websocket)] = False
+                        # Use serialized wrapper so concurrent chat messages
+                        # for the same session are processed one at a time.
+                        await self._serialized_chat(
+                            websocket, user_message, chat_id, display_message,
+                            user_id=user_id, draft_agent_id=draft_agent_id,
+                            selected_tools=selected_tools,
+                        )
 
                 elif msg.action == "cancel_task":
                     self.cancelled_sessions[id(websocket)] = True
@@ -1129,6 +1143,34 @@ class Orchestrator:
                         "status": "done",
                         "message": "Cancelled"
                     }))
+
+                elif msg.action == "watch_task":
+                    # 020-async-queries: subscribe to task completion notifications
+                    task_id = msg.payload.get("task_id")
+                    if task_id:
+                        bg_task = await self.async_task_manager.get(task_id)
+                        if bg_task:
+                            bg_task.watchers.append(websocket)
+                            # If already completed, notify immediately
+                            if bg_task.status.value in ("completed", "failed", "cancelled"):
+                                await self._safe_send(websocket, json.dumps({
+                                    "type": "task_completed",
+                                    "payload": {
+                                        "task_id": bg_task.task_id,
+                                        "chat_id": bg_task.chat_id,
+                                        "status": bg_task.status.value,
+                                    },
+                                }))
+                        else:
+                            await self._safe_send(websocket, json.dumps({
+                                "type": "error",
+                                "payload": {"message": f"Task {task_id} not found"},
+                            }))
+                    else:
+                        await self._safe_send(websocket, json.dumps({
+                            "type": "error",
+                            "payload": {"message": "task_id is required for watch_task"},
+                        }))
 
                 elif msg.action == "component_feedback":
                     # Feature 004 — submit feedback for a rendered component.
@@ -2058,6 +2100,58 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 # (>30 s old, no active task) into 'interrupted' on the
                 # next chat load.
                 self._chat_recorders.pop(ws_id, None)
+
+    async def _dispatch_async_chat(
+        self, websocket, message: str, chat_id: str, display_message: str = None,
+        *, user_id=None, draft_agent_id=None, selected_tools=None,
+    ):
+        """020-async-queries: Dispatch a chat message as a background task.
+
+        Creates a BackgroundTask and returns immediately with a task_started
+        message. The task runs handle_chat_message asynchronously using a
+        VirtualWebSocket to capture outputs.
+        """
+        logger.info("Dispatching async chat for chat_id=%s user_id=%s", chat_id, user_id)
+
+        async def _run_in_background(vws, msg, cid, display, uid, draft, tools):
+            """Execute handle_chat_message with the virtual WS."""
+            await self.handle_chat_message(
+                vws, msg, cid, display,
+                user_id=uid, draft_agent_id=draft, selected_tools=tools,
+            )
+
+        bg_task = await self.async_task_manager.submit(
+            chat_id=chat_id,
+            user_id=user_id or self._get_user_id(websocket),
+            coro_factory=_run_in_background,
+            msg=message,
+            cid=chat_id,
+            display=display_message,
+            uid=user_id or self._get_user_id(websocket),
+            draft=draft_agent_id,
+            tools=selected_tools,
+        )
+
+        # Register the submitting websocket as a watcher
+        bg_task.watchers.append(websocket)
+
+        await self._safe_send(websocket, json.dumps({
+            "type": "task_started",
+            "payload": {
+                "task_id": bg_task.task_id,
+                "chat_id": chat_id,
+                "status": "queued",
+            },
+        }))
+
+        # Send loading state so UI knows the query was accepted
+        await self._safe_send(websocket, json.dumps({
+            "type": "chat_status",
+            "status": "processing_async",
+            "message": f"Query running in background (task {bg_task.task_id})",
+        }))
+
+        return None
 
     async def handle_chat_message(self, websocket, message: str, chat_id: str, display_message: str = None, user_id: str = None, draft_agent_id: str = None, selected_tools=None):
         """Process a chat message: LLM determines which tools to call (Multi-Turn Re-Act Loop).
@@ -5202,7 +5296,7 @@ COMPONENT UPDATE RULES:
             await self.handle_ui_connection_fastapi(websocket)
 
         # Mount REST API routers
-        from orchestrator.api import chat_router, component_router, agent_router, dashboard_router, draft_router, voice_router, task_router, user_router
+        from orchestrator.api import chat_router, component_router, agent_router, dashboard_router, draft_router, voice_router, task_router, async_task_router, user_router
         from orchestrator.auth import auth_router
         from orchestrator.attachments.router import attachments_router
         from audit.api import audit_router
@@ -5220,6 +5314,7 @@ COMPONENT UPDATE RULES:
         app.include_router(attachments_router)
         app.include_router(voice_router)
         app.include_router(task_router)
+        app.include_router(async_task_router)
         app.include_router(audit_router)
         # Feature 004 — component feedback & tool-improvement loop
         app.include_router(feedback_user_router)

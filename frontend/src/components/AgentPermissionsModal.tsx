@@ -494,7 +494,7 @@ export default function AgentPermissionsModal({
                         {/* ── Agent Description ───────────────────────── */}
                         {agentDescription && (
                             <div className="px-6 pt-4 pb-0">
-                                <p className="text-xs text-astral-muted/80 leading-relaxed">
+                                <p className="text-xs text-astral-muted/80 leading-relaxed max-h-20 md:max-h-28 overflow-y-auto pr-1">
                                     {agentDescription}
                                 </p>
                             </div>
@@ -929,7 +929,7 @@ export default function AgentPermissionsModal({
                                 ) : (
                                     <ul
                                         data-testid="per-tool-permission-list"
-                                        className="space-y-1.5 max-h-[420px] overflow-y-auto pr-1"
+                                        className="space-y-1.5 pr-1"
                                     >
                                         {/* Stable order: by required kind, then alphabetically. */}
                                         {Object.keys(permissions)
@@ -1037,7 +1037,7 @@ export default function AgentPermissionsModal({
                                                                     // Scope is already on — flipping the per-tool override.
                                                                     toggleToolOverride(tool);
                                                                 }}
-                                                                className={`relative w-9 h-5 rounded-full flex-shrink-0 transition-colors duration-200 mt-0.5 ${
+                                                                className={`relative w-9 min-w-9 h-5 min-h-5 rounded-full flex-shrink-0 transition-colors duration-200 mt-0.5 ${
                                                                     enabled ? scopeDef.bgClass : "bg-white/10 hover:bg-white/15"
                                                                 }`}
                                                             >

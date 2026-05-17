@@ -12,7 +12,7 @@ COPY .env ./.env
 
 # Copy frontend source
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci --no-audit --no-fund
+RUN npm ci --no-audit --no-fund && npm install -g npm@latest
 
 COPY frontend/ ./
 # Sanitize all .env files to remove Windows line endings (\r)
@@ -21,8 +21,12 @@ RUN find /app -name ".env" -exec sed -i 's/\r$//' {} +
 # Set memory limit for Node to prevent swap thrashing during Vite build
 ENV NODE_OPTIONS="--max-old-space-size=4096"
 
-# Source .env before build to ensure Vite sees the variables
-RUN set -a && . /app/.env && set +a && npm run build
+# Strip Windows line endings, then extract only VITE_* vars.
+# awk wraps each value in single quotes to guard against shell metacharacters.
+RUN find /app -name ".env" -exec sed -i 's/\r$//' {} + && \
+    awk -F= '/^VITE_/ {printf "export %s='\''%s'\''\n", $1, substr($0, index($0,$2))}' /app/.env > /tmp/vite-env.sh && \
+    . /tmp/vite-env.sh && \
+    npm run build
 
 # ==========================================
 # Stage 2: Final Image (Backend + Nginx)

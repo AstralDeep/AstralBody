@@ -389,6 +389,16 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
                     status: (data.status as "idle" | "thinking" | "executing" | "done") || "idle",
                     message: (data.message as string) || ""
                 });
+                // Drain message queue when processing completes
+                if ((data.status === "idle" || data.status === "done") && messageQueueRef.current.length > 0) {
+                    const next = messageQueueRef.current.shift()!;
+                    // Slight delay so UI can render the completion state
+                    setTimeout(() => {
+                        sendMessage(next.message, next.displayMessage, next.explicitChatId);
+                    }, 50);
+                } else {
+                    isProcessingRef.current = false;
+                }
                 break;
 
             case "user_message_acked": {
@@ -1090,6 +1100,10 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         return () => window.removeEventListener("llm-config-changed", onChange);
     }, []);
 
+    // Message queue — prevents overlapping sends
+    const messageQueueRef = useRef<Array<{ message: string; displayMessage?: string; explicitChatId?: string }>>([]);
+    const isProcessingRef = useRef(false);
+
     const sendMessage = useCallback((
         message: string,
         displayMessage?: string,
@@ -1106,6 +1120,14 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
 
         const targetChatId = explicitChatId || activeChatId;
+
+        // Queue if a message is already being processed
+        if (isProcessingRef.current) {
+            messageQueueRef.current.push({ message, displayMessage, explicitChatId });
+            return;
+        }
+
+        isProcessingRef.current = true;
 
         setMessages(prev => [...prev, { role: "user", content: displayMessage || message }]);
         setChatStatus({ status: "thinking", message: "Processing..." });
@@ -1138,6 +1160,9 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
             payload: {}
         }));
         setChatStatus({ status: "idle", message: "" });
+        isProcessingRef.current = false;
+        // Discard queued messages on cancel
+        messageQueueRef.current = [];
     }, []);
 
     const loadChat = useCallback((chatId: string) => {
@@ -1361,6 +1386,20 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
             action: "condense_components",
             payload: { component_ids: componentIds }
         }));
+    }, []);
+
+    const cancelCombine = useCallback(() => {
+        if (condenseTimeoutRef.current) {
+            clearTimeout(condenseTimeoutRef.current);
+        }
+        wsRef.current?.send(JSON.stringify({
+            type: "ui_event",
+            action: "cancel_combine"
+        }));
+        setIsCombining(false);
+        setCombineError("Cancelled");
+        setTimeout(() => setCombineError(null), 2000);
+        condenseTimeoutRef.current = null;
     }, []);
 
     const getAgentPermissions = useCallback((agentId: string) => {
@@ -1669,6 +1708,7 @@ export function useWebSocket(url: string = `ws://localhost:${import.meta.env.ORC
         loadSavedComponents,
         combineComponents,
         condenseComponents,
+        cancelCombine,
         isCombining,
         combineError,
         agentPermissions,

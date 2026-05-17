@@ -440,7 +440,7 @@ export default function DashboardLayout({
                             animate={{ opacity: 1, scale: 1 }}
                             exit={{ opacity: 0, scale: 0.95 }}
                             transition={{ duration: 0.15 }}
-                            className="bg-astral-surface border border-white/10 rounded-xl shadow-2xl max-w-2xl w-full mx-4 max-h-[80vh] flex flex-col"
+                            className="bg-astral-surface border border-white/10 rounded-xl shadow-2xl max-w-4xl w-full mx-4 max-h-[85vh] flex flex-col"
                             role="dialog"
                             aria-modal="true"
                             aria-label="Connected agents"
@@ -696,14 +696,32 @@ export default function DashboardLayout({
                                                             : <Activity size={16} className="text-astral-primary" />}
                                                     </div>
                                                     <div className="flex-1 min-w-0">
-                                                        <div className="flex items-center gap-2">
-                                                            <p className="text-sm font-medium text-white truncate">{agent.name}</p>
-                                                            <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${statusColor} ${hasMissingCreds ? "animate-pulse" : ""}`} title={statusLabel} />
-                                                            {/* Drafts: lifecycle badge (FR-002 — pending / testing / live / etc.).
-                                                                Live agents: per-user on/off toggle in the same slot. The
-                                                                pre-013 "ALL TOOLS ENABLED" / "SECURITY FLAGS" pill is gone
-                                                                — disabling does NOT change scopes / permissions, it just
-                                                                mutes the agent for this user until they re-enable it. */}
+                                                        {/* Row 1: name + status dot + action icons */}
+                                                        <div className="flex items-start gap-2">
+                                                            <p className="text-sm font-medium text-white break-words flex-1">{agent.name}</p>
+                                                            <div className="flex items-center gap-1.5 flex-shrink-0 mt-0.5">
+                                                                <span className={`w-1.5 h-1.5 rounded-full ${statusColor} ${hasMissingCreds ? "animate-pulse" : ""}`} title={statusLabel} />
+                                                                {hasMissingCreds && (
+                                                                    <KeyRound size={10} className="text-amber-400 animate-pulse" />
+                                                                )}
+                                                                {!isDraft && (
+                                                                    <>
+                                                                        <span title={agent.is_public ? "Public" : "Private"}>
+                                                                            {agent.is_public ? (
+                                                                                <Globe size={10} className="text-green-400/60" />
+                                                                            ) : (
+                                                                                <Lock size={10} className="text-astral-muted/40" />
+                                                                            )}
+                                                                        </span>
+                                                                    </>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                        {agent.description && (
+                                                            <p className="text-[11px] text-astral-muted mt-0.5 line-clamp-2">{agent.description}</p>
+                                                        )}
+                                                        {/* Row 2: toggle + owner info */}
+                                                        <div className="flex items-center gap-2 mt-2">
                                                             {isDraft ? (
                                                                 <span className="text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-white/5 text-astral-muted/80">
                                                                     {statusLabel}
@@ -725,7 +743,7 @@ export default function DashboardLayout({
                                                                             title={disabled
                                                                                 ? "Disabled for you — click to re-enable. Scopes and permissions are preserved."
                                                                                 : "Enabled — click to disable for you only. Scopes and permissions are preserved."}
-                                                                            className={`flex items-center gap-1.5 text-[10px] font-medium px-1.5 py-0.5 rounded-md transition-colors flex-shrink-0 ${
+                                                                            className={`flex items-center gap-1.5 text-[10px] font-medium px-1.5 py-0.5 rounded-md transition-colors ${
                                                                                 disabled
                                                                                     ? "bg-white/5 text-astral-muted hover:bg-white/10"
                                                                                     : "bg-astral-primary/15 text-astral-primary hover:bg-astral-primary/25"
@@ -747,39 +765,24 @@ export default function DashboardLayout({
                                                                     );
                                                                 })()
                                                             )}
-                                                            {hasMissingCreds && (
-                                                                <KeyRound size={10} className="text-amber-400 flex-shrink-0 animate-pulse" />
-                                                            )}
-                                                            {!isDraft && (
-                                                                <span title={agent.is_public ? "Public" : "Private"}>
-                                                                    {agent.is_public ? (
-                                                                        <Globe size={10} className="text-green-400/60 flex-shrink-0" />
-                                                                    ) : (
-                                                                        <Lock size={10} className="text-astral-muted/40 flex-shrink-0" />
+                                                            {(isDraft || (!isOwner && agent.owner_email)) && (
+                                                                <>
+                                                                    {isDraft && (
+                                                                        <span className="text-[10px] text-astral-muted/70 flex items-center gap-1">
+                                                                            <FileCode size={9} />
+                                                                            Draft — open to continue
+                                                                        </span>
                                                                     )}
-                                                                </span>
+                                                                    {!isOwner && agent.owner_email && (
+                                                                        <span className="text-[10px] text-astral-muted/50 truncate">
+                                                                            by {agent.owner_email}
+                                                                        </span>
+                                                                    )}
+                                                                </>
                                                             )}
                                                         </div>
-                                                        {agent.description && (
-                                                            <p className="text-[11px] text-astral-muted mt-0.5 line-clamp-2">{agent.description}</p>
-                                                        )}
-                                                        {(isDraft || (!isOwner && agent.owner_email)) && (
-                                                            <div className="flex items-center gap-2 mt-1.5">
-                                                                {isDraft && (
-                                                                    <span className="text-[10px] text-astral-muted/70 flex items-center gap-1">
-                                                                        <FileCode size={9} />
-                                                                        Draft — open to continue
-                                                                    </span>
-                                                                )}
-                                                                {!isOwner && agent.owner_email && (
-                                                                    <span className="text-[10px] text-astral-muted/50 truncate">
-                                                                        by {agent.owner_email}
-                                                                    </span>
-                                                                )}
-                                                            </div>
-                                                        )}
                                                     </div>
-                                                    <ChevronRight size={14} className="text-astral-muted/30 group-hover:text-astral-primary transition-colors mt-1 flex-shrink-0" />
+                                                    <ChevronRight size={14} className="text-astral-muted/30 group-hover:text-astral-primary transition-colors h-full flex-shrink-0" />
                                                 </button>
                                             );
                                         })}
@@ -846,7 +849,10 @@ export default function DashboardLayout({
                         <Plus size={18} className="text-astral-primary" />
                     </button>
                     <button
-                        onClick={() => setAgentsModalOpen(true)}
+                        onClick={() => {
+                            if (window.innerWidth < 768) setSidebarOpen(false);
+                            setAgentsModalOpen(true);
+                        }}
                         className="p-2.5 rounded-lg hover:bg-white/10 transition-colors"
                         title={`Agents — ${agents.length} connected`}
                     >
@@ -865,6 +871,9 @@ export default function DashboardLayout({
                         onOpenTutorialAdmin={onOpenTutorialAdmin}
                         onReplayTutorial={onReplayTutorial}
                         onOpenUserGuide={onOpenUserGuide}
+                        onOpenChange={(open) => {
+                            if (open && window.innerWidth < 768) setSidebarOpen(false);
+                        }}
                     />
                     <div className="flex-1" />
                     <div className="flex flex-col items-center gap-1 mb-1">
@@ -924,7 +933,10 @@ export default function DashboardLayout({
                     <div>
                         <Tooltip text={tooltipCatalog["sidebar.agents"]}>
                             <button
-                                onClick={() => setAgentsModalOpen(true)}
+                                onClick={() => {
+                                    if (window.innerWidth < 768) setSidebarOpen(false);
+                                    setAgentsModalOpen(true);
+                                }}
                                 data-tutorial-target="sidebar.agents"
                                 className="w-full flex items-center gap-2 px-2 py-2 rounded-lg
                                            hover:bg-white/5 transition-colors group text-left"
@@ -958,6 +970,9 @@ export default function DashboardLayout({
                                 onOpenTutorialAdmin={onOpenTutorialAdmin}
                                 onReplayTutorial={onReplayTutorial}
                                 onOpenUserGuide={onOpenUserGuide}
+                                onOpenChange={(open) => {
+                                    if (open && window.innerWidth < 768) setSidebarOpen(false);
+                                }}
                             />
                         </Tooltip>
                     </div>
@@ -1067,7 +1082,7 @@ export default function DashboardLayout({
             </aside>
 
             {/* Main Content */}
-            <main className="flex-1 flex flex-col min-w-0">
+            <main className="flex-1 flex flex-col min-w-0 overflow-y-auto">
                 {/* Header */}
                 <header className="h-14 relative flex items-center justify-between px-3 sm:px-6 border-b border-white/5 bg-astral-bg/80 backdrop-blur-md flex-shrink-0 safe-top">
                     <div className="flex items-center gap-2 sm:gap-3">
@@ -1091,7 +1106,7 @@ export default function DashboardLayout({
                 </header>
 
                 {/* Page Content */}
-                <div className="flex-1 overflow-hidden">{children}</div>
+                <div className="flex-1">{children}</div>
             </main>
 
             {/* Create Agent Modal */}

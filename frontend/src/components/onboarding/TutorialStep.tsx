@@ -2,8 +2,10 @@
  * TutorialStep — renders the title/body/controls of a single tutorial step.
  *
  * Pure presentational; the parent overlay handles positioning, focus
- * trapping, and ARIA wiring. Buttons are big, keyboard-friendly, and use
- * the dashboard's existing color tokens.
+ * trapping, and ARIA wiring.
+ *
+ * US-17: Added thin progress bar at the bottom, and "Not now" button
+ * on the welcome (first) step for soft dismissal.
  */
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
 
@@ -17,6 +19,7 @@ export interface TutorialStepProps {
     onNext: () => void;
     onBack: () => void;
     onSkip: () => void;
+    onDismissNotNow?: () => void;
     titleId: string;
     bodyId: string;
 }
@@ -29,10 +32,14 @@ export function TutorialStep({
     onNext,
     onBack,
     onSkip,
+    onDismissNotNow,
     titleId,
     bodyId,
 }: TutorialStepProps) {
     const isFinal = stepNumber === totalSteps;
+    const isFirst = stepNumber === 1;
+    const progressPct = totalSteps > 0 ? (stepNumber / totalSteps) * 100 : 0;
+
     return (
         <div
             className="bg-astral-bg border border-white/10 rounded-xl shadow-2xl
@@ -63,14 +70,36 @@ export function TutorialStep({
             >
                 {step.body}
             </p>
+            {/* Progress bar */}
+            <div className="mb-4 h-1 bg-white/10 rounded-full overflow-hidden">
+                <div
+                    className="h-full bg-astral-primary rounded-full transition-all duration-300 ease-out"
+                    style={{ width: `${progressPct}%` }}
+                />
+            </div>
             <div className="flex items-center justify-between gap-3">
-                <button
-                    type="button"
-                    onClick={onSkip}
-                    className="text-xs text-astral-muted hover:text-white transition-colors"
-                >
-                    Skip tour
-                </button>
+                <div className="flex items-center gap-2">
+                    {isFirst && onDismissNotNow && (
+                        <button
+                            type="button"
+                            onClick={onDismissNotNow}
+                            className="text-xs text-astral-muted hover:text-white
+                                       transition-colors px-2 py-1 rounded-md
+                                       hover:bg-white/5"
+                        >
+                            Not now
+                        </button>
+                    )}
+                    {!isFirst && (
+                        <button
+                            type="button"
+                            onClick={onSkip}
+                            className="text-xs text-astral-muted hover:text-white transition-colors"
+                        >
+                            Skip tour
+                        </button>
+                    )}
+                </div>
                 <div className="flex items-center gap-2">
                     <button
                         type="button"
@@ -91,7 +120,7 @@ export function TutorialStep({
                                    bg-astral-primary hover:bg-astral-primary/90
                                    text-white font-medium transition-colors"
                     >
-                        {isFinal ? "Done" : "Next"}
+                        {isFirst ? "Start tour" : isFinal ? "Done" : "Next"}
                         {!isFinal && <ChevronRight size={14} />}
                     </button>
                 </div>
