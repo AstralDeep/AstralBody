@@ -494,7 +494,7 @@ export default function AgentPermissionsModal({
                         {/* ── Agent Description ───────────────────────── */}
                         {agentDescription && (
                             <div className="px-6 pt-4 pb-0">
-                                <p className="text-xs text-astral-muted/80 leading-relaxed max-h-16 overflow-y-auto">
+                                <p className="text-xs text-astral-muted/80 leading-relaxed">
                                     {agentDescription}
                                 </p>
                             </div>
@@ -1015,7 +1015,7 @@ export default function AgentPermissionsModal({
                                                         {/* Per-tool toggle (FR-010, FR-012). System-blocked tools are
                                                             never user-toggleable — the proactive review wins. */}
                                                         {isBlocked ? (
-                                                            <ShieldAlert size={14} className="text-red-400 flex-shrink-0" />
+                                                            <ShieldAlert size={14} className="text-red-400 mt-0.5 flex-shrink-0" />
                                                         ) : (
                                                             <button
                                                                 type="button"
@@ -1025,18 +1025,27 @@ export default function AgentPermissionsModal({
                                                                 data-testid={`per-tool-toggle-${tool}`}
                                                                 onClick={() => {
                                                                     if (!scopeOn && !enabled) {
+                                                                        // First time enabling something of this kind:
+                                                                        // surface the consent warning (FR-011 — pre-toggle
+                                                                        // info already shown via the (i) icon, this is the
+                                                                        // explicit confirm step). Tag the triggering tool
+                                                                        // so confirmScopeToggle only enables this one and
+                                                                        // leaves siblings explicitly disabled.
                                                                         setPendingScopeToggle({ ...scopeDef, triggeringTool: tool });
                                                                         return;
                                                                     }
+                                                                    // Scope is already on — flipping the per-tool override.
                                                                     toggleToolOverride(tool);
                                                                 }}
-                                                                className={`flex-shrink-0 px-2.5 py-1 rounded-md text-[10px] font-semibold transition-all duration-200 ${ 
-                                                                    enabled
-                                                                        ? `${scopeDef.bgClass}/20 ${scopeDef.colorClass} ring-1 ring-inset ${scopeDef.colorClass.replace('text-','ring-')}/30`
-                                                                        : "bg-white/5 text-astral-muted hover:bg-white/10 hover:text-white"
+                                                                className={`relative w-9 h-5 rounded-full flex-shrink-0 transition-colors duration-200 mt-0.5 ${
+                                                                    enabled ? scopeDef.bgClass : "bg-white/10 hover:bg-white/15"
                                                                 }`}
                                                             >
-                                                                {enabled ? "ON" : "OFF"}
+                                                                <motion.div
+                                                                    className="absolute top-0.5 w-4 h-4 rounded-full shadow-sm bg-white"
+                                                                    animate={{ left: enabled ? "18px" : "2px" }}
+                                                                    transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                                                                />
                                                             </button>
                                                         )}
                                                     </li>
