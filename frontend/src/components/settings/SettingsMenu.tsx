@@ -81,6 +81,12 @@ export interface SettingsMenuProps {
     variant?: "expanded" | "collapsed";
     /** Optional className appended to the root wrapper. */
     className?: string;
+    /**
+     * Fires whenever the menu's open state changes. Used by the
+     * dashboard to auto-collapse the mobile sidebar so the modal
+     * isn't visually hidden behind it.
+     */
+    onOpenChange?: (open: boolean) => void;
 }
 
 interface MenuItem {
@@ -124,6 +130,7 @@ export function SettingsMenu(props: SettingsMenuProps): ReactElement {
         flaggedToolsCount,
         variant = "expanded",
         className,
+        onOpenChange,
     } = props;
 
     const [open, setOpen] = useState<boolean>(false);
@@ -260,6 +267,10 @@ export function SettingsMenu(props: SettingsMenuProps): ReactElement {
         const el = itemRefs.current[focusedIndex];
         if (el) el.focus();
     }, [open, focusedIndex, flatItems.length]);
+
+    useEffect(() => {
+        onOpenChange?.(open);
+    }, [open, onOpenChange]);
 
     const closeAndRestoreFocus = useCallback(() => {
         setOpen(false);
