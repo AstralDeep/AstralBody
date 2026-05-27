@@ -598,6 +598,129 @@ class Database:
         if not self._column_exists(cursor, 'messages', 'step_count'):
             cursor.execute("ALTER TABLE messages ADD COLUMN step_count INTEGER NOT NULL DEFAULT 0")
 
+        # ------------------------------------------------------------------
+        # Feature 025 — agentic soul integration
+        # Per-user personalization (profile + personality/"soul"), durable
+        # non-PHI memory, scheduled jobs ("cron"), background consolidation
+        # ("dreaming"), and the encrypted offline-grant store that authorizes
+        # unattended job runs. All rows are strictly user-scoped.
+        # See specs/025-agentic-soul-integration/data-model.md.
+        # ------------------------------------------------------------------
+
+        # One row per user: profession, goals, personality, dreaming toggle.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_personalization (
+                user_id TEXT PRIMARY KEY,
+                profession TEXT,
+                goals JSONB NOT NULL DEFAULT '[]'::jsonb,
+                personality JSONB NOT NULL DEFAULT '{}'::jsonb,
+                dreaming_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at BIGINT,
+                updated_at BIGINT
+            )
+        ''')
+
+        # Durable, non-PHI personalization facts (structured-only categories).
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS memory_item (
+                id UUID PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                category TEXT NOT NULL CHECK (category IN ('profession','goal','preference','workflow_tag','context')),
+                value TEXT NOT NULL,
+                source TEXT NOT NULL CHECK (source IN ('explicit','promoted')),
+                salience REAL NOT NULL DEFAULT 0,
+                created_at BIGINT,
+                updated_at BIGINT
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_memory_item_user_cat ON memory_item(user_id, category)')
+
+        # Transient promotion candidates; consumed/aged by the dreaming sweep.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS short_term_signal (
+                id UUID PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                category TEXT NOT NULL CHECK (category IN ('profession','goal','preference','workflow_tag','context')),
+                value TEXT NOT NULL,
+                recall_count INTEGER NOT NULL DEFAULT 0,
+                last_seen_at BIGINT,
+                created_at BIGINT
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_short_term_signal_user_seen ON short_term_signal(user_id, last_seen_at)')
+
+        # Encrypted offline-grant store (authority for unattended job runs).
+        # refresh_token_enc is encrypted at rest and never returned by any API.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_offline_grant (
+                id UUID PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                agent_id TEXT,
+                refresh_token_enc BYTEA NOT NULL,
+                issued_at BIGINT NOT NULL,
+                expires_at BIGINT NOT NULL,
+                revoked_at BIGINT,
+                created_at BIGINT,
+                updated_at BIGINT
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_offline_grant_active ON user_offline_grant(user_id, agent_id) WHERE revoked_at IS NULL')
+
+        # User-defined recurring/future tasks.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS scheduled_job (
+                id UUID PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                agent_id TEXT,
+                name TEXT NOT NULL,
+                instruction TEXT NOT NULL,
+                schedule_kind TEXT NOT NULL CHECK (schedule_kind IN ('one_shot','interval','cron')),
+                schedule_expr TEXT NOT NULL,
+                timezone TEXT NOT NULL DEFAULT 'UTC',
+                consented_scopes JSONB NOT NULL DEFAULT '[]'::jsonb,
+                delivery TEXT NOT NULL DEFAULT 'in_app' CHECK (delivery = 'in_app'),
+                status TEXT NOT NULL CHECK (status IN ('active','paused','expired','completed','disabled')),
+                target_chat_id TEXT,
+                next_run_at BIGINT,
+                last_run_at BIGINT,
+                offline_grant_id UUID REFERENCES user_offline_grant(id) ON DELETE SET NULL,
+                created_at BIGINT,
+                updated_at BIGINT
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_scheduled_job_due ON scheduled_job(status, next_run_at)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_scheduled_job_user ON scheduled_job(user_id, status)')
+
+        # One execution record per job run.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS job_run (
+                id UUID PRIMARY KEY,
+                job_id UUID NOT NULL REFERENCES scheduled_job(id) ON DELETE CASCADE,
+                user_id TEXT NOT NULL,
+                started_at BIGINT NOT NULL,
+                ended_at BIGINT,
+                outcome TEXT NOT NULL CHECK (outcome IN ('running','success','failure','interrupted','skipped_auth')),
+                auth_ref TEXT,
+                correlation_id UUID NOT NULL,
+                summary TEXT
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_job_run_job_time ON job_run(job_id, started_at DESC)')
+
+        # A "dream": one consolidation sweep's human-readable review record.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS consolidation_sweep (
+                id UUID PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                ran_at BIGINT NOT NULL,
+                candidates_considered INTEGER NOT NULL DEFAULT 0,
+                promoted_count INTEGER NOT NULL DEFAULT 0,
+                summary TEXT NOT NULL,
+                trigger TEXT NOT NULL CHECK (trigger IN ('scheduled','manual'))
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_consolidation_sweep_user_time ON consolidation_sweep(user_id, ran_at DESC)')
+
         conn.commit()
         conn.close()
 

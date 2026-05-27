@@ -59,6 +59,8 @@ export interface SettingsMenuProps {
     isAdmin?: boolean;
     onOpenAuditLog?: () => void;
     onOpenLlmSettings?: () => void;
+    /** Open the Personalization panel (profile/soul, skills, schedule, memory) — feature 025. */
+    onOpenPersonalization?: () => void;
     onOpenFeedbackAdmin?: () => void;
     onOpenTutorialAdmin?: () => void;
     onReplayTutorial?: () => void;
@@ -123,6 +125,7 @@ export function SettingsMenu(props: SettingsMenuProps): ReactElement {
         isAdmin = false,
         onOpenAuditLog,
         onOpenLlmSettings,
+        onOpenPersonalization,
         onOpenFeedbackAdmin,
         onOpenTutorialAdmin,
         onReplayTutorial,
@@ -151,6 +154,9 @@ export function SettingsMenu(props: SettingsMenuProps): ReactElement {
         }
         if (onOpenLlmSettings) {
             account.push({ key: "sidebar.llm", label: "LLM settings", onSelect: onOpenLlmSettings });
+        }
+        if (onOpenPersonalization) {
+            account.push({ key: "sidebar.personalization", label: "Personalization", onSelect: onOpenPersonalization });
         }
 
         const help: MenuItem[] = [];
@@ -187,6 +193,7 @@ export function SettingsMenu(props: SettingsMenuProps): ReactElement {
         isAdmin,
         onOpenAuditLog,
         onOpenLlmSettings,
+        onOpenPersonalization,
         onOpenFeedbackAdmin,
         onOpenTutorialAdmin,
         onReplayTutorial,

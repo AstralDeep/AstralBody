@@ -444,3 +444,54 @@ async def list_revisions_admin(
         raise HTTPException(status_code=404, detail="not found")
     revisions = repo.list_revisions(step_id)
     return RevisionListResponse(revisions=revisions)
+
+
+# ---------------------------------------------------------------------------
+# Feature 025 — onboarding personalization panels (server-generated, US1/T019)
+# ---------------------------------------------------------------------------
+
+@onboarding_user_router.get(
+    "/api/onboarding/personalize/{step}",
+    summary="Server-generated personalization panel for an onboarding step",
+)
+async def get_personalize_panel(
+    step: str,
+    request: Request,
+    user_id: str = Depends(require_user_id),
+):
+    """Return a ParamPicker panel (``_ui_components``) for a personalization step.
+
+    Steps: ``profession`` | ``skills`` | ``personality`` (matching the seeded
+    sdui tutorial steps). The skills panel ranks the user's available agent
+    tools by relevance to their stated profession/goals (FR-003/FR-007/FR-011).
+    """
+    from personalization import panels as _panels
+    from personalization.skills_reco import recommend_skills
+
+    orch = _orchestrator(request)
+    svc = getattr(orch, "personalization_service", None)
+    profile = svc.repo.get_profile(user_id) if svc else None
+
+    if step in ("profession", "profile"):
+        return _panels.build_profession_panel(profile)
+    if step == "personality":
+        return _panels.build_personality_panel(profile)
+    if step == "skills":
+        tp = getattr(orch, "tool_permissions", None)
+        tools = []
+        if tp is not None:
+            for agent_id in list(getattr(tp, "_tool_scope_map", {}).keys()):
+                for tool_name, scope in tp.get_tool_scope_map(agent_id).items():
+                    tools.append({
+                        "agent_id": agent_id,
+                        "tool_name": tool_name,
+                        "description": tool_name.replace("_", " "),
+                        "scope": scope,
+                        "available": tp.is_scope_enabled(user_id, agent_id, scope),
+                    })
+        profession = (profile or {}).get("profession") if profile else None
+        goals = (profile or {}).get("goals") if profile else None
+        ranked = recommend_skills(profession, goals, tools)
+        return _panels.build_skills_panel(ranked)
+
+    raise HTTPException(status_code=404, detail=f"unknown personalization step: {step}")
