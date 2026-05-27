@@ -35,6 +35,7 @@ import { setUserAgentEnabled } from "../api/toolSelection";
 import { Tooltip } from "./onboarding/Tooltip";
 import { tooltipCatalog } from "./onboarding/tooltipCatalog";
 import { SettingsMenu } from "./settings/SettingsMenu";
+import PersonalizationPanel from "./personalization/PersonalizationPanel";
 import { useFlaggedToolsCount } from "./useFlaggedToolsCount";
 
 interface DashboardLayoutProps {
@@ -173,6 +174,7 @@ export default function DashboardLayout({
     }, [sidebarOpen]);
     const [chatSearch, setChatSearch] = useState("");
     const [agentsModalOpen, setAgentsModalOpen] = useState(false);
+    const [personalizationOpen, setPersonalizationOpen] = useState(false);  // feature 025
     const [agentsTab, setAgentsTab] = useState<"my" | "all" | "drafts">("my");
     const [externalAgentUrl, setExternalAgentUrl] = useState("");
     const [createAgentOpen, setCreateAgentOpen] = useState(false);
@@ -382,6 +384,13 @@ export default function DashboardLayout({
 
     return (
         <div className="h-dvh flex overflow-hidden bg-astral-bg relative">
+
+            {/* Personalization panel (feature 025) */}
+            <PersonalizationPanel
+                open={personalizationOpen}
+                accessToken={accessToken}
+                onClose={() => setPersonalizationOpen(false)}
+            />
 
             {/* Delete Confirmation Modal */}
             {chatToDelete && (
@@ -867,6 +876,7 @@ export default function DashboardLayout({
                         flaggedToolsCount={flaggedToolsCount}
                         onOpenAuditLog={onOpenAuditLog}
                         onOpenLlmSettings={onOpenLlmSettings}
+                        onOpenPersonalization={() => setPersonalizationOpen(true)}
                         onOpenFeedbackAdmin={onOpenFeedbackAdminWithRefresh}
                         onOpenTutorialAdmin={onOpenTutorialAdmin}
                         onReplayTutorial={onReplayTutorial}
@@ -966,6 +976,7 @@ export default function DashboardLayout({
                                 flaggedToolsCount={flaggedToolsCount}
                                 onOpenAuditLog={onOpenAuditLog}
                                 onOpenLlmSettings={onOpenLlmSettings}
+                                onOpenPersonalization={() => setPersonalizationOpen(true)}
                                 onOpenFeedbackAdmin={onOpenFeedbackAdminWithRefresh}
                                 onOpenTutorialAdmin={onOpenTutorialAdmin}
                                 onReplayTutorial={onReplayTutorial}
