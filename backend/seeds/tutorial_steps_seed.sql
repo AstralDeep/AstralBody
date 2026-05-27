@@ -40,6 +40,26 @@ VALUES
 
 ON CONFLICT (slug) DO NOTHING;
 
+-- Feature 025-agentic-soul-integration: personalization steps. These are
+-- server-generated (sdui) ParamPicker panels — profession/goals capture,
+-- skill enablement, and personality. target_key routes the frontend to the
+-- GET /api/onboarding/personalize/{step} panel for that step.
+INSERT INTO tutorial_step (slug, audience, display_order, target_kind, target_key, title, body)
+VALUES
+    ('personalize-profession', 'user', 22, 'sdui', 'personalize.profession',
+     'Make it yours',
+     'Tell your assistant what you do and what you''re working on. It''s personalization, not medical data, and you can change it anytime.'),
+
+    ('personalize-skills', 'user', 24, 'sdui', 'personalize.skills',
+     'Turn on the right skills',
+     'Based on your work, switch on the capabilities you want. You only ever get access you''re authorized for.'),
+
+    ('personalize-personality', 'user', 26, 'sdui', 'personalize.personality',
+     'Give it a personality',
+     'Choose how your assistant sounds. This shapes tone only — it never changes how your data is protected.')
+
+ON CONFLICT (slug) DO NOTHING;
+
 -- Admin-flow steps (audience='admin', appended after user-flow) ------------
 INSERT INTO tutorial_step (slug, audience, display_order, target_kind, target_key, title, body)
 VALUES

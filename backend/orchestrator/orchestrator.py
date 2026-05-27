@@ -418,6 +418,9 @@ class Orchestrator:
             seed_tutorial_steps(self.history.db)
         except Exception as exc:  # pragma: no cover — never block startup
             logger.warning(f"Tutorial seed loader failed (non-fatal): {exc}")
+        # Feature 025 — per-user personalization (profile, personality, memory)
+        from personalization.service import PersonalizationService
+        self.personalization_service = PersonalizationService(self.history.db)
         # Publish self as the module-level singleton so the feedback CLI
         # and the pre-pass entrypoint can find the synthesizer without
         # going through FastAPI app.state.
@@ -2514,6 +2517,22 @@ COMPONENT UPDATE RULES:
                 routing_hints = self.knowledge_index.get_routing_hints()
                 if routing_hints:
                     system_prompt += f"\n{routing_hints}\n"
+
+            # Feature 025 — append per-user personalization (memory recall, user
+            # context, enabled-skill guidance, and personality/"soul"). This is
+            # added AFTER the compliance/safety preamble and tool rules so the
+            # personality block remains subordinate to them (FR-015). Skill
+            # guidance lines are supplied from the eligible tool set computed
+            # above. Failures here must never break a chat turn.
+            try:
+                skill_lines = locals().get("personalization_skill_lines") or None
+                personalization_fragment = self.personalization_service.build_prompt_fragment(
+                    user_id, skill_lines=skill_lines
+                )
+                if personalization_fragment:
+                    system_prompt += f"\n\n{personalization_fragment}\n"
+            except Exception as exc:  # pragma: no cover — never block a chat turn
+                logger.warning(f"personalization injection failed (non-fatal): {exc}")
 
             # ------------------------------------------------------------------
             # MULTI-TURN LOOP
@@ -5304,6 +5323,14 @@ COMPONENT UPDATE RULES:
         from feedback.api import feedback_user_router, feedback_admin_router
         from onboarding.api import onboarding_user_router, onboarding_admin_router
         from llm_config.api import llm_router  # Feature 006-user-llm-config
+        # Feature 025 — agentic soul integration
+        from personalization.api import (
+            personalization_router,
+            skills_router,
+            memory_router,
+        )
+        from scheduler.api import schedule_router
+        from dreaming.api import dreaming_router
         app.include_router(chat_router)
         app.include_router(component_router)
         app.include_router(agent_router)
@@ -5324,6 +5351,12 @@ COMPONENT UPDATE RULES:
         app.include_router(onboarding_admin_router)
         # Feature 006 — user-configurable LLM subscription (Test Connection)
         app.include_router(llm_router)
+        # Feature 025 — agentic soul integration
+        app.include_router(personalization_router)
+        app.include_router(skills_router)
+        app.include_router(memory_router)
+        app.include_router(schedule_router)
+        app.include_router(dreaming_router)
 
         # Audit HTTP middleware — records every authenticated REST request
         # in the caller's own log (FR-021). Added after CORS so OPTIONS

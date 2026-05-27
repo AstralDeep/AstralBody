@@ -51,6 +51,12 @@ EVENT_CLASSES = (
     "llm_config_change",
     "llm_unconfigured",
     "llm_call",
+    # Feature 025 — agentic soul integration
+    "personalization",   # profile / personality ("soul") changes
+    "memory",            # durable-memory create/view/update/delete/promote
+    "skill",             # skill (agent tool) enable/disable
+    "schedule",          # scheduled-job lifecycle + each run
+    "dreaming",          # background consolidation sweeps + toggles
 )
 
 OUTCOMES = ("in_progress", "success", "failure", "interrupted")
