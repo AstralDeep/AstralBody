@@ -52,6 +52,10 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 COPY backend/requirements.txt ./backend/
 RUN pip install --no-cache-dir -r backend/requirements.txt
 
+# Download the spaCy model used by Presidio for PHI detection at build time
+# (feature 025-agentic-soul-integration) so no model is fetched over the network at runtime.
+RUN python -m spacy download en_core_web_lg
+
 # Copy backend source
 COPY backend/ ./backend/
 
