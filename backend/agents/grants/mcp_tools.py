@@ -19,7 +19,7 @@ import requests
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from shared.primitives import (
+from astralprims import (
     Text, Card, Table, Alert, MetricCard, Grid, Grids,
     BarChart, PieChart, LineChart, List_, Tabs, TabItem,
     create_ui_response,
@@ -326,7 +326,7 @@ def search_grants(
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "total": len(hits),
             "open": open_count,
@@ -588,7 +588,7 @@ def get_grant_details(
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "opportunity_id": number,
             "numeric_id": numeric_id,
@@ -761,7 +761,7 @@ def match_grants_to_caai(
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "total_analyzed": total_analyzed,
             "total_matched": total_matched,
@@ -927,7 +927,7 @@ def get_caai_profile(
         ])
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "name": CAAI_MISSION["name"],
             "mission": CAAI_MISSION["mission"],
@@ -1112,7 +1112,7 @@ def analyze_funding_trends(
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "total_opportunities": len(hits),
             "agency_distribution": dict(agency_counts),

@@ -9,7 +9,7 @@ import logging
 import re
 from typing import Dict, Any, List, Tuple
 
-from shared.primitives import (
+from astralprims import (
     Alert, Collapsible, Text, Container, Divider,
     create_ui_response,
 )

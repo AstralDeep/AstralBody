@@ -136,11 +136,16 @@ class UIRender(Message):
     type: str = "ui_render"
     components: List[Dict[str, Any]] = field(default_factory=list)
     target: str = "canvas"  # "canvas" for SDUI main area, "chat" for floating chat panel
+    # Feature 026: server-rendered HTML for web clients (orchestrator renders
+    # astralprims primitives via webrender). Structured `components` remain on
+    # the wire for programmatic/non-web consumers (FR-018).
+    html: Optional[str] = None
 
 @dataclass
 class UIUpdate(Message):
     type: str = "ui_update"
     components: List[Dict[str, Any]] = field(default_factory=list)
+    html: Optional[str] = None  # Feature 026: server-rendered HTML (see UIRender)
 
 @dataclass
 class UIAppend(Message):

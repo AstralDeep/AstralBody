@@ -1,0 +1,53 @@
+/* Feature 026 — Astral theme (ported from frontend/src/index.css, midnight preset).
+   Tailwind utilities are provided by the self-hosted Play CDN (vendor/tailwind.js);
+   this file carries the CSS-var palette + custom utilities the renderer emits. */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+:root {
+  --astral-bg:        15 18 33;     /* #0F1221 */
+  --astral-surface:   26 30 46;     /* #1A1E2E */
+  --astral-primary:   99 102 241;   /* #6366F1 */
+  --astral-secondary: 139 92 246;   /* #8B5CF6 */
+  --astral-text:      243 244 246;  /* #F3F4F6 */
+  --astral-muted:     156 163 175;  /* #9CA3AF */
+  --astral-accent:    6 182 212;    /* #06B6D4 */
+}
+
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: rgb(var(--astral-bg));
+  color: rgb(var(--astral-text));
+  font-family: 'Inter', system-ui, sans-serif;
+}
+
+.glass {
+  background: rgb(var(--astral-surface) / 0.60);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgb(255 255 255 / 0.10);
+}
+.glass-card {
+  background: rgb(var(--astral-surface) / 0.40);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgb(255 255 255 / 0.05);
+  border-radius: 0.75rem;
+  box-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
+}
+
+/* scrollbars (global, matches index.css) */
+* { scrollbar-width: thin; scrollbar-color: rgb(var(--astral-primary) / 0.3) transparent; }
+*::-webkit-scrollbar { width: 6px; height: 6px; }
+*::-webkit-scrollbar-thumb { background: rgb(var(--astral-primary) / 0.3); border-radius: 999px; }
+
+/* line-clamp-2 fallback (used by detailed list descriptions) */
+.line-clamp-2 {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+
+/* minimal prose fallback for the text 'markdown' variant (block_md already emits styled tags) */
+.prose :where(p) { margin: 0 0 0.5rem; }
+.prose :where(a) { color: rgb(var(--astral-primary)); }
+.prose :where(code) { color: rgb(var(--astral-accent)); }
+
+details > summary { list-style: none; }
+details > summary::-webkit-details-marker { display: none; }

@@ -10,7 +10,7 @@ from typing import Dict, Any, List, Optional
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from shared.primitives import (
+from astralprims import (
     Text, Card, Table, Container, MetricCard, ProgressBar,
     Alert, Grid, BarChart, LineChart, PieChart, PlotlyChart, List_,
     Divider, CodeBlock, Image, Tabs,
@@ -206,7 +206,7 @@ def check_connection(**kwargs) -> Dict[str, Any]:
         ]
 
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {"token_configured": token_ok, "url_configured": url_ok}
         }
     except Exception as e:
@@ -261,7 +261,7 @@ def list_tables(base_id: str = "", **kwargs) -> Dict[str, Any]:
 
         components = [Card(title=f"Tables in Base {base_id}", content=content)]
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {"tables": tables, "table_map": table_map}
         }
     except Exception as e:
@@ -313,7 +313,7 @@ def list_records(table_id: str, fields: str = "", sort: str = "",
 
         components = [Card(title=f"Records — {table_id}", content=content)]
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {"records": records, "pageInfo": page_info}
         }
     except Exception as e:
@@ -356,7 +356,7 @@ def get_record(table_id: str, record_id: str, fields: str = "", **kwargs) -> Dic
         ]
 
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {"record": record}
         }
     except Exception as e:
@@ -386,7 +386,7 @@ def count_records(table_id: str, where: str = "", view_id: str = "", **kwargs) -
 
         components = [Card(title=f"Count — {table_id}", content=content)]
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {"count": count}
         }
     except Exception as e:
@@ -437,7 +437,7 @@ def search_records(table_id: str, where: str, fields: str = "", sort: str = "",
 
         components = [Card(title=f"Search Results — {table_id}", content=content)]
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {"records": records, "pageInfo": page_info}
         }
     except Exception as e:
@@ -489,7 +489,7 @@ def search_records_simple(table_id: str, field_name: str, operator: str, value: 
 
         components = [Card(title=f"Search — {table_id}", content=content)]
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {"records": records, "pageInfo": page_info, "filter": where}
         }
     except Exception as e:
@@ -581,7 +581,7 @@ def get_assigned_tasks(table_id: str, assignee: str, status: str = "",
 
         components = [Card(title=f"Tasks — {assignee}", content=content)]
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {"records": records, "pageInfo": page_info, "assignee": assignee}
         }
     except Exception as e:
@@ -618,7 +618,7 @@ def create_record(table_id: str, data: str, **kwargs) -> Dict[str, Any]:
             )
         ]
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {"created": result}
         }
     except json.JSONDecodeError as e:
@@ -657,7 +657,7 @@ def create_records_batch(table_id: str, records: str, **kwargs) -> Dict[str, Any
             )
         ]
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {"created": created_ids}
         }
     except json.JSONDecodeError as e:
@@ -697,7 +697,7 @@ def update_record(table_id: str, record_id: str, data: str, **kwargs) -> Dict[st
             )
         ]
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {"updated": result}
         }
     except json.JSONDecodeError as e:
@@ -740,7 +740,7 @@ def update_records_batch(table_id: str, records: str, **kwargs) -> Dict[str, Any
             )
         ]
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {"updated": updated}
         }
     except json.JSONDecodeError as e:
@@ -786,7 +786,7 @@ def delete_records(table_id: str, record_ids: str, **kwargs) -> Dict[str, Any]:
             )
         ]
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {"deleted": deleted}
         }
     except json.JSONDecodeError as e:
@@ -828,7 +828,7 @@ def list_linked_records(table_id: str, link_field_id: str, record_id: str,
 
         components = [Card(title=f"Linked Records — {record_id}", content=content)]
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {"records": records, "pageInfo": page_info}
         }
     except Exception as e:
@@ -871,7 +871,7 @@ def link_records(table_id: str, link_field_id: str, record_id: str,
             )
         ]
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {"linked": ids, "source_record": record_id}
         }
     except json.JSONDecodeError as e:
@@ -916,7 +916,7 @@ def unlink_records(table_id: str, link_field_id: str, record_id: str,
             )
         ]
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {"unlinked": ids, "source_record": record_id}
         }
     except json.JSONDecodeError as e:
@@ -955,7 +955,7 @@ def upload_attachment(file_path: str, storage_path: str = "", **kwargs) -> Dict[
             )
         ]
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {"upload_result": result}
         }
     except Exception as e:

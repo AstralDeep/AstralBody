@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from shared.primitives import Alert, ParamPicker, create_ui_response
+from astralprims import Alert, ParamPicker, create_ui_response
 
 
 def build_profession_panel(profile: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

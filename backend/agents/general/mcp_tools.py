@@ -37,7 +37,7 @@ from shared.expression_evaluator import ExpressionEvaluator, safe_eval
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from shared.primitives import (
+from astralprims import (
     Text, Card, Table, Container, MetricCard, ProgressBar,
     Alert, Grid, BarChart, LineChart, PieChart, PlotlyChart, List_,
     FileDownload, create_ui_response, ColorPicker, Button, Divider,
@@ -74,13 +74,13 @@ def generate_dynamic_chart(
             data = json.loads(data)
         except json.JSONDecodeError:
             return {
-                "_ui_components": [Alert(message="Invalid data format provided. Expected JSON array.", variant="error").to_json()],
+                "_ui_components": [Alert(message="Invalid data format provided. Expected JSON array.", variant="error").to_dict()],
                 "_data": {}
             }
 
     if not data:
         return {
-            "_ui_components": [Alert(message="No data provided to graph.", variant="warning").to_json()],
+            "_ui_components": [Alert(message="No data provided to graph.", variant="warning").to_dict()],
             "_data": {}
         }
 
@@ -177,7 +177,7 @@ def generate_dynamic_chart(
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "labels": labels, 
             "values": values, 
@@ -468,7 +468,7 @@ def modify_data(
         ]
 
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {
                 "filename": filename,
                 "file_path": out_file_path,
@@ -549,7 +549,7 @@ def get_system_status(session_id: str = "default", **kwargs) -> Dict[str, Any]:
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "cpu_percent": cpu_percent,
             "memory_percent": mem.percent,
@@ -587,7 +587,7 @@ def get_cpu_info(session_id: str = "default", **kwargs) -> Dict[str, Any]:
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {"cores": cpu_count, "frequency": cpu_freq.current if cpu_freq else 0}
     }
 
@@ -623,7 +623,7 @@ def get_memory_info(session_id: str = "default", **kwargs) -> Dict[str, Any]:
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {"ram_percent": mem.percent, "swap_percent": swap.percent}
     }
 
@@ -660,7 +660,7 @@ def get_disk_info(session_id: str = "default", **kwargs) -> Dict[str, Any]:
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {"partitions": len(rows)}
     }
 
@@ -788,7 +788,7 @@ async def live_system_metrics(
             )
 
             yield StreamComponents(
-                components=[card.to_json()],
+                components=[card.to_dict()],
                 raw={
                     "cpu_percent": cpu_percent,
                     "memory_percent": mem.percent,
@@ -862,7 +862,7 @@ def search_wikipedia(query: str, language: str = "en", session_id: str = "defaul
         ]
 
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {"results": [{"title": r["title"], "pageid": r["pageid"]} for r in results]}
         }
 
@@ -1022,7 +1022,7 @@ def search_arxiv(query: str, max_results: int = 10, session_id: str = "default",
             ]
         
         return {
-            "_ui_components": [c.to_json() if hasattr(c, 'to_json') else c for c in components],
+            "_ui_components": [c.to_dict() if hasattr(c, 'to_json') else c for c in components],
             "_data": results
         }
     except Exception as e:
@@ -1123,7 +1123,7 @@ def change_theme(preset: str = None, **kwargs) -> Dict[str, Any]:
     components = [_build_theme_customization_card(preset)]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "message": "Theme customization panel rendered. Use the preset buttons or color pickers to change colors.",
             "presets": list(THEME_PRESETS.keys()),
@@ -1157,7 +1157,7 @@ def apply_theme_preset(preset: str, **kwargs) -> Dict[str, Any]:
         _build_theme_customization_card(preset),
     ]
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {"applied_preset": preset, "colors": colors, "message": message},
     }
 
@@ -1199,7 +1199,7 @@ def set_theme_color(color_key: str, hex_value: str, **kwargs) -> Dict[str, Any]:
         _build_theme_customization_card(),
     ]
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {"color_key": color_key, "color_value": hex_value, "message": message},
     }
 

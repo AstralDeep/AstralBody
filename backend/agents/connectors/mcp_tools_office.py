@@ -12,7 +12,7 @@ import os
 import re
 from typing import Dict, Any
 
-from shared.primitives import (
+from astralprims import (
     Table, Alert, Collapsible, FileDownload, Text, Container, Divider,
     create_ui_response,
 )

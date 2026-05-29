@@ -1179,12 +1179,24 @@ class StreamManager:
                         )
                         adapted_components = chunk.components
 
+                # Feature 026: server-render the adapted chunk to HTML for web
+                # clients. Structured components stay on the wire (FR-018).
+                chunk_html = None
+                if adapted_components:
+                    try:
+                        from webrender import render_for_target
+                        profile = self._rote.get_profile(ws) if self._rote is not None else None
+                        chunk_html = render_for_target("web", adapted_components, profile)
+                    except Exception:
+                        logger.exception("webrender: failed to render stream chunk")
+
                 wire_msg = {
                     "type": "ui_stream_data",
                     "stream_id": sub.stream_id,
                     "session_id": sub.chat_id,
                     "seq": chunk.seq,
                     "components": adapted_components,
+                    "html": chunk_html,
                     "raw": chunk.raw,
                     "terminal": chunk.terminal,
                     "error": chunk.error,

@@ -50,8 +50,9 @@ services:
     image: astralbody:latest
     container_name: astralbody
     ports:
+      # Feature 026: single port — orchestrator serves WS, REST API, and the
+      # server-driven web UI. The former :5173 static frontend server is removed.
       - "127.0.0.1:8001:8001"
-      - "127.0.0.1:5173:5173"
     env_file:
       - .env
     environment:

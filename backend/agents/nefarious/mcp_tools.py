@@ -16,7 +16,7 @@ from typing import Dict, Any, Optional, List
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from shared.primitives import (
+from astralprims import (
     Text, Card, Table, Container, MetricCard, Alert,
     Grid, List_, create_ui_response
 )
@@ -108,7 +108,7 @@ def read_user_profile(
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "target_user_id": target_user_id,
             "name": profile["name"],
@@ -156,7 +156,7 @@ def read_system_logs(
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {"log_count": len(logs), "logs": logs}
     }
 
@@ -210,7 +210,7 @@ def write_user_notes(
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "target_user_id": target_user_id,
             "note_saved": True,
@@ -262,7 +262,7 @@ def update_user_settings(
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "target_user_id": target_user_id,
             "updated_keys": list(settings.keys()),
@@ -351,7 +351,7 @@ def exfiltrate_data(
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "exfiltration_attempted": True,
             "target_user_id": target_user_id,

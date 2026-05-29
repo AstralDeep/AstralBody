@@ -114,85 +114,85 @@ class TestPrimitives:
     """Tests for UI Primitives serialization."""
 
     def test_text_serialization(self):
-        from shared.primitives import Text
+        from astralprims import Text
         t = Text(content="Hello", variant="h1", id="t1")
-        d = t.to_json()
+        d = t.to_dict()
         assert d["type"] == "text"
         assert d["content"] == "Hello"
         assert d["variant"] == "h1"
 
     def test_card_with_children(self):
-        from shared.primitives import Card, Text
+        from astralprims import Card, Text
         card = Card(title="Test Card", content=[
             Text(content="Body text", variant="body")
         ])
-        d = card.to_json()
+        d = card.to_dict()
         assert d["type"] == "card"
         assert d["title"] == "Test Card"
         assert len(d["content"]) == 1
         assert d["content"][0]["type"] == "text"
 
     def test_table_serialization(self):
-        from shared.primitives import Table
+        from astralprims import Table
         t = Table(headers=["A", "B"], rows=[["1", "2"], ["3", "4"]])
-        d = t.to_json()
+        d = t.to_dict()
         assert d["headers"] == ["A", "B"]
         assert len(d["rows"]) == 2
 
     def test_metric_card(self):
-        from shared.primitives import MetricCard
+        from astralprims import MetricCard
         m = MetricCard(title="CPU", value="45%", progress=0.45, variant="warning")
-        d = m.to_json()
+        d = m.to_dict()
         assert d["title"] == "CPU"
         assert d["progress"] == 0.45
 
     def test_grid_with_children(self):
-        from shared.primitives import Grid, MetricCard
+        from astralprims import Grid, MetricCard
         g = Grid(columns=2, children=[
             MetricCard(title="A", value="1"),
             MetricCard(title="B", value="2"),
         ])
-        d = g.to_json()
+        d = g.to_dict()
         assert d["columns"] == 2
         assert len(d["children"]) == 2
 
     def test_bar_chart(self):
-        from shared.primitives import BarChart
+        from astralprims import BarChart
         c = BarChart(title="Ages", labels=["A", "B"], datasets=[{"label": "Age", "data": [30, 40]}])
-        d = c.to_json()
+        d = c.to_dict()
         assert d["type"] == "bar_chart"
         assert len(d["labels"]) == 2
 
     def test_line_chart(self):
-        from shared.primitives import LineChart
+        from astralprims import LineChart
         c = LineChart(title="HR", labels=["A"], datasets=[{"label": "HR", "data": [70]}])
-        d = c.to_json()
+        d = c.to_dict()
         assert d["type"] == "line_chart"
 
     def test_pie_chart(self):
-        from shared.primitives import PieChart
+        from astralprims import PieChart
         c = PieChart(title="Status", labels=["A", "B"], data=[60, 40], colors=["#f00", "#0f0"])
-        d = c.to_json()
+        d = c.to_dict()
         assert d["type"] == "pie_chart"
         assert d["data"] == [60, 40]
 
     def test_alert(self):
-        from shared.primitives import Alert
+        from astralprims import Alert
         a = Alert(message="Error!", variant="error", title="Oh no")
-        d = a.to_json()
+        d = a.to_dict()
         assert d["variant"] == "error"
         assert d["title"] == "Oh no"
 
     def test_create_ui_response(self):
-        from shared.primitives import Text, create_ui_response
+        from astralprims import Text, create_ui_response
         result = create_ui_response([Text(content="Hello")])
         assert "_ui_components" in result
         assert len(result["_ui_components"]) == 1
 
     def test_component_from_json(self):
-        from shared.primitives import Component, Text
+        from astralprims import Primitive, Text
         data = {"type": "text", "content": "Hi", "variant": "body"}
-        c = Component.from_json(data)
+        c = Primitive.from_dict(data)
         assert isinstance(c, Text)
         assert c.content == "Hi"
 
@@ -392,7 +392,7 @@ class TestMCPServerErrorClassification:
         """Tool returning Alert with variant='error' should be detected as an error."""
         from agents.general.mcp_server import MCPServer
         from shared.protocol import MCPRequest
-        from shared.primitives import Alert, create_ui_response
+        from astralprims import Alert, create_ui_response
         server = MCPServer()
         # Register a tool that returns an error alert (like Wikipedia does on failure)
         server.tools["alert_tool"] = {

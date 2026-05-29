@@ -50,7 +50,7 @@ from shared.protocol import (
     ToolStreamData, ToolStreamEnd, ToolStreamCancel,
     validate_streaming_metadata,
 )
-from shared.primitives import (
+from astralprims import (
     Container, Text, Card, Grid, Alert, MetricCard, ProgressBar,
     Collapsible, create_ui_response
 )
@@ -1004,7 +1004,7 @@ class Orchestrator:
                     if evt:
                         evt.set()
                     await self.send_ui_render(websocket, [
-                        Alert(message="Authentication failed. Please log in again.", variant="error").to_json()
+                        Alert(message="Authentication failed. Please log in again.", variant="error").to_dict()
                     ])
                     # We might want to close, but let's let the UI handle the error alert
                     return
@@ -1054,7 +1054,7 @@ class Orchestrator:
                 # Ensure authenticated
                 if websocket not in self.ui_sessions:
                     await self.send_ui_render(websocket, [
-                        Alert(message="Unauthorized. Please refresh.", variant="error").to_json()
+                        Alert(message="Unauthorized. Please refresh.", variant="error").to_dict()
                     ])
                     return
 
@@ -1228,7 +1228,7 @@ class Orchestrator:
                     agent_url = msg.payload.get("url", "").strip().rstrip("/")
                     if not agent_url:
                         await self.send_ui_render(websocket, [
-                            Alert(message="Please provide an agent URL", variant="error").to_json()
+                            Alert(message="Please provide an agent URL", variant="error").to_dict()
                         ])
                     else:
                         await self._safe_send(websocket, json.dumps({
@@ -1246,7 +1246,7 @@ class Orchestrator:
                             }))
                         else:
                             await self.send_ui_render(websocket, [
-                                Alert(message=f"Could not discover A2A agent at {agent_url}", variant="error").to_json()
+                                Alert(message=f"Could not discover A2A agent at {agent_url}", variant="error").to_dict()
                             ])
                             await self._safe_send(websocket, json.dumps({
                                 "type": "chat_status", "status": "done",
@@ -1309,7 +1309,7 @@ class Orchestrator:
                                 logger.warning(f"stream_manager.resume failed: {e}")
                     else:
                         await self.send_ui_render(websocket, [
-                            Alert(message="Chat not found", variant="error").to_json()
+                            Alert(message="Chat not found", variant="error").to_dict()
                         ])
 
                 elif msg.action == "new_chat":
@@ -1328,7 +1328,7 @@ class Orchestrator:
                     
                     if not chat_id or not component_data:
                         await self.send_ui_render(websocket, [
-                            Alert(message="Missing required fields for saving component", variant="error").to_json()
+                            Alert(message="Missing required fields for saving component", variant="error").to_dict()
                         ])
                         return
                     
@@ -1372,7 +1372,7 @@ class Orchestrator:
                     component_id = msg.payload.get("component_id")
                     if not component_id:
                         await self.send_ui_render(websocket, [
-                            Alert(message="Missing component ID", variant="error").to_json()
+                            Alert(message="Missing component ID", variant="error").to_dict()
                         ])
                         return
                     
@@ -1553,7 +1553,13 @@ class Orchestrator:
                     # Use UIUpdate (not UIRender) so the frontend replaces the last
                     # components in-place instead of appending a duplicate message.
                     if re_adapted is not None:
-                        msg_out = UIUpdate(components=re_adapted)
+                        re_html = None
+                        try:
+                            from webrender import render_for_target
+                            re_html = render_for_target("web", re_adapted, self.rote.get_profile(websocket))
+                        except Exception:
+                            logger.exception("webrender: failed to re-render UI after device change")
+                        msg_out = UIUpdate(components=re_adapted, html=re_html)
                         await self._safe_send(websocket, msg_out.to_json())
 
                 elif msg.action == "save_theme":
@@ -1655,7 +1661,7 @@ class Orchestrator:
 
                     if not tool_name or not agent_id:
                         await self.send_ui_render(websocket, [
-                            Alert(message="Missing tool_name or agent_id for pagination", variant="error").to_json()
+                            Alert(message="Missing tool_name or agent_id for pagination", variant="error").to_dict()
                         ])
                         await self._safe_send(websocket, json.dumps({
                             "type": "chat_status", "status": "done", "message": ""
@@ -1676,12 +1682,12 @@ class Orchestrator:
                             await self.send_ui_render(websocket, result.ui_components)
                         elif result and result.error:
                             await self.send_ui_render(websocket, [
-                                Alert(message=result.error.get("message", "Pagination failed"), variant="error").to_json()
+                                Alert(message=result.error.get("message", "Pagination failed"), variant="error").to_dict()
                             ])
                     except Exception as e:
                         logger.error(f"table_paginate failed: {e}", exc_info=True)
                         await self.send_ui_render(websocket, [
-                            Alert(message=f"Pagination failed: {e}", variant="error").to_json()
+                            Alert(message=f"Pagination failed: {e}", variant="error").to_dict()
                         ])
                     finally:
                         await self._safe_send(websocket, json.dumps({
@@ -2088,7 +2094,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                         Alert(
                             message="Something went wrong while processing your request. Please try again.",
                             variant="error",
-                        ).to_json()
+                        ).to_dict()
                     ])
                 except Exception:  # pragma: no cover — defensive
                     pass
@@ -2217,7 +2223,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 Alert(
                     message="LLM unavailable — set your own provider in settings.",
                     variant="error",
-                ).to_json()
+                ).to_dict()
             ])
             return
 
@@ -2440,7 +2446,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                         "and permissions before testing it."
                     ),
                     variant="warning",
-                ).to_json()
+                ).to_dict()
             ])
             return
         if is_text_only:
@@ -2586,10 +2592,10 @@ COMPONENT UPDATE RULES:
                         task.transition(TaskState.CANCELLED)
                     logger.info(f"Processing cancelled by user for chat_id {chat_id}")
                     await self.send_ui_render(websocket, [
-                        Alert(message="Processing was cancelled.", variant="info").to_json()
+                        Alert(message="Processing was cancelled.", variant="info").to_dict()
                     ])
                     self.history.add_message(chat_id, "assistant", [
-                        Alert(message="Processing was cancelled.", variant="info").to_json()
+                        Alert(message="Processing was cancelled.", variant="info").to_dict()
                     ], user_id=user_id)
                     await self._safe_send(websocket, json.dumps({
                         "type": "chat_status",
@@ -2626,7 +2632,7 @@ COMPONENT UPDATE RULES:
                         "message": ""
                     }))
                     await self.send_ui_render(websocket, [
-                        Alert(message="Failed to get a response from the AI model. Please try again.", variant="error").to_json()
+                        Alert(message="Failed to get a response from the AI model. Please try again.", variant="error").to_dict()
                     ])
                     return
 
@@ -2637,7 +2643,7 @@ COMPONENT UPDATE RULES:
                     reasoning_components = [
                         Collapsible(title="Reasoning", content=[
                             Text(content=reasoning, variant="markdown")
-                        ]).to_json()
+                        ]).to_dict()
                     ]
                     await self.send_ui_render(websocket, reasoning_components)
                     self.history.add_message(chat_id, "assistant", reasoning_components, user_id=user_id)
@@ -2768,7 +2774,7 @@ COMPONENT UPDATE RULES:
                         if not tools_desc:
                             logger.warning("All tools denied — breaking Re-Act loop")
                             await self.send_ui_render(websocket, [
-                                Alert(message="All available tools are restricted by your permission settings. Please update your agent permissions.", variant="warning").to_json()
+                                Alert(message="All available tools are restricted by your permission settings. Please update your agent permissions.", variant="warning").to_dict()
                             ])
                             break
 
@@ -2934,7 +2940,7 @@ COMPONENT UPDATE RULES:
                             chat_summary = list(leak_alerts) + [
                                 Card(title="Analysis", content=[
                                     Text(content=content, variant="markdown")
-                                ]).to_json()
+                                ]).to_dict()
                             ]
                             await self.send_ui_render(websocket, chat_summary, target="chat")
                             response_components = list(leak_alerts) + list(parsed_components)
@@ -2942,7 +2948,7 @@ COMPONENT UPDATE RULES:
                         response_components = list(leak_alerts) + [
                             Card(title="Analysis", content=[
                                 Text(content=content, variant="markdown")
-                            ]).to_json()
+                            ]).to_dict()
                         ]
                         # Pure text response goes to chat panel
                         await self.send_ui_render(websocket, response_components, target="chat")
@@ -2979,7 +2985,7 @@ COMPONENT UPDATE RULES:
                     await self.send_ui_render(websocket, [
                         Card(title="Summary", content=[
                             Text(content="Multiple tool operations were completed. Review the results above for details.", variant="body")
-                        ]).to_json()
+                        ]).to_dict()
                     ])
 
                 await self._safe_send(websocket, json.dumps({
@@ -3013,11 +3019,11 @@ COMPONENT UPDATE RULES:
                     )
                     if fixed:
                         await self.send_ui_render(websocket, [
-                            Alert(message="Tool schema fixed. Agent restarted — please try your message again.", variant="info").to_json()
+                            Alert(message="Tool schema fixed. Agent restarted — please try your message again.", variant="info").to_dict()
                         ])
                     else:
                         await self.send_ui_render(websocket, [
-                            Alert(message="Auto-fix could not resolve the schema issue. Try refining the agent.", variant="warning").to_json()
+                            Alert(message="Auto-fix could not resolve the schema issue. Try refining the agent.", variant="warning").to_dict()
                         ])
                     await self._safe_send(websocket, json.dumps({
                         "type": "chat_status", "status": "done", "message": ""
@@ -3028,7 +3034,7 @@ COMPONENT UPDATE RULES:
                         "type": "chat_status", "status": "done", "message": ""
                     }))
                     await self.send_ui_render(websocket, [
-                        Alert(message=f"Tool schema error and auto-fix failed: {error_text}", variant="error", title="Error").to_json()
+                        Alert(message=f"Tool schema error and auto-fix failed: {error_text}", variant="error", title="Error").to_dict()
                     ])
             else:
                 # Clear the 'thinking' spinner so the UI doesn't hang
@@ -3047,7 +3053,7 @@ COMPONENT UPDATE RULES:
                 elif "timeout" in error_text.lower():
                     error_text = "Request timed out waiting for the AI model. Please try again."
                 await self.send_ui_render(websocket, [
-                    Alert(message=error_text, variant="error", title="Error").to_json()
+                    Alert(message=error_text, variant="error", title="Error").to_dict()
                 ])
         finally:
             heartbeat_task.cancel()
@@ -3406,7 +3412,7 @@ COMPONENT UPDATE RULES:
                 return [
                     Card(title="Summary", content=[
                         Text(content=summary_text, variant="body")
-                    ]).to_json()
+                    ]).to_dict()
                 ]
 
         except Exception as e:
@@ -3646,7 +3652,7 @@ COMPONENT UPDATE RULES:
         for tool_name in names:
             diag = self._diagnose_disabled_tool(tool_name, user_id, chat_id)
             alert = self._alert_for_disabled_tool(diag, tool_name)
-            alerts.append(alert.to_json())
+            alerts.append(alert.to_dict())
         return alerts
 
     def _is_long_running_tool(self, agent_id: Optional[str], tool_name: str) -> bool:
@@ -3682,10 +3688,10 @@ COMPONENT UPDATE RULES:
             err_msg = f"Tool '{tool_name}' is system-blocked: {reason}"
             logger.warning(f"Security block: agent={agent_id} tool={tool_name}")
             alert = Alert(message=err_msg, variant="error")
-            await self.send_ui_render(websocket, [alert.to_json()], target="chat")
+            await self.send_ui_render(websocket, [alert.to_dict()], target="chat")
             return MCPResponse(
                 error={"message": err_msg, "retryable": False},
-                ui_components=[alert.to_json()]
+                ui_components=[alert.to_dict()]
             )
 
         # Permission enforcement gate (RFC 8693 delegation)
@@ -3693,10 +3699,10 @@ COMPONENT UPDATE RULES:
             err_msg = f"Tool '{tool_name}' is restricted for this agent. Update permissions in the sidebar to enable it."
             logger.warning(f"Permission denied: user={user_id} agent={agent_id} tool={tool_name}")
             alert = Alert(message=err_msg, variant="warning")
-            await self.send_ui_render(websocket, [alert.to_json()])
+            await self.send_ui_render(websocket, [alert.to_dict()])
             return MCPResponse(
                 error={"message": err_msg, "retryable": False},
-                ui_components=[alert.to_json()]
+                ui_components=[alert.to_dict()]
             )
 
         # Map file paths if chat_id provided
@@ -3750,16 +3756,16 @@ COMPONENT UPDATE RULES:
                     "Dispatch blocked by disabled-tool gate: tool=%s owner=%s status=%s user=%s chat=%s",
                     tool_name, owner, diag.status.value, user_id, chat_id,
                 )
-                await self.send_ui_render(websocket, [alert.to_json()], target="chat")
+                await self.send_ui_render(websocket, [alert.to_dict()], target="chat")
                 return MCPResponse(
                     error={"message": alert.message, "retryable": False},
-                    ui_components=[alert.to_json()],
+                    ui_components=[alert.to_dict()],
                 )
 
         if not agent_id or (agent_id not in self.agents and agent_id not in self.a2a_clients):
             err_msg = f"No agent available for tool '{tool_name}'"
             await self.send_ui_render(websocket, [
-                Alert(message=err_msg, variant="error").to_json()
+                Alert(message=err_msg, variant="error").to_dict()
             ], target="chat")
             return MCPResponse(error={"message": err_msg})
 
@@ -3808,10 +3814,10 @@ COMPONENT UPDATE RULES:
                     user_id, agent_id, tool_name,
                 )
                 alert = Alert(message=err_msg, variant="warning")
-                await self.send_ui_render(websocket, [alert.to_json()], target="chat")
+                await self.send_ui_render(websocket, [alert.to_dict()], target="chat")
                 return MCPResponse(
                     error={"message": err_msg, "retryable": False},
-                    ui_components=[alert.to_json()],
+                    ui_components=[alert.to_dict()],
                 )
             args["_cap_job_id"] = cap_job_id
             self._pending_cap_entries[cap_job_id] = (user_id, agent_id)
@@ -3872,7 +3878,7 @@ COMPONENT UPDATE RULES:
             # Errors are still shown immediately so the user knows something went wrong
             err_msg = result.error.get('message', 'Unknown error')
             await self.send_ui_render(websocket, [
-                Alert(message=f"Tool '{tool_name}' failed: {err_msg}", variant="error").to_json()
+                Alert(message=f"Tool '{tool_name}' failed: {err_msg}", variant="error").to_dict()
             ], target="chat")
 
             # Auto-fix: if this is a draft agent, attempt to fix the tool error automatically
@@ -3888,7 +3894,7 @@ COMPONENT UPDATE RULES:
                     if fixed:
                         logger.info(f"Auto-fix attempted for draft agent {agent_id} tool '{tool_name}'")
                         await self.send_ui_render(websocket, [
-                            Alert(message=f"Auto-fix applied for '{tool_name}'. Agent restarted — try again.", variant="info").to_json()
+                            Alert(message=f"Auto-fix applied for '{tool_name}'. Agent restarted — try again.", variant="info").to_dict()
                         ])
                     await self._safe_send(websocket, json.dumps({
                         "type": "chat_status", "status": "thinking",
@@ -3955,7 +3961,7 @@ COMPONENT UPDATE RULES:
                 logger.warning(f"Security block (parallel): agent={agent_id} tool={tool_name}")
                 async def _sec_err(msg=err_msg):
                     return MCPResponse(error={"message": msg, "retryable": False},
-                                       ui_components=[Alert(message=msg, variant="error").to_json()])
+                                       ui_components=[Alert(message=msg, variant="error").to_dict()])
                 prepared.append((idx, tc, tool_name, agent_id, None, _sec_err()))
                 continue
 
@@ -3965,7 +3971,7 @@ COMPONENT UPDATE RULES:
                 logger.warning(f"Permission denied (parallel): user={user_id} agent={agent_id} tool={tool_name}")
                 async def _perm_err(msg=err_msg):
                     return MCPResponse(error={"message": msg, "retryable": False},
-                                       ui_components=[Alert(message=msg, variant="error").to_json()])
+                                       ui_components=[Alert(message=msg, variant="error").to_dict()])
                 prepared.append((idx, tc, tool_name, agent_id, None, _perm_err()))
                 continue
 
@@ -4043,11 +4049,11 @@ COMPONENT UPDATE RULES:
             if isinstance(result, Exception):
                 err_res = MCPResponse(error={"message": str(result)})
                 final_results.append(err_res)
-                error_components.append(Alert(message=f"Tool error: {str(result)}", variant="error").to_json())
+                error_components.append(Alert(message=f"Tool error: {str(result)}", variant="error").to_dict())
             else:
                 final_results.append(result)
                 if result and result.error:
-                    error_components.append(Alert(message=f"Tool '{tool_names[i]}' failed: {result.error.get('message')}", variant="error").to_json())
+                    error_components.append(Alert(message=f"Tool '{tool_names[i]}' failed: {result.error.get('message')}", variant="error").to_dict())
 
         # Only render errors immediately — successful results are batched by caller
         if error_components:
@@ -4069,7 +4075,7 @@ COMPONENT UPDATE RULES:
                                 a_id, t_name, result.error.get('message', ''), websocket
                             )
                             await self.send_ui_render(websocket, [
-                                Alert(message=f"Auto-fix applied for '{t_name}'. Agent restarted — try again.", variant="info").to_json()
+                                Alert(message=f"Auto-fix applied for '{t_name}'. Agent restarted — try again.", variant="info").to_dict()
                             ])
                             await self._safe_send(websocket, json.dumps({
                                 "type": "chat_status", "status": "thinking",
@@ -4912,8 +4918,27 @@ COMPONENT UPDATE RULES:
         ):
             target = "chat"
         adapted = self.rote.adapt(websocket, components)
-        msg = UIRender(components=adapted, target=target)
+        html = None
+        try:
+            from webrender import render_for_target
+            profile = self.rote.get_profile(websocket)
+            # All current device targets render to web HTML; the seam allows
+            # future targets to register their own renderer (FR-011).
+            html = render_for_target("web", adapted, profile)
+        except Exception:
+            logger.exception("webrender: failed to render UI (sending structured components only)")
+        msg = UIRender(components=adapted, target=target, html=html)
         await self._safe_send(websocket, msg.to_json())
+
+    async def _shell_token_for_request(self, request):
+        """Feature 026: access token for the web shell's WS register_ui handshake.
+        Server-side OIDC session (or 'dev-token' under mock auth)."""
+        try:
+            from orchestrator.web_auth import session_token
+            return session_token(request)
+        except Exception:
+            logger.debug("web_auth: session_token unavailable", exc_info=True)
+            return ""
 
     @staticmethod
     def _sanitize_tool_schema(schema: dict) -> dict:
@@ -5314,9 +5339,39 @@ COMPONENT UPDATE RULES:
         async def websocket_endpoint(websocket: WebSocket):
             await self.handle_ui_connection_fastapi(websocket)
 
+        # ── Feature 026: serve the server-driven web UI from this app ──────
+        # The shell page + static assets replace the former separate React SPA
+        # (no separate :5173 frontend). astralprims defines primitives, the
+        # orchestrator renders them (webrender), ROTE adapts per device.
+        import os as _os
+        from fastapi.responses import HTMLResponse as _HTMLResponse
+        _webrender_dir = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "webrender")
+        _shell_path = _os.path.join(_webrender_dir, "templates", "shell.html")
+
+        @app.get("/", response_class=_HTMLResponse)
+        async def serve_shell(request: Request):
+            try:
+                with open(_shell_path, "r", encoding="utf-8") as fh:
+                    shell = fh.read()
+            except Exception:
+                logger.exception("webrender: shell template missing")
+                return _HTMLResponse("<h1>AstralBody</h1><p>UI shell unavailable.</p>", status_code=500)
+            # Inject a session token for the WS handshake. In mock-auth/dev the
+            # client falls back to 'dev-token'; with server-side OIDC the auth
+            # routes establish a session and supply the access token here.
+            token = ""
+            try:
+                token = await self._shell_token_for_request(request)
+            except Exception:
+                token = ""
+            return _HTMLResponse(shell.replace("%%ASTRAL_TOKEN%%", token or ""))
+
+        app.mount("/static", StaticFiles(directory=_os.path.join(_webrender_dir, "static")), name="static")
+
         # Mount REST API routers
         from orchestrator.api import chat_router, component_router, agent_router, dashboard_router, draft_router, voice_router, task_router, async_task_router, user_router
         from orchestrator.auth import auth_router
+        from orchestrator.web_auth import web_auth_router  # Feature 026 — server-side OIDC
         from orchestrator.attachments.router import attachments_router
         from audit.api import audit_router
         from audit.middleware import AuditHTTPMiddleware
@@ -5338,6 +5393,7 @@ COMPONENT UPDATE RULES:
         app.include_router(draft_router)
         app.include_router(dashboard_router)
         app.include_router(auth_router)
+        app.include_router(web_auth_router)  # Feature 026 — /auth/login,/callback,/session,/logout
         app.include_router(attachments_router)
         app.include_router(voice_router)
         app.include_router(task_router)

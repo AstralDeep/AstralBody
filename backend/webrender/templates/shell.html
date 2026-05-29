@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>AstralBody</title>
+  <link rel="stylesheet" href="/static/astral.css">
+  <script>window.__ASTRAL_TOKEN__ = "%%ASTRAL_TOKEN%%";</script>
+  <script src="/static/vendor/tailwind.js"></script>
+  <script>
+    // Map Tailwind `astral-*` color tokens to the runtime CSS variables so
+    // every utility (bg-astral-primary, text-astral-muted, astral-primary/20, …)
+    // resolves and theme_apply/color_picker can keep mutating them live.
+    tailwind.config = {
+      theme: { extend: {
+        colors: {
+          'astral-bg': 'rgb(var(--astral-bg) / <alpha-value>)',
+          'astral-surface': 'rgb(var(--astral-surface) / <alpha-value>)',
+          'astral-primary': 'rgb(var(--astral-primary) / <alpha-value>)',
+          'astral-secondary': 'rgb(var(--astral-secondary) / <alpha-value>)',
+          'astral-text': 'rgb(var(--astral-text) / <alpha-value>)',
+          'astral-muted': 'rgb(var(--astral-muted) / <alpha-value>)',
+          'astral-accent': 'rgb(var(--astral-accent) / <alpha-value>)',
+        },
+        fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] },
+      } },
+    };
+  </script>
+  <script src="/static/vendor/plotly.min.js"></script>
+</head>
+<body class="bg-astral-bg text-astral-text">
+  <div class="flex flex-col h-screen">
+    <header class="flex items-center justify-between px-4 py-3 border-b border-white/5">
+      <div class="flex items-center gap-2">
+        <span class="w-2 h-5 rounded-full bg-astral-primary inline-block"></span>
+        <span class="text-base font-semibold">AstralBody</span>
+      </div>
+      <span id="astral-status" class="text-xs text-astral-muted"></span>
+    </header>
+    <main class="flex flex-1 min-h-0">
+      <!-- Canvas: server-rendered UI (astralprims primitives) -->
+      <section id="astral-canvas" class="flex-1 overflow-y-auto p-4 space-y-3"></section>
+      <!-- Chat panel -->
+      <aside class="w-[380px] max-w-[40%] flex flex-col border-l border-white/5 min-h-0">
+        <div id="astral-chat" class="flex-1 overflow-y-auto p-3 space-y-2"></div>
+        <form id="astral-form" class="p-3 border-t border-white/5 flex gap-2">
+          <input id="astral-input" type="text" autocomplete="off" placeholder="Message an agent…"
+                 class="flex-1 rounded-lg bg-white/5 border border-white/10 px-3 py-2 text-sm text-astral-text focus:outline-none focus:border-astral-primary">
+          <button type="submit" class="px-4 py-2 rounded-lg text-sm font-medium bg-astral-primary hover:bg-astral-primary/80 text-white">Send</button>
+        </form>
+      </aside>
+    </main>
+  </div>
+  <script src="/static/client.js"></script>
+</body>
+</html>
