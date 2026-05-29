@@ -151,8 +151,8 @@ class AgentLifecycleManager:
                     "The generated tools FAILED spec validation with these errors:\n"
                     + "\n".join(error_lines)
                     + "\n\nFix ALL these issues. Ensure every tool returns "
-                    "{'_ui_components': [c.to_json() for c in components], '_data': {...}} "
-                    "using the shared.primitives classes."
+                    "{'_ui_components': [c.to_dict() for c in components], '_data': {...}} "
+                    "using the astralprims classes."
                 )
 
                 await self._send_progress(

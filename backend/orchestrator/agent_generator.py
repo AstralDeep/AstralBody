@@ -417,8 +417,8 @@ Output ONLY the Python code. No markdown fences, no explanations."""
 
 {ui_spec}
 
-IMPORTANT: Ensure all UI components use the shared.primitives classes (Card, MetricCard, Alert, etc.)
-and call `.to_json()` to serialize them. Do NOT use raw dicts for UI components.
+IMPORTANT: Ensure all UI components use the astralprims classes (Card, MetricCard, Alert, etc.)
+and call `.to_dict()` to serialize them. Do NOT use raw dicts for UI components.
 
 ## CREDENTIAL DECLARATION
 

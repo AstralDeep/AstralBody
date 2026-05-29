@@ -140,7 +140,7 @@ class AgentSpecValidator:
         return report
 
     def _validate_imports(self, code: str, report: ValidationReport):
-        """Check that code imports from shared.primitives."""
+        """Check that code imports primitive classes from astralprims."""
         try:
             tree = ast.parse(code)
         except SyntaxError as e:
@@ -152,15 +152,15 @@ class AgentSpecValidator:
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
                 module = node.module or ""
-                if "shared.primitives" in module or "primitives" in module:
+                if "astralprims" in module or "primitives" in module:
                     has_primitives_import = True
                     break
 
         if not has_primitives_import:
             report.add(ValidationSeverity.WARNING, "IMPORT",
-                       "Code does not import from shared.primitives. "
+                       "Code does not import from astralprims. "
                        "Tools should use primitive classes (Card, MetricCard, etc.) "
-                       "and call .to_json() instead of constructing raw dicts.")
+                       "and call .to_dict() instead of constructing raw dicts.")
 
     def _load_registry(self, code: str, slug: str, agents_dir: str,
                        report: ValidationReport) -> Optional[Dict]:

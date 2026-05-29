@@ -42,6 +42,13 @@ Python 3.11+ (backend), TypeScript 5.x on Vite + React 18 (frontend): Follow sta
 
 
 <!-- MANUAL ADDITIONS START -->
+## UI delivery (feature 026)
+
+The UI is **server-driven from the backend** — there is no separate React/Vite frontend.
+- **Primitives** are defined by the first-party pip package **`astralprims`** (`pip install astralprims`). Build UI with its classes (`Text`, `Card`, `Table`, …) and serialize with **`.to_dict()`** (NOT `.to_json()`, which returns a string) or `create_ui_response([...])`. The base styling field is **`css`** (not `style`).
+- The **orchestrator renders** those primitive dicts to web HTML in `backend/webrender/` (pure-Python render functions, escape-by-default via `esc()`); **ROTE** (`backend/rote/`) adapts per device. New client targets register a renderer via `webrender.register_target(...)` — no change to astralprims or agent code.
+- The orchestrator serves the shell + static assets on **`:8001`** (`GET /`, `/static/*`); server-side OIDC at `/auth/{login,callback,session,logout}` (`backend/orchestrator/web_auth.py`). No `:5173` static server.
+- Per Constitution II (v2.0.1): **astralprims defines → orchestrator renders → ROTE adapts.**
 <!-- MANUAL ADDITIONS END -->
 
 <!-- SPECKIT START -->
@@ -62,4 +69,5 @@ shell commands, and other important information, read the current plan at
 - [specs/014-progress-notifications/plan.md](specs/014-progress-notifications/plan.md)
 - [specs/016-persistent-login/plan.md](specs/016-persistent-login/plan.md)
 - [specs/025-agentic-soul-integration/plan.md](specs/025-agentic-soul-integration/plan.md)
+- [specs/026-frontend-removal-astralprims/plan.md](specs/026-frontend-removal-astralprims/plan.md)
 <!-- SPECKIT END -->

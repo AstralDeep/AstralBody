@@ -6,7 +6,7 @@ Analyzes incoming requests and recommends optimal agent dispatch.
 import logging
 from typing import Dict, Any, List
 
-from shared.primitives import (
+from astralprims import (
     Table, Card, Text, Alert, Container,
     create_ui_response,
 )

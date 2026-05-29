@@ -21,7 +21,7 @@ import requests
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from shared.primitives import (
+from astralprims import (
     Text, Card, Table, Container, MetricCard, ProgressBar,
     Alert, Grid, BarChart, LineChart, PieChart, PlotlyChart, List_,
     FileDownload, create_ui_response
@@ -208,7 +208,7 @@ def geocode_location(
                             variant="caption"
                         )
                     ]
-                ).to_json()
+                ).to_dict()
             ],
             "_data": cached_result
         }
@@ -343,7 +343,7 @@ def geocode_location(
         ]
         
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": location_data
         }
         
@@ -487,7 +487,7 @@ def get_current_weather(
         ]
         
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {
                 "location": location_str,
                 "coordinates": {"latitude": lat, "longitude": lon},
@@ -611,7 +611,7 @@ def get_extended_weather(
         ]
         
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {
                 "location": location_str,
                 "coordinates": {"latitude": lat, "longitude": lon},
@@ -775,7 +775,7 @@ def get_historical_weather(
         ]
         
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {
                 "location": location_str,
                 "coordinates": {"latitude": lat, "longitude": lon},
@@ -963,7 +963,7 @@ def get_weather_alerts(
         ]
         
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {
                 "location": location_str,
                 "coordinates": {"latitude": lat, "longitude": lon},
@@ -1192,7 +1192,7 @@ def compare_locations(
         ]
         
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {
                 "locations": location_names,
                 "results": results,
@@ -1322,7 +1322,7 @@ def get_hourly_forecast(
         ]
         
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {
                 "location": location_str,
                 "coordinates": {"latitude": lat, "longitude": lon},
@@ -1463,7 +1463,7 @@ def get_daily_forecast(
         ]
         
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {
                 "location": location_str,
                 "coordinates": {"latitude": lat, "longitude": lon},
@@ -1591,7 +1591,7 @@ def get_weekly_forecast(
         ]
         
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {
                 "location": location_str,
                 "weekly_stats": {
