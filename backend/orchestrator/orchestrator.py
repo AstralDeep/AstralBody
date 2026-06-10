@@ -2450,6 +2450,21 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # is falsy. We tag the audit/log signal so operators can
         # distinguish text-only fallback turns (FR-009).
         is_text_only = not tools_desc and not draft_agent_id
+
+        # Feature 027 — inject the orchestrator meta-tools (create_capability /
+        # extend_agent) so the LLM can act on capability gaps (D1). Excluded:
+        # draft-test sessions, text-only turns (feature 008 semantics — the
+        # user disabled everything deliberately), and flag-off deployments.
+        from orchestrator import agentic_creation
+        meta_tools_injected = False
+        if agentic_creation.should_inject(draft_agent_id) and not is_text_only:
+            for _meta_def in agentic_creation.meta_tool_definitions():
+                _meta_name = _meta_def["function"]["name"]
+                tools_desc.append(_meta_def)
+                tool_to_agent[_meta_name] = agentic_creation.META_AGENT_ID
+                tool_to_unqualified[_meta_name] = _meta_name
+            meta_tools_injected = True
+
         if not tools_desc and draft_agent_id:
             await self.send_ui_render(websocket, [
                 Alert(
@@ -2551,6 +2566,10 @@ COMPONENT UPDATE RULES:
                     system_prompt += f"\n\n{personalization_fragment}\n"
             except Exception as exc:  # pragma: no cover — never block a chat turn
                 logger.warning(f"personalization injection failed (non-fatal): {exc}")
+
+            # Feature 027 — capability-gap guidance accompanies the meta-tools.
+            if meta_tools_injected:
+                system_prompt += agentic_creation.SYSTEM_PROMPT_ADDENDUM
 
             # ------------------------------------------------------------------
             # MULTI-TURN LOOP
@@ -3692,8 +3711,17 @@ COMPONENT UPDATE RULES:
         except json.JSONDecodeError:
             args = {}
 
-        # System-level security block (proactive security review)
+        # Feature 027 — orchestrator meta-tools dispatch before the agent
+        # gates (the pseudo-agent has no scopes/credentials; ownership and
+        # approval gates live inside the handler — contracts/agentic-creation.md).
         agent_id = tool_to_agent.get(llm_tool_name)
+        if agent_id == "__orchestrator__":
+            from orchestrator import agentic_creation
+            return await agentic_creation.handle_meta_tool(
+                self, tool_name, args, user_id=user_id, chat_id=chat_id, websocket=websocket
+            )
+
+        # System-level security block (proactive security review)
         agent_flags = self.security_flags.get(agent_id, {}) if agent_id else {}
         if agent_id and tool_name in agent_flags and agent_flags[tool_name].get("blocked"):
             reason = agent_flags[tool_name].get("reason", "Security threat detected")
@@ -3958,6 +3986,15 @@ COMPONENT UPDATE RULES:
                     args["user_id"] = user_id
 
             agent_id = tool_to_agent.get(llm_tool_name)
+
+            # Feature 027 — meta-tools dispatch directly (see execute_single_tool).
+            if agent_id == "__orchestrator__":
+                from orchestrator import agentic_creation
+                prepared.append((idx, tc, tool_name, agent_id, None,
+                                 agentic_creation.handle_meta_tool(
+                                     self, tool_name, args, user_id=user_id,
+                                     chat_id=chat_id, websocket=websocket)))
+                continue
 
             if user_id and agent_id:
                 creds = self.credential_manager.get_agent_credentials_encrypted(user_id, agent_id)
