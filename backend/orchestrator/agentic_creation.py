@@ -582,14 +582,14 @@ async def apply_revision(orch, rev: Dict[str, Any], user_id: str) -> Dict[str, A
         shutil.copy2(live_tools, backup)
         with open(live_tools, "w", encoding="utf-8") as fh:
             fh.write(new_code)
-        await lifecycle.start_draft_agent(live_row["id"])
+        await lifecycle.start_draft_agent(live_row["id"], align_scopes=False)
         db.update_draft_agent(live_row["id"], status="live")
     except Exception as exc:
         logger.exception("agentic: revision swap failed for %s — rolling back", agent_id)
         try:
             if os.path.exists(backup):
                 shutil.copy2(backup, live_tools)
-            await lifecycle.start_draft_agent(live_row["id"])
+            await lifecycle.start_draft_agent(live_row["id"], align_scopes=False)
             db.update_draft_agent(live_row["id"], status="live")
         except Exception:
             logger.exception("agentic: rollback restart failed for %s", agent_id)

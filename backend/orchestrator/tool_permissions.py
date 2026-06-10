@@ -23,8 +23,12 @@ from typing import Dict, List, Optional
 
 logger = logging.getLogger("ToolPermissions")
 
-# The four canonical scopes aligned with Keycloak astral-agent-service client
-VALID_SCOPES = ["tools:read", "tools:write", "tools:search", "tools:system"]
+# The canonical scopes aligned with the Keycloak astral-agent-service client.
+# "tools:files" (general agent's file/volume readers) was registered by tools
+# but missing here, leaving those tools without any permission control surface
+# (027 click-through finding) — agent_scopes has no scope CHECK constraint, so
+# adding it is purely additive.
+VALID_SCOPES = ["tools:read", "tools:write", "tools:search", "tools:system", "tools:files"]
 
 
 class ToolPermissionManager:
@@ -238,6 +242,30 @@ class ToolPermissionManager:
             return False
         # 3. Fall back to scope
         return self.is_scope_enabled(user_id, agent_id, required_scope)
+
+    def set_skill_enabled(self, user_id: str, agent_id: str, tool_name: str,
+                          enabled: bool) -> None:
+        """Toggle a skill through the row that actually wins (027 fix).
+
+        ``is_tool_allowed`` resolves the per-(tool, permission_kind) row FIRST,
+        so writing the legacy NULL-kind row (``set_tool_overrides``) is a
+        silent no-op whenever a kind row exists — and every Agents &
+        permissions save creates those rows. Write the per-kind row for the
+        tool's required scope and clear any legacy NULL-kind row so the two
+        layers cannot disagree.
+        """
+        required_scope = self.get_tool_scope(agent_id, tool_name)
+        if required_scope in VALID_SCOPES:
+            self.set_tool_permission(user_id, agent_id, tool_name, required_scope, enabled)
+            self.db.execute(
+                """DELETE FROM tool_overrides
+                   WHERE user_id = ? AND agent_id = ? AND tool_name = ?
+                     AND permission_kind IS NULL""",
+                (user_id, agent_id, tool_name),
+            )
+        else:
+            # Unknown/legacy scope — the tool-wide row is all that exists.
+            self.set_tool_overrides(user_id, agent_id, {tool_name: enabled})
 
     # ── Per-Tool Permissions (Feature 013) ──────────────────────────────
 

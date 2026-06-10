@@ -26,12 +26,13 @@ TITLE = "Agents & permissions"
 # Permission-kind columns of the matrix — mirrors
 # ``orchestrator.tool_permissions.VALID_SCOPES`` (kept literal so the render
 # layer does not import orchestrator modules at import time).
-PERMISSION_KINDS = ("tools:read", "tools:write", "tools:search", "tools:system")
+PERMISSION_KINDS = ("tools:read", "tools:write", "tools:search", "tools:system", "tools:files")
 _KIND_LABELS = {
     "tools:read": "Read",
     "tools:write": "Write",
     "tools:search": "Search",
     "tools:system": "System",
+    "tools:files": "Files",
 }
 
 _BTN_PRIMARY = (
@@ -220,7 +221,7 @@ def _render_list(orch, user_id, tab: str) -> str:
 # Render — detail view
 # ---------------------------------------------------------------------------
 
-def _render_matrix(agent_id: str, tool_scope_map, per_tool, tool_descriptions) -> str:
+def _render_matrix(agent_id: str, tool_scope_map, per_tool, tool_descriptions, tab: str = "mine") -> str:
     """Per-tool permission matrix (rows = tools, columns = permission kinds).
 
     Only the kind that applies to a tool (its required scope) renders a
@@ -258,12 +259,12 @@ def _render_matrix(agent_id: str, tool_scope_map, per_tool, tool_descriptions) -
         body_rows.append(f'<tr class="border-t border-white/5">{"".join(cells)}</tr>')
     if not body_rows:
         rows_html = (
-            '<tr><td class="py-3 text-sm text-astral-muted" colspan="5">'
+            '<tr><td class="py-3 text-sm text-astral-muted" colspan="6">'
             "This agent exposes no tools.</td></tr>"
         )
     else:
         rows_html = "".join(body_rows)
-    save_pl = _payload({"agent_id": agent_id})
+    save_pl = _payload({"agent_id": agent_id, "tab": tab})
     return (
         f'<div class="astral-perms bg-white/5 border border-white/10 rounded-lg p-4" data-ui-form>'
         f'<h3 class="text-sm font-semibold text-astral-text mb-2">Tool permissions</h3>'
@@ -276,10 +277,10 @@ def _render_matrix(agent_id: str, tool_scope_map, per_tool, tool_descriptions) -
     )
 
 
-def _render_visibility(agent_id: str, is_public: bool) -> str:
+def _render_visibility(agent_id: str, is_public: bool, tab: str = "mine") -> str:
     state = "Public" if is_public else "Private"
     action_label = "Make private" if is_public else "Make public"
-    pl = _payload({"agent_id": agent_id, "is_public": not is_public})
+    pl = _payload({"agent_id": agent_id, "is_public": not is_public, "tab": tab})
     return (
         f'<div class="astral-visibility bg-white/5 border border-white/10 rounded-lg p-4 '
         f'flex items-center justify-between gap-3">'
@@ -291,10 +292,34 @@ def _render_visibility(agent_id: str, is_public: bool) -> str:
     )
 
 
-def _render_credentials(orch, user_id, agent_id: str, card) -> str:
+def _normalize_credential_entries(raw) -> "tuple[list, dict]":
+    """Normalize ``required_credentials`` declarations to (keys, labels).
+
+    Agents declare them either as plain strings or as dicts like
+    ``{"key": "MS_GRAPH_CLIENT_ID", "label": ..., "description": ...,
+    "required": bool, "type": ...}`` (the generated-agent shape). Anything
+    unrecognizable is skipped rather than crashing the surface.
+    """
+    keys, labels = [], {}
+    for entry in raw or []:
+        if isinstance(entry, dict):
+            key = str(entry.get("key") or entry.get("name") or "").strip()
+            if not key:
+                continue
+            keys.append(key)
+            label = entry.get("label") or entry.get("description")
+            if label:
+                labels[key] = str(label)
+        elif isinstance(entry, str) and entry.strip():
+            keys.append(entry.strip())
+    return keys, labels
+
+
+def _render_credentials(orch, user_id, agent_id: str, card, tab: str = "mine") -> str:
     keys = orch.credential_manager.list_credential_keys(user_id, agent_id)
     metadata = getattr(card, "metadata", None) or {}
-    required = metadata.get("required_credentials", []) or []
+    required, req_labels = _normalize_credential_entries(
+        metadata.get("required_credentials"))
     stored = set(keys)
     all_keys = list(dict.fromkeys(list(required) + sorted(stored)))
     parts = [
@@ -324,22 +349,23 @@ def _render_credentials(orch, user_id, agent_id: str, card) -> str:
                 placeholder = "Enter value"
             delete_btn = ""
             if is_stored:
-                del_pl = _payload({"agent_id": agent_id, "key": key})
+                del_pl = _payload({"agent_id": agent_id, "key": key, "tab": tab})
                 delete_btn = (
                     f'<button type="button" class="{_BTN_DANGER}" '
                     f'data-ui-action="chrome_credential_delete" '
                     f"data-ui-payload='{del_pl}'>Delete</button>"
                 )
+            label_attr = f' title="{esc(req_labels[key])}"' if key in req_labels else ""
             parts.append(
                 f'<div class="flex items-center gap-2">'
                 f'<div class="w-44 shrink-0 flex items-center gap-1.5">'
-                f'<span class="text-xs text-astral-text font-mono truncate">{esc(key)}</span>'
+                f'<span class="text-xs text-astral-text font-mono truncate"{label_attr}>{esc(key)}</span>'
                 f"{badge}</div>"
                 f'<input type="password" name="{esc(key)}" autocomplete="off" '
                 f'placeholder="{esc(placeholder)}" class="{_INPUT_CLS}">'
                 f"{delete_btn}</div>"
             )
-        save_pl = _payload({"agent_id": agent_id})
+        save_pl = _payload({"agent_id": agent_id, "tab": tab})
         parts.append(
             f'<div class="flex justify-end">'
             f'<button type="button" class="{_BTN_PRIMARY}" data-ui-action="chrome_credentials_save" '
@@ -383,10 +409,10 @@ def _render_detail(orch, user_id, agent_id: str, tab: str) -> str:
         f'{_enable_button(agent_id, enabled, {"detail": True, "tab": tab})}'
         f"{_back_button(tab)}</div></div>"
     )
-    sections = [header, _render_matrix(agent_id, tool_scope_map, per_tool, tool_descriptions)]
+    sections = [header, _render_matrix(agent_id, tool_scope_map, per_tool, tool_descriptions, tab)]
     if is_owner:
-        sections.append(_render_visibility(agent_id, bool(ownership.get("is_public", False))))
-    sections.append(_render_credentials(orch, user_id, agent_id, card))
+        sections.append(_render_visibility(agent_id, bool(ownership.get("is_public", False)), tab))
+    sections.append(_render_credentials(orch, user_id, agent_id, card, tab))
     return (
         f'<div class="astral-agent-detail space-y-4" data-agent-id="{esc(agent_id)}">'
         + "".join(sections)

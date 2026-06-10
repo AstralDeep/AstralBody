@@ -645,7 +645,9 @@ async def _handle_skill_toggle(orch, websocket, user_id, roles, payload):
             f"This skill needs the '{required_scope}' permission, which you haven't "
             "been granted.",
         ))
-    tp.set_tool_overrides(user_id, agent_id, {tool_name: enabled})
+    # 027 fix: write the per-(tool, kind) row that is_tool_allowed actually
+    # honors (the legacy NULL-kind row is outranked whenever a kind row exists).
+    tp.set_skill_enabled(user_id, agent_id, tool_name, enabled)
     verb = "Enabled" if enabled else "Disabled"
     await record_generic(
         claims=_claims(orch, websocket, user_id), event_class="skill",

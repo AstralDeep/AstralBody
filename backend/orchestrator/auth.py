@@ -21,6 +21,8 @@ from fastapi.responses import JSONResponse, FileResponse
 from jose import jwt as jose_jwt
 import shutil
 
+import shared  # noqa: F401 — normalizes USE_MOCK_AUTH/KEYCLOAK_* env aliases before the import-time read below
+
 logger = logging.getLogger("AuthProxy")
 
 if os.getenv("VITE_USE_MOCK_AUTH", "").lower() == "true":

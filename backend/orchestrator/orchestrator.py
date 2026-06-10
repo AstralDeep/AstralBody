@@ -5337,6 +5337,45 @@ COMPONENT UPDATE RULES:
 
         asyncio.create_task(_feedback_quality_loop())
 
+        # Feature 025 wiring (027 click-through finding): the scheduler loop
+        # was never instantiated anywhere, so cron jobs and "Run now" silently
+        # never dispatched. Start it here with the same stores the REST API uses.
+        try:
+            from orchestrator.offline_grant import OfflineGrantStore
+            from scheduler.loop import SchedulerLoop
+            from scheduler.runner import JobRunner
+            from scheduler.store import ScheduledJobStore
+            _job_store = ScheduledJobStore(self.history.db)
+            _job_runner = JobRunner(self, _job_store, OfflineGrantStore(self.history.db))
+            self._scheduler_loop = SchedulerLoop(_job_store, _job_runner, self.async_task_manager)
+            self._scheduler_loop.start()
+        except Exception:
+            logger.exception("scheduler loop failed to start (jobs will not dispatch)")
+
+        # Feature 027 (click-through finding): user-created agents that went
+        # live do not survive a restart — nothing relaunched them, leaving
+        # "My agents" empty and the original requests unservable. Relaunch
+        # every live generated agent without touching ownership or the user's
+        # saved scopes (align_scopes=False).
+        async def _relaunch_generated_agents():
+            await asyncio.sleep(5)  # let the static-fleet monitor settle first
+            try:
+                rows = self.history.db.fetch_all(
+                    "SELECT id, agent_name FROM draft_agents WHERE status = 'live'")
+            except Exception:
+                logger.exception("relaunch: could not list live generated agents")
+                return
+            for row in rows:
+                try:
+                    await self.lifecycle_manager.start_draft_agent(
+                        row["id"], align_scopes=False)
+                    logger.info("relaunch: %s (%s) restarted", row["agent_name"], row["id"])
+                except Exception as exc:
+                    logger.warning("relaunch: %s (%s) failed: %s",
+                                   row["agent_name"], row["id"], exc)
+
+        asyncio.create_task(_relaunch_generated_agents())
+
         # Import WebSocket protocol docs for OpenAPI description
         from orchestrator.models import WS_PROTOCOL_DOCS
 

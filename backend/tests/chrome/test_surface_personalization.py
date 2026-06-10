@@ -132,6 +132,12 @@ class FakeToolPermissions:
     def set_tool_overrides(self, user_id, agent_id, overrides):
         self.override_calls.append((user_id, agent_id, dict(overrides)))
 
+    def set_skill_enabled(self, user_id, agent_id, tool_name, enabled):
+        # 027 fix: the handler now writes the winning per-(tool, kind) row
+        # through this method instead of the outranked NULL-kind row.
+        self.skill_calls = getattr(self, "skill_calls", [])
+        self.skill_calls.append((user_id, agent_id, tool_name, enabled))
+
 
 class _Cursor:
     def __init__(self, rowcount):
@@ -421,8 +427,10 @@ def test_skill_toggle_disable_succeeds_and_records_override():
         surf._handle_skill_toggle, orch,
         {"agent_id": "helper", "tool_name": "search_docs", "enabled": False})
     assert "Disabled" in notice
-    assert orch.tool_permissions.override_calls == [
-        ("u1", "helper", {"search_docs": False})]
+    # 027 fix: must route through set_skill_enabled (per-kind row), NOT the
+    # legacy NULL-kind set_tool_overrides path that per-kind rows outrank.
+    assert orch.tool_permissions.skill_calls == [("u1", "helper", "search_docs", False)]
+    assert orch.tool_permissions.override_calls == []
 
 
 # ---------------------------------------------------------------------------
