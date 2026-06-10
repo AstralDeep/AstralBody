@@ -1744,6 +1744,18 @@ class Orchestrator:
                     if flags.is_enabled("live_streaming"):
                         await self._handle_stream_list(websocket)
 
+                else:
+                    # Feature 027: chrome/settings + agentic-creation actions
+                    # live in their own dispatcher. It returns False only for
+                    # actions outside its namespace — those were previously a
+                    # silent fall-through; log them so typos are diagnosable.
+                    from orchestrator.chrome_events import handle_chrome_event
+                    handled = await handle_chrome_event(
+                        self, websocket, str(msg.action or ""), msg.payload or {}, user_id
+                    )
+                    if not handled:
+                        logger.warning("Unhandled ui_event action: %r", msg.action)
+
         except Exception as e:
             import traceback
             logger.error(f"Error handling UI message: {e}\n{traceback.format_exc()}")
@@ -5364,7 +5376,18 @@ COMPONENT UPDATE RULES:
                 token = await self._shell_token_for_request(request)
             except Exception:
                 token = ""
-            return _HTMLResponse(shell.replace("%%ASTRAL_TOKEN%%", token or ""))
+            # Feature 027: render the static top bar + settings menu from the
+            # server session's roles (admin group absent for non-admins —
+            # FR-014 UX gating; handlers re-check server-side).
+            topbar = ""
+            try:
+                from orchestrator.web_auth import session_roles
+                from webrender.chrome import render_topbar
+                topbar = render_topbar(roles=session_roles(request))
+            except Exception:
+                logger.exception("chrome: topbar render failed — serving bare shell")
+            shell = shell.replace("%%ASTRAL_TOKEN%%", token or "")
+            return _HTMLResponse(shell.replace("%%ASTRAL_TOPBAR%%", topbar))
 
         app.mount("/static", StaticFiles(directory=_os.path.join(_webrender_dir, "static")), name="static")
 

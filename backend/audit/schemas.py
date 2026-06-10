@@ -57,6 +57,11 @@ EVENT_CLASSES = (
     "skill",             # skill (agent tool) enable/disable
     "schedule",          # scheduled-job lifecycle + each run
     "dreaming",          # background consolidation sweeps + toggles
+    # Feature 027 — agentic agent/tool creation. Action types:
+    # lifecycle.gap_detected / .auto_created / .self_test / .refined /
+    # .approved / .rejected / .discarded / .revision_applied /
+    # .revision_rolled_back — one correlation_id per capability gap.
+    "agent_lifecycle",
 )
 
 OUTCOMES = ("in_progress", "success", "failure", "interrupted")

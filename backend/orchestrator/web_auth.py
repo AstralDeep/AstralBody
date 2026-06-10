@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import logging
 import os
 import secrets
@@ -103,6 +104,33 @@ def session_token(request: Request) -> str:
         return "dev-token"
     sess = get_session(request)
     return (sess or {}).get("access_token", "") or ""
+
+
+def session_roles(request: Request) -> list:
+    """Feature 027 — roles for shell-render UX gating (settings menu groups).
+
+    Mock auth mirrors the WS/REST mock principal (admin + user). For real
+    sessions the roles are read from the access token's claims WITHOUT
+    signature verification — this gates only what the shell renders; every
+    admin action is still enforced server-side by the validated-JWT role
+    checks (Constitution VII / spec FR-014).
+    """
+    if _is_mock():
+        return ["admin", "user"]
+    sess = get_session(request)
+    token = (sess or {}).get("access_token", "") or ""
+    parts = token.split(".")
+    if len(parts) != 3:
+        return []
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+        roles = list(payload.get("realm_access", {}).get("roles", []) or [])
+        for client in (payload.get("resource_access", {}) or {}).values():
+            roles.extend(client.get("roles", []) or [])
+        return roles
+    except Exception:
+        logger.debug("web_auth: could not decode roles from session token", exc_info=True)
+        return []
 
 
 def _pkce_pair():
