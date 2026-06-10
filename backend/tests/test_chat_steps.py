@@ -260,3 +260,34 @@ class TestNoWebSocket:
         row = db.fetch_one("SELECT status FROM chat_steps WHERE id = ?", (step_id,))
         assert row is not None
         assert row["status"] == "in_progress"
+
+
+class TestLoggingDoesNotBreakLifecycle:
+    """Regression for the live-only stuck-step bug.
+
+    ``recorder.start`` logged with ``extra={..., "name": name}`` — but "name"
+    is a reserved LogRecord attribute, so once the logger is INFO-enabled
+    (as in the deployed container; pytest's WARNING default short-circuits
+    record creation and hid this) the logging call itself raised KeyError
+    *after* the row was persisted and the in-progress event emitted. Callers
+    caught the exception and got ``step_id=None``, so complete()/error() were
+    never invoked and every step stayed ``in_progress`` forever.
+    """
+
+    def test_full_lifecycle_with_info_logging_enabled(self, db, recorder):
+        import logging
+
+        steps_logger = logging.getLogger("Orchestrator.ChatSteps")
+        old_level = steps_logger.level
+        steps_logger.setLevel(logging.INFO)
+        try:
+            step_id = asyncio.run(recorder.start("tool_call", "get_cpu_info", {"q": 1}))
+            assert step_id is not None
+            asyncio.run(recorder.complete(step_id, {"ok": True}))
+            row = db.fetch_one(
+                "SELECT status, ended_at FROM chat_steps WHERE id = ?", (step_id,)
+            )
+            assert row["status"] == "completed"
+            assert row["ended_at"] is not None
+        finally:
+            steps_logger.setLevel(old_level)

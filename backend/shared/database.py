@@ -287,6 +287,20 @@ class Database:
             )
         ''')
 
+        # Feature 027 — agentic creation provenance on drafts. Additive,
+        # idempotent (Constitution IX); all columns nullable or defaulted so
+        # pre-027 code paths are unaffected. Rollback: redeploy prior image
+        # (columns ignored) or ALTER TABLE draft_agents DROP COLUMN <col>.
+        cursor.execute("ALTER TABLE draft_agents ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'manual'")
+        cursor.execute("ALTER TABLE draft_agents ADD COLUMN IF NOT EXISTS source_chat_id TEXT")
+        cursor.execute("ALTER TABLE draft_agents ADD COLUMN IF NOT EXISTS gap_fingerprint TEXT")
+        cursor.execute("ALTER TABLE draft_agents ADD COLUMN IF NOT EXISTS revises_agent_id TEXT")
+        cursor.execute("ALTER TABLE draft_agents ADD COLUMN IF NOT EXISTS self_test TEXT")
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_draft_gap "
+            "ON draft_agents (user_id, source_chat_id, gap_fingerprint)"
+        )
+
         # User attachments — chat-message file uploads, user-scoped (feature 002-file-uploads)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS user_attachments (
@@ -998,17 +1012,41 @@ class Database:
 
     def create_draft_agent(self, draft_id: str, user_id: str, agent_name: str,
                            agent_slug: str, description: str, tools_spec: str = None,
-                           skill_tags: str = None, packages: str = None) -> None:
-        """Create a new draft agent record."""
+                           skill_tags: str = None, packages: str = None,
+                           origin: str = "manual", source_chat_id: str = None,
+                           gap_fingerprint: str = None, revises_agent_id: str = None) -> None:
+        """Create a new draft agent record.
+
+        Feature 027: ``origin`` records the entry point (``manual`` |
+        ``auto_chat`` | ``revision``); ``source_chat_id`` + ``gap_fingerprint``
+        scope capability-gap dedup; ``revises_agent_id`` links a revision
+        draft to the live agent it stages changes for.
+        """
         import time
         now = int(time.time() * 1000)
         self.execute(
             """INSERT INTO draft_agents (id, user_id, agent_name, agent_slug, description,
-               tools_spec, skill_tags, packages, status, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)""",
+               tools_spec, skill_tags, packages, status, origin, source_chat_id,
+               gap_fingerprint, revises_agent_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)""",
             (draft_id, user_id, agent_name, agent_slug, description,
-             tools_spec, skill_tags, packages, now, now)
+             tools_spec, skill_tags, packages, origin, source_chat_id,
+             gap_fingerprint, revises_agent_id, now, now)
         )
+
+    def find_gap_draft(self, user_id: str, source_chat_id: str,
+                       gap_fingerprint: str) -> Optional[Dict]:
+        """Feature 027 (FR-007): the non-terminal draft already staged for a
+        capability gap, or None. Terminal = live (resolved) or deleted
+        (discarded); rejected drafts stay editable so they still count."""
+        row = self.fetch_one(
+            """SELECT * FROM draft_agents
+               WHERE user_id = ? AND source_chat_id = ? AND gap_fingerprint = ?
+                 AND status != 'live'
+               ORDER BY created_at DESC LIMIT 1""",
+            (user_id, source_chat_id, gap_fingerprint)
+        )
+        return dict(row) if row else None
 
     def get_draft_agent(self, draft_id: str) -> Optional[Dict]:
         """Get a draft agent by ID."""
