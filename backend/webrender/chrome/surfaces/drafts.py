@@ -97,7 +97,11 @@ def _detail(orch, user_id, draft, show_refine=False):
            if draft.get("error_message") else "")
         + (f'<div class="text-xs text-astral-muted mt-1">revises: {esc(draft.get("revises_agent_id") or "")}</div>'
            if draft.get("revises_agent_id") else "")
-        + _decision_row(draft)
+        # Live drafts are done — no approve/refine/discard (discarding a live
+        # row would orphan the running agent; 027 click-through finding).
+        + (_decision_row(draft) if status != "live"
+           else '<div class="text-xs text-green-400 mt-2">This draft was approved and is '
+                "live — manage it under Agents &amp; permissions.</div>")
         + "</div>",
     ]
     if show_refine:

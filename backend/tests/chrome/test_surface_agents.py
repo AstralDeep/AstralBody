@@ -491,3 +491,35 @@ def test_agent_enabled_unknown_agent():
         orch, None, "u1", ["user"], {"agent_id": "nope", "enabled": True}))
     assert "not found" in notice
     assert orch.history.db.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Regression: dict-shaped required_credentials (real generated-agent metadata)
+# ---------------------------------------------------------------------------
+
+def test_detail_renders_with_dict_shaped_required_credentials():
+    """Generated agents declare REQUIRED_CREDENTIALS as dicts with key/label/
+    description — the surface crashed on dict.fromkeys(unhashable). The
+    detail view must render, list the declared keys, and surface labels."""
+    orch = make_orch()
+    orch.agent_cards["alpha"].metadata = {"required_credentials": [
+        {"key": "MS_GRAPH_CLIENT_ID", "label": "Microsoft Graph Client ID",
+         "description": "OAuth 2.0 Client ID", "required": True, "type": "oauth_client_id"},
+        {"key": "MS_GRAPH_SECRET"},
+        "PLAIN_STRING_KEY",
+        {"label": "no key — skipped"},
+        42,
+    ]}
+    html = run(surface.render(orch, "u1", [], {"agent_id": "alpha"}))
+    assert "astral-chrome-error" not in html
+    assert "MS_GRAPH_CLIENT_ID" in html and "MS_GRAPH_SECRET" in html
+    assert "PLAIN_STRING_KEY" in html
+    assert 'title="Microsoft Graph Client ID"' in html
+
+
+def test_normalize_credential_entries_shapes():
+    keys, labels = surface._normalize_credential_entries(
+        [{"key": "A", "label": "Label A"}, "B", {"name": "C"}, {"x": 1}, None, 7])
+    assert keys == ["A", "B", "C"]
+    assert labels == {"A": "Label A"}
+    assert surface._normalize_credential_entries(None) == ([], {})

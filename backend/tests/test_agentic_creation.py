@@ -66,7 +66,7 @@ class FakeLifecycle:
         self.db.drafts[draft_id]["status"] = "generated"
         return dict(self.db.drafts[draft_id])
 
-    async def start_draft_agent(self, draft_id, websocket=None):
+    async def start_draft_agent(self, draft_id, websocket=None, align_scopes=True):
         self.calls.append(("start", draft_id))
         self.db.drafts[draft_id]["status"] = "testing"
         return dict(self.db.drafts[draft_id])
@@ -359,7 +359,7 @@ def _revision_fixture(tmp_path, gate_pass=True, start_raises=False):
     lc.validator = types.SimpleNamespace(
         validate=lambda code, slug, agents_dir: _Validation(gate_pass))
     if start_raises:
-        async def boom(draft_id, websocket=None):
+        async def boom(draft_id, websocket=None, align_scopes=True):
             lc.calls.append(("start", draft_id))
             if draft_id == "live1" and ("start", "live1") not in lc.calls[:-1]:
                 raise RuntimeError("restart failed")

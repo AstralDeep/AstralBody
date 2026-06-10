@@ -28,6 +28,8 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
+import shared  # noqa: F401 — normalizes USE_MOCK_AUTH/KEYCLOAK_* env aliases (post-VITE rename)
+
 logger = logging.getLogger("orchestrator.web_auth")
 
 web_auth_router = APIRouter()

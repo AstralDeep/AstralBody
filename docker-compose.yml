@@ -64,6 +64,11 @@ services:
       - ./backend/data:/app/backend/data
       - ./backend/tmp:/app/backend/tmp
       - ./backend/knowledge:/app/backend/knowledge
+      # Feature 027: user-created (generated) agents are written into
+      # backend/agents/<slug>/ at runtime — without this mount their code is
+      # wiped on every image rebuild, orphaning live DB rows. The host dir is
+      # the same content the image COPYs, so static agents are unaffected.
+      - ./backend/agents:/app/backend/agents
       # Mount host procfs/sysfs/rootfs so psutil reports real host metrics
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
