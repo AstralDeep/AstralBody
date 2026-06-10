@@ -353,7 +353,10 @@
   document.addEventListener("click", function (e) {
     var btn = e.target.closest && e.target.closest("#astral-settings-btn");
     if (btn) { setMenu(!menuOpen(), false); return; }
-    if (menuOpen() && !(e.target.closest && e.target.closest("#astral-settings-menu"))) setMenu(false, false);
+    // Tour-card clicks must not count as "outside" — the tour opens the menu
+    // to spotlight in-menu targets, and Next would otherwise close it again.
+    var inTour = e.target.closest && e.target.closest("#astral-tour-card");
+    if (menuOpen() && !inTour && !(e.target.closest && e.target.closest("#astral-settings-menu"))) setMenu(false, false);
     // modal close affordances: X button or backdrop click
     if (e.target.closest && e.target.closest(".astral-modal-close")) { closeModal(); return; }
     var backdrop = e.target.classList && e.target.classList.contains("astral-modal-backdrop");

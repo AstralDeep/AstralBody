@@ -180,6 +180,11 @@ def _summarize_outputs(outputs: List[Dict[str, Any]]) -> Dict[str, Any]:
             for comp in frame.get("components") or []:
                 if not isinstance(comp, dict):
                     continue
+                # Fallback tool attribution: tool-produced components carry
+                # _source_tool tags even when chat_step frames are absent.
+                src_tool = comp.get("_source_tool")
+                if src_tool and src_tool not in tools_called:
+                    tools_called.append(src_tool)
                 if comp.get("type") == "alert" and comp.get("variant") == "error":
                     error_messages.append(str(comp.get("message", ""))[:200])
                 else:

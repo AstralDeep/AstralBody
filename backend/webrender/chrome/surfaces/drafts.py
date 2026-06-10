@@ -20,9 +20,9 @@ logger = logging.getLogger("Orchestrator.Chrome")
 TITLE = "Drafts & creation"
 
 _ORIGIN_BADGES = {
-    "auto_chat": ("from chat", "bg-astral-primary/20 text-astral-primary"),
-    "revision": ("revision", "bg-astral-secondary/20 text-astral-secondary"),
-    "manual": ("manual", "bg-white/10 text-astral-muted"),
+    "auto_chat": ("from chat", "bg-astral-primary/40 text-white border border-astral-primary/50"),
+    "revision": ("revision", "bg-astral-secondary/40 text-white border border-astral-secondary/50"),
+    "manual": ("manual", "bg-white/10 text-astral-text border border-white/20"),
 }
 
 _TERMINAL_NOTE = {
