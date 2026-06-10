@@ -4,7 +4,14 @@ astralprims defines primitives + the structured representation; this package
 renders them into a client target's output (web HTML now); ROTE adapts per
 device upstream. New targets are added via :func:`register_target`.
 """
-from .renderer import render, render_one, esc, safe_url  # noqa: F401
+from .renderer import (  # noqa: F401
+    render,
+    render_one,
+    render_component_fragment,
+    render_workspace,
+    esc,
+    safe_url,
+)
 from .registry import (  # noqa: F401
     render_for_target,
     register_target,
@@ -16,6 +23,8 @@ from .registry import (  # noqa: F401
 __all__ = [
     "render",
     "render_one",
+    "render_component_fragment",
+    "render_workspace",
     "render_for_target",
     "register_target",
     "get_renderer",

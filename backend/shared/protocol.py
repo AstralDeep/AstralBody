@@ -36,6 +36,10 @@ class Message:
             return UIUpdate(**data)
         elif msg_type == 'ui_append':
             return UIAppend(**data)
+        elif msg_type == 'ui_upsert':
+            return UIUpsert(**data)
+        elif msg_type == 'auth_required':
+            return AuthRequired(**data)
         elif msg_type == 'register_agent':
             return RegisterAgent.from_json(json_str)
         elif msg_type == 'register_ui':
@@ -152,6 +156,34 @@ class UIAppend(Message):
     type: str = "ui_append"
     target_id: str = ""
     data: Any = None
+
+
+@dataclass
+class UIUpsert(Message):
+    """Feature 028 — partial workspace update (additive to the 026 contract).
+
+    Each op carries BOTH the ROTE-adapted structured component dict and the
+    web renderer's HTML projection of exactly that dict, mirroring the
+    ``ui_stream_data`` dual shape so non-web targets consume the structured
+    layer (026 FR-018). ``op`` is ``"upsert"`` (replace node by
+    ``data-component-id``, else append) or ``"remove"``.
+    """
+    type: str = "ui_upsert"
+    chat_id: str = ""
+    ops: List[Dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class AuthRequired(Message):
+    """Feature 028 — server→client auth recovery signal.
+
+    Replaces the dead-end in-chat error Alert on ``register_ui`` validation
+    failure. The client re-fetches ``/auth/session`` (which silently
+    refreshes server-side) and retries ``register_ui``; if the session is
+    truly gone it redirects to ``/auth/login?next=…``.
+    """
+    type: str = "auth_required"
+    reason: str = "invalid"  # "expired" | "invalid" | "hard_cap"
 
 @dataclass
 class ChromeRender(Message):
