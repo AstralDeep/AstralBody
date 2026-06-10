@@ -33,6 +33,16 @@ _BOLD = re.compile(r"\*\*([^*]+)\*\*|__([^_]+)__")
 _STRIKE = re.compile(r"~~([^~]+)~~")
 _EM = re.compile(r"(?<!\*)\*([^*]+)\*(?!\*)|(?<!_)_([^_]+)_(?!_)")
 
+# Block patterns (GFM subset).
+_HR = re.compile(r"^(-{3,}|\*{3,}|_{3,})$")
+_TABLE_SEP_CELL = re.compile(r"^:?-+:?$")
+_LIST_START = re.compile(r"^(?:[-*]|\d+\.)\s+")
+# A table body ends where any other block construct begins (GFM: tables break
+# at the start of another block-level structure).
+_TABLE_BODY_BREAK = re.compile(r"^(?:#{1,3}\s|>|```|(?:[-*]|\d+\.)\s)")
+# GFM's only mechanism for a literal "|" inside a cell is "\|".
+_UNESCAPED_PIPE = re.compile(r"(?<!\\)\|")
+
 
 def inline_md(text: Any) -> str:
     """Render a small set of inline markdown on escaped text:
@@ -53,10 +63,71 @@ def inline_md(text: Any) -> str:
     return s
 
 
+def _split_table_row(line: str) -> list[str]:
+    """Split a GFM pipe-table row into trimmed cell strings (honoring \\|)."""
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|") and not s.endswith("\\|"):
+        s = s[:-1]
+    return [c.strip().replace("\\|", "|") for c in _UNESCAPED_PIPE.split(s)]
+
+
+def _table_aligns(sep_line: str, n_cols: int):
+    """Parse a GFM table delimiter row into per-column alignments.
+
+    Returns a list like ``["left", "center", "right"]`` when ``sep_line`` is a
+    valid delimiter row with exactly ``n_cols`` cells, else None (the caller
+    falls back to paragraph handling). A delimiter row must contain a pipe —
+    a bare dashes line is a thematic break (or setext underline), never a
+    table delimiter.
+    """
+    if "|" not in sep_line:
+        return None
+    cells = _split_table_row(sep_line)
+    if len(cells) != n_cols:
+        return None
+    aligns = []
+    for cell in cells:
+        if not _TABLE_SEP_CELL.match(cell):
+            return None
+        if cell.startswith(":") and cell.endswith(":"):
+            aligns.append("center")
+        elif cell.endswith(":"):
+            aligns.append("right")
+        else:
+            aligns.append("left")
+    return aligns
+
+
+def _render_md_table(headers: list[str], aligns: list[str], rows: list[list[str]]) -> str:
+    """Emit a styled table; every cell goes through ``inline_md`` (escaped)."""
+    align_cls = {"left": "text-left", "center": "text-center", "right": "text-right"}
+    ths = "".join(
+        f'<th class="px-3 py-2 {align_cls[a]} text-xs font-semibold uppercase '
+        f'tracking-wider text-astral-muted whitespace-nowrap">{inline_md(h)}</th>'
+        for h, a in zip(headers, aligns)
+    )
+    trs = []
+    for row in rows:
+        cells = list(row[: len(headers)]) + [""] * (len(headers) - len(row))
+        tds = "".join(
+            f'<td class="px-3 py-2 {align_cls[a]} text-astral-text align-top">{inline_md(c)}</td>'
+            for c, a in zip(cells, aligns)
+        )
+        trs.append(f'<tr class="border-t border-white/5">{tds}</tr>')
+    return (
+        '<div class="my-2 overflow-x-auto rounded-lg border border-white/10">'
+        f'<table class="w-full text-sm"><thead class="bg-white/5"><tr>{ths}</tr></thead>'
+        f'<tbody>{"".join(trs)}</tbody></table></div>'
+    )
+
+
 def block_md(text: Any) -> str:
     """Render a compact, safe subset of block markdown: fenced code blocks,
-    ATX headings, unordered/ordered lists, blockquotes, and paragraphs with
-    inline markdown. Escape-by-default throughout."""
+    ATX headings, unordered/ordered lists, blockquotes, pipe tables,
+    horizontal rules, and paragraphs with inline markdown.
+    Escape-by-default throughout."""
     if text is None or text == "":
         return ""
     src = str(text).replace("\r\n", "\n").replace("\r", "\n")
@@ -114,6 +185,31 @@ def block_md(text: Any) -> str:
                 i += 1
             inner = "<br>".join(inline_md(q) for q in quote_lines)
             out.append(f'<blockquote class="border-l-2 border-astral-primary/40 pl-3 text-astral-text/80 my-2">{inner}</blockquote>')
+            continue
+
+        # pipe table: header row + delimiter row (|---|:--:|...) with the
+        # same cell count, then body rows until a blank line, a pipe-less
+        # line, or the start of another block construct. A list-marker line
+        # can never open a table (the list wins, as in GFM).
+        if "|" in stripped and i + 1 < n and not _LIST_START.match(stripped):
+            headers = _split_table_row(stripped)
+            aligns = _table_aligns(lines[i + 1].strip(), len(headers))
+            if aligns is not None:
+                flush_para(para)
+                i += 2
+                rows = []
+                while (i < n and "|" in lines[i] and lines[i].strip()
+                       and not _TABLE_BODY_BREAK.match(lines[i].strip())):
+                    rows.append(_split_table_row(lines[i]))
+                    i += 1
+                out.append(_render_md_table(headers, aligns, rows))
+                continue
+
+        # horizontal rule
+        if _HR.match(stripped):
+            flush_para(para)
+            out.append('<hr class="border-white/10 my-3">')
+            i += 1
             continue
 
         # lists

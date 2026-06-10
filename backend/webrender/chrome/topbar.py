@@ -95,8 +95,8 @@ def render_topbar(roles=None) -> str:
     return (
         '<div class="flex items-center justify-between px-4 py-3 w-full">'
         '<div class="flex items-center gap-2" data-tour-target="topbar.brand">'
-        '<span class="w-2 h-5 rounded-full bg-astral-primary inline-block"></span>'
-        '<span class="text-base font-semibold">AstralBody</span></div>'
+        '<img src="/static/img/AstralDeep.png" alt="AstralDeep" '
+        'class="h-8 w-auto select-none" draggable="false"></div>'
         '<div class="flex items-center gap-3">'
         '<span id="astral-status" class="text-xs text-astral-muted" role="status"></span>'
         '<div class="relative" id="astral-settings">'
