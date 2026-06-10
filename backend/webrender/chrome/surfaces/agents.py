@@ -1,0 +1,631 @@
+"""Feature 027 — T012: Agents & permissions settings surface.
+
+List view (tabs ``mine`` | ``public`` + a Drafts tab that opens the
+``drafts`` surface) and per-agent detail view (per-tool permission matrix,
+visibility toggle, credentials, per-user enable/disable). Render + handlers
+call the SAME internals the REST routes in ``backend/orchestrator/api.py``
+use (``GET /api/agents``, ``GET/PUT /api/agents/{id}/permissions``,
+``PUT /api/agents/{id}/visibility``, the credentials routes and
+``PUT /api/users/me/agent-enabled``) — never HTTP-to-self.
+
+Tab semantics follow Feature 013 (``agentTabFilters``): *mine* = agents whose
+``owner_email`` equals the user's email; *public* = ``is_public`` agents;
+owned-and-public agents appear in both tabs.
+
+Every dynamic interpolation goes through ``esc()`` (escape-by-default).
+"""
+import json
+import logging
+
+from webrender.chrome import esc, notice_block
+
+logger = logging.getLogger("Orchestrator.Chrome.Agents")
+
+TITLE = "Agents & permissions"
+
+# Permission-kind columns of the matrix — mirrors
+# ``orchestrator.tool_permissions.VALID_SCOPES`` (kept literal so the render
+# layer does not import orchestrator modules at import time).
+PERMISSION_KINDS = ("tools:read", "tools:write", "tools:search", "tools:system")
+_KIND_LABELS = {
+    "tools:read": "Read",
+    "tools:write": "Write",
+    "tools:search": "Search",
+    "tools:system": "System",
+}
+
+_BTN_PRIMARY = (
+    "px-3 py-1.5 rounded-lg text-xs font-medium bg-astral-primary/20 "
+    "text-astral-primary border border-astral-primary/30 hover:bg-astral-primary/30"
+)
+_BTN_GHOST = (
+    "px-3 py-1.5 rounded-lg text-xs font-medium bg-white/5 text-astral-text "
+    "border border-white/10 hover:bg-white/10"
+)
+_BTN_DANGER = (
+    "px-2.5 py-1 rounded-lg text-xs font-medium bg-red-500/10 text-red-400 "
+    "border border-red-500/20 hover:bg-red-500/20"
+)
+_INPUT_CLS = (
+    "w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm "
+    "text-astral-text placeholder:text-astral-muted focus:outline-none "
+    "focus:border-astral-primary/50"
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _payload(data) -> str:
+    """JSON-encode an action payload and escape it for an HTML attribute."""
+    return esc(json.dumps(data))
+
+
+def _user_email(orch, user_id) -> str:
+    """Resolve the user's email (owner checks mirror the REST JWT email).
+
+    The REST visibility route compares against the JWT ``email`` claim; the
+    chrome dispatcher hands us ``user_id``, so we read the profile the
+    orchestrator upserts from those same claims (``users`` table). Falls back
+    to ``user_id`` itself when it is email-shaped (mock-auth mode).
+    """
+    email = ""
+    try:
+        user = orch.history.db.get_user(user_id)
+        email = (user or {}).get("email") or ""
+    except Exception:  # pragma: no cover — defensive: profile lookup only
+        logger.exception("chrome agents: user profile lookup failed for %s", user_id)
+    if not email and "@" in str(user_id or ""):
+        email = str(user_id)
+    return email
+
+
+def _snippet(text, limit: int = 110) -> str:
+    """Single-line description snippet, ellipsised past ``limit`` chars."""
+    flat = " ".join(str(text or "").split())
+    if len(flat) <= limit:
+        return flat
+    return flat[: limit - 1].rstrip() + "…"
+
+
+def _agent_rows(orch, user_id):
+    """Agent dicts mirroring ``GET /api/agents`` (api.py ``list_agents``)."""
+    db = orch.history.db
+    ownership_map = {o["agent_id"]: o for o in db.get_all_agent_ownership()}
+    disabled_set = set(db.get_user_disabled_agents(user_id))
+    rows = []
+    for agent_id, card in orch.agent_cards.items():
+        if orch._is_draft_agent(agent_id):
+            continue  # hide non-live drafts (same rule as list_agents)
+        ownership = ownership_map.get(agent_id, {})
+        rows.append({
+            "id": agent_id,
+            "name": card.name,
+            "description": card.description,
+            "owner_email": ownership.get("owner_email"),
+            "is_public": bool(ownership.get("is_public", False)),
+            "disabled": agent_id in disabled_set,
+        })
+    return rows
+
+
+def _back_button(tab: str) -> str:
+    pl = _payload({"surface": "agents", "params": {"tab": tab}})
+    return (
+        f'<button type="button" class="{_BTN_GHOST}" data-ui-action="chrome_open" '
+        f"data-ui-payload='{pl}'>&larr; Back to agents</button>"
+    )
+
+
+def _enable_button(agent_id: str, enabled: bool, extra: dict) -> str:
+    """Per-user enable/disable toggle → ``chrome_agent_enabled``."""
+    data = {"agent_id": agent_id, "enabled": not enabled}
+    data.update(extra)
+    label = "Disable" if enabled else "Enable"
+    cls = _BTN_GHOST if enabled else _BTN_PRIMARY
+    return (
+        f'<button type="button" class="astral-agent-enable {cls}" '
+        f'data-ui-action="chrome_agent_enabled" '
+        f"data-ui-payload='{_payload(data)}'>{esc(label)}</button>"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Render — list view
+# ---------------------------------------------------------------------------
+
+def _render_tabs(tab: str) -> str:
+    parts = ['<div class="flex items-center gap-1.5" role="tablist">']
+    for key, label in (("mine", "My agents"), ("public", "Public")):
+        active = key == tab
+        cls = _BTN_PRIMARY if active else _BTN_GHOST
+        pl = _payload({"surface": "agents", "params": {"tab": key}})
+        sel = "true" if active else "false"
+        parts.append(
+            f'<button type="button" role="tab" aria-selected="{sel}" class="{cls}" '
+            f"data-ui-action=\"chrome_open\" data-ui-payload='{pl}'>{esc(label)}</button>"
+        )
+    drafts_pl = _payload({"surface": "drafts", "params": {}})
+    parts.append(
+        f'<button type="button" role="tab" aria-selected="false" class="{_BTN_GHOST}" '
+        f"data-ui-action=\"chrome_open\" data-ui-payload='{drafts_pl}'>Drafts</button>"
+    )
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def _render_agent_row(agent: dict, tab: str, user_email: str) -> str:
+    agent_id = agent["id"]
+    badges = []
+    if user_email and agent.get("owner_email") == user_email:
+        badges.append(
+            '<span class="px-1.5 py-0.5 rounded text-[10px] font-medium '
+            'bg-astral-primary/15 text-astral-primary border border-astral-primary/25">Yours</span>'
+        )
+    if agent.get("is_public"):
+        badges.append(
+            '<span class="px-1.5 py-0.5 rounded text-[10px] font-medium '
+            'bg-white/5 text-astral-muted border border-white/10">Public</span>'
+        )
+    if agent.get("disabled"):
+        badges.append(
+            '<span class="px-1.5 py-0.5 rounded text-[10px] font-medium '
+            'bg-yellow-500/10 text-yellow-400 border border-yellow-500/20">Disabled by you</span>'
+        )
+    open_pl = _payload({"surface": "agents", "params": {"agent_id": agent_id, "tab": tab}})
+    status = (
+        '<span class="flex items-center gap-1.5 text-xs text-astral-muted">'
+        '<span class="w-1.5 h-1.5 rounded-full bg-green-400 inline-block"></span>'
+        "Connected</span>"
+    )
+    return (
+        f'<div class="astral-agent-row bg-white/5 border border-white/10 rounded-lg p-3 '
+        f'flex items-center justify-between gap-3" data-agent-id="{esc(agent_id)}">'
+        f'<button type="button" class="text-left flex-1 min-w-0 group" '
+        f"data-ui-action=\"chrome_open\" data-ui-payload='{open_pl}'>"
+        f'<div class="flex items-center gap-2 flex-wrap">'
+        f'<span class="text-sm font-medium text-astral-text group-hover:text-astral-primary">'
+        f'{esc(agent["name"])}</span>{"".join(badges)}</div>'
+        f'<div class="text-xs text-astral-muted mt-0.5">{esc(_snippet(agent.get("description")))}</div>'
+        f"</button>"
+        f'<div class="flex items-center gap-2 shrink-0">{status}'
+        f'{_enable_button(agent_id, not agent.get("disabled", False), {"tab": tab})}'
+        f"</div></div>"
+    )
+
+
+def _render_list(orch, user_id, tab: str) -> str:
+    user_email = _user_email(orch, user_id)
+    rows = _agent_rows(orch, user_id)
+    if tab == "public":
+        visible = [a for a in rows if a["is_public"]]
+        empty_msg = "No public agents are available."
+    else:
+        tab = "mine"
+        visible = [a for a in rows if user_email and a.get("owner_email") == user_email]
+        empty_msg = "You don't own any agents yet. Create one from the Drafts tab or from chat."
+    if visible:
+        body = "".join(_render_agent_row(a, tab, user_email) for a in visible)
+    else:
+        body = f'<div class="text-sm text-astral-muted py-6 text-center">{esc(empty_msg)}</div>'
+    return (
+        f'<div class="astral-agents-list space-y-3" data-tab="{esc(tab)}">'
+        f"{_render_tabs(tab)}"
+        f'<div class="space-y-2">{body}</div></div>'
+    )
+
+
+# ---------------------------------------------------------------------------
+# Render — detail view
+# ---------------------------------------------------------------------------
+
+def _render_matrix(agent_id: str, tool_scope_map, per_tool, tool_descriptions) -> str:
+    """Per-tool permission matrix (rows = tools, columns = permission kinds).
+
+    Only the kind that applies to a tool (its required scope) renders a
+    checkbox named ``<tool>::<kind>``; other cells are inert dashes, so the
+    collected fields always validate against the PUT-permissions rules.
+    """
+    head_cells = ['<th class="text-left text-xs font-medium text-astral-muted py-2 pr-3">Tool</th>']
+    for kind in PERMISSION_KINDS:
+        head_cells.append(
+            f'<th class="text-center text-xs font-medium text-astral-muted py-2 px-2">'
+            f"{esc(_KIND_LABELS[kind])}</th>"
+        )
+    body_rows = []
+    for tool_name in sorted(tool_scope_map):
+        required = tool_scope_map[tool_name]
+        desc = tool_descriptions.get(tool_name, "")
+        cells = [
+            f'<td class="py-2 pr-3"><div class="text-sm text-astral-text">{esc(tool_name)}</div>'
+            f'<div class="text-xs text-astral-muted">{esc(_snippet(desc, 90))}</div></td>'
+        ]
+        for kind in PERMISSION_KINDS:
+            if kind == required:
+                enabled = bool(per_tool.get(tool_name, {}).get(kind, False))
+                checked = " checked" if enabled else ""
+                field = f"{tool_name}::{kind}"
+                cells.append(
+                    f'<td class="text-center px-2"><input type="checkbox" name="{esc(field)}"'
+                    f'{checked} class="w-4 h-4 accent-astral-primary align-middle" '
+                    f'aria-label="{esc(tool_name)} {esc(_KIND_LABELS[kind])}"></td>'
+                )
+            else:
+                cells.append(
+                    '<td class="text-center px-2 text-astral-muted/40" aria-hidden="true">&mdash;</td>'
+                )
+        body_rows.append(f'<tr class="border-t border-white/5">{"".join(cells)}</tr>')
+    if not body_rows:
+        rows_html = (
+            '<tr><td class="py-3 text-sm text-astral-muted" colspan="5">'
+            "This agent exposes no tools.</td></tr>"
+        )
+    else:
+        rows_html = "".join(body_rows)
+    save_pl = _payload({"agent_id": agent_id})
+    return (
+        f'<div class="astral-perms bg-white/5 border border-white/10 rounded-lg p-4" data-ui-form>'
+        f'<h3 class="text-sm font-semibold text-astral-text mb-2">Tool permissions</h3>'
+        f'<table class="w-full text-sm"><thead><tr>{"".join(head_cells)}</tr></thead>'
+        f"<tbody>{rows_html}</tbody></table>"
+        f'<div class="mt-3 flex justify-end">'
+        f'<button type="button" class="{_BTN_PRIMARY}" data-ui-action="chrome_perms_save" '
+        f"data-ui-collect=\"true\" data-ui-payload='{save_pl}'>Save permissions</button>"
+        f"</div></div>"
+    )
+
+
+def _render_visibility(agent_id: str, is_public: bool) -> str:
+    state = "Public" if is_public else "Private"
+    action_label = "Make private" if is_public else "Make public"
+    pl = _payload({"agent_id": agent_id, "is_public": not is_public})
+    return (
+        f'<div class="astral-visibility bg-white/5 border border-white/10 rounded-lg p-4 '
+        f'flex items-center justify-between gap-3">'
+        f'<div><h3 class="text-sm font-semibold text-astral-text">Visibility</h3>'
+        f'<div class="text-xs text-astral-muted mt-0.5">This agent is currently '
+        f"<span class=\"text-astral-text\">{esc(state.lower())}</span>.</div></div>"
+        f'<button type="button" class="{_BTN_GHOST}" data-ui-action="chrome_visibility_set" '
+        f"data-ui-payload='{pl}'>{esc(action_label)}</button></div>"
+    )
+
+
+def _render_credentials(orch, user_id, agent_id: str, card) -> str:
+    keys = orch.credential_manager.list_credential_keys(user_id, agent_id)
+    metadata = getattr(card, "metadata", None) or {}
+    required = metadata.get("required_credentials", []) or []
+    stored = set(keys)
+    all_keys = list(dict.fromkeys(list(required) + sorted(stored)))
+    parts = [
+        '<div class="astral-credentials bg-white/5 border border-white/10 rounded-lg p-4 space-y-3">',
+        '<h3 class="text-sm font-semibold text-astral-text">Credentials</h3>',
+    ]
+    if not all_keys:
+        parts.append(
+            '<div class="text-xs text-astral-muted">This agent declares no credential '
+            "requirements and has no stored credentials.</div>"
+        )
+    else:
+        parts.append("<div data-ui-form class=\"space-y-2\">")
+        for key in all_keys:
+            is_stored = key in stored
+            if is_stored:
+                badge = (
+                    '<span class="px-1.5 py-0.5 rounded text-[10px] font-medium '
+                    'bg-green-500/10 text-green-400 border border-green-500/20">Stored</span>'
+                )
+                placeholder = "Stored — enter a new value to replace"
+            else:
+                badge = (
+                    '<span class="px-1.5 py-0.5 rounded text-[10px] font-medium '
+                    'bg-yellow-500/10 text-yellow-400 border border-yellow-500/20">Required</span>'
+                )
+                placeholder = "Enter value"
+            delete_btn = ""
+            if is_stored:
+                del_pl = _payload({"agent_id": agent_id, "key": key})
+                delete_btn = (
+                    f'<button type="button" class="{_BTN_DANGER}" '
+                    f'data-ui-action="chrome_credential_delete" '
+                    f"data-ui-payload='{del_pl}'>Delete</button>"
+                )
+            parts.append(
+                f'<div class="flex items-center gap-2">'
+                f'<div class="w-44 shrink-0 flex items-center gap-1.5">'
+                f'<span class="text-xs text-astral-text font-mono truncate">{esc(key)}</span>'
+                f"{badge}</div>"
+                f'<input type="password" name="{esc(key)}" autocomplete="off" '
+                f'placeholder="{esc(placeholder)}" class="{_INPUT_CLS}">'
+                f"{delete_btn}</div>"
+            )
+        save_pl = _payload({"agent_id": agent_id})
+        parts.append(
+            f'<div class="flex justify-end">'
+            f'<button type="button" class="{_BTN_PRIMARY}" data-ui-action="chrome_credentials_save" '
+            f"data-ui-collect=\"true\" data-ui-payload='{save_pl}'>Save credentials</button></div>"
+        )
+        parts.append("</div>")
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def _render_detail(orch, user_id, agent_id: str, tab: str) -> str:
+    card = orch.agent_cards.get(agent_id)
+    if not card:
+        return (
+            notice_block("error", f"Agent '{agent_id}' not found.")
+            + f'<div class="pt-2">{_back_button(tab)}</div>'
+        )
+    # FR-015 lazy backfill — same call the GET-permissions route makes.
+    try:
+        orch.tool_permissions.backfill_per_tool_rows(user_id, agent_id)
+    except Exception as e:  # pragma: no cover — defensive logging only
+        logger.warning(
+            "Per-tool backfill failed for user=%s agent=%s: %s", user_id, agent_id, e
+        )
+    tool_scope_map = orch.tool_permissions.get_tool_scope_map(agent_id)
+    per_tool = orch.tool_permissions.get_effective_tool_permissions(user_id, agent_id)
+    tool_descriptions = {s.id: s.description for s in card.skills}
+
+    db = orch.history.db
+    ownership = db.get_agent_ownership(agent_id) or {}
+    user_email = _user_email(orch, user_id)
+    is_owner = bool(user_email) and ownership.get("owner_email") == user_email
+    enabled = not db.is_user_agent_disabled(user_id, agent_id)
+
+    header = (
+        f'<div class="flex items-start justify-between gap-3">'
+        f'<div class="min-w-0"><h3 class="text-base font-semibold text-astral-text">'
+        f"{esc(card.name)}</h3>"
+        f'<div class="text-xs text-astral-muted mt-0.5">{esc(card.description)}</div></div>'
+        f'<div class="flex items-center gap-2 shrink-0">'
+        f'{_enable_button(agent_id, enabled, {"detail": True, "tab": tab})}'
+        f"{_back_button(tab)}</div></div>"
+    )
+    sections = [header, _render_matrix(agent_id, tool_scope_map, per_tool, tool_descriptions)]
+    if is_owner:
+        sections.append(_render_visibility(agent_id, bool(ownership.get("is_public", False))))
+    sections.append(_render_credentials(orch, user_id, agent_id, card))
+    return (
+        f'<div class="astral-agent-detail space-y-4" data-agent-id="{esc(agent_id)}">'
+        + "".join(sections)
+        + "</div>"
+    )
+
+
+async def render(orch, user_id, roles, params) -> str:
+    """Render the Agents & permissions surface body (list or detail view).
+
+    Args:
+        orch: The orchestrator instance (service internals).
+        user_id: The requesting user's id.
+        roles: The session roles (unused — surface is available to all users).
+        params: ``{tab?: "mine"|"public", agent_id?: str}``.
+
+    Returns:
+        Body HTML for the chrome modal (escape-by-default).
+    """
+    params = params or {}
+    tab = str(params.get("tab") or "mine")
+    if tab not in ("mine", "public"):
+        tab = "mine"
+    agent_id = params.get("agent_id")
+    if agent_id:
+        return _render_detail(orch, user_id, str(agent_id), tab)
+    return _render_list(orch, user_id, tab)
+
+
+# ---------------------------------------------------------------------------
+# Handlers (explicit save → re-render with notice; FR-016)
+# ---------------------------------------------------------------------------
+
+def _detail_params(agent_id: str, payload) -> dict:
+    tab = str((payload or {}).get("tab") or "mine")
+    if tab not in ("mine", "public"):
+        tab = "mine"
+    return {"agent_id": agent_id, "tab": tab}
+
+
+def _list_params(payload) -> dict:
+    tab = str((payload or {}).get("tab") or "mine")
+    if tab not in ("mine", "public"):
+        tab = "mine"
+    return {"tab": tab}
+
+
+async def handle_perms_save(orch, websocket, user_id, roles, payload):
+    """``chrome_perms_save {agent_id, fields}`` → PUT-permissions internals.
+
+    ``fields`` arrive as ``{"<tool>::<kind>": bool}`` from the matrix form
+    and are translated to the ``per_tool_permissions`` shape
+    (``{tool: {kind: bool}}``) the REST route builds, with the same
+    validate-whole-payload-then-write semantics (FR-014: any (tool, kind)
+    mismatch rejects everything so no half-applied state).
+    """
+    payload = payload or {}
+    agent_id = str(payload.get("agent_id") or "")
+    card = orch.agent_cards.get(agent_id)
+    if not card:
+        return ("agents", _list_params(payload),
+                notice_block("error", f"Agent '{agent_id}' not found."))
+    params = _detail_params(agent_id, payload)
+    fields = payload.get("fields") or {}
+    per_tool_permissions = {}
+    for name, value in fields.items():
+        if "::" not in str(name):
+            continue  # not a matrix checkbox
+        tool_name, kind = str(name).split("::", 1)
+        per_tool_permissions.setdefault(tool_name, {})[kind] = bool(value)
+    if not per_tool_permissions:
+        return ("agents", params, notice_block("error", "No permission changes submitted."))
+
+    tool_scope_map = orch.tool_permissions.get_tool_scope_map(agent_id)
+    # Validate every (tool, kind) pair before writing anything (api.py rules).
+    for tool_name, kind_map in per_tool_permissions.items():
+        required = tool_scope_map.get(tool_name)
+        if required is None:
+            return ("agents", params, notice_block(
+                "error", f"Tool '{tool_name}' is not registered for agent '{agent_id}'."
+            ))
+        for kind in kind_map:
+            if kind != required:
+                return ("agents", params, notice_block(
+                    "error",
+                    f"Permission kind '{kind}' does not apply to tool "
+                    f"'{tool_name}' (required: '{required}').",
+                ))
+    for tool_name, kind_map in per_tool_permissions.items():
+        for kind, enabled in kind_map.items():
+            orch.tool_permissions.set_tool_permission(
+                user_id, agent_id, tool_name, kind, bool(enabled)
+            )
+    # Mirror up to the agent_scopes layer (legacy filter path stays coherent —
+    # identical derivation to the PUT route).
+    scope_state = orch.tool_permissions.get_agent_scopes(user_id, agent_id)
+    derived = {**scope_state}
+    per_tool = orch.tool_permissions.get_effective_tool_permissions(user_id, agent_id)
+    for tool_name, kind_map in per_tool.items():
+        for kind, enabled in kind_map.items():
+            if enabled:
+                derived[kind] = True
+    orch.tool_permissions.set_agent_scopes(user_id, agent_id, derived)
+    logger.info(
+        "Agent permissions updated: user=%s agent=%s shape=per_tool tools_changed=%d",
+        user_id, agent_id, len(per_tool_permissions),
+    )
+    return ("agents", params, notice_block("success", "Permissions saved."))
+
+
+async def handle_visibility_set(orch, websocket, user_id, roles, payload):
+    """``chrome_visibility_set {agent_id, is_public}`` — owner-only toggle."""
+    payload = payload or {}
+    agent_id = str(payload.get("agent_id") or "")
+    params = _detail_params(agent_id, payload)
+    db = orch.history.db
+    ownership = db.get_agent_ownership(agent_id)
+    if not ownership:
+        return ("agents", params, notice_block(
+            "error", f"No ownership record for agent '{agent_id}'."
+        ))
+    user_email = _user_email(orch, user_id)
+    if not user_email or ownership.get("owner_email") != user_email:
+        return ("agents", params, notice_block(
+            "error", "Only the agent owner can change visibility."
+        ))
+    is_public = bool(payload.get("is_public"))
+    db.set_agent_visibility(agent_id, is_public)
+    state = "public" if is_public else "private"
+    return ("agents", params, notice_block("success", f"Agent is now {state}."))
+
+
+async def handle_credentials_save(orch, websocket, user_id, roles, payload):
+    """``chrome_credentials_save {agent_id, fields}`` → credentials internals.
+
+    Blank fields are skipped (passwords render empty; an empty submit must
+    not wipe stored values). After saving, runs the same save-time
+    ``_credentials_check`` probe as the PUT-credentials route when the agent
+    exposes one, and reports the verdict in the notice (FR-008 semantics).
+    """
+    payload = payload or {}
+    agent_id = str(payload.get("agent_id") or "")
+    card = orch.agent_cards.get(agent_id)
+    if not card:
+        return ("agents", _list_params(payload),
+                notice_block("error", f"Agent '{agent_id}' not found."))
+    params = _detail_params(agent_id, payload)
+    fields = payload.get("fields") or {}
+    credentials = {
+        str(k): str(v) for k, v in fields.items()
+        if isinstance(v, str) and v.strip()
+    }
+    if not credentials:
+        return ("agents", params, notice_block("error", "No credential values entered."))
+    orch.credential_manager.set_bulk_credentials(user_id, agent_id, credentials)
+
+    # Save-time credential probe (FR-008) — mirrors set_agent_credentials.
+    verdict_note = ""
+    kind = "success"
+    skill_names = {getattr(s, "name", None) for s in getattr(card, "skills", [])}
+    if "_credentials_check" in skill_names:
+        verdict = "unreachable"
+        detail = None
+        try:
+            creds = orch.credential_manager.get_agent_credentials_encrypted(user_id, agent_id)
+            args = {}
+            if creds:
+                args["_credentials"] = creds
+                args["_credentials_encrypted"] = True
+            mcp_resp = await orch._dispatch_tool_call(
+                agent_id=agent_id,
+                tool_name="_credentials_check",
+                args=args,
+                timeout=5.0,
+                ui_websocket=None,
+            )
+            if mcp_resp is None:
+                verdict, detail = "unreachable", "no response from agent"
+            elif mcp_resp.error:
+                verdict, detail = "unreachable", mcp_resp.error.get("message")
+            elif isinstance(mcp_resp.result, dict):
+                verdict = mcp_resp.result.get("credential_test", "unexpected")
+                detail = mcp_resp.result.get("detail")
+        except Exception as e:
+            # A failed probe must not block the credential save.
+            verdict, detail = "unreachable", f"Credential probe failed: {e}"
+        verdict_note = f" Connection test: {verdict}."
+        if detail:
+            verdict_note = f" Connection test: {verdict} — {detail}"
+        if verdict != "success":
+            kind = "info"
+    saved = len(credentials)
+    plural = "s" if saved != 1 else ""
+    return ("agents", params, notice_block(
+        kind, f"Saved {saved} credential{plural}.{verdict_note}"
+    ))
+
+
+async def handle_credential_delete(orch, websocket, user_id, roles, payload):
+    """``chrome_credential_delete {agent_id, key}`` → delete-credential internals."""
+    payload = payload or {}
+    agent_id = str(payload.get("agent_id") or "")
+    card = orch.agent_cards.get(agent_id)
+    if not card:
+        return ("agents", _list_params(payload),
+                notice_block("error", f"Agent '{agent_id}' not found."))
+    params = _detail_params(agent_id, payload)
+    key = str(payload.get("key") or "")
+    if not key:
+        return ("agents", params, notice_block("error", "No credential key given."))
+    orch.credential_manager.delete_credential(user_id, agent_id, key)
+    return ("agents", params, notice_block(
+        "success", f"Credential '{key}' deleted for agent '{agent_id}'."
+    ))
+
+
+async def handle_agent_enabled(orch, websocket, user_id, roles, payload):
+    """``chrome_agent_enabled {agent_id, enabled}`` → per-user enable internals."""
+    payload = payload or {}
+    agent_id = str(payload.get("agent_id") or "")
+    if agent_id not in orch.agent_cards:
+        return ("agents", _list_params(payload),
+                notice_block("error", f"Agent '{agent_id}' not found."))
+    enabled = bool(payload.get("enabled"))
+    orch.history.db.set_user_agent_disabled(user_id, agent_id, not enabled)
+    logger.info(
+        "Agent enabled state updated: user=%s agent=%s enabled=%s",
+        user_id, agent_id, enabled,
+    )
+    params = _detail_params(agent_id, payload) if payload.get("detail") else _list_params(payload)
+    state = "enabled" if enabled else "disabled"
+    name = orch.agent_cards[agent_id].name
+    return ("agents", params, notice_block("success", f"{name} {state} for your account."))
+
+
+HANDLERS = {
+    "chrome_perms_save": handle_perms_save,
+    "chrome_visibility_set": handle_visibility_set,
+    "chrome_credentials_save": handle_credentials_save,
+    "chrome_credential_delete": handle_credential_delete,
+    "chrome_agent_enabled": handle_agent_enabled,
+}

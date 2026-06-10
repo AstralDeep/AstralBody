@@ -1,0 +1,493 @@
+"""Feature 027 — T012: Agents & permissions surface (structural/behavioral).
+
+Runs without Postgres: a minimal fake orchestrator exposes exactly the
+internals the surface uses (``history.db`` ownership/disabled helpers,
+``tool_permissions``, ``credential_manager``, ``agent_cards``,
+``_is_draft_agent``). Assertions are structural (key markup + handler
+side-effects), mirroring test_topbar.py / test_render_golden.py style.
+"""
+import asyncio
+
+from webrender.chrome.surfaces import agents as surface
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+# ---------------------------------------------------------------------------
+# Fakes
+# ---------------------------------------------------------------------------
+
+class FakeSkill:
+    def __init__(self, sid, description, scope, name=None):
+        self.id = sid
+        self.name = name or sid
+        self.description = description
+        self.scope = scope
+
+
+class FakeCard:
+    def __init__(self, agent_id, name, description, skills=None, metadata=None):
+        self.agent_id = agent_id
+        self.name = name
+        self.description = description
+        self.skills = skills or []
+        self.metadata = metadata or {}
+
+
+class FakeDB:
+    def __init__(self, ownership=None, users=None):
+        self.ownership = ownership or {}
+        self.users = users or {}
+        self.disabled = set()
+        self.calls = []
+
+    def get_all_agent_ownership(self):
+        return [{"agent_id": k, **v} for k, v in self.ownership.items()]
+
+    def get_agent_ownership(self, agent_id):
+        o = self.ownership.get(agent_id)
+        return {"agent_id": agent_id, **o} if o else None
+
+    def set_agent_visibility(self, agent_id, is_public):
+        self.calls.append(("set_agent_visibility", agent_id, is_public))
+        self.ownership[agent_id]["is_public"] = is_public
+        return True
+
+    def get_user_disabled_agents(self, user_id):
+        return sorted(self.disabled)
+
+    def is_user_agent_disabled(self, user_id, agent_id):
+        return agent_id in self.disabled
+
+    def set_user_agent_disabled(self, user_id, agent_id, disabled):
+        self.calls.append(("set_user_agent_disabled", user_id, agent_id, disabled))
+        if disabled:
+            self.disabled.add(agent_id)
+        else:
+            self.disabled.discard(agent_id)
+        return True
+
+    def get_user(self, user_id):
+        return self.users.get(user_id)
+
+
+class FakePerms:
+    def __init__(self, scope_map=None, per_tool=None):
+        self.scope_map = scope_map or {}
+        self.per_tool = per_tool or {}
+        self.scopes = dict.fromkeys(surface.PERMISSION_KINDS, False)
+        self.set_calls = []
+        self.scope_calls = []
+        self.backfilled = []
+
+    def backfill_per_tool_rows(self, user_id, agent_id):
+        self.backfilled.append((user_id, agent_id))
+        return 0
+
+    def get_tool_scope_map(self, agent_id):
+        return dict(self.scope_map)
+
+    def get_effective_tool_permissions(self, user_id, agent_id):
+        return {t: dict(k) for t, k in self.per_tool.items()}
+
+    def set_tool_permission(self, user_id, agent_id, tool, kind, enabled):
+        self.set_calls.append((tool, kind, enabled))
+        self.per_tool.setdefault(tool, {})[kind] = enabled
+
+    def get_agent_scopes(self, user_id, agent_id):
+        return dict(self.scopes)
+
+    def set_agent_scopes(self, user_id, agent_id, scopes):
+        self.scope_calls.append(dict(scopes))
+        self.scopes.update(scopes)
+
+
+class FakeCreds:
+    def __init__(self, keys=None):
+        self.keys = list(keys or [])
+        self.calls = []
+
+    def list_credential_keys(self, user_id, agent_id):
+        return list(self.keys)
+
+    def set_bulk_credentials(self, user_id, agent_id, credentials):
+        self.calls.append(("set_bulk", dict(credentials)))
+        for k in credentials:
+            if k not in self.keys:
+                self.keys.append(k)
+
+    def delete_credential(self, user_id, agent_id, key):
+        self.calls.append(("delete", key))
+        if key in self.keys:
+            self.keys.remove(key)
+
+    def get_agent_credentials_encrypted(self, user_id, agent_id):
+        return {k: "enc" for k in self.keys}
+
+
+class FakeHistory:
+    def __init__(self, db):
+        self.db = db
+
+
+class FakeOrch:
+    def __init__(self, cards, db, perms, creds, draft_ids=()):
+        self.agent_cards = cards
+        self.history = FakeHistory(db)
+        self.tool_permissions = perms
+        self.credential_manager = creds
+        self.security_flags = {}
+        self._draft_ids = set(draft_ids)
+        self.dispatched = []
+        self.probe_response = None
+
+    def _is_draft_agent(self, agent_id):
+        return agent_id in self._draft_ids
+
+    async def _dispatch_tool_call(self, agent_id, tool_name, args, timeout, ui_websocket):
+        self.dispatched.append((agent_id, tool_name, dict(args)))
+        return self.probe_response
+
+
+def make_orch(**kwargs):
+    """Two live agents (alpha owned by alice, beta public) + one hidden draft."""
+    cards = {
+        "alpha": FakeCard(
+            "alpha", "Alpha Agent", "Reads and writes data for analysis pipelines.",
+            skills=[
+                FakeSkill("get_data", "Fetch records", "tools:read"),
+                FakeSkill("write_data", "Modify records", "tools:write"),
+            ],
+            metadata={"required_credentials": ["api_key"]},
+        ),
+        "beta": FakeCard("beta", "Beta Agent", "A public helper agent."),
+        "ghost": FakeCard("ghost", "Ghost Draft", "Should never appear."),
+    }
+    db = FakeDB(
+        ownership={
+            "alpha": {"owner_email": "alice@example.com", "is_public": False},
+            "beta": {"owner_email": "bob@example.com", "is_public": True},
+        },
+        users={"u1": {"email": "alice@example.com"}},
+    )
+    perms = FakePerms(
+        scope_map={"get_data": "tools:read", "write_data": "tools:write"},
+        per_tool={
+            "get_data": {"tools:read": True},
+            "write_data": {"tools:write": False},
+        },
+    )
+    creds = FakeCreds(keys=["api_key"])
+    defaults = dict(cards=cards, db=db, perms=perms, creds=creds, draft_ids={"ghost"})
+    defaults.update(kwargs)
+    return FakeOrch(**defaults)
+
+
+# ---------------------------------------------------------------------------
+# Module contract
+# ---------------------------------------------------------------------------
+
+def test_module_contract():
+    assert surface.TITLE == "Agents & permissions"
+    assert not getattr(surface, "ADMIN_ONLY", False)
+    for action in ("chrome_perms_save", "chrome_visibility_set", "chrome_credentials_save",
+                   "chrome_credential_delete", "chrome_agent_enabled"):
+        assert action in surface.HANDLERS, f"missing handler: {action}"
+
+
+# ---------------------------------------------------------------------------
+# List view
+# ---------------------------------------------------------------------------
+
+def test_list_mine_tab_shows_owned_only_and_hides_drafts():
+    orch = make_orch()
+    html = run(surface.render(orch, "u1", ["user"], {}))
+    assert "Alpha Agent" in html
+    assert "Beta Agent" not in html  # bob's agent, not mine
+    assert "Ghost Draft" not in html  # non-live draft hidden
+    assert "Connected" in html  # status/health
+    assert "Yours" in html  # owner badge
+
+
+def test_list_public_tab_shows_public_agents():
+    orch = make_orch()
+    html = run(surface.render(orch, "u1", ["user"], {"tab": "public"}))
+    assert "Beta Agent" in html and "Alpha Agent" not in html
+    assert ">Public<" in html  # badge
+
+
+def test_list_tabs_and_drafts_button():
+    orch = make_orch()
+    html = run(surface.render(orch, "u1", ["user"], {"tab": "mine"}))
+    assert "&quot;tab&quot;: &quot;mine&quot;" in html
+    assert "&quot;tab&quot;: &quot;public&quot;" in html
+    # Drafts tab opens the drafts surface (not implemented here).
+    assert "&quot;surface&quot;: &quot;drafts&quot;" in html
+    assert "Drafts" in html
+
+
+def test_list_row_click_through_and_enable_toggle():
+    orch = make_orch()
+    html = run(surface.render(orch, "u1", ["user"], {}))
+    # Click-through opens detail via chrome_open with agent_id.
+    assert 'data-ui-action="chrome_open"' in html
+    assert "&quot;agent_id&quot;: &quot;alpha&quot;" in html
+    # Enabled agent shows a Disable toggle sending enabled=false.
+    assert 'data-ui-action="chrome_agent_enabled"' in html
+    assert "&quot;enabled&quot;: false" in html
+    assert ">Disable<" in html
+
+
+def test_list_disabled_agent_shows_enable_and_badge():
+    orch = make_orch()
+    orch.history.db.disabled.add("alpha")
+    html = run(surface.render(orch, "u1", ["user"], {}))
+    assert "Disabled by you" in html
+    assert "&quot;enabled&quot;: true" in html
+    assert ">Enable<" in html
+
+
+def test_list_escapes_agent_text():
+    orch = make_orch()
+    orch.agent_cards["alpha"].name = '<script>alert(1)</script>'
+    orch.agent_cards["alpha"].description = '<img onerror=x>'
+    html = run(surface.render(orch, "u1", ["user"], {}))
+    assert "<script>" not in html and "&lt;script&gt;" in html
+    assert "<img" not in html
+
+
+def test_list_unknown_tab_falls_back_to_mine():
+    orch = make_orch()
+    html = run(surface.render(orch, "u1", ["user"], {"tab": "evil"}))
+    assert 'data-tab="mine"' in html
+
+
+# ---------------------------------------------------------------------------
+# Detail view
+# ---------------------------------------------------------------------------
+
+def test_detail_matrix_checkboxes_named_tool_kind_with_state():
+    orch = make_orch()
+    html = run(surface.render(orch, "u1", ["user"], {"agent_id": "alpha"}))
+    assert orch.tool_permissions.backfilled == [("u1", "alpha")]
+    # Applicable kinds render named checkboxes; enabled state from internals.
+    assert 'name="get_data::tools:read" checked' in html
+    assert 'name="write_data::tools:write"' in html
+    assert 'name="write_data::tools:write" checked' not in html
+    # All four kind columns are present.
+    for label in ("Read", "Write", "Search", "System"):
+        assert f">{label}</th>" in html
+    # Matrix lives in a data-ui-form and saves via collect.
+    assert "data-ui-form" in html
+    assert 'data-ui-action="chrome_perms_save"' in html
+    assert 'data-ui-collect="true"' in html
+    # Tool descriptions shown.
+    assert "Fetch records" in html
+
+
+def test_detail_visibility_toggle_owner_only():
+    orch = make_orch()
+    html = run(surface.render(orch, "u1", ["user"], {"agent_id": "alpha"}))
+    assert 'data-ui-action="chrome_visibility_set"' in html
+    assert "&quot;is_public&quot;: true" in html  # alpha is private -> offer public
+    # Non-owner (beta belongs to bob) gets no visibility section.
+    html_beta = run(surface.render(orch, "u1", ["user"], {"agent_id": "beta"}))
+    assert 'data-ui-action="chrome_visibility_set"' not in html_beta
+
+
+def test_detail_credentials_section():
+    orch = make_orch()
+    html = run(surface.render(orch, "u1", ["user"], {"agent_id": "alpha"}))
+    assert "api_key" in html and ">Stored<" in html
+    assert 'type="password"' in html and 'name="api_key"' in html
+    assert 'data-ui-action="chrome_credentials_save"' in html
+    assert 'data-ui-action="chrome_credential_delete"' in html
+    assert "&quot;key&quot;: &quot;api_key&quot;" in html
+
+
+def test_detail_back_link_and_enable_toggle():
+    orch = make_orch()
+    html = run(surface.render(orch, "u1", ["user"], {"agent_id": "alpha", "tab": "public"}))
+    assert "Back to agents" in html
+    assert "&quot;tab&quot;: &quot;public&quot;" in html  # back preserves tab
+    assert 'data-ui-action="chrome_agent_enabled"' in html
+    assert "&quot;detail&quot;: true" in html
+
+
+def test_detail_unknown_agent_renders_error_not_raise():
+    orch = make_orch()
+    html = run(surface.render(orch, "u1", ["user"], {"agent_id": "nope"}))
+    assert "not found" in html
+    assert "astral-chrome-notice" in html
+    assert "Back to agents" in html
+
+
+# ---------------------------------------------------------------------------
+# chrome_perms_save
+# ---------------------------------------------------------------------------
+
+def test_perms_save_translates_fields_and_mirrors_scopes():
+    orch = make_orch()
+    result = run(surface.HANDLERS["chrome_perms_save"](
+        orch, None, "u1", ["user"],
+        {"agent_id": "alpha",
+         "fields": {"get_data::tools:read": False, "write_data::tools:write": True}},
+    ))
+    key, params, notice = result
+    assert key == "agents" and params["agent_id"] == "alpha"
+    assert "success" in notice or "green" in notice
+    assert ("get_data", "tools:read", False) in orch.tool_permissions.set_calls
+    assert ("write_data", "tools:write", True) in orch.tool_permissions.set_calls
+    # Scope mirror derived from effective per-tool state (api.py parity).
+    assert orch.tool_permissions.scope_calls, "set_agent_scopes not called"
+    assert orch.tool_permissions.scope_calls[-1]["tools:write"] is True
+
+
+def test_perms_save_rejects_unknown_tool_without_writes():
+    orch = make_orch()
+    key, params, notice = run(surface.HANDLERS["chrome_perms_save"](
+        orch, None, "u1", ["user"],
+        {"agent_id": "alpha", "fields": {"bogus::tools:read": True}},
+    ))
+    assert key == "agents"
+    assert "not registered" in notice
+    assert orch.tool_permissions.set_calls == []
+
+
+def test_perms_save_rejects_wrong_kind_whole_payload():
+    orch = make_orch()
+    key, params, notice = run(surface.HANDLERS["chrome_perms_save"](
+        orch, None, "u1", ["user"],
+        {"agent_id": "alpha",
+         "fields": {"get_data::tools:read": True, "get_data::tools:write": True}},
+    ))
+    assert "does not apply" in notice
+    assert orch.tool_permissions.set_calls == []  # no half-applied state
+
+
+def test_perms_save_unknown_agent_and_empty_fields():
+    orch = make_orch()
+    _, _, notice = run(surface.HANDLERS["chrome_perms_save"](
+        orch, None, "u1", ["user"], {"agent_id": "nope", "fields": {}}))
+    assert "not found" in notice
+    _, _, notice2 = run(surface.HANDLERS["chrome_perms_save"](
+        orch, None, "u1", ["user"], {"agent_id": "alpha", "fields": {}}))
+    assert "No permission changes" in notice2
+
+
+# ---------------------------------------------------------------------------
+# chrome_visibility_set
+# ---------------------------------------------------------------------------
+
+def test_visibility_set_owner_succeeds():
+    orch = make_orch()
+    key, params, notice = run(surface.HANDLERS["chrome_visibility_set"](
+        orch, None, "u1", ["user"], {"agent_id": "alpha", "is_public": True}))
+    assert key == "agents" and params["agent_id"] == "alpha"
+    assert ("set_agent_visibility", "alpha", True) in orch.history.db.calls
+    assert "public" in notice
+
+
+def test_visibility_set_non_owner_rejected_without_write():
+    orch = make_orch()
+    _, _, notice = run(surface.HANDLERS["chrome_visibility_set"](
+        orch, None, "u1", ["user"], {"agent_id": "beta", "is_public": False}))
+    assert "owner" in notice
+    assert all(c[0] != "set_agent_visibility" for c in orch.history.db.calls)
+
+
+def test_visibility_set_no_ownership_record():
+    orch = make_orch()
+    orch.agent_cards["lone"] = FakeCard("lone", "Lone", "No ownership row.")
+    _, _, notice = run(surface.HANDLERS["chrome_visibility_set"](
+        orch, None, "u1", ["user"], {"agent_id": "lone", "is_public": True}))
+    assert "No ownership record" in notice
+
+
+# ---------------------------------------------------------------------------
+# chrome_credentials_save / chrome_credential_delete
+# ---------------------------------------------------------------------------
+
+def test_credentials_save_filters_blank_values():
+    orch = make_orch()
+    key, params, notice = run(surface.HANDLERS["chrome_credentials_save"](
+        orch, None, "u1", ["user"],
+        {"agent_id": "alpha", "fields": {"api_key": "s3cret", "other": "  "}}))
+    assert key == "agents" and params["agent_id"] == "alpha"
+    assert ("set_bulk", {"api_key": "s3cret"}) in orch.credential_manager.calls
+    assert "Saved 1 credential" in notice
+
+
+def test_credentials_save_empty_is_error_without_write():
+    orch = make_orch()
+    _, _, notice = run(surface.HANDLERS["chrome_credentials_save"](
+        orch, None, "u1", ["user"], {"agent_id": "alpha", "fields": {"api_key": ""}}))
+    assert "No credential values" in notice
+    assert orch.credential_manager.calls == []
+
+
+def test_credentials_save_runs_probe_when_agent_exposes_check():
+    orch = make_orch()
+    orch.agent_cards["alpha"].skills.append(
+        FakeSkill("_credentials_check", "probe", "tools:read"))
+
+    class Resp:
+        error = None
+        result = {"credential_test": "success", "detail": None}
+
+    orch.probe_response = Resp()
+    _, _, notice = run(surface.HANDLERS["chrome_credentials_save"](
+        orch, None, "u1", ["user"], {"agent_id": "alpha", "fields": {"api_key": "x"}}))
+    assert orch.dispatched and orch.dispatched[0][1] == "_credentials_check"
+    assert "Connection test: success" in notice
+
+
+def test_credentials_save_probe_failure_does_not_block_save():
+    orch = make_orch()
+    orch.agent_cards["alpha"].skills.append(
+        FakeSkill("_credentials_check", "probe", "tools:read"))
+    orch.probe_response = None  # no response -> unreachable
+    _, _, notice = run(surface.HANDLERS["chrome_credentials_save"](
+        orch, None, "u1", ["user"], {"agent_id": "alpha", "fields": {"api_key": "x"}}))
+    assert ("set_bulk", {"api_key": "x"}) in orch.credential_manager.calls
+    assert "unreachable" in notice
+
+
+def test_credential_delete():
+    orch = make_orch()
+    key, params, notice = run(surface.HANDLERS["chrome_credential_delete"](
+        orch, None, "u1", ["user"], {"agent_id": "alpha", "key": "api_key"}))
+    assert ("delete", "api_key") in orch.credential_manager.calls
+    assert "deleted" in notice
+    _, _, notice2 = run(surface.HANDLERS["chrome_credential_delete"](
+        orch, None, "u1", ["user"], {"agent_id": "alpha"}))
+    assert "No credential key" in notice2
+
+
+# ---------------------------------------------------------------------------
+# chrome_agent_enabled
+# ---------------------------------------------------------------------------
+
+def test_agent_enabled_toggle_writes_inverse_disabled_flag():
+    orch = make_orch()
+    key, params, notice = run(surface.HANDLERS["chrome_agent_enabled"](
+        orch, None, "u1", ["user"], {"agent_id": "alpha", "enabled": False, "tab": "mine"}))
+    assert ("set_user_agent_disabled", "u1", "alpha", True) in orch.history.db.calls
+    assert key == "agents" and params == {"tab": "mine"}
+    assert "disabled" in notice
+
+    key, params, _ = run(surface.HANDLERS["chrome_agent_enabled"](
+        orch, None, "u1", ["user"],
+        {"agent_id": "alpha", "enabled": True, "detail": True, "tab": "mine"}))
+    assert ("set_user_agent_disabled", "u1", "alpha", False) in orch.history.db.calls
+    assert params == {"agent_id": "alpha", "tab": "mine"}  # detail re-render
+
+
+def test_agent_enabled_unknown_agent():
+    orch = make_orch()
+    _, _, notice = run(surface.HANDLERS["chrome_agent_enabled"](
+        orch, None, "u1", ["user"], {"agent_id": "nope", "enabled": True}))
+    assert "not found" in notice
+    assert orch.history.db.calls == []
