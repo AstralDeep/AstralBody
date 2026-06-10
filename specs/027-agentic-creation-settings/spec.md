@@ -147,8 +147,8 @@ A platform admin uses the same Settings menu and additionally sees Admin tools (
 
 ### Key Entities
 
-- **Creation Proposal**: A turn-scoped offer to create a specific agent or tool, derived from a detected capability gap — carries what would be created, what it would do, and its confirmation state. At most one active proposal exists per distinct gap per conversation; a confirmed proposal becomes (or attaches to) a Draft Agent.
-- **Draft Agent** *(existing)*: The unit of the existing generate → test → refine → approve lifecycle; gains a new origin ("created from chat") alongside the existing manual origin. Retained until owner deletion; private to its owner.
+- **Capability-Gap Creation**: A conversation-scoped record tying a detected gap to its auto-created draft — carries what was missing, what was created, the self-test outcome, and its resolution state (pending user decision / approved / discarded). At most one exists per distinct gap per conversation.
+- **Draft Agent** *(existing)*: The unit of the existing generate → test → refine → approve lifecycle; gains a new origin ("auto-created from chat") alongside the existing manual origin, and a new use as the staging form of a live-agent revision. Retained until owner deletion or decline-discard; private to its owner.
 - **Settings Menu Entry**: A non-persisted, role- and availability-filtered navigation item belonging to a group (Account, Help, Admin tools, Sign out).
 - **User Role** *(existing)*: Drives Admin tools visibility (UX) while server-side checks remain authoritative.
 - **Personalization Profile / Memory Item / Scheduled Job** *(existing, feature 025)*: Surfaced read/write through the Personalization entry; no schema changes implied by this feature.
@@ -157,8 +157,8 @@ A platform admin uses the same Settings menu and additionally sees Admin tools (
 
 ### Measurable Outcomes
 
-- **SC-001**: A user who requests an unserved capability can go from the assistant's proposal to an approved, working agent/tool — without leaving the conversation — in under 10 minutes for a typical request (95th percentile of guided test sessions).
-- **SC-002**: 0 capability-gap conversations end in a bare "can't do that" when creation is possible: 100% of detected gaps yield either a creation proposal or an explicit pointer to an existing-but-disabled capability.
+- **SC-001**: A user who requests an unserved capability can go from asking to an approved, working agent/tool — without leaving the conversation — in under 10 minutes for a typical request (95th percentile of guided sessions, including auto-creation and self-test time).
+- **SC-002**: 0 capability-gap conversations end in a bare "can't do that" when creation is possible: 100% of detected gaps yield an auto-created, self-tested draft (with approve/refine/discard choices) or an explicit pointer to an existing-but-disabled capability.
 - **SC-003**: 100% of the former React settings inventory (Agents & permissions, LLM settings, Personalization, Audit log, Theme, Take the tour, User guide, Tool quality, Tutorial admin, Sign out) is reachable from the new top-bar Settings menu, verified surface-by-surface.
 - **SC-004**: The Settings control is reachable from every signed-in screen in at most 1 activation (it is always visible in the top bar), and any settings surface opens within 2 activations from anywhere in the app.
 - **SC-005**: A non-admin's rendered menu output contains zero admin-item references, across 100% of non-admin sessions inspected.
@@ -177,3 +177,5 @@ A platform admin uses the same Settings menu and additionally sees Admin tools (
 - **A7**: Sign-out/revocation semantics (365-day persistent login, user-switch revocation, offline revocation queue, auth audit events) are governed by feature 016 and are unchanged here.
 - **A8**: Tutorial step content is owned by feature 005's tutorial system; this feature must keep step targets resolvable from the new menu but does not redefine tutorial content.
 - **A9**: On-the-fly creation is available to every authenticated user for private agents/tools (the existing ownership model); making a created agent public continues to follow the existing visibility rules and checks.
+- **A10** *(scope boundary, per Clarifications)*: This feature delivers the persistent top bar, the Settings menu, the surfaces those open, and the in-chat creation experience. The remaining application chrome — sidebar with recent chats/search, dashboard empty-state suggestion cards, floating chat panel, canvas component-flow toolbar, onboarding spotlight chrome — remains out of scope, deferred to the server-rendered-chrome feature (SERVER_RENDERED_CHROME_SPEC.md). Where "Take the tour" depends on chrome not yet rebuilt, the tour replays against the surfaces that exist, and tour steps targeting deferred chrome are skipped gracefully rather than breaking the tour.
+- **A11**: Autonomous creation and self-testing consume the user's configured LLM capacity; the self-test/auto-refine loop is bounded (FR-007 dedup plus a bounded attempt count) so a single gap cannot consume unbounded time or tokens.
