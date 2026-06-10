@@ -30,13 +30,9 @@
 </head>
 <body class="bg-astral-bg text-astral-text">
   <div class="flex flex-col h-screen">
-    <header class="flex items-center justify-between px-4 py-3 border-b border-white/5">
-      <div class="flex items-center gap-2">
-        <span class="w-2 h-5 rounded-full bg-astral-primary inline-block"></span>
-        <span class="text-base font-semibold">AstralBody</span>
-      </div>
-      <span id="astral-status" class="text-xs text-astral-muted"></span>
-    </header>
+    <!-- Feature 027: server-rendered top bar + static settings menu
+         (role-gated at GET / time; see webrender/chrome/topbar.py) -->
+    <header id="astral-topbar" class="flex items-center border-b border-white/5">%%ASTRAL_TOPBAR%%</header>
     <main class="flex flex-1 min-h-0">
       <!-- Canvas: server-rendered UI (astralprims primitives) -->
       <section id="astral-canvas" class="flex-1 overflow-y-auto p-4 space-y-3"></section>
@@ -51,6 +47,8 @@
       </aside>
     </main>
   </div>
+  <!-- Feature 027: chrome modal root (settings surfaces render here via chrome_render) -->
+  <div id="astral-modal"></div>
   <script src="/static/client.js"></script>
 </body>
 </html>

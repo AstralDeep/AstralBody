@@ -51,3 +51,13 @@ body {
 
 details > summary { list-style: none; }
 details > summary::-webkit-details-marker { display: none; }
+
+/* Feature 027 — tour spotlight + chrome modal helpers */
+.astral-tour-highlight {
+  outline: 2px solid rgb(var(--astral-primary));
+  outline-offset: 3px;
+  border-radius: 8px;
+  position: relative;
+  z-index: 65;
+}
+#astral-tour-card { transform: translateX(-50%); }
