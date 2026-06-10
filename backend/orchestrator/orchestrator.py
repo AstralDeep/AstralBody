@@ -271,6 +271,12 @@ class Orchestrator:
         # Keyed by id(websocket).
         self._ws_active_chat: Dict[int, str] = {}
 
+        # Feature 028 — per-socket read-only timeline mode (mutating
+        # component actions are refused server-side while set) and per-chat
+        # serialization locks for deterministic component-action ordering.
+        self._ws_timeline_mode: Dict[int, bool] = {}
+        self._workspace_locks: Dict[str, asyncio.Lock] = {}
+
         # Feature 014 — per-active-turn step recorders, keyed by id(websocket).
         # Created at the start of handle_chat_message and torn down at the end
         # of _serialized_chat. The cancel_task handler reads this map to invoke
@@ -350,6 +356,11 @@ class Orchestrator:
         backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
         data_dir = os.path.join(backend_dir, 'data')
         self.history = HistoryManager(data_dir=data_dir)
+
+        # Feature 028 — per-chat persistent workspace (identity, upserts,
+        # snapshots/timeline). Owns the saved_components store.
+        from orchestrator.workspace import WorkspaceManager
+        self.workspace = WorkspaceManager(self.history)
 
         # File-tool DB wiring (feature 002-file-uploads). Lets the
         # in-process tool functions resolve attachments without going
@@ -1004,10 +1015,24 @@ class Orchestrator:
                     evt = self._registered_events.get(id(websocket))
                     if evt:
                         evt.set()
-                    await self.send_ui_render(websocket, [
-                        Alert(message="Authentication failed. Please log in again.", variant="error").to_dict()
-                    ])
-                    # We might want to close, but let's let the UI handle the error alert
+                    # Feature 028 (FR-009, research D4): replace the dead-end
+                    # error Alert with a recoverable auth_required signal. The
+                    # client re-fetches /auth/session (which silently
+                    # refreshes server-side) and retries register_ui, or
+                    # redirects to /auth/login when the session is truly gone.
+                    from shared.protocol import AuthRequired
+                    reason = "invalid"
+                    if token:
+                        try:
+                            import base64 as _b64
+                            _p = token.split(".")[1]
+                            _p += "=" * (-len(_p) % 4)
+                            _exp = json.loads(_b64.urlsafe_b64decode(_p)).get("exp")
+                            if _exp is not None and float(_exp) < time.time():
+                                reason = "expired"
+                        except Exception:
+                            pass
+                    await self._safe_send(websocket, AuthRequired(reason=reason).to_json())
                     return
 
             elif msg.type in ("llm_config_set", "llm_config_clear"):
@@ -1108,6 +1133,11 @@ class Orchestrator:
                                 "type": "chat_created",
                                 "payload": {"chat_id": chat_id, "from_message": True}
                             }))
+
+                    # Feature 028: chat_message also marks this socket's active
+                    # chat (pre-028 only load_chat did) so workspace upserts in
+                    # brand-new chats reach the originating tab's siblings too.
+                    self._ws_active_chat[id(websocket)] = chat_id
 
                     display_message = msg.payload.get("display_message")
                     async_mode = msg.payload.get("async_mode", False)
@@ -1279,10 +1309,36 @@ class Orchestrator:
                                 logger.warning(f"pause_chat failed: {e}")
                         self._ws_active_chat[ws_id] = chat_id
 
+                        # Feature 028 (FR-028): component-bearing transcript
+                        # messages get a server-rendered html form so the
+                        # client renders meaningful bubbles instead of empty
+                        # ones (additive field on chat_loaded messages).
+                        try:
+                            from webrender import render as _render_web
+                            for m in chat.get("messages", []):
+                                if not isinstance(m.get("content"), str) and isinstance(m.get("content"), list):
+                                    try:
+                                        m["html"] = _render_web(m["content"])
+                                    except Exception:
+                                        logger.debug("transcript render failed for message %s", m.get("id"), exc_info=True)
+                        except Exception:
+                            logger.exception("webrender unavailable for transcript rendering")
+
                         await self._safe_send(websocket, json.dumps({
                             "type": "chat_loaded",
                             "chat": chat
                         }))
+
+                        # Feature 028 (FR-027): re-hydrate the persistent
+                        # workspace — the canvas state the user left — as a
+                        # full ui_render after chat_loaded (stream-resume
+                        # precedent below). No capabilities re-run.
+                        try:
+                            ws_components = self.workspace.live_components(chat_id, user_id=user_id)
+                            if ws_components:
+                                await self.send_ui_render(websocket, ws_components)
+                        except Exception:
+                            logger.exception("workspace re-hydration failed for chat %s", chat_id)
 
                         # 001-tool-stream-ui (US3 T054): after chat_loaded
                         # is sent, resume any DORMANT streams for this chat.
@@ -1334,10 +1390,22 @@ class Orchestrator:
                         return
                     
                     try:
-                        component_id = self.history.save_component(
-                            chat_id, component_data, component_type, title, user_id=user_id
-                        )
-                        
+                        # Feature 028 (D18): explicit saves are a deprecated
+                        # alias — everything rich is auto-persisted. Route
+                        # through the workspace so the row gets a stable
+                        # identity instead of a bare legacy row.
+                        if isinstance(component_data, dict):
+                            ops = self.workspace.upsert(chat_id, user_id, [component_data])
+                            component_id = ops[0]["component_id"] if ops else self.history.save_component(
+                                chat_id, component_data, component_type, title, user_id=user_id
+                            )
+                            if ops:
+                                await self.send_ui_upsert(websocket, chat_id, user_id, ops)
+                        else:
+                            component_id = self.history.save_component(
+                                chat_id, component_data, component_type, title, user_id=user_id
+                            )
+
                         # Send success response
                         await self._safe_send(websocket, json.dumps({
                             "type": "component_saved",
@@ -1376,14 +1444,36 @@ class Orchestrator:
                             Alert(message="Missing component ID", variant="error").to_dict()
                         ])
                         return
-                    
+
+                    # Feature 028 (D18): resolve the row before deleting so the
+                    # workspace identity can be removed from every client and
+                    # the removal snapshotted/audited.
+                    row = self.history.get_component_by_id(component_id, user_id=user_id)
+                    ws_component_id = None
+                    chat_id_for_row = row.get("chat_id") if row else None
+                    if row and isinstance(row.get("component_data"), dict):
+                        ws_component_id = row["component_data"].get("component_id")
+
                     success = self.history.delete_component(component_id, user_id=user_id)
                     if success:
                         await self._safe_send(websocket, json.dumps({
                             "type": "component_deleted",
                             "component_id": component_id
                         }))
-                        
+                        if ws_component_id and chat_id_for_row:
+                            await self.send_ui_upsert(websocket, chat_id_for_row, user_id, [
+                                {"op": "remove", "component_id": ws_component_id}
+                            ])
+                            try:
+                                self.workspace.snapshot(chat_id_for_row, user_id, cause="remove")
+                                from audit.hooks import record_workspace_event
+                                asyncio.create_task(record_workspace_event(
+                                    user_id=user_id, action="component_removed",
+                                    chat_id=chat_id_for_row, component_id=ws_component_id,
+                                ))
+                            except Exception:
+                                logger.debug("workspace remove bookkeeping failed", exc_info=True)
+
                         # Broadcast updated chat history (each user gets their own)
                         await self._broadcast_user_history()
                     else:
@@ -1464,6 +1554,11 @@ class Orchestrator:
                                 "removed_ids": [source_id, target_id],
                                 "new_components": new_components
                             }))
+                            # Feature 028 (D18): make the legacy replacement
+                            # visible — stamp identities, snapshot, re-render.
+                            await self._reconcile_legacy_replacement(
+                                websocket, chat_id, user_id, cause="combine"
+                            )
                     except Exception as e:
                         logger.error(f"Combine failed: {e}", exc_info=True)
                         await self._safe_send(websocket, json.dumps({
@@ -1544,16 +1639,29 @@ class Orchestrator:
                 elif msg.action == "update_device":
                     # ROTE: viewport / capability change from the frontend
                     device_info = msg.payload.get("device") or {}
-                    new_profile, re_adapted = self.rote.update_device(websocket, device_info)
+                    new_profile, re_adapted, profile_changed = self.rote.update_device(websocket, device_info)
                     await self._safe_send(websocket, json.dumps({
                         "type": "rote_config",
                         "device_profile": new_profile.to_dict(),
                         "speech_server_available": bool(os.getenv("SPEACHES_URL", "").strip()),
                     }))
-                    # If the profile changed and we have cached components, re-send them.
-                    # Use UIUpdate (not UIRender) so the frontend replaces the last
-                    # components in-place instead of appending a duplicate message.
-                    if re_adapted is not None:
+                    # Feature 028 (D17): a device change re-renders the FULL
+                    # persisted workspace from server state. The pre-028
+                    # single-slot _last_components replay would wipe all but
+                    # the most recent fragment once partial upserts exist.
+                    handled_via_workspace = False
+                    if profile_changed:
+                        active_chat = self._ws_active_chat.get(id(websocket))
+                        if active_chat:
+                            try:
+                                ws_components = self.workspace.live_components(active_chat, user_id=user_id)
+                                if ws_components:
+                                    await self.send_ui_render(websocket, ws_components)
+                                    handled_via_workspace = True
+                            except Exception:
+                                logger.exception("workspace re-adapt failed after device change")
+                    # Legacy fallback for sockets with no persisted workspace.
+                    if not handled_via_workspace and re_adapted is not None:
                         re_html = None
                         try:
                             from webrender import render_for_target
@@ -1647,6 +1755,11 @@ class Orchestrator:
                                 "removed_ids": component_ids,
                                 "new_components": new_components
                             }))
+                            # Feature 028 (D18): make the legacy replacement
+                            # visible — stamp identities, snapshot, re-render.
+                            await self._reconcile_legacy_replacement(
+                                websocket, chat_id, user_id, cause="condense"
+                            )
                     except Exception as e:
                         logger.error(f"Condense failed: {e}", exc_info=True)
                         await self._safe_send(websocket, json.dumps({
@@ -1654,8 +1767,25 @@ class Orchestrator:
                             "error": f"Failed to condense components: {str(e)}"
                         }))
 
+                elif msg.action == "component_action":
+                    # Feature 028 — standardized deterministic component
+                    # action (contracts/component-action.md).
+                    await self._handle_component_action(websocket, user_id, msg.payload or {})
+
                 elif msg.action == "table_paginate":
-                    # Re-invoke a tool with updated pagination params
+                    # Feature 028 (FR-038): pagination clicks that carry the
+                    # table's component identity route through the
+                    # standardized pipeline — permission-gated and updating
+                    # ONLY the table, instead of replacing the whole canvas.
+                    if (msg.payload or {}).get("component_id"):
+                        await self._handle_component_action(websocket, user_id, {
+                            "chat_id": (msg.payload or {}).get("chat_id"),
+                            "component_id": msg.payload["component_id"],
+                            "kind": "refresh",
+                            "params_patch": (msg.payload or {}).get("params", {}),
+                        })
+                        return
+                    # Legacy alias (pre-028 clients): re-invoke with raw params.
                     tool_name = msg.payload.get("tool_name")
                     agent_id = msg.payload.get("agent_id")
                     params = msg.payload.get("params", {})
@@ -2496,17 +2626,22 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     file_context += f"- {mapping['original_name']} -> {mapping['backend_path']}\n"
                 file_context += "\nIMPORTANT: You MUST use the absolute backend path (right side) when calling tools for these files. Never use just the original filename.\n"
 
-            # Fetch saved canvas components for context-aware updates
-            canvas_saved = self.history.get_saved_components(chat_id, user_id=user_id)
+            # Feature 028 (FR-029): the canvas context comes from the SAME
+            # workspace state the user sees, keyed by the stable component_id
+            # the upsert path matches on — so "update the table" turns
+            # actually update the table the user is looking at.
+            canvas_saved = self.workspace.live_rows(chat_id, user_id=user_id) if chat_id else []
             canvas_context = ""
             if canvas_saved:
                 canvas_context = "\nCOMPONENTS CURRENTLY ON CANVAS:\n"
                 for sc in canvas_saved:
                     cd = sc.get("component_data", {})
+                    if not isinstance(cd, dict):
+                        cd = {}
                     source_tool = cd.get("_source_tool", "unknown")
                     source_agent = cd.get("_source_agent", "unknown")
                     canvas_context += (
-                        f"- ID: {sc['id']} | Title: {sc['title']} "
+                        f"- component_id: {sc.get('component_id') or sc['id']} | Title: {sc['title']} "
                         f"| Type: {sc['component_type']} | Tool: {source_tool} | Agent: {source_agent}\n"
                     )
 
@@ -2533,9 +2668,10 @@ CRITICAL RULES:
 - **VISUALIZATIONS**: If the user asks for a graph, YOU MUST call the graphing tool. Do not just describe the data.
 {canvas_context}
 COMPONENT UPDATE RULES:
-- The user's canvas already has the components listed above under COMPONENTS CURRENTLY ON CANVAS.
+- The user's canvas is PERSISTENT: every component listed above under COMPONENTS CURRENTLY ON CANVAS stays visible until removed, and updates replace it in place.
 - When the user asks to MODIFY, UPDATE, REMOVE items from, or CHANGE existing displayed data, re-call the SAME tool that originally created it with the corrected/updated parameters. Do NOT create duplicates.
-- When the user asks for something completely NEW and unrelated, call the appropriate tool normally.
+- When you author UI components directly and intend to UPDATE one listed above, set its "id" field to that component's component_id so it updates in place; omit "id" for genuinely new components.
+- When the user asks for something completely NEW and unrelated, call the appropriate tool normally — the new output is added alongside the existing components.
 """
 
             # Feature 008-llm-text-only-chat (FR-006a). When this turn
@@ -2759,12 +2895,21 @@ COMPONENT UPDATE RULES:
                                 tool_ui_components.append(comp)
 
                     if tool_ui_components:
-                        # Send components, auto-replacing any that match existing canvas components
-                        await self._send_or_replace_components(
+                        # Send components, upserting into the persistent workspace (028)
+                        ws_ops = await self._send_or_replace_components(
                             websocket, tool_ui_components, chat_id, user_id=user_id
                         )
                         if chat_id:
                             self.history.add_message(chat_id, "assistant", tool_ui_components, user_id=user_id)
+                            if ws_ops:
+                                # FR-030: capture the workspace state this turn produced.
+                                try:
+                                    self.workspace.snapshot(
+                                        chat_id, user_id, cause="turn",
+                                        turn_message_id=self.history.get_latest_message_id(chat_id, user_id=user_id),
+                                    )
+                                except Exception:
+                                    logger.debug("workspace snapshot failed (tool turn)", exc_info=True)
 
                     # Append tool outputs to LLM conversation history
                     for i, tc in enumerate(llm_msg.tool_calls):
@@ -2954,7 +3099,8 @@ COMPONENT UPDATE RULES:
                         continue
                     
                     logger.info("LLM provided final response. conversation complete.")
-                    
+
+                    final_ops = []
                     if parsed_components:
                         if self._is_text_only_components(parsed_components):
                             # Text-only components -- route to chat panel only.
@@ -2966,9 +3112,9 @@ COMPONENT UPDATE RULES:
                             # Rich UI components -- canvas gets the parsed components,
                             # chat gets the leak alerts + Analysis card. The persisted
                             # message includes BOTH so reload shows the canvas + alerts.
-                            await self._send_or_replace_components(
+                            final_ops = await self._send_or_replace_components(
                                 websocket, parsed_components, chat_id, user_id=user_id
-                            )
+                            ) or []
                             chat_summary = list(leak_alerts) + [
                                 Card(title="Analysis", content=[
                                     Text(content=content, variant="markdown")
@@ -2987,6 +3133,17 @@ COMPONENT UPDATE RULES:
 
                     # Save complete interaction to history
                     self.history.add_message(chat_id, "assistant", response_components, user_id=user_id)
+
+                    # Feature 028 (FR-030): close the turn with a workspace
+                    # snapshot when this turn changed the workspace.
+                    if final_ops and chat_id:
+                        try:
+                            self.workspace.snapshot(
+                                chat_id, user_id, cause="turn",
+                                turn_message_id=self.history.get_latest_message_id(chat_id, user_id=user_id),
+                            )
+                        except Exception:
+                            logger.debug("workspace snapshot failed (final turn)", exc_info=True)
 
                     # Signal that processing is complete
                     await self._safe_send(websocket, json.dumps({
@@ -4903,66 +5060,240 @@ COMPONENT UPDATE RULES:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def _send_or_replace_components(self, websocket, components: List[Dict], chat_id: str, user_id: str):
-        """Send components to canvas, auto-replacing existing ones from the same source tool.
+    async def _send_or_replace_components(self, websocket, components: List[Dict], chat_id: str,
+                                          user_id: str, *, force_component_id: Optional[str] = None) -> List[Dict]:
+        """Feature 028: persist rich components into the chat's workspace under
+        stable identities and push partial ``ui_upsert`` updates (research D12).
 
-        Components whose (_source_tool, _source_agent) match a saved canvas
-        component are treated as updates — the old component is replaced in the
-        DB and the frontend receives a 'components_replaced' message so it can
-        swap in-place. Unmatched components flow through the normal ui_render
-        path (frontend auto-saves them as new).
+        Replaces the pre-028 ``(tool, agent)`` matcher whose
+        ``components_replaced`` messages the thin client silently dropped —
+        the disappearing-UI defect. Updates morph in place on every socket of
+        this user viewing the chat (FR-040); new components append. Returns
+        the persisted op list so callers can snapshot the turn (FR-030).
         """
         if not components:
+            return []
+        if not chat_id:
+            await self.send_ui_render(websocket, components)
+            return []
+        try:
+            ops = self.workspace.upsert(chat_id, user_id, components,
+                                        force_component_id=force_component_id)
+        except Exception:
+            logger.exception("workspace upsert failed — falling back to transient render")
+            await self.send_ui_render(websocket, components)
+            return []
+        await self.send_ui_upsert(websocket, chat_id, user_id, ops)
+        # Audit the mutation (FR-023) without blocking the turn.
+        try:
+            from audit.hooks import record_workspace_event
+            for op in ops:
+                asyncio.create_task(record_workspace_event(
+                    user_id=user_id,
+                    action="component_updated" if not op.get("created") else "component_added",
+                    chat_id=chat_id, component_id=op.get("component_id"),
+                ))
+        except Exception:
+            logger.debug("workspace audit failed", exc_info=True)
+        return ops
+
+    def _component_action_allowed(self, user_id: str, agent_id: str, tool_name: str):
+        """FR-036: deterministic component actions pass the SAME gates as the
+        chat path — security-flag blocks and per-user tool permissions
+        (the pre-028 ``table_paginate`` skipped both)."""
+        agent_flags = self.security_flags.get(agent_id, {}) if hasattr(self, "security_flags") else {}
+        flag = agent_flags.get(tool_name)
+        if flag and flag.get("blocked"):
+            return False, "This tool is blocked by a security review."
+        try:
+            if not self.tool_permissions.is_tool_allowed(user_id, agent_id, tool_name):
+                return False, "This tool is disabled in your permissions."
+        except Exception:
+            logger.exception("component_action: permission check failed — denying")
+            return False, "Permission check failed."
+        return True, ""
+
+    async def _handle_component_action(self, websocket, user_id: str, payload: Dict[str, Any]):
+        """Feature 028 — standardized deterministic component action
+        (contracts/component-action.md): resolve the emitting component's
+        provenance, re-check permissions, re-execute its source capability,
+        and upsert the result into the target component in place."""
+        chat_id = payload.get("chat_id") or self._ws_active_chat.get(id(websocket))
+        component_id = payload.get("component_id")
+        target_id = payload.get("target_component_id") or component_id
+        params_patch = payload.get("params_patch") or {}
+        if not chat_id or not component_id:
+            await self.send_ui_render(websocket, [
+                Alert(message="This action is missing its component context.", variant="error").to_dict()
+            ], target="chat")
+            return
+        # Timeline guard (FR-031): historical views are strictly read-only.
+        if self._ws_timeline_mode.get(id(websocket)):
+            await self._audit_workspace_denial(user_id, chat_id, component_id, "timeline_readonly")
+            await self.send_ui_render(websocket, [
+                Alert(message="You are viewing a past workspace state — return to live to interact.",
+                      variant="warning").to_dict()
+            ], target="chat")
+            return
+        row = self.workspace.get_by_component_id(chat_id, user_id, component_id)
+        if row is None or not isinstance(row.get("component_data"), dict):
+            await self.send_ui_render(websocket, [
+                Alert(message="This component is no longer available.", variant="warning").to_dict()
+            ], target="chat")
+            return
+        cd = row["component_data"]
+        agent_id = cd.get("_source_agent", "")
+        tool_name = cd.get("_source_tool", "")
+        if not agent_id or not tool_name:
+            await self.send_ui_render(websocket, [
+                Alert(message="This component has no refreshable source.", variant="warning").to_dict()
+            ], target="chat")
+            return
+        allowed, deny_reason = self._component_action_allowed(user_id, agent_id, tool_name)
+        if not allowed:
+            await self._audit_workspace_denial(user_id, chat_id, component_id, deny_reason)
+            await self.send_ui_render(websocket, [
+                Alert(message=f"Action not permitted: {deny_reason}", variant="error").to_dict()
+            ], target="chat")
             return
 
-        replacement_ids = []
-        replacement_comps = []
-        new_only = []
+        params = dict(cd.get("_source_params") or {})
+        if isinstance(params_patch, dict):
+            params.update(params_patch)
+        # Per-user credentials ride along exactly as on the chat path.
+        args = dict(params)
+        try:
+            creds = self.credential_manager.get_agent_credentials_encrypted(user_id, agent_id)
+            if creds:
+                args["_credentials"] = creds
+                args["_credentials_encrypted"] = True
+        except Exception:
+            logger.debug("component_action: credential injection failed", exc_info=True)
 
-        if chat_id:
-            existing = self.history.get_saved_components(chat_id, user_id=user_id)
-            # Build lookup: (source_tool, source_agent) -> [component_ids] (most recent first)
-            existing_by_source: Dict[tuple, List[str]] = {}
-            for ec in existing:
-                cd = ec.get("component_data", {})
-                key = (cd.get("_source_tool", ""), cd.get("_source_agent", ""))
-                if key != ("", ""):
-                    existing_by_source.setdefault(key, []).append(ec["id"])
-
-            for comp in components:
-                key = (comp.get("_source_tool", ""), comp.get("_source_agent", ""))
-                matching_ids = existing_by_source.get(key, [])
-                if matching_ids:
-                    old_id = matching_ids.pop(0)
-                    replacement_ids.append(old_id)
-                    replacement_comps.append(comp)
-                else:
-                    new_only.append(comp)
-        else:
-            new_only = list(components)
-
-        # Replace matched components via existing replace_components infra
-        if replacement_ids:
-            new_comp_dicts = [
-                {
-                    "component_data": comp,
-                    "component_type": comp.get("type", "unknown"),
-                    "title": comp.get("title", comp.get("type", "Component")),
-                }
-                for comp in replacement_comps
-            ]
-            replaced = self.history.replace_components(
-                replacement_ids, new_comp_dicts, chat_id, user_id=user_id
-            )
+        lock = self._workspace_locks.setdefault(chat_id, asyncio.Lock())
+        try:
+            async with lock:  # deterministic ordering per chat (contract §Concurrency)
+                result = await self._execute_with_retry(websocket, agent_id, tool_name, args)
+                if result and result.ui_components and not result.error:
+                    for comp in result.ui_components:
+                        if isinstance(comp, dict):
+                            comp["_source_agent"] = agent_id
+                            comp["_source_tool"] = tool_name
+                            comp["_source_params"] = params
+                    ops = await self._send_or_replace_components(
+                        websocket, result.ui_components, chat_id, user_id=user_id,
+                        force_component_id=target_id,
+                    )
+                    if ops:
+                        try:
+                            self.workspace.snapshot(chat_id, user_id, cause="component_action")
+                        except Exception:
+                            logger.debug("workspace snapshot failed (component_action)", exc_info=True)
+                elif result and result.error:
+                    await self.send_ui_render(websocket, [
+                        Alert(message=result.error.get("message", "The action failed."),
+                              variant="error").to_dict()
+                    ], target="chat")
+        except Exception as e:
+            logger.error(f"component_action failed: {e}", exc_info=True)
+            await self.send_ui_render(websocket, [
+                Alert(message=f"The action failed: {e}", variant="error").to_dict()
+            ], target="chat")
+        finally:
             await self._safe_send(websocket, json.dumps({
-                "type": "components_replaced",
-                "removed_ids": replacement_ids,
-                "new_components": replaced,
+                "type": "chat_status", "status": "done", "message": ""
             }))
 
-        # Send truly new components through normal ui_render flow
-        if new_only:
-            await self.send_ui_render(websocket, new_only)
+    async def _reconcile_legacy_replacement(self, websocket, chat_id: str, user_id: str,
+                                            *, cause: str):
+        """Feature 028 (D18): after a legacy combine/condense replace, stamp
+        workspace identities onto the fresh rows, snapshot, and push the full
+        live workspace so the mutation is visible (pre-028 the thin client
+        silently dropped components_combined/condensed)."""
+        if not chat_id:
+            return
+        try:
+            now_ms = int(time.time() * 1000)
+            for row in self.workspace.live_rows(chat_id, user_id):
+                if row.get("component_id"):
+                    continue
+                data = row.get("component_data")
+                if not isinstance(data, dict):
+                    continue
+                cid = self.workspace.resolve_identity(data)
+                self.history.db.execute(
+                    "UPDATE saved_components SET component_id = ?, component_data = ?, updated_at = ? "
+                    "WHERE id = ? AND user_id = ?",
+                    (cid, json.dumps(data), now_ms, row["id"], user_id),
+                )
+            self.workspace.snapshot(chat_id, user_id, cause=cause)
+            ws_components = self.workspace.live_components(chat_id, user_id)
+            await self.send_ui_render(websocket, ws_components)
+        except Exception:
+            logger.exception("legacy replacement reconciliation failed (%s)", cause)
+
+    async def _audit_workspace_denial(self, user_id: str, chat_id: str,
+                                      component_id: str, reason: str):
+        try:
+            from audit.hooks import record_workspace_event
+            await record_workspace_event(
+                user_id=user_id, action="action_denied", chat_id=chat_id,
+                component_id=component_id, outcome="failure",
+                description=f"Component action denied: {reason}",
+                detail={"reason": reason},
+            )
+        except Exception:
+            logger.debug("workspace denial audit failed", exc_info=True)
+
+    async def send_ui_upsert(self, websocket, chat_id: str, user_id: str, ops: List[Dict]):
+        """Fan a ``ui_upsert`` out to every socket of ``user_id`` whose active
+        chat is ``chat_id``, adapting each op per receiving device (D16).
+
+        The structured dict AND its web HTML fragment ride together per op
+        (026 FR-018 dual shape); the originating socket goes through the same
+        path so there is exactly one delivery code path.
+        """
+        if not ops:
+            return
+        from rote.adapter import ComponentAdapter
+        from rote.capabilities import DeviceType
+        from shared.protocol import UIUpsert
+        from webrender import render_component_fragment
+
+        targets = [
+            ws for ws in self.ui_clients
+            if self._get_user_id(ws) == user_id and self._ws_active_chat.get(id(ws)) == chat_id
+        ]
+        if websocket is not None and websocket not in targets:
+            targets.append(websocket)
+
+        for ws in targets:
+            profile = self.rote.get_profile(ws)
+            wire_ops = []
+            for op in ops:
+                if op.get("op") == "remove":
+                    wire_ops.append({"op": "remove", "component_id": op.get("component_id")})
+                    continue
+                comp = op.get("component")
+                cid = op.get("component_id")
+                if profile.device_type == DeviceType.BROWSER:
+                    adapted = comp
+                else:
+                    adapted_list = ComponentAdapter.adapt([comp], profile)
+                    if len(adapted_list) == 1:
+                        adapted = adapted_list[0]
+                    else:
+                        adapted = {"type": "container", "content": adapted_list}
+                    if isinstance(adapted, dict):
+                        adapted["component_id"] = cid
+                html = None
+                try:
+                    html = render_component_fragment(adapted if isinstance(adapted, dict) else comp)
+                except Exception:
+                    logger.exception("webrender: ui_upsert fragment render failed")
+                wire_ops.append({"op": "upsert", "component_id": cid,
+                                 "component": adapted, "html": html})
+            await self._safe_send(ws, UIUpsert(chat_id=chat_id, ops=wire_ops).to_json())
 
     async def send_ui_render(self, websocket, components: List, target: str = "canvas"):
         """Send a UIRender message to a UI client, adapted via ROTE."""
@@ -4975,11 +5306,18 @@ COMPONENT UPDATE RULES:
         adapted = self.rote.adapt(websocket, components)
         html = None
         try:
-            from webrender import render_for_target
             profile = self.rote.get_profile(websocket)
-            # All current device targets render to web HTML; the seam allows
-            # future targets to register their own renderer (FR-011).
-            html = render_for_target("web", adapted, profile)
+            if target == "canvas":
+                # Feature 028: canvas renders carry per-component identity
+                # wrappers so every top-level component is a ui_upsert morph
+                # target (contracts/ws-workspace-protocol.md).
+                from webrender import render_workspace
+                html = render_workspace(adapted, profile)
+            else:
+                from webrender import render_for_target
+                # All current device targets render to web HTML; the seam allows
+                # future targets to register their own renderer (FR-011).
+                html = render_for_target("web", adapted, profile)
         except Exception:
             logger.exception("webrender: failed to render UI (sending structured components only)")
         msg = UIRender(components=adapted, target=target, html=html)
@@ -5267,6 +5605,7 @@ COMPONENT UPDATE RULES:
                 except Exception as e:
                     logger.warning(f"stream_manager.detach failed: {e}")
             self._ws_active_chat.pop(id(websocket), None)
+            self._ws_timeline_mode.pop(id(websocket), None)
             if websocket in self.ui_clients:
                 self.ui_clients.remove(websocket)
             if websocket in self.ui_sessions:
@@ -5298,6 +5637,7 @@ COMPONENT UPDATE RULES:
                 except Exception as e:
                     logger.warning(f"stream_manager.detach failed: {e}")
             self._ws_active_chat.pop(id(websocket), None)
+            self._ws_timeline_mode.pop(id(websocket), None)
             if websocket in self.ui_clients:
                 self.ui_clients.remove(websocket)
             if websocket in self.ui_sessions:
@@ -5312,6 +5652,27 @@ COMPONENT UPDATE RULES:
 
     async def start(self):
         logger.info(f"Orchestrator starting on port {PORT}")
+
+        # Feature 028 (FR-015): production posture is fail-closed. Mock auth
+        # outside explicitly declared development mode is a fatal
+        # misconfiguration — refuse to serve rather than run open.
+        from orchestrator.session_store import assert_production_posture
+        assert_production_posture()
+
+        # Feature 028 (FR-013): drain queued offline sign-out revocations.
+        async def _revocation_queue_loop():
+            from orchestrator.web_auth import process_revocation_queue_once
+            interval = int(os.getenv("AUTH_REVOCATION_RETRY_SECONDS", "60"))
+            while True:
+                try:
+                    resolved = await process_revocation_queue_once()
+                    if resolved:
+                        logger.info("auth: resolved %d queued credential revocation(s)", resolved)
+                except Exception:
+                    logger.debug("auth: revocation queue pass failed", exc_info=True)
+                await asyncio.sleep(interval)
+
+        asyncio.create_task(_revocation_queue_loop())
 
         # Auto-discover agents (continuous monitor)
         agent_port = int(os.getenv("AGENT_PORT", 8003))
@@ -5444,6 +5805,18 @@ COMPONENT UPDATE RULES:
 
         @app.get("/", response_class=_HTMLResponse)
         async def serve_shell(request: Request):
+            # Feature 028 (FR-001): the shell is gated. Unauthenticated
+            # visitors are redirected straight to Keycloak via /auth/login
+            # with their destination preserved — no app markup is served.
+            try:
+                from orchestrator.web_auth import shell_gate
+                from fastapi.responses import RedirectResponse as _Redirect
+                gate = shell_gate(request)
+                if gate:
+                    return _Redirect(gate, status_code=302)
+            except Exception:
+                logger.exception("web_auth: shell gate check failed — failing closed")
+                return _HTMLResponse("<h1>AstralBody</h1><p>Sign-in unavailable.</p>", status_code=503)
             try:
                 with open(_shell_path, "r", encoding="utf-8") as fh:
                     shell = fh.read()
@@ -5688,11 +6061,11 @@ COMPONENT UPDATE RULES:
                 logger.warning("Auth not configured (VITE_KEYCLOAK_AUTHORITY/CLIENT_ID missing)")
                 return None
 
-            # Fetch JWKS
+            # Fetch JWKS (feature 028 D8: cached with kid-miss refetch — the
+            # pre-028 per-call fetch made every WS register an IdP round-trip)
             jwks_url = f"{authority}/protocol/openid-connect/certs"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(jwks_url) as resp:
-                    jwks = await resp.json()
+            from shared.jwks_cache import get_jwks
+            jwks = await get_jwks(jwks_url, token=token)
 
             # Verify token — skip strict audience check since Keycloak
             # confidential clients set aud="account", not the client_id.

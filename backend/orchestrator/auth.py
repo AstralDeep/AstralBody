@@ -48,15 +48,19 @@ def _get_keycloak_config():
 @auth_router.post(
     "/auth/token",
     tags=["Auth"],
-    summary="Proxy token request to Keycloak",
+    summary="[DEPRECATED] Proxy token request to Keycloak",
     description=(
-        "Proxies OIDC token exchange requests to Keycloak's token endpoint, "
-        "injecting the client_secret server-side so it never reaches the browser. "
-        "Supports authorization_code and refresh_token grant types."
+        "DEPRECATED (feature 028): the React-era BFF proxy for oidc-client-ts. "
+        "No shipped client calls it — the server-side OIDC flow in web_auth.py "
+        "owns login/refresh since 026/028. Kept mounted for external API "
+        "consumers pending a tracked removal."
     ),
+    deprecated=True,
 )
 async def proxy_token(request: Request):
     """
+    DEPRECATED (028 D10) — React-era BFF proxy; web_auth.py owns the flow now.
+
     Proxy token requests to Keycloak's token endpoint.
 
     Accepts the same application/x-www-form-urlencoded body that
@@ -178,11 +182,11 @@ async def get_current_user_payload(request: Request, credentials: HTTPAuthorizat
         raise HTTPException(status_code=500, detail="Auth not configured")
         
     try:
+        # Feature 028 D8: cached JWKS (kid-miss refetch) replaces per-request fetch.
         jwks_url = f"{authority}/protocol/openid-connect/certs"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(jwks_url) as resp:
-                jwks = await resp.json()
-                
+        from shared.jwks_cache import get_jwks
+        jwks = await get_jwks(jwks_url, token=token)
+
         payload = jose_jwt.decode(
             token, jwks, algorithms=["RS256"],
             options={"verify_aud": False, "verify_at_hash": False}
@@ -322,15 +326,26 @@ async def download_file(session_id: str, filename: str, user_id: str = Depends(r
 def validate_agent_api_key(api_key: str) -> bool:
     """
     Validate an API key for Agent-to-Agent (A2A) communication.
-    
+
     Remote agents connecting to the orchestrator can authenticate
     using an API key configured in the AGENT_API_KEY environment variable.
     This is used for server-to-server communication between the
     orchestrator and agents running on remote servers.
+
+    Feature 028 (FR-016): an UNSET key fails closed outside explicitly
+    declared development mode — production deployments must configure
+    AGENT_API_KEY (or rely on JWT-validated A2A) for agent connections.
+    Pre-028 this returned True when unset, silently allowing
+    unauthenticated agent connections in any environment.
     """
     configured_key = os.getenv("AGENT_API_KEY", "")
     if not configured_key:
-        # No key configured — allow unauthenticated agent connections
-        # (backwards-compatible with local dev)
-        return True
+        from orchestrator.session_store import is_dev_mode
+        if is_dev_mode():
+            return True  # keyless local dev remains supported (spec A13)
+        logger.warning(
+            "AGENT_API_KEY is not configured and ASTRAL_ENV is not 'development' — "
+            "refusing unauthenticated agent connection (fail closed, 028 FR-016)"
+        )
+        return False
     return api_key == configured_key

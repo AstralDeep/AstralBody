@@ -1,16 +1,28 @@
-"""Feature 026 — server-side OIDC Authorization-Code flow (FR-009).
+"""Server-side OIDC Authorization-Code flow (feature 026 FR-009, upgraded by 028).
 
-Replaces the removed React client-side auth (oidc-client-ts). The orchestrator
-now drives login server-side: ``/auth/login`` → Keycloak authorize (PKCE),
-``/auth/callback`` → token exchange (confidential client_secret stays
-server-side), ``/auth/session`` → hands the access token to the WS
-``register_ui`` handshake, ``/auth/logout`` → Keycloak end-session + offline-
-tolerant sign-out. Tokens stay server-side in a signed-cookie session.
+The orchestrator drives login server-side: ``/auth/login`` → Keycloak
+authorize (PKCE), ``/auth/callback`` → token exchange (confidential
+client_secret stays server-side), ``/auth/session`` → hands the access token
+to the WS ``register_ui`` handshake, ``/auth/logout`` → revocation +
+Keycloak end-session. Tokens stay server-side in a signed-cookie session.
 
-Preserves: JWKS validation (via the existing ``validate_token``), the
-``openid profile email offline_access`` scope (so feature-025 OfflineGrant still
-captures the refresh token), the 365-day persistent-login hard cap (feature 016),
-and the ``auth.login_interactive`` / ``auth.session_resumed`` audit action types.
+Feature 028 (workspace-auth-revival, Part A) adds the full session
+lifecycle on top of the 026 flow:
+
+* **Durable sessions** — ``web_session`` Postgres rows (Fernet-encrypted at
+  rest) survive restarts/multi-instance deploys; the module-level
+  ``_SESSIONS`` dict remains as the in-process cache and the dev/mock
+  fallback (FR-008, research D3).
+* **Silent refresh** — :func:`ensure_session` renews the access token at
+  Keycloak when it nears expiry. Refresh NEVER moves the 365-day
+  interactive-login anchor (016 FR-001); at the hard cap the session dies
+  and interactive login is required (FR-006/FR-007, research D2).
+* **Shell gate** — :func:`shell_gate` gives ``GET /`` its redirect-to-login
+  decision with a validated ``next`` destination (FR-001..FR-003, D1).
+* **Sign-out revocation** — logout revokes the refresh token at Keycloak,
+  revokes feature-025 offline grants, and completes locally even offline
+  (queued retries — FR-012/FR-013, D5); a different user signing in on the
+  same browser revokes the prior session first (FR-014, D6).
 """
 from __future__ import annotations
 
@@ -26,7 +38,7 @@ from typing import Any, Dict, Optional
 
 import httpx
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 import shared  # noqa: F401 — normalizes USE_MOCK_AUTH/KEYCLOAK_* env aliases (post-VITE rename)
 
@@ -34,9 +46,10 @@ logger = logging.getLogger("orchestrator.web_auth")
 
 web_auth_router = APIRouter()
 
-# In-memory session store: sid -> {access_token, refresh_token, sub, created_at}.
-# Survives the process lifetime; production multi-worker deploys should back this
-# with shared storage, but the contract (signed cookie + 365-day cap) is the same.
+# In-process session cache + dev/mock fallback: sid -> {access_token,
+# refresh_token, sub, created_at, resumed}. The durable source of truth is
+# the web_session table (session_store.WebSessionStore); rows are mirrored
+# here on read so the hot path stays dict-cheap.
 _SESSIONS: Dict[str, Dict[str, Any]] = {}
 # Pending logins: state -> {code_verifier, created_at, next}
 _PENDING: Dict[str, Dict[str, Any]] = {}
@@ -44,8 +57,15 @@ _PENDING: Dict[str, Dict[str, Any]] = {}
 HARD_MAX_SECONDS = int(os.getenv("OFFLINE_GRANT_MAX_DAYS", "365")) * 24 * 60 * 60
 COOKIE_NAME = "astral_session"
 _SCOPE = "openid profile email offline_access"
+# Refresh when the access token has less than this many seconds left (D2).
+_REFRESH_WINDOW_SECONDS = 60
+# ±5 min JWT clock-skew tolerance (016 clarification).
+_CLOCK_SKEW_SECONDS = 300
 
 _PROCESS_SECRET = secrets.token_hex(32)
+
+_STORE = None
+_STORE_FAILED = False
 
 
 def _is_mock() -> bool:
@@ -69,6 +89,32 @@ def _unsign(value: str) -> Optional[str]:
     return sid if hmac.compare_digest(mac, expected) else None
 
 
+def _get_store():
+    """Lazily construct the durable session store (None when unavailable).
+
+    The fail-closed production boot check lives in the orchestrator startup
+    (FR-015); here a missing store degrades to the in-memory cache so unit
+    tests and keyless dev environments keep working.
+    """
+    global _STORE, _STORE_FAILED
+    if _STORE is not None or _STORE_FAILED:
+        return _STORE
+    try:
+        from orchestrator.session_store import WebSessionStore
+        _STORE = WebSessionStore()
+    except Exception as exc:
+        _STORE_FAILED = True
+        logger.warning("web_auth: durable session store unavailable (%s) — using in-memory sessions", exc)
+    return _STORE
+
+
+def reset_store_for_tests() -> None:
+    """Test helper: drop the cached store so monkeypatched envs re-init."""
+    global _STORE, _STORE_FAILED
+    _STORE = None
+    _STORE_FAILED = False
+
+
 def _keycloak_config():
     """Reuse the existing helper (authority, client_id, client_secret)."""
     try:
@@ -82,22 +128,179 @@ def _keycloak_config():
         )
 
 
+def _validate_next(nxt: Optional[str]) -> str:
+    """Open-redirect guard (D1): same-origin relative paths only."""
+    nxt = (nxt or "").strip()
+    if not nxt.startswith("/") or nxt.startswith("//") or "\\" in nxt or ":" in nxt.split("?", 1)[0]:
+        return "/"
+    return nxt
+
+
+def _jwt_payload(token: str) -> Dict[str, Any]:
+    """Best-effort, non-validating JWT payload decode ('' claims on failure)."""
+    try:
+        part = token.split(".")[1]
+        part += "=" * (-len(part) % 4)
+        return json.loads(base64.urlsafe_b64decode(part))
+    except Exception:
+        return {}
+
+
+def _token_expires_at(token: str) -> Optional[int]:
+    exp = _jwt_payload(token).get("exp")
+    try:
+        return int(exp) if exp is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Session lookup (cache → durable store) + silent refresh
+# ---------------------------------------------------------------------------
+
+def _session_by_sid(sid: str) -> Optional[Dict[str, Any]]:
+    sess = _SESSIONS.get(sid)
+    if sess is not None:
+        if (time.time() - sess.get("created_at", 0)) > HARD_MAX_SECONDS:
+            _SESSIONS.pop(sid, None)
+            store = _get_store()
+            if store is not None:
+                store.delete(sid)
+            logger.info("web_auth: session %s exceeded 365-day cap — cleared", sid[:8])
+            return None
+        return sess
+    store = _get_store()
+    if store is None:
+        return None
+    row = store.get(sid)  # enforces the hard cap itself
+    if row is None:
+        return None
+    sess = {
+        "sid": sid,
+        "access_token": row["access_token"],
+        "refresh_token": row["refresh_token"],
+        "sub": row["user_id"],
+        "created_at": row["interactive_anchor"],
+        "resumed": True,  # any store re-read is by definition a resume
+    }
+    _SESSIONS[sid] = sess
+    return sess
+
+
 def get_session(request: Request) -> Optional[Dict[str, Any]]:
-    """Return the live session dict for a request, enforcing the 365-day cap."""
+    """Return the live session dict for a request, enforcing the 365-day cap.
+
+    Does NOT refresh — callers needing a guaranteed-fresh access token use
+    :func:`ensure_session` (async)."""
     raw = request.cookies.get(COOKIE_NAME)
     if not raw:
         return None
     sid = _unsign(raw)
     if not sid:
         return None
-    sess = _SESSIONS.get(sid)
-    if not sess:
-        return None
-    if (time.time() - sess.get("created_at", 0)) > HARD_MAX_SECONDS:
-        _SESSIONS.pop(sid, None)
-        logger.info("web_auth: session %s exceeded 365-day cap — cleared", sid[:8])
-        return None
+    sess = _session_by_sid(sid)
+    if sess is not None and "sid" not in sess:
+        sess["sid"] = sid
     return sess
+
+
+async def _refresh_session(sid: str, sess: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Silent refresh at Keycloak (D2). Returns the refreshed session or None.
+
+    Never moves the interactive anchor; failure kills the session (the user
+    must sign in interactively) and audits ``auth.token_refresh_failed``.
+    """
+    authority, client_id, client_secret = _keycloak_config()
+    refresh_token = sess.get("refresh_token", "")
+    if not authority or not refresh_token:
+        return None
+    data = {"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": client_id}
+    if client_secret:
+        data["client_secret"] = client_secret
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(f"{authority}/protocol/openid-connect/token", data=data)
+        resp.raise_for_status()
+        tok = resp.json()
+    except httpx.HTTPStatusError:
+        # Keycloak refused the refresh token (revoked/expired) — dead session.
+        logger.info("web_auth: refresh refused for session %s — clearing", sid[:8])
+        await _kill_session(sid, sess, audit_action="token_refresh_failed",
+                            description="Silent token refresh refused by the identity provider")
+        return None
+    except Exception:
+        # IdP unreachable: keep the session (offline tolerance) — the caller
+        # may still succeed with the current token if it hasn't expired.
+        logger.warning("web_auth: refresh attempt failed (IdP unreachable?)", exc_info=True)
+        return sess
+    sess["access_token"] = tok.get("access_token", "") or sess["access_token"]
+    new_refresh = tok.get("refresh_token", "")
+    if new_refresh:
+        sess["refresh_token"] = new_refresh
+    store = _get_store()
+    if store is not None:
+        try:
+            store.update_tokens(sid, access_token=sess["access_token"], refresh_token=sess["refresh_token"])
+        except Exception:
+            logger.warning("web_auth: failed persisting refreshed tokens", exc_info=True)
+    return sess
+
+
+async def _kill_session(sid: str, sess: Dict[str, Any], *, audit_action: Optional[str] = None,
+                        description: str = "", outcome: str = "failure") -> None:
+    _SESSIONS.pop(sid, None)
+    store = _get_store()
+    if store is not None:
+        try:
+            store.delete(sid)
+        except Exception:
+            logger.debug("web_auth: store delete failed", exc_info=True)
+    if audit_action:
+        await _audit(audit_action, sess.get("sub", "anonymous"), description, outcome=outcome)
+
+
+async def ensure_session(request: Request) -> Optional[Dict[str, Any]]:
+    """Session for this request with a guaranteed-usable access token.
+
+    Refreshes silently when the access token is inside the refresh window.
+    Returns None when there is no session, the hard cap is reached, or the
+    refresh was refused (interactive login required)."""
+    if _is_mock():
+        return {"access_token": "dev-token", "refresh_token": "", "sub": "test_user",
+                "created_at": time.time(), "resumed": True, "sid": "mock"}
+    sess = get_session(request)
+    if sess is None:
+        return None
+    sid = sess.get("sid") or _unsign(request.cookies.get(COOKIE_NAME, "")) or ""
+    exp = _token_expires_at(sess.get("access_token", ""))
+    if exp is None or (exp - time.time()) < _REFRESH_WINDOW_SECONDS:
+        refreshed = await _refresh_session(sid, sess)
+        if refreshed is None:
+            return None
+        sess = refreshed
+        # If the IdP was unreachable and the token is hard-expired (beyond
+        # skew), the session can't serve this request.
+        exp2 = _token_expires_at(sess.get("access_token", ""))
+        if exp2 is not None and (time.time() - exp2) > _CLOCK_SKEW_SECONDS:
+            return None
+    return sess
+
+
+def shell_gate(request: Request) -> Optional[str]:
+    """FR-001: redirect target for unauthenticated shell requests, else None.
+
+    Cheap synchronous check (no refresh): a session that merely needs a
+    refresh is allowed through — the client's ``/auth/session`` fetch
+    refreshes before the WS handshake. Only a missing/dead session gates."""
+    if _is_mock():
+        return None
+    if get_session(request) is not None:
+        return None
+    path = request.url.path or "/"
+    query = ("?" + str(request.url.query)) if request.url.query else ""
+    nxt = _validate_next(path + query)
+    from urllib.parse import quote
+    return f"/auth/login?next={quote(nxt, safe='')}"
 
 
 def session_token(request: Request) -> str:
@@ -121,18 +324,13 @@ def session_roles(request: Request) -> list:
         return ["admin", "user"]
     sess = get_session(request)
     token = (sess or {}).get("access_token", "") or ""
-    parts = token.split(".")
-    if len(parts) != 3:
+    payload = _jwt_payload(token)
+    if not payload:
         return []
-    try:
-        payload = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
-        roles = list(payload.get("realm_access", {}).get("roles", []) or [])
-        for client in (payload.get("resource_access", {}) or {}).values():
-            roles.extend(client.get("roles", []) or [])
-        return roles
-    except Exception:
-        logger.debug("web_auth: could not decode roles from session token", exc_info=True)
-        return []
+    roles = list(payload.get("realm_access", {}).get("roles", []) or [])
+    for client in (payload.get("resource_access", {}) or {}).values():
+        roles.extend(client.get("roles", []) or [])
+    return roles
 
 
 def _pkce_pair():
@@ -146,16 +344,20 @@ def _redirect_uri(request: Request) -> str:
     return f"{base}/auth/callback"
 
 
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
 @web_auth_router.get("/auth/login")
 async def auth_login(request: Request):
     """Begin the OIDC Authorization-Code flow (PKCE)."""
-    nxt = request.query_params.get("next", "/")
+    nxt = _validate_next(request.query_params.get("next", "/"))
     if _is_mock():
         # Dev/mock: mint a local session immediately, no Keycloak round-trip.
         return _establish_session(request, {"access_token": "dev-token", "refresh_token": "", "sub": "test_user"}, nxt)
     authority, client_id, _secret_unused = _keycloak_config()
     if not authority:
-        return JSONResponse({"error": "OIDC not configured"}, status_code=500)
+        return _error_page(nxt, "OIDC is not configured on this server.", status=500)
     verifier, challenge = _pkce_pair()
     state = secrets.token_urlsafe(24)
     _PENDING[state] = {"code_verifier": verifier, "created_at": time.time(), "next": nxt}
@@ -171,12 +373,14 @@ async def auth_login(request: Request):
 @web_auth_router.get("/auth/callback")
 async def auth_callback(request: Request):
     """Exchange the authorization code for tokens, establish a session, audit
-    ``auth.login_interactive``."""
+    ``auth.login_interactive``. A valid cookie belonging to a DIFFERENT user
+    triggers user-switch revocation of the prior session first (016 FR-008)."""
     code = request.query_params.get("code")
     state = request.query_params.get("state")
     pending = _PENDING.pop(state, None) if state else None
     if not code or not pending:
-        return JSONResponse({"error": "invalid_callback"}, status_code=400)
+        return _error_page("/", "Sign-in could not be completed (invalid callback). Please try again.")
+    nxt = _validate_next(pending.get("next", "/"))
     authority, client_id, client_secret = _keycloak_config()
     data = {
         "grant_type": "authorization_code", "code": code,
@@ -192,37 +396,78 @@ async def auth_callback(request: Request):
         tok = resp.json()
     except Exception:
         logger.exception("web_auth: token exchange failed")
-        return JSONResponse({"error": "token_exchange_failed"}, status_code=502)
+        return _error_page(nxt, "The identity provider rejected the sign-in. Please try again.")
     sub = _sub_from_jwt(tok.get("access_token", ""))
-    _audit_login(request, sub, "login_interactive")
+
+    # D6 — user-switch revocation: a live session for someone else on this
+    # browser is revoked (session + refresh token) before the new one starts.
+    prior = get_session(request)
+    if prior and prior.get("sub") and prior["sub"] != sub:
+        prior_sid = prior.get("sid", "")
+        logger.info("web_auth: user switch %s -> %s — revoking prior session", prior["sub"], sub)
+        await _revoke_or_queue(prior.get("sub", ""), prior.get("refresh_token", ""))
+        await _kill_session(prior_sid, prior, audit_action="logout",
+                            description="Prior session revoked by user switch on shared browser",
+                            outcome="success")
+
+    await _audit("login_interactive", sub, "Interactive login completed; new session established")
     return _establish_session(
         request,
         {"access_token": tok.get("access_token", ""), "refresh_token": tok.get("refresh_token", ""), "sub": sub},
-        pending.get("next", "/"),
+        nxt,
     )
 
 
 @web_auth_router.get("/auth/session")
 async def auth_session(request: Request):
-    """Report the current session/token for the WS handshake."""
+    """Report the current session/token for the WS handshake — refresh-aware
+    (D2/D4): an access token inside the refresh window is renewed before
+    being handed out, so reconnects after the token TTL recover silently."""
     if _is_mock():
         return JSONResponse({"authenticated": True, "access_token": "dev-token", "resumed": True})
-    sess = get_session(request)
+    sess = await ensure_session(request)
     if not sess:
-        return JSONResponse({"authenticated": False, "access_token": "", "resumed": False})
-    return JSONResponse({"authenticated": True, "access_token": sess.get("access_token", ""), "resumed": True})
+        had_cookie = bool(request.cookies.get(COOKIE_NAME))
+        reason = "refresh_failed" if had_cookie else "no_session"
+        return JSONResponse({"authenticated": False, "access_token": "", "resumed": False, "reason": reason})
+    return JSONResponse({
+        "authenticated": True,
+        "access_token": sess.get("access_token", ""),
+        "resumed": bool(sess.get("resumed", True)),
+        "user_id": sess.get("sub", ""),
+    })
 
 
 @web_auth_router.post("/auth/logout")
 @web_auth_router.get("/auth/logout")
 async def auth_logout(request: Request):
-    """Offline-tolerant sign-out: clear the server session, then best-effort
-    Keycloak end-session (never blocks)."""
+    """Sign-out with server-side invalidation (FR-012/FR-013, research D5).
+
+    Order: end the server session unconditionally → best-effort refresh-token
+    revocation at Keycloak (queued for retry when offline) → revoke the
+    user's feature-025 offline grants → audit → Keycloak end-session
+    redirect (best-effort). Local sign-out never blocks on the IdP."""
     raw = request.cookies.get(COOKIE_NAME)
+    sess = None
     if raw:
         sid = _unsign(raw)
         if sid:
-            _SESSIONS.pop(sid, None)
+            sess = _session_by_sid(sid)
+            if sess is None:
+                _SESSIONS.pop(sid, None)
+            else:
+                await _kill_session(sid, sess)  # unconditional local sign-out
+    if sess and not _is_mock():
+        user_id = sess.get("sub", "")
+        await _revoke_or_queue(user_id, sess.get("refresh_token", ""))
+        try:
+            from orchestrator.offline_grant import OfflineGrantStore
+            revoked = OfflineGrantStore().revoke_for_user(user_id)
+            if revoked:
+                logger.info("web_auth: revoked %d offline grant(s) for %s at sign-out", revoked, user_id)
+        except Exception:
+            logger.warning("web_auth: offline-grant revocation failed at sign-out", exc_info=True)
+        await _audit("logout", user_id, "User signed out; session and refresh credential revoked")
     resp = RedirectResponse("/", status_code=303)
     resp.delete_cookie(COOKIE_NAME)
     if not _is_mock():
@@ -235,10 +480,115 @@ async def auth_logout(request: Request):
     return resp
 
 
+@web_auth_router.get("/auth/error")
+async def auth_error(request: Request):
+    """Bounded, ungated sign-in error page (FR-004) — never auto-redirects."""
+    nxt = _validate_next(request.query_params.get("next", "/"))
+    reason = (request.query_params.get("reason") or "Sign-in failed.")[:300]
+    return _error_page(nxt, reason)
+
+
+def _error_page(nxt: str, reason: str, status: int = 200) -> HTMLResponse:
+    from html import escape
+    from urllib.parse import quote
+    retry = f"/auth/login?next={quote(_validate_next(nxt), safe='')}"
+    body = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>AstralBody — sign-in</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body style="margin:0;display:grid;place-items:center;min-height:100vh;background:#0F1221;color:#F3F4F6;font-family:system-ui,sans-serif">
+<div style="max-width:420px;padding:2rem;border:1px solid rgba(255,255,255,.1);border-radius:12px;background:#1A1E2E;text-align:center">
+<h1 style="font-size:1.1rem;margin:0 0 .75rem">Sign-in problem</h1>
+<p style="font-size:.9rem;color:#9CA3AF;margin:0 0 1.25rem">{escape(reason)}</p>
+<a href="{escape(retry)}" style="display:inline-block;padding:.6rem 1.2rem;border-radius:8px;background:#6366F1;color:#fff;text-decoration:none;font-size:.9rem">Try again</a>
+</div></body></html>"""
+    return HTMLResponse(body, status_code=status)
+
+
+# ---------------------------------------------------------------------------
+# Revocation (D5) — best-effort with offline-tolerant queue
+# ---------------------------------------------------------------------------
+
+async def _revoke_refresh_token(refresh_token: str) -> bool:
+    """POST the refresh token to Keycloak's RFC 7009 revocation endpoint."""
+    if not refresh_token:
+        return True
+    authority, client_id, client_secret = _keycloak_config()
+    if not authority:
+        return False
+    data = {"token": refresh_token, "token_type_hint": "refresh_token", "client_id": client_id}
+    if client_secret:
+        data["client_secret"] = client_secret
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(f"{authority}/protocol/openid-connect/revoke", data=data)
+        return resp.status_code < 400
+    except Exception:
+        return False
+
+
+async def _revoke_or_queue(user_id: str, refresh_token: str) -> None:
+    if not refresh_token:
+        return
+    if await _revoke_refresh_token(refresh_token):
+        return
+    store = _get_store()
+    if store is not None:
+        try:
+            store.enqueue_revocation(user_id, refresh_token)
+            logger.info("web_auth: IdP unreachable — refresh-token revocation queued for %s", user_id)
+            return
+        except Exception:
+            logger.warning("web_auth: revocation enqueue failed", exc_info=True)
+    logger.warning("web_auth: could not revoke or queue refresh token for %s", user_id)
+
+
+_MAX_REVOCATION_ATTEMPTS = 30
+
+
+async def process_revocation_queue_once() -> int:
+    """Drain pending offline revocations (called by the orchestrator's
+    background worker). Returns how many were resolved this pass."""
+    store = _get_store()
+    if store is None:
+        return 0
+    resolved = 0
+    try:
+        pending = store.pending_revocations()
+    except Exception:
+        logger.debug("web_auth: revocation queue read failed", exc_info=True)
+        return 0
+    for item in pending:
+        if await _revoke_refresh_token(item["refresh_token"]):
+            store.resolve_revocation(item["id"])
+            resolved += 1
+        elif item["attempts"] >= _MAX_REVOCATION_ATTEMPTS:
+            logger.warning("web_auth: dropping revocation for %s after %d attempts "
+                           "(token will die at its natural expiry)", item["user_id"], item["attempts"])
+            store.resolve_revocation(item["id"])
+        else:
+            store.bump_revocation_attempt(item["id"])
+    return resolved
+
+
+# ---------------------------------------------------------------------------
+# Internals
+# ---------------------------------------------------------------------------
+
 def _establish_session(request: Request, payload: Dict[str, Any], nxt: str) -> RedirectResponse:
     sid = secrets.token_urlsafe(24)
-    _SESSIONS[sid] = {**payload, "created_at": time.time()}
-    safe_next = nxt if (nxt or "").startswith("/") else "/"
+    _SESSIONS[sid] = {**payload, "created_at": time.time(), "sid": sid, "resumed": False}
+    if not _is_mock():
+        store = _get_store()
+        if store is not None:
+            try:
+                store.create(sid, user_id=payload.get("sub", "anonymous"),
+                             access_token=payload.get("access_token", ""),
+                             refresh_token=payload.get("refresh_token", ""),
+                             hard_max_seconds=HARD_MAX_SECONDS)
+            except Exception:
+                logger.warning("web_auth: durable session persist failed — session is process-local",
+                               exc_info=True)
+    safe_next = _validate_next(nxt)
     resp = RedirectResponse(safe_next, status_code=303)
     secure = str(request.base_url).startswith("https")
     resp.set_cookie(COOKIE_NAME, _sign(sid), httponly=True, samesite="lax",
@@ -249,19 +599,19 @@ def _establish_session(request: Request, payload: Dict[str, Any], nxt: str) -> R
 def _sub_from_jwt(token: str) -> str:
     """Best-effort, non-validating sub extraction (validation happens via JWKS
     in validate_token when register_ui arrives)."""
-    try:
-        payload = token.split(".")[1]
-        payload += "=" * (-len(payload) % 4)
-        import json
-        return json.loads(base64.urlsafe_b64decode(payload)).get("sub", "anonymous")
-    except Exception:
-        return "anonymous"
+    return _jwt_payload(token).get("sub", "anonymous") or "anonymous"
 
 
-def _audit_login(request: Request, sub: str, action: str) -> None:
+async def _audit(action: str, sub: str, description: str, *, outcome: str = "success") -> None:
+    """Record an auth lifecycle event (fixes the 026 signature mismatch that
+    silently dropped ``auth.login_interactive`` from this module)."""
     try:
         from audit.hooks import record_auth_event
-        record_auth_event(action_type=f"auth.{action}", actor_user_id=sub or "anonymous",
-                           detail={"flow": "server_oidc", "feature": "026"})
+        await record_auth_event(
+            claims={"sub": sub or "anonymous"},
+            action=action,
+            description=description,
+            outcome=outcome,
+        )
     except Exception:
         logger.debug("web_auth: audit hook unavailable for %s", action, exc_info=True)

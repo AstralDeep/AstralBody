@@ -35,6 +35,8 @@ SURFACE_MODULES = {
     "tour": "webrender.chrome.surfaces.tour",
     "guide": "webrender.chrome.surfaces.guide",
     "admin_tools": "webrender.chrome.surfaces.admin_tools",
+    # Feature 028 — read-only workspace timeline (research D14).
+    "workspace_timeline": "webrender.chrome.surfaces.workspace_timeline",
 }
 
 

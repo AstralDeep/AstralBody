@@ -44,6 +44,9 @@ def _menu_entries(roles):
             ("personalization", "Personalization", "personalization", {}),
             ("audit", "Audit log", "audit", {}),
             ("theme", "Theme", "theme", {}),
+            # Feature 028 — read-only workspace timeline; the client injects
+            # the active chat id into params at click time.
+            ("timeline", "Workspace timeline", "workspace_timeline", {}),
         ]),
         ("Help", [
             ("tour", "Take the tour", "tour", {}),

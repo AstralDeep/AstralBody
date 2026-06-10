@@ -43,16 +43,20 @@ class ROTE:
 
     def update_device(
         self, websocket: Any, device_info: Dict[str, Any]
-    ) -> Tuple[DeviceProfile, Optional[List[Dict]]]:
+    ) -> Tuple[DeviceProfile, Optional[List[Dict]], bool]:
         """
         Called when the frontend reports a viewport / capability change.
         Rebuilds the DeviceProfile and, if it differs from the current one,
         re-adapts the last-sent components so the orchestrator can push them.
 
-        Returns (new_profile, re_adapted_components_or_None).
+        Returns (new_profile, re_adapted_components_or_None, changed).
         re_adapted_components is None when:
           - the profile hasn't meaningfully changed, OR
           - there are no cached components to re-adapt.
+        ``changed`` (feature 028, D17) lets the orchestrator re-render the
+        full persisted workspace instead of replaying only the single-slot
+        ``_last_components`` cache — which, after partial upserts shipped,
+        would wipe everything but the most recent fragment.
         """
         old_profile = self._profiles.get(websocket)
         new_profile = DeviceProfile.from_dict(device_info) if device_info else DeviceProfile.default()
@@ -73,22 +77,22 @@ class ROTE:
         )
 
         if not changed:
-            return new_profile, None
+            return new_profile, None, False
 
         # Re-adapt cached components if available
         raw = self._last_components.get(websocket)
         if not raw:
-            return new_profile, None
+            return new_profile, None, True
 
         if new_profile.device_type == DeviceType.BROWSER:
-            return new_profile, raw  # fast path
+            return new_profile, raw, True  # fast path
 
         adapted = ComponentAdapter.adapt(raw, new_profile)
         logger.debug(
             f"ROTE: re-adapted {len(raw)} → {len(adapted)} components "
             f"after viewport change for {new_profile.device_type.value}"
         )
-        return new_profile, adapted
+        return new_profile, adapted, True
 
     def cleanup(self, websocket: Any) -> None:
         """Called on WebSocket disconnect to free the profile entry."""
