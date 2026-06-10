@@ -208,8 +208,9 @@
       chat.appendChild(el); stepEls[step.id] = el;
     }
     var icon = step.status === "completed" ? "✓" : step.status === "errored" ? "✗" : "•";
-    el.textContent = icon + " " + (step.name || step.kind || "step") +
-      (step.result_summary ? " — " + step.result_summary : "");
+    // Chat shows only the tool/step name; result summaries stay in the
+    // persisted step record (chat-steps API / audit), not the transcript.
+    el.textContent = icon + " " + (step.name || step.kind || "step");
     chat.scrollTop = chat.scrollHeight;
   }
 
@@ -409,6 +410,21 @@
     }
     if (act === "chrome_open") setMenu(false, false);
     action(act, payload);
+  });
+
+  // Permission sections (Agents & permissions): the section master gates its
+  // tool switches — on enables them all, off clears and disables them. The
+  // server enforces the same rule on save; this just keeps the form honest.
+  document.addEventListener("change", function (e) {
+    var t = e.target;
+    if (!(t.classList && t.classList.contains("astral-perm-master"))) return;
+    var section = t.closest && t.closest("[data-perm-section]");
+    if (!section) return;
+    var on = t.checked;
+    var tools = section.querySelectorAll(".astral-perm-tool");
+    for (var i = 0; i < tools.length; i++) { tools[i].checked = on; tools[i].disabled = !on; }
+    var body = section.querySelector(".astral-perm-tools");
+    if (body) body.classList.toggle("opacity-50", !on);
   });
 
   // ---- tour runner (steps server-rendered into [data-tour-steps]; A10 skips) ----

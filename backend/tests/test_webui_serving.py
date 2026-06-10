@@ -41,8 +41,17 @@ def test_shell_served_with_token(client):
     body = resp.text
     assert "AstralBody" in body
     assert "/static/client.js" in body and "/static/astral.css" in body
+    assert '<link rel="icon" type="image/png" href="/static/img/astra-fav.png">' in body
     assert "%%ASTRAL_TOKEN%%" not in body          # placeholder replaced
     assert 'window.__ASTRAL_TOKEN__ = "dev-token"' in body  # mock token injected, JS var name intact
+
+
+def test_brand_image_assets_served(client):
+    for path in ("/static/img/AstralDeep.png", "/static/img/astra-fav.png"):
+        resp = client.get(path)
+        assert resp.status_code == 200, f"missing asset: {path}"
+        assert resp.headers["content-type"] == "image/png"
+        assert resp.content[:8] == b"\x89PNG\r\n\x1a\n"  # real PNG payload
 
 
 def test_client_js_served(client):

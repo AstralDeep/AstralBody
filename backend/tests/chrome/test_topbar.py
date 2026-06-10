@@ -9,7 +9,10 @@ from webrender.chrome import chrome_error_block, notice_block, render_modal_shel
 
 def test_topbar_has_brand_status_and_settings_trigger():
     html = render_topbar(roles=["user"])
-    assert "AstralBody" in html
+    # Brand is the AstralDeep logo image (served from the static mount).
+    assert 'src="/static/img/AstralDeep.png"' in html
+    assert 'alt="AstralDeep"' in html
+    assert 'data-tour-target="topbar.brand"' in html
     assert 'id="astral-status"' in html
     assert 'id="astral-settings-btn"' in html
     assert 'aria-haspopup="menu"' in html and 'aria-expanded="false"' in html

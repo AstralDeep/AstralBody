@@ -268,23 +268,64 @@ def test_list_unknown_tab_falls_back_to_mine():
 # Detail view
 # ---------------------------------------------------------------------------
 
-def test_detail_matrix_checkboxes_named_tool_kind_with_state():
+def test_detail_sections_tool_switches_named_tool_kind_with_state():
     orch = make_orch()
     html = run(surface.render(orch, "u1", ["user"], {"agent_id": "alpha"}))
     assert orch.tool_permissions.backfilled == [("u1", "alpha")]
-    # Applicable kinds render named checkboxes; enabled state from internals.
+    # Tool switches keep the <tool>::<kind> names; enabled state from internals.
     assert 'name="get_data::tools:read" checked' in html
     assert 'name="write_data::tools:write"' in html
     assert 'name="write_data::tools:write" checked' not in html
-    # All four kind columns are present.
-    for label in ("Read", "Write", "Search", "System"):
-        assert f">{label}</th>" in html
-    # Matrix lives in a data-ui-form and saves via collect.
+    # Only kinds with tools render a section (read + write here).
+    assert 'data-perm-section="tools:read"' in html
+    assert 'data-perm-section="tools:write"' in html
+    assert 'data-perm-section="tools:search"' not in html
+    assert 'data-perm-section="tools:system"' not in html
+    # Sections live in a data-ui-form and save via collect.
     assert "data-ui-form" in html
     assert 'data-ui-action="chrome_perms_save"' in html
     assert 'data-ui-collect="true"' in html
     # Tool descriptions shown.
     assert "Fetch records" in html
+
+
+def test_detail_section_masters_reflect_state_and_gate_tools():
+    orch = make_orch()
+    html = run(surface.render(orch, "u1", ["user"], {"agent_id": "alpha"}))
+    # Read has an enabled tool -> master on; its tool switch is interactive.
+    assert 'name="__scope::tools:read" checked' in html
+    assert 'name="get_data::tools:read" checked disabled' not in html
+    # Write has no enabled tool and scope off -> master off; tool disabled + dimmed.
+    assert 'name="__scope::tools:write" checked' not in html
+    assert 'name="write_data::tools:write" disabled' in html
+    assert "opacity-50" in html
+
+
+def test_detail_section_master_on_from_scope_even_if_all_tools_off():
+    orch = make_orch()
+    orch.tool_permissions.per_tool["get_data"]["tools:read"] = False
+    orch.tool_permissions.scopes["tools:read"] = True
+    html = run(surface.render(orch, "u1", ["user"], {"agent_id": "alpha"}))
+    assert 'name="__scope::tools:read" checked' in html
+    # Tools stay individually off but remain interactive under an on master.
+    assert 'name="get_data::tools:read" checked' not in html
+    assert 'name="get_data::tools:read" disabled' not in html
+
+
+def test_detail_unknown_scope_tools_listed_but_not_configurable():
+    """Tools with a non-standard scope stay visible (the old matrix listed
+    every tool) in an inert Other section instead of vanishing."""
+    orch = make_orch()
+    orch.tool_permissions.scope_map["weird_tool"] = "tools:custom"
+    html = run(surface.render(orch, "u1", ["user"], {"agent_id": "alpha"}))
+    assert "weird_tool" in html and "Not configurable" in html
+    assert 'name="weird_tool::tools:custom"' not in html  # no switch rendered
+    # An agent exposing ONLY unknown-scope tools must not claim it has none.
+    orch.tool_permissions.scope_map = {"only_weird": "tools:custom"}
+    orch.tool_permissions.per_tool = {}
+    html2 = run(surface.render(orch, "u1", ["user"], {"agent_id": "alpha"}))
+    assert "exposes no tools" not in html2
+    assert "only_weird" in html2
 
 
 def test_detail_visibility_toggle_owner_only():
@@ -375,6 +416,56 @@ def test_perms_save_unknown_agent_and_empty_fields():
     _, _, notice2 = run(surface.HANDLERS["chrome_perms_save"](
         orch, None, "u1", ["user"], {"agent_id": "alpha", "fields": {}}))
     assert "No permission changes" in notice2
+
+
+def test_perms_save_master_off_forces_section_off():
+    """Section gate wins: a collected tool switch left on cannot survive an
+    off master, and the agent-wide scope is written off (not legacy-mirrored
+    back on)."""
+    orch = make_orch()
+    _, _, notice = run(surface.HANDLERS["chrome_perms_save"](
+        orch, None, "u1", ["user"],
+        {"agent_id": "alpha",
+         "fields": {"__scope::tools:read": False, "get_data::tools:read": True}},
+    ))
+    assert "success" in notice or "green" in notice
+    assert ("get_data", "tools:read", False) in orch.tool_permissions.set_calls
+    assert ("get_data", "tools:read", True) not in orch.tool_permissions.set_calls
+    assert orch.tool_permissions.scope_calls[-1]["tools:read"] is False
+
+
+def test_perms_save_master_off_blankets_unsubmitted_tools():
+    orch = make_orch()
+    run(surface.HANDLERS["chrome_perms_save"](
+        orch, None, "u1", ["user"],
+        {"agent_id": "alpha", "fields": {"__scope::tools:read": False}},
+    ))
+    assert ("get_data", "tools:read", False) in orch.tool_permissions.set_calls
+
+
+def test_perms_save_master_on_preserves_individual_tool_offs():
+    orch = make_orch()
+    _, _, notice = run(surface.HANDLERS["chrome_perms_save"](
+        orch, None, "u1", ["user"],
+        {"agent_id": "alpha",
+         "fields": {"__scope::tools:write": True, "write_data::tools:write": False}},
+    ))
+    assert "success" in notice or "green" in notice
+    assert ("write_data", "tools:write", False) in orch.tool_permissions.set_calls
+    # Master writes the scope on even though every tool under it is off.
+    assert orch.tool_permissions.scope_calls[-1]["tools:write"] is True
+
+
+def test_perms_save_rejects_unknown_master_kind_without_writes():
+    orch = make_orch()
+    _, _, notice = run(surface.HANDLERS["chrome_perms_save"](
+        orch, None, "u1", ["user"],
+        {"agent_id": "alpha",
+         "fields": {"__scope::tools:evil": True, "get_data::tools:read": True}},
+    ))
+    assert "Unknown permission kind" in notice
+    assert orch.tool_permissions.set_calls == []
+    assert orch.tool_permissions.scope_calls == []
 
 
 # ---------------------------------------------------------------------------

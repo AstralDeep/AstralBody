@@ -56,6 +56,7 @@ from astralprims import (
 )
 from rote.rote import ROTE
 from shared.feature_flags import flags
+from shared.llm_text import strip_reasoning_markup
 from orchestrator.stream_manager import StreamManager
 
 load_dotenv(override=False)
@@ -3241,6 +3242,11 @@ COMPONENT UPDATE RULES:
                         "model response (likely a provider maintenance "
                         "page); treating as transient."
                     )
+                # Some serving stacks leak Harmony channel tokens
+                # ("<|channel|>thought…") or <think> blocks into content;
+                # strip them before any consumer renders or persists it.
+                if _msg is not None and isinstance(getattr(_msg, "content", None), str):
+                    _msg.content = strip_reasoning_markup(_msg.content)
                 usage = getattr(response, "usage", None)
                 # Audit: successful llm_call
                 total_tokens = getattr(usage, "total_tokens", None) if usage else None
@@ -3436,7 +3442,7 @@ COMPONENT UPDATE RULES:
                     usage=usage, outcome="success",
                 )
 
-            summary_text = response.choices[0].message.content or ""
+            summary_text = strip_reasoning_markup(response.choices[0].message.content or "")
             summary_text = summary_text.strip()
 
             if summary_text:
@@ -5609,7 +5615,7 @@ COMPONENT UPDATE RULES:
                     websocket, feature=feature, model=resolved.model,
                     usage=usage, outcome="success",
                 )
-            content = response.choices[0].message.content
+            content = strip_reasoning_markup(response.choices[0].message.content)
             if not content:
                 return
             title = content.strip().strip('"')

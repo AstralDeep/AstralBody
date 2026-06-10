@@ -34,6 +34,16 @@ _KIND_LABELS = {
     "tools:system": "System",
     "tools:files": "Files",
 }
+_KIND_DESCRIPTIONS = {
+    "tools:read": "Read and retrieve data, run analyses, generate visualizations.",
+    "tools:write": "Create, modify, or delete data and post to external services.",
+    "tools:search": "Query external APIs and databases for information.",
+    "tools:system": "Access system resources such as CPU, memory, and disk.",
+    "tools:files": "Read uploaded files, documents, and volumes.",
+}
+# Form-field prefix for a section's master switch (``__scope::<kind>``); the
+# ``__`` sentinel can never collide with a tool name field (``<tool>::<kind>``).
+SCOPE_FIELD_PREFIX = "__scope::"
 
 _BTN_PRIMARY = (
     "px-3 py-1.5 rounded-lg text-xs font-medium bg-astral-primary/20 "
@@ -221,55 +231,112 @@ def _render_list(orch, user_id, tab: str) -> str:
 # Render — detail view
 # ---------------------------------------------------------------------------
 
-def _render_matrix(agent_id: str, tool_scope_map, per_tool, tool_descriptions, tab: str = "mine") -> str:
-    """Per-tool permission matrix (rows = tools, columns = permission kinds).
+def _switch(name: str, checked: bool, extra_cls: str, aria: str, disabled: bool = False) -> str:
+    """Toggle-switch checkbox (styled by ``.astral-switch`` in astral.css)."""
+    return (
+        f'<label class="astral-switch">'
+        f'<input type="checkbox" name="{esc(name)}"{" checked" if checked else ""}'
+        f'{" disabled" if disabled else ""} class="{extra_cls}" aria-label="{esc(aria)}">'
+        f'<span class="astral-switch-track" aria-hidden="true"></span></label>'
+    )
 
-    Only the kind that applies to a tool (its required scope) renders a
-    checkbox named ``<tool>::<kind>``; other cells are inert dashes, so the
-    collected fields always validate against the PUT-permissions rules.
+
+def _render_perm_sections(agent_id: str, tool_scope_map, per_tool, scope_state,
+                          tool_descriptions, tab: str = "mine") -> str:
+    """Per-kind permission sections: one master switch per permission kind,
+    individual tool switches beneath it.
+
+    The master is named ``__scope::<kind>``; tool switches keep the
+    ``<tool>::<kind>`` names from the matrix so the save handler validates
+    against the same PUT-permissions rules. A section renders only when the
+    agent exposes tools of that kind. When the master is off, the tool
+    switches render disabled (the client mirrors this on toggle) and the
+    save handler forces the whole section off regardless of collected values.
     """
-    head_cells = ['<th class="text-left text-xs font-medium text-astral-muted py-2 pr-3">Tool</th>']
+    sections = []
+    sectioned = set()
     for kind in PERMISSION_KINDS:
-        head_cells.append(
-            f'<th class="text-center text-xs font-medium text-astral-muted py-2 px-2">'
-            f"{esc(_KIND_LABELS[kind])}</th>"
+        tools = sorted(t for t, req in tool_scope_map.items() if req == kind)
+        if not tools:
+            continue
+        sectioned.update(tools)
+        label = _KIND_LABELS[kind]
+        enabled_count = sum(
+            1 for t in tools if bool(per_tool.get(t, {}).get(kind, False))
         )
-    body_rows = []
-    for tool_name in sorted(tool_scope_map):
-        required = tool_scope_map[tool_name]
-        desc = tool_descriptions.get(tool_name, "")
-        cells = [
-            f'<td class="py-2 pr-3"><div class="text-sm text-astral-text">{esc(tool_name)}</div>'
-            f'<div class="text-xs text-astral-muted">{esc(_snippet(desc, 90))}</div></td>'
-        ]
-        for kind in PERMISSION_KINDS:
-            if kind == required:
-                enabled = bool(per_tool.get(tool_name, {}).get(kind, False))
-                checked = " checked" if enabled else ""
-                field = f"{tool_name}::{kind}"
-                cells.append(
-                    f'<td class="text-center px-2"><input type="checkbox" name="{esc(field)}"'
-                    f'{checked} class="w-4 h-4 accent-astral-primary align-middle" '
-                    f'aria-label="{esc(tool_name)} {esc(_KIND_LABELS[kind])}"></td>'
-                )
-            else:
-                cells.append(
-                    '<td class="text-center px-2 text-astral-muted/40" aria-hidden="true">&mdash;</td>'
-                )
-        body_rows.append(f'<tr class="border-t border-white/5">{"".join(cells)}</tr>')
-    if not body_rows:
-        rows_html = (
-            '<tr><td class="py-3 text-sm text-astral-muted" colspan="6">'
-            "This agent exposes no tools.</td></tr>"
+        # Effective per-tool rows win over the scope at resolution time, so a
+        # section with any enabled tool must present as "on" even if the
+        # agent-wide scope row is stale/false.
+        master_on = bool(scope_state.get(kind, False)) or enabled_count > 0
+        rows = []
+        for tool_name in tools:
+            tool_on = bool(per_tool.get(tool_name, {}).get(kind, False))
+            desc = tool_descriptions.get(tool_name, "")
+            rows.append(
+                f'<div class="flex items-center justify-between gap-3 py-2">'
+                f'<div class="min-w-0">'
+                f'<div class="text-sm text-astral-text">{esc(tool_name)}</div>'
+                f'<div class="text-xs text-astral-muted">{esc(_snippet(desc, 90))}</div></div>'
+                f'{_switch(f"{tool_name}::{kind}", tool_on, "astral-perm-tool", f"{tool_name} {label}", disabled=not master_on)}'
+                f"</div>"
+            )
+        count = len(tools)
+        plural = "s" if count != 1 else ""
+        dim = "" if master_on else " opacity-50"
+        sections.append(
+            f'<div class="astral-perm-section border border-white/10 rounded-lg overflow-hidden" '
+            f'data-perm-section="{esc(kind)}">'
+            f'<div class="flex items-center justify-between gap-3 px-3 py-2.5 bg-white/5">'
+            f'<div class="min-w-0">'
+            f'<div class="text-sm font-semibold text-astral-text">{esc(label)}</div>'
+            f'<div class="text-xs text-astral-muted">{esc(_KIND_DESCRIPTIONS[kind])} '
+            f"&middot; {count} tool{plural}</div></div>"
+            f'{_switch(f"{SCOPE_FIELD_PREFIX}{kind}", master_on, "astral-perm-master", f"Enable all {label} tools")}'
+            f"</div>"
+            f'<div class="astral-perm-tools divide-y divide-white/5 px-3{dim}">{"".join(rows)}</div>'
+            f"</div>"
+        )
+    # Tools whose required scope is not a known permission kind stay visible
+    # (the old matrix listed every tool) but are not user-configurable here.
+    others = sorted(set(tool_scope_map) - sectioned)
+    if others:
+        rows = []
+        for tool_name in others:
+            desc = tool_descriptions.get(tool_name, "")
+            rows.append(
+                f'<div class="flex items-center justify-between gap-3 py-2">'
+                f'<div class="min-w-0">'
+                f'<div class="text-sm text-astral-text">{esc(tool_name)}</div>'
+                f'<div class="text-xs text-astral-muted">{esc(_snippet(desc, 90))}</div></div>'
+                f'<span class="text-xs text-astral-muted shrink-0">Not configurable</span>'
+                f"</div>"
+            )
+        count = len(others)
+        plural = "s" if count != 1 else ""
+        sections.append(
+            f'<div class="astral-perm-section border border-white/10 rounded-lg overflow-hidden">'
+            f'<div class="px-3 py-2.5 bg-white/5">'
+            f'<div class="text-sm font-semibold text-astral-text">Other</div>'
+            f'<div class="text-xs text-astral-muted">Tools with a non-standard permission '
+            f"type; they can&#x27;t be configured here. &middot; {count} tool{plural}</div></div>"
+            f'<div class="divide-y divide-white/5 px-3">{"".join(rows)}</div>'
+            f"</div>"
+        )
+    if sections:
+        body = "".join(sections)
+        hint = (
+            '<p class="text-xs text-astral-muted mb-3">Turn a section on to allow that '
+            "permission for all of its tools, then switch off any individual tools you "
+            "don&#x27;t want. Turning a section off disables every tool in it.</p>"
         )
     else:
-        rows_html = "".join(body_rows)
+        body = '<div class="py-3 text-sm text-astral-muted">This agent exposes no tools.</div>'
+        hint = ""
     save_pl = _payload({"agent_id": agent_id, "tab": tab})
     return (
         f'<div class="astral-perms bg-white/5 border border-white/10 rounded-lg p-4" data-ui-form>'
         f'<h3 class="text-sm font-semibold text-astral-text mb-2">Tool permissions</h3>'
-        f'<table class="w-full text-sm"><thead><tr>{"".join(head_cells)}</tr></thead>'
-        f"<tbody>{rows_html}</tbody></table>"
+        f'{hint}<div class="space-y-3">{body}</div>'
         f'<div class="mt-3 flex justify-end">'
         f'<button type="button" class="{_BTN_PRIMARY}" data-ui-action="chrome_perms_save" '
         f"data-ui-collect=\"true\" data-ui-payload='{save_pl}'>Save permissions</button>"
@@ -392,6 +459,7 @@ def _render_detail(orch, user_id, agent_id: str, tab: str) -> str:
         )
     tool_scope_map = orch.tool_permissions.get_tool_scope_map(agent_id)
     per_tool = orch.tool_permissions.get_effective_tool_permissions(user_id, agent_id)
+    scope_state = orch.tool_permissions.get_agent_scopes(user_id, agent_id)
     tool_descriptions = {s.id: s.description for s in card.skills}
 
     db = orch.history.db
@@ -409,7 +477,8 @@ def _render_detail(orch, user_id, agent_id: str, tab: str) -> str:
         f'{_enable_button(agent_id, enabled, {"detail": True, "tab": tab})}'
         f"{_back_button(tab)}</div></div>"
     )
-    sections = [header, _render_matrix(agent_id, tool_scope_map, per_tool, tool_descriptions, tab)]
+    sections = [header, _render_perm_sections(
+        agent_id, tool_scope_map, per_tool, scope_state, tool_descriptions, tab)]
     if is_owner:
         sections.append(_render_visibility(agent_id, bool(ownership.get("is_public", False)), tab))
     sections.append(_render_credentials(orch, user_id, agent_id, card, tab))
@@ -463,11 +532,15 @@ def _list_params(payload) -> dict:
 async def handle_perms_save(orch, websocket, user_id, roles, payload):
     """``chrome_perms_save {agent_id, fields}`` → PUT-permissions internals.
 
-    ``fields`` arrive as ``{"<tool>::<kind>": bool}`` from the matrix form
-    and are translated to the ``per_tool_permissions`` shape
-    (``{tool: {kind: bool}}``) the REST route builds, with the same
-    validate-whole-payload-then-write semantics (FR-014: any (tool, kind)
-    mismatch rejects everything so no half-applied state).
+    ``fields`` arrive from the sectioned form as ``{"__scope::<kind>": bool}``
+    masters plus ``{"<tool>::<kind>": bool}`` tool switches, translated to the
+    ``per_tool_permissions`` shape (``{tool: {kind: bool}}``) the REST route
+    builds, with the same validate-whole-payload-then-write semantics (FR-014:
+    any mismatch rejects everything so no half-applied state). A master that
+    is off forces every tool of that kind off — the section gate wins over the
+    individual switches collected under it. Masters write straight through to
+    the ``agent_scopes`` layer; kinds without a master keep the legacy mirror
+    (scope goes true when any of its tools is enabled).
     """
     payload = payload or {}
     agent_id = str(payload.get("agent_id") or "")
@@ -477,17 +550,25 @@ async def handle_perms_save(orch, websocket, user_id, roles, payload):
                 notice_block("error", f"Agent '{agent_id}' not found."))
     params = _detail_params(agent_id, payload)
     fields = payload.get("fields") or {}
+    masters = {}
     per_tool_permissions = {}
     for name, value in fields.items():
-        if "::" not in str(name):
-            continue  # not a matrix checkbox
-        tool_name, kind = str(name).split("::", 1)
-        per_tool_permissions.setdefault(tool_name, {})[kind] = bool(value)
-    if not per_tool_permissions:
+        name = str(name)
+        if name.startswith(SCOPE_FIELD_PREFIX):
+            masters[name[len(SCOPE_FIELD_PREFIX):]] = bool(value)
+        elif "::" in name:
+            tool_name, kind = name.split("::", 1)
+            per_tool_permissions.setdefault(tool_name, {})[kind] = bool(value)
+    if not per_tool_permissions and not masters:
         return ("agents", params, notice_block("error", "No permission changes submitted."))
 
     tool_scope_map = orch.tool_permissions.get_tool_scope_map(agent_id)
-    # Validate every (tool, kind) pair before writing anything (api.py rules).
+    # Validate the whole payload before writing anything (api.py rules).
+    for kind in masters:
+        if kind not in PERMISSION_KINDS:
+            return ("agents", params, notice_block(
+                "error", f"Unknown permission kind '{kind}'."
+            ))
     for tool_name, kind_map in per_tool_permissions.items():
         required = tool_scope_map.get(tool_name)
         if required is None:
@@ -503,22 +584,36 @@ async def handle_perms_save(orch, websocket, user_id, roles, payload):
                 ))
     for tool_name, kind_map in per_tool_permissions.items():
         for kind, enabled in kind_map.items():
+            if masters.get(kind) is False:
+                enabled = False  # section gate wins
             orch.tool_permissions.set_tool_permission(
                 user_id, agent_id, tool_name, kind, bool(enabled)
             )
-    # Mirror up to the agent_scopes layer (legacy filter path stays coherent —
-    # identical derivation to the PUT route).
+    # A master turned off blankets every tool of that kind, including any
+    # missing from the submitted fields (the form normally collects all).
+    for kind, master_on in masters.items():
+        if master_on:
+            continue
+        for tool_name, required in tool_scope_map.items():
+            if required == kind and kind not in per_tool_permissions.get(tool_name, {}):
+                orch.tool_permissions.set_tool_permission(
+                    user_id, agent_id, tool_name, kind, False
+                )
+    # Mirror up to the agent_scopes layer (legacy filter path stays coherent).
     scope_state = orch.tool_permissions.get_agent_scopes(user_id, agent_id)
     derived = {**scope_state}
+    for kind, master_on in masters.items():
+        derived[kind] = bool(master_on)
     per_tool = orch.tool_permissions.get_effective_tool_permissions(user_id, agent_id)
     for tool_name, kind_map in per_tool.items():
         for kind, enabled in kind_map.items():
-            if enabled:
+            if enabled and kind not in masters:
                 derived[kind] = True
     orch.tool_permissions.set_agent_scopes(user_id, agent_id, derived)
     logger.info(
-        "Agent permissions updated: user=%s agent=%s shape=per_tool tools_changed=%d",
-        user_id, agent_id, len(per_tool_permissions),
+        "Agent permissions updated: user=%s agent=%s shape=sections "
+        "masters_changed=%d tools_changed=%d",
+        user_id, agent_id, len(masters), len(per_tool_permissions),
     )
     return ("agents", params, notice_block("success", "Permissions saved."))
 
