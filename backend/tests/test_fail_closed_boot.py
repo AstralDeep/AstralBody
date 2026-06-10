@@ -1,0 +1,130 @@
+"""Feature 028 (workspace-auth-revival) — fail-closed posture tests.
+
+FR-015: mock authentication refused outside explicitly declared development
+mode (boot gate exits with EX_CONFIG). FR-016: agent/automation connections
+fail closed when AGENT_API_KEY is unset outside dev mode, replacing the
+pre-028 fail-open behavior. ``is_dev_mode`` is the shared posture primitive:
+unset/unknown ASTRAL_ENV means production.
+"""
+import uuid
+
+import pytest
+
+from orchestrator.auth import validate_agent_api_key
+from orchestrator.session_store import assert_production_posture, is_dev_mode
+
+
+# ---------------------------------------------------------------------------
+# assert_production_posture — boot gate (FR-015)
+# ---------------------------------------------------------------------------
+
+def test_mock_auth_with_env_unset_refuses_boot(monkeypatch):
+    """028 FR-015: mock auth on + ASTRAL_ENV unset (default = production)
+    must fail fast with SystemExit(78) (EX_CONFIG)."""
+    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "true")
+    monkeypatch.delenv("ASTRAL_ENV", raising=False)
+    with pytest.raises(SystemExit) as exc:
+        assert_production_posture()
+    assert exc.value.code == 78
+
+
+def test_mock_auth_in_production_refuses_boot(monkeypatch):
+    """028 FR-015: mock auth on + ASTRAL_ENV=production must fail fast."""
+    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "true")
+    monkeypatch.setenv("ASTRAL_ENV", "production")
+    with pytest.raises(SystemExit) as exc:
+        assert_production_posture()
+    assert exc.value.code == 78
+
+
+def test_mock_auth_in_development_boots(monkeypatch):
+    """028 FR-015: explicitly declared development mode keeps mock auth
+    usable — no raise."""
+    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "true")
+    monkeypatch.setenv("ASTRAL_ENV", "development")
+    assert_production_posture()  # must not raise
+
+
+def test_real_auth_with_env_unset_boots(monkeypatch):
+    """028 FR-015: with mock auth off, ASTRAL_ENV may stay unset — the gate
+    only targets the mock-auth-in-production combination."""
+    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "false")
+    monkeypatch.delenv("ASTRAL_ENV", raising=False)
+    assert_production_posture()  # must not raise
+
+
+def test_mock_auth_unset_entirely_boots(monkeypatch):
+    """028 FR-015: VITE_USE_MOCK_AUTH absent counts as mock-off — no raise."""
+    monkeypatch.delenv("VITE_USE_MOCK_AUTH", raising=False)
+    monkeypatch.delenv("ASTRAL_ENV", raising=False)
+    assert_production_posture()  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# validate_agent_api_key — A2A fail-closed (FR-016)
+# ---------------------------------------------------------------------------
+
+def test_agent_key_unset_in_dev_mode_allows(monkeypatch):
+    """028 FR-016: keyless local dev remains supported — unset AGENT_API_KEY
+    with ASTRAL_ENV=development accepts the connection."""
+    monkeypatch.delenv("AGENT_API_KEY", raising=False)
+    monkeypatch.setenv("ASTRAL_ENV", "development")
+    assert validate_agent_api_key("anything") is True
+
+
+def test_agent_key_unset_outside_dev_mode_refuses(monkeypatch):
+    """028 FR-016 (THE fail-closed change): unset AGENT_API_KEY with
+    ASTRAL_ENV unset (default = production) refuses the connection.
+    Pre-028 this returned True, silently allowing unauthenticated agents."""
+    monkeypatch.delenv("AGENT_API_KEY", raising=False)
+    monkeypatch.delenv("ASTRAL_ENV", raising=False)
+    assert validate_agent_api_key("anything") is False
+    assert validate_agent_api_key("") is False
+
+
+def test_agent_key_matching_allows(monkeypatch):
+    """028 FR-016: a configured key accepts only the exact matching key
+    (works without any ASTRAL_ENV declaration)."""
+    key = f"agent-key-{uuid.uuid4()}"
+    monkeypatch.setenv("AGENT_API_KEY", key)
+    monkeypatch.delenv("ASTRAL_ENV", raising=False)
+    assert validate_agent_api_key(key) is True
+
+
+def test_agent_key_mismatch_refuses(monkeypatch):
+    """028 FR-016: a configured key refuses a wrong/empty presented key,
+    even in development mode."""
+    key = f"agent-key-{uuid.uuid4()}"
+    monkeypatch.setenv("AGENT_API_KEY", key)
+    monkeypatch.delenv("ASTRAL_ENV", raising=False)
+    assert validate_agent_api_key("wrong-key") is False
+    assert validate_agent_api_key("") is False
+    monkeypatch.setenv("ASTRAL_ENV", "development")
+    assert validate_agent_api_key("wrong-key") is False
+
+
+# ---------------------------------------------------------------------------
+# is_dev_mode — shared posture primitive (FR-015/FR-016)
+# ---------------------------------------------------------------------------
+
+def test_is_dev_mode_true_values(monkeypatch):
+    """028 FR-015/FR-016: only explicit 'development'/'dev' declare dev mode
+    (case-insensitive, whitespace-tolerant)."""
+    for value in ("development", "dev", "Development", "DEV", "  dev  "):
+        monkeypatch.setenv("ASTRAL_ENV", value)
+        assert is_dev_mode() is True, value
+
+
+def test_is_dev_mode_false_values(monkeypatch):
+    """028 FR-015/FR-016: production / empty / unknown values (including
+    'prod', which is NOT in the allow-list) all mean production — every
+    posture check fails closed by default."""
+    for value in ("production", "", "prod", "staging", "true"):
+        monkeypatch.setenv("ASTRAL_ENV", value)
+        assert is_dev_mode() is False, value
+
+
+def test_is_dev_mode_unset_is_production(monkeypatch):
+    """028 FR-015/FR-016: unset ASTRAL_ENV defaults to production."""
+    monkeypatch.delenv("ASTRAL_ENV", raising=False)
+    assert is_dev_mode() is False
