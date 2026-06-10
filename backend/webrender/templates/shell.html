@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>AstralBody</title>
+  <link rel="icon" type="image/png" href="/static/img/astra-fav.png">
+  <link rel="apple-touch-icon" href="/static/img/astra-fav.png">
   <link rel="stylesheet" href="/static/astral.css">
   <script>window.__ASTRAL_TOKEN__ = "%%ASTRAL_TOKEN%%";</script>
   <script src="/static/vendor/tailwind.js"></script>
@@ -30,13 +32,9 @@
 </head>
 <body class="bg-astral-bg text-astral-text">
   <div class="flex flex-col h-screen">
-    <header class="flex items-center justify-between px-4 py-3 border-b border-white/5">
-      <div class="flex items-center gap-2">
-        <span class="w-2 h-5 rounded-full bg-astral-primary inline-block"></span>
-        <span class="text-base font-semibold">AstralBody</span>
-      </div>
-      <span id="astral-status" class="text-xs text-astral-muted"></span>
-    </header>
+    <!-- Feature 027: server-rendered top bar + static settings menu
+         (role-gated at GET / time; see webrender/chrome/topbar.py) -->
+    <header id="astral-topbar" class="flex items-center border-b border-white/5">%%ASTRAL_TOPBAR%%</header>
     <main class="flex flex-1 min-h-0">
       <!-- Canvas: server-rendered UI (astralprims primitives) -->
       <section id="astral-canvas" class="flex-1 overflow-y-auto p-4 space-y-3"></section>
@@ -44,13 +42,15 @@
       <aside class="w-[380px] max-w-[40%] flex flex-col border-l border-white/5 min-h-0">
         <div id="astral-chat" class="flex-1 overflow-y-auto p-3 space-y-2"></div>
         <form id="astral-form" class="p-3 border-t border-white/5 flex gap-2">
-          <input id="astral-input" type="text" autocomplete="off" placeholder="Message an agent…"
+          <input id="astral-input" type="text" autocomplete="off" placeholder="Message an agent…" data-tour-target="chat.input"
                  class="flex-1 rounded-lg bg-white/5 border border-white/10 px-3 py-2 text-sm text-astral-text focus:outline-none focus:border-astral-primary">
           <button type="submit" class="px-4 py-2 rounded-lg text-sm font-medium bg-astral-primary hover:bg-astral-primary/80 text-white">Send</button>
         </form>
       </aside>
     </main>
   </div>
+  <!-- Feature 027: chrome modal root (settings surfaces render here via chrome_render) -->
+  <div id="astral-modal"></div>
   <script src="/static/client.js"></script>
 </body>
 </html>

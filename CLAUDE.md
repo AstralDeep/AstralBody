@@ -49,6 +49,12 @@ The UI is **server-driven from the backend** — there is no separate React/Vite
 - The **orchestrator renders** those primitive dicts to web HTML in `backend/webrender/` (pure-Python render functions, escape-by-default via `esc()`); **ROTE** (`backend/rote/`) adapts per device. New client targets register a renderer via `webrender.register_target(...)` — no change to astralprims or agent code.
 - The orchestrator serves the shell + static assets on **`:8001`** (`GET /`, `/static/*`); server-side OIDC at `/auth/{login,callback,session,logout}` (`backend/orchestrator/web_auth.py`). No `:5173` static server.
 - Per Constitution II (v2.0.1): **astralprims defines → orchestrator renders → ROTE adapts.**
+
+## Chrome + agentic creation (feature 027)
+
+- **App chrome** (top bar, static settings menu, modal surfaces) is server-rendered HTML in `backend/webrender/chrome/` — NOT astralprims primitives, and it never enters ROTE. The shell injects the role-gated top bar at `GET /` (`%%ASTRAL_TOPBAR%%`); surfaces are pushed over WS as `chrome_render {region, html}`. Surface modules in `webrender/chrome/surfaces/` export `TITLE`, `async render(orch, user_id, roles, params)` and a `HANDLERS` dict; `backend/orchestrator/chrome_events.py` dispatches all `chrome_*`/draft-decision `ui_event` actions (unmatched legacy actions still log a warning).
+- **Agentic creation**: orchestrator meta-tools `create_capability`/`extend_agent` (pseudo-agent `__orchestrator__`, defined in `backend/orchestrator/agentic_creation.py`) are injected into chat tool lists when `FF_AGENTIC_CREATION` is on (default). Gap → auto-create draft (012 lifecycle) → VirtualWebSocket self-test → approve/refine/discard cards; live-agent revisions re-pass the security gate with backup/rollback. Provenance columns on `draft_agents`: `origin`, `source_chat_id`, `gap_fingerprint`, `revises_agent_id`, `self_test`.
+- Audit event class `agent_lifecycle` covers the creation lifecycle; admin gating is server-side (`web_auth.session_roles` for shell render, JWT roles per handler).
 <!-- MANUAL ADDITIONS END -->
 
 <!-- SPECKIT START -->
@@ -70,4 +76,5 @@ shell commands, and other important information, read the current plan at
 - [specs/016-persistent-login/plan.md](specs/016-persistent-login/plan.md)
 - [specs/025-agentic-soul-integration/plan.md](specs/025-agentic-soul-integration/plan.md)
 - [specs/026-frontend-removal-astralprims/plan.md](specs/026-frontend-removal-astralprims/plan.md)
+- [specs/027-agentic-creation-settings/plan.md](specs/027-agentic-creation-settings/plan.md)
 <!-- SPECKIT END -->

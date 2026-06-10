@@ -1556,6 +1556,7 @@ async def admin_review(
         raise HTTPException(status_code=403, detail="Admin role required")
 
     lifecycle = _get_lifecycle(request)
+    orch = _get_orchestrator(request)
     ws = None  # Could look up draft owner's WS for notification
     try:
         result = await lifecycle.admin_review(
@@ -1955,7 +1956,9 @@ async def voice_stream(ws: WebSocket):
                             logger.info("voice_no_speech_detected")
                             await ws.send_json({"type": "transcription.done", "text": ""})
                         else:
-                            logger.error("voice_speaches_error", extra={"message": err_msg, "type": err_type})
+                            # "error_message", not "message": reserved LogRecord
+                            # attribute — using it in `extra` makes logging raise.
+                            logger.error("voice_speaches_error", extra={"error_message": err_msg, "error_type": err_type})
                             await ws.send_json({"type": "error", "message": err_msg})
 
             except (ws_client.exceptions.ConnectionClosed, Exception) as e:

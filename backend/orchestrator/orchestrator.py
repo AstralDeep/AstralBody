@@ -56,6 +56,7 @@ from astralprims import (
 )
 from rote.rote import ROTE
 from shared.feature_flags import flags
+from shared.llm_text import strip_reasoning_markup
 from orchestrator.stream_manager import StreamManager
 
 load_dotenv(override=False)
@@ -1744,6 +1745,18 @@ class Orchestrator:
                     if flags.is_enabled("live_streaming"):
                         await self._handle_stream_list(websocket)
 
+                else:
+                    # Feature 027: chrome/settings + agentic-creation actions
+                    # live in their own dispatcher. It returns False only for
+                    # actions outside its namespace — those were previously a
+                    # silent fall-through; log them so typos are diagnosable.
+                    from orchestrator.chrome_events import handle_chrome_event
+                    handled = await handle_chrome_event(
+                        self, websocket, str(msg.action or ""), msg.payload or {}, user_id
+                    )
+                    if not handled:
+                        logger.warning("Unhandled ui_event action: %r", msg.action)
+
         except Exception as e:
             import traceback
             logger.error(f"Error handling UI message: {e}\n{traceback.format_exc()}")
@@ -2438,6 +2451,21 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # is falsy. We tag the audit/log signal so operators can
         # distinguish text-only fallback turns (FR-009).
         is_text_only = not tools_desc and not draft_agent_id
+
+        # Feature 027 — inject the orchestrator meta-tools (create_capability /
+        # extend_agent) so the LLM can act on capability gaps (D1). Excluded:
+        # draft-test sessions, text-only turns (feature 008 semantics — the
+        # user disabled everything deliberately), and flag-off deployments.
+        from orchestrator import agentic_creation
+        meta_tools_injected = False
+        if agentic_creation.should_inject(draft_agent_id) and not is_text_only:
+            for _meta_def in agentic_creation.meta_tool_definitions():
+                _meta_name = _meta_def["function"]["name"]
+                tools_desc.append(_meta_def)
+                tool_to_agent[_meta_name] = agentic_creation.META_AGENT_ID
+                tool_to_unqualified[_meta_name] = _meta_name
+            meta_tools_injected = True
+
         if not tools_desc and draft_agent_id:
             await self.send_ui_render(websocket, [
                 Alert(
@@ -2539,6 +2567,10 @@ COMPONENT UPDATE RULES:
                     system_prompt += f"\n\n{personalization_fragment}\n"
             except Exception as exc:  # pragma: no cover — never block a chat turn
                 logger.warning(f"personalization injection failed (non-fatal): {exc}")
+
+            # Feature 027 — capability-gap guidance accompanies the meta-tools.
+            if meta_tools_injected:
+                system_prompt += agentic_creation.SYSTEM_PROMPT_ADDENDUM
 
             # ------------------------------------------------------------------
             # MULTI-TURN LOOP
@@ -3210,6 +3242,11 @@ COMPONENT UPDATE RULES:
                         "model response (likely a provider maintenance "
                         "page); treating as transient."
                     )
+                # Some serving stacks leak Harmony channel tokens
+                # ("<|channel|>thought…") or <think> blocks into content;
+                # strip them before any consumer renders or persists it.
+                if _msg is not None and isinstance(getattr(_msg, "content", None), str):
+                    _msg.content = strip_reasoning_markup(_msg.content)
                 usage = getattr(response, "usage", None)
                 # Audit: successful llm_call
                 total_tokens = getattr(usage, "total_tokens", None) if usage else None
@@ -3405,7 +3442,7 @@ COMPONENT UPDATE RULES:
                     usage=usage, outcome="success",
                 )
 
-            summary_text = response.choices[0].message.content or ""
+            summary_text = strip_reasoning_markup(response.choices[0].message.content or "")
             summary_text = summary_text.strip()
 
             if summary_text:
@@ -3680,8 +3717,17 @@ COMPONENT UPDATE RULES:
         except json.JSONDecodeError:
             args = {}
 
-        # System-level security block (proactive security review)
+        # Feature 027 — orchestrator meta-tools dispatch before the agent
+        # gates (the pseudo-agent has no scopes/credentials; ownership and
+        # approval gates live inside the handler — contracts/agentic-creation.md).
         agent_id = tool_to_agent.get(llm_tool_name)
+        if agent_id == "__orchestrator__":
+            from orchestrator import agentic_creation
+            return await agentic_creation.handle_meta_tool(
+                self, tool_name, args, user_id=user_id, chat_id=chat_id, websocket=websocket
+            )
+
+        # System-level security block (proactive security review)
         agent_flags = self.security_flags.get(agent_id, {}) if agent_id else {}
         if agent_id and tool_name in agent_flags and agent_flags[tool_name].get("blocked"):
             reason = agent_flags[tool_name].get("reason", "Security threat detected")
@@ -3946,6 +3992,15 @@ COMPONENT UPDATE RULES:
                     args["user_id"] = user_id
 
             agent_id = tool_to_agent.get(llm_tool_name)
+
+            # Feature 027 — meta-tools dispatch directly (see execute_single_tool).
+            if agent_id == "__orchestrator__":
+                from orchestrator import agentic_creation
+                prepared.append((idx, tc, tool_name, agent_id, None,
+                                 agentic_creation.handle_meta_tool(
+                                     self, tool_name, args, user_id=user_id,
+                                     chat_id=chat_id, websocket=websocket)))
+                continue
 
             if user_id and agent_id:
                 creds = self.credential_manager.get_agent_credentials_encrypted(user_id, agent_id)
@@ -5288,6 +5343,45 @@ COMPONENT UPDATE RULES:
 
         asyncio.create_task(_feedback_quality_loop())
 
+        # Feature 025 wiring (027 click-through finding): the scheduler loop
+        # was never instantiated anywhere, so cron jobs and "Run now" silently
+        # never dispatched. Start it here with the same stores the REST API uses.
+        try:
+            from orchestrator.offline_grant import OfflineGrantStore
+            from scheduler.loop import SchedulerLoop
+            from scheduler.runner import JobRunner
+            from scheduler.store import ScheduledJobStore
+            _job_store = ScheduledJobStore(self.history.db)
+            _job_runner = JobRunner(self, _job_store, OfflineGrantStore(self.history.db))
+            self._scheduler_loop = SchedulerLoop(_job_store, _job_runner, self.async_task_manager)
+            self._scheduler_loop.start()
+        except Exception:
+            logger.exception("scheduler loop failed to start (jobs will not dispatch)")
+
+        # Feature 027 (click-through finding): user-created agents that went
+        # live do not survive a restart — nothing relaunched them, leaving
+        # "My agents" empty and the original requests unservable. Relaunch
+        # every live generated agent without touching ownership or the user's
+        # saved scopes (align_scopes=False).
+        async def _relaunch_generated_agents():
+            await asyncio.sleep(5)  # let the static-fleet monitor settle first
+            try:
+                rows = self.history.db.fetch_all(
+                    "SELECT id, agent_name FROM draft_agents WHERE status = 'live'")
+            except Exception:
+                logger.exception("relaunch: could not list live generated agents")
+                return
+            for row in rows:
+                try:
+                    await self.lifecycle_manager.start_draft_agent(
+                        row["id"], align_scopes=False)
+                    logger.info("relaunch: %s (%s) restarted", row["agent_name"], row["id"])
+                except Exception as exc:
+                    logger.warning("relaunch: %s (%s) failed: %s",
+                                   row["agent_name"], row["id"], exc)
+
+        asyncio.create_task(_relaunch_generated_agents())
+
         # Import WebSocket protocol docs for OpenAPI description
         from orchestrator.models import WS_PROTOCOL_DOCS
 
@@ -5364,7 +5458,18 @@ COMPONENT UPDATE RULES:
                 token = await self._shell_token_for_request(request)
             except Exception:
                 token = ""
-            return _HTMLResponse(shell.replace("%%ASTRAL_TOKEN%%", token or ""))
+            # Feature 027: render the static top bar + settings menu from the
+            # server session's roles (admin group absent for non-admins —
+            # FR-014 UX gating; handlers re-check server-side).
+            topbar = ""
+            try:
+                from orchestrator.web_auth import session_roles
+                from webrender.chrome import render_topbar
+                topbar = render_topbar(roles=session_roles(request))
+            except Exception:
+                logger.exception("chrome: topbar render failed — serving bare shell")
+            shell = shell.replace("%%ASTRAL_TOKEN%%", token or "")
+            return _HTMLResponse(shell.replace("%%ASTRAL_TOPBAR%%", topbar))
 
         app.mount("/static", StaticFiles(directory=_os.path.join(_webrender_dir, "static")), name="static")
 
@@ -5510,7 +5615,7 @@ COMPONENT UPDATE RULES:
                     websocket, feature=feature, model=resolved.model,
                     usage=usage, outcome="success",
                 )
-            content = response.choices[0].message.content
+            content = strip_reasoning_markup(response.choices[0].message.content)
             if not content:
                 return
             title = content.strip().strip('"')

@@ -28,6 +28,12 @@ class FeatureFlags:
             # multi-client fan-out. Default OFF for safe rollout. See
             # specs/001-tool-stream-ui/ for the full design.
             "tool_streaming": self._read("FF_TOOL_STREAMING", False),
+            # 027-agentic-creation-settings: injects the orchestrator meta-tools
+            # (create_capability / extend_agent) into the chat LLM's tool list so
+            # the assistant can create draft agents/tools on capability gaps.
+            # Default ON; gates meta-tool injection only — the settings chrome
+            # ships ungated. See specs/027-agentic-creation-settings/.
+            "agentic_creation": self._read("FF_AGENTIC_CREATION", True),
         }
 
     @staticmethod

@@ -63,15 +63,15 @@ ON CONFLICT (slug) DO NOTHING;
 -- Admin-flow steps (audience='admin', appended after user-flow) ------------
 INSERT INTO tutorial_step (slug, audience, display_order, target_kind, target_key, title, body)
 VALUES
-    ('admin-feedback-flagged', 'admin', 100, 'static', 'sidebar.feedback-admin',
+    ('admin-feedback-flagged', 'admin', 100, 'static', 'sidebar.tool-quality',
      'Admin: Flagged tools',
      'As an admin, you can see which tools have flagged quality issues. Open Feedback admin to review the data behind a flag.'),
 
-    ('admin-feedback-proposals', 'admin', 110, 'static', 'sidebar.feedback-admin',
+    ('admin-feedback-proposals', 'admin', 110, 'static', 'sidebar.tool-quality',
      'Admin: Knowledge update proposals',
      'When the system identifies a likely fix for an underperforming tool, it surfaces a proposal here. You decide whether to apply it.'),
 
-    ('admin-feedback-quarantine', 'admin', 120, 'static', 'sidebar.feedback-admin',
+    ('admin-feedback-quarantine', 'admin', 120, 'static', 'sidebar.tool-quality',
      'Admin: Quarantined feedback',
      'Feedback flagged for unsafe content lands in quarantine. Release or dismiss items here to keep the synthesizer pool clean.'),
 

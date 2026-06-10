@@ -168,6 +168,13 @@
         if (data.terminal) delete streamSeq[data.stream_id];
         break;
       }
+      case "chrome_render": // Feature 027: server-rendered chrome regions
+        if (data.region === "modal") setModal(data.html || "");
+        else if (data.region === "topbar") {
+          var tb = document.getElementById("astral-topbar");
+          if (tb) { tb.innerHTML = data.html || ""; }
+        }
+        break;
       case "chat_status":
         setStatus({ idle: "", thinking: "Thinking…", executing: "Working…", done: "" }[data.status] || "");
         break;
@@ -201,8 +208,9 @@
       chat.appendChild(el); stepEls[step.id] = el;
     }
     var icon = step.status === "completed" ? "✓" : step.status === "errored" ? "✗" : "•";
-    el.textContent = icon + " " + (step.name || step.kind || "step") +
-      (step.result_summary ? " — " + step.result_summary : "");
+    // Chat shows only the tool/step name; result summaries stay in the
+    // persisted step record (chat-steps API / audit), not the transcript.
+    el.textContent = icon + " " + (step.name || step.kind || "step");
     chat.scrollTop = chat.scrollHeight;
   }
 
@@ -294,6 +302,203 @@
       .then(function (j) { sendChat("[Attachment: " + (j.filename || file.name) + " (" + (j.category || "file") + ") — id=" + (j.attachment_id || "") + "]"); })
       .catch(function () { sendChat("[Attachment upload failed: " + file.name + "]"); });
   });
+
+  // =========================================================================
+  // Feature 027 — chrome runtime: settings menu, modal surfaces, generic
+  // [data-ui-action] delegation, and the tour step-runner. Server renders all
+  // chrome HTML (webrender/chrome/); this block is plumbing only.
+  // =========================================================================
+  var modalRoot = document.getElementById("astral-modal");
+  var modalReturnFocus = null;
+
+  /** Replace the chrome modal content; empty html closes it (FR-017 focus restore). */
+  function setModal(htmlStr) {
+    if (!modalRoot) return;
+    if (htmlStr) {
+      modalReturnFocus = document.activeElement;
+      modalRoot.innerHTML = htmlStr;
+      processSideEffects(modalRoot);
+      var card = modalRoot.querySelector(".astral-modal-card");
+      if (card) card.focus();
+      maybeStartTour();
+    } else {
+      modalRoot.innerHTML = "";
+      if (modalReturnFocus && modalReturnFocus.focus) { try { modalReturnFocus.focus(); } catch (e) {} }
+      modalReturnFocus = null;
+    }
+  }
+  function closeModal() { if (modalRoot && modalRoot.innerHTML) { setModal(""); action("chrome_close", {}); } }
+
+  // ---- settings menu (static, server-rendered; WAI-ARIA menu pattern) ----
+  function menuEl() { return document.getElementById("astral-settings-menu"); }
+  function menuBtn() { return document.getElementById("astral-settings-btn"); }
+  function menuItems() {
+    var m = menuEl(); if (!m) return [];
+    return Array.prototype.slice.call(m.querySelectorAll('[role="menuitem"]'));
+  }
+  function menuOpen() { var m = menuEl(); return !!(m && !m.hidden); }
+  function setMenu(open, focusFirst) {
+    var m = menuEl(), b = menuBtn(); if (!m || !b) return;
+    m.hidden = !open;
+    b.setAttribute("aria-expanded", open ? "true" : "false");
+    if (open && focusFirst) { var items = menuItems(); if (items.length) items[0].focus(); }
+    if (!open) { try { b.focus(); } catch (e) {} }
+  }
+  function menuMove(delta, edge) {
+    var items = menuItems(); if (!items.length) return;
+    var idx = items.indexOf(document.activeElement);
+    var next = edge != null ? edge : (idx < 0 ? 0 : (idx + delta + items.length) % items.length);
+    items[next].focus();
+  }
+
+  document.addEventListener("click", function (e) {
+    var btn = e.target.closest && e.target.closest("#astral-settings-btn");
+    if (btn) { setMenu(!menuOpen(), false); return; }
+    // Tour-card clicks must not count as "outside" — the tour opens the menu
+    // to spotlight in-menu targets, and Next would otherwise close it again.
+    var inTour = e.target.closest && e.target.closest("#astral-tour-card");
+    if (menuOpen() && !inTour && !(e.target.closest && e.target.closest("#astral-settings-menu"))) setMenu(false, false);
+    // modal close affordances: X button or backdrop click
+    if (e.target.closest && e.target.closest(".astral-modal-close")) { closeModal(); return; }
+    var backdrop = e.target.classList && e.target.classList.contains("astral-modal-backdrop");
+    if (backdrop) closeModal();
+  });
+
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") {
+      if (tourState) { endTour("dismissed"); return; }
+      if (menuOpen()) { setMenu(false, false); return; }
+      if (modalRoot && modalRoot.innerHTML) { closeModal(); return; }
+    }
+    var b = menuBtn();
+    if (document.activeElement === b && (e.key === "Enter" || e.key === " " || e.key === "ArrowDown")) {
+      e.preventDefault(); setMenu(true, true); return;
+    }
+    if (!menuOpen()) return;
+    var inMenu = e.target.closest && e.target.closest("#astral-settings-menu");
+    if (!inMenu) return;
+    if (e.key === "ArrowDown") { e.preventDefault(); menuMove(1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); menuMove(-1); }
+    else if (e.key === "Home") { e.preventDefault(); menuMove(0, 0); }
+    else if (e.key === "End") { e.preventDefault(); menuMove(0, menuItems().length - 1); }
+    else if (e.key === "Tab") { e.preventDefault(); menuMove(e.shiftKey ? -1 : 1); }
+  });
+
+  // ---- generic [data-ui-action] delegation (chrome surfaces + creation cards) ----
+  function collectChromeFields(container) {
+    var fields = {};
+    if (!container) return fields;
+    var els = container.querySelectorAll("input[name], select[name], textarea[name]");
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i], name = el.getAttribute("name");
+      if (el.type === "checkbox") fields[name] = el.checked;
+      else if (el.type === "radio") { if (el.checked) fields[name] = el.value; }
+      else if (el.type === "number") fields[name] = el.value === "" ? null : Number(el.value);
+      else fields[name] = el.value;
+    }
+    return fields;
+  }
+
+  document.addEventListener("click", function (e) {
+    var el = e.target.closest && e.target.closest("[data-ui-action]");
+    if (!el) return;
+    var act = el.getAttribute("data-ui-action");
+    var payload = {};
+    try { payload = JSON.parse(el.getAttribute("data-ui-payload") || "{}"); } catch (err) {}
+    if (el.getAttribute("data-ui-collect") === "true") {
+      payload.fields = collectChromeFields(el.closest("[data-ui-form]") || modalRoot);
+    }
+    if (act === "chrome_open") setMenu(false, false);
+    action(act, payload);
+  });
+
+  // Permission sections (Agents & permissions): the section master gates its
+  // tool switches — on enables them all, off clears and disables them. The
+  // server enforces the same rule on save; this just keeps the form honest.
+  document.addEventListener("change", function (e) {
+    var t = e.target;
+    if (!(t.classList && t.classList.contains("astral-perm-master"))) return;
+    var section = t.closest && t.closest("[data-perm-section]");
+    if (!section) return;
+    var on = t.checked;
+    var tools = section.querySelectorAll(".astral-perm-tool");
+    for (var i = 0; i < tools.length; i++) { tools[i].checked = on; tools[i].disabled = !on; }
+    var body = section.querySelector(".astral-perm-tools");
+    if (body) body.classList.toggle("opacity-50", !on);
+  });
+
+  // ---- tour runner (steps server-rendered into [data-tour-steps]; A10 skips) ----
+  var tourState = null;
+  function maybeStartTour() {
+    var holder = modalRoot && modalRoot.querySelector("[data-tour-steps]");
+    if (!holder) return;
+    var steps = [];
+    try { steps = JSON.parse(holder.getAttribute("data-tour-steps") || "[]"); } catch (e) { return; }
+    if (!steps.length) return;
+    setModal(""); // tour replaces the modal with its floating card
+    action("chrome_close", {});
+    tourState = { steps: steps, idx: 0 };
+    action("chrome_tour_event", { event: "started" });
+    showTourStep();
+  }
+  function tourTargetEl(step) {
+    if (!step.target_key) return null;
+    try { return document.querySelector('[data-tour-target="' + step.target_key + '"]'); } catch (e) { return null; }
+  }
+  function clearTourHighlight() {
+    var hl = document.querySelectorAll(".astral-tour-highlight");
+    for (var i = 0; i < hl.length; i++) hl[i].classList.remove("astral-tour-highlight");
+    var card = document.getElementById("astral-tour-card");
+    if (card) card.parentNode.removeChild(card);
+  }
+  function showTourStep() {
+    if (!tourState) return;
+    clearTourHighlight();
+    var step = tourState.steps[tourState.idx];
+    var target = tourTargetEl(step);
+    var skippedNote = "";
+    if (step.target_kind === "static" && step.target_key && !target) {
+      // A10: target belongs to chrome that isn't built yet — note + no highlight.
+      skippedNote = '<div class="text-xs text-astral-muted italic mt-1">(this step’s target isn’t available yet)</div>';
+    }
+    if (target) {
+      target.classList.add("astral-tour-highlight");
+      if (target.scrollIntoView) target.scrollIntoView({ block: "nearest" });
+      if (target.id === "astral-settings-menu" || (target.closest && target.closest("#astral-settings-menu"))) setMenu(true, false);
+    }
+    var card = document.createElement("div");
+    card.id = "astral-tour-card";
+    card.className = "fixed bottom-6 left-1/2 -translate-x-1/2 z-[70] w-[360px] max-w-[90vw] " +
+      "bg-astral-surface border border-white/10 rounded-xl shadow-2xl p-4";
+    var last = tourState.idx === tourState.steps.length - 1;
+    card.innerHTML =
+      '<div class="text-xs text-astral-muted mb-1">Step ' + (tourState.idx + 1) + " of " + tourState.steps.length + "</div>" +
+      '<div class="text-sm font-semibold text-astral-text mb-1" id="astral-tour-title"></div>' +
+      '<div class="text-sm text-astral-text/80" id="astral-tour-body"></div>' + skippedNote +
+      '<div class="flex justify-between items-center mt-3">' +
+      '<button type="button" class="astral-tour-skip text-xs text-astral-muted hover:text-astral-text">Skip tour</button>' +
+      '<div class="flex gap-2">' +
+      (tourState.idx > 0 ? '<button type="button" class="astral-tour-back px-3 py-1.5 rounded-lg text-xs bg-white/5 border border-white/10 text-astral-text">Back</button>' : "") +
+      '<button type="button" class="astral-tour-next px-3 py-1.5 rounded-lg text-xs font-medium bg-astral-primary text-white">' + (last ? "Finish" : "Next") + "</button>" +
+      "</div></div>";
+    document.body.appendChild(card);
+    // server step content is text — set via textContent to stay inert
+    card.querySelector("#astral-tour-title").textContent = step.title || "";
+    card.querySelector("#astral-tour-body").textContent = step.body || "";
+    card.querySelector(".astral-tour-next").addEventListener("click", function () {
+      if (last) { endTour("completed"); }
+      else { tourState.idx++; showTourStep(); }
+    });
+    var back = card.querySelector(".astral-tour-back");
+    if (back) back.addEventListener("click", function () { tourState.idx--; showTourStep(); });
+    card.querySelector(".astral-tour-skip").addEventListener("click", function () { endTour("skipped"); });
+  }
+  function endTour(outcome) {
+    clearTourHighlight();
+    setMenu(false, false);
+    if (tourState) action("chrome_tour_event", { event: outcome });
+    tourState = null;
+  }
 
   // ---- connection lifecycle ----
   function connect() {

@@ -153,6 +153,21 @@ class UIAppend(Message):
     target_id: str = ""
     data: Any = None
 
+@dataclass
+class ChromeRender(Message):
+    """Feature 027 — server-rendered application chrome push.
+
+    Additive to the 026 protocol: carries trusted, server-rendered chrome
+    HTML (top bar / settings-surface modal) for the web shell's named
+    regions. Canvas/chat content continues to flow as UIRender/UIUpdate
+    with components+html (FR-018 untouched). Empty ``html`` for the modal
+    region clears it (close).
+    """
+    type: str = "chrome_render"
+    region: str = "modal"  # "modal" | "topbar"
+    html: str = ""
+    mode: str = "replace"  # reserved; only "replace" in 027
+
 # --- Agent2Agent Protocol ---
 @dataclass
 class AgentSkill:

@@ -33,6 +33,7 @@ except ImportError:
 
 # Expression evaluator
 from shared.expression_evaluator import ExpressionEvaluator, safe_eval
+from shared.llm_text import strip_reasoning_markup
 
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
@@ -915,9 +916,9 @@ def extract_search_terms(query: str, **kwargs) -> str:
             max_tokens=50,
             timeout=10 # Add timeout
         )
-        terms = response.choices[0].message.content.strip()
+        terms = strip_reasoning_markup(response.choices[0].message.content or "").strip()
         logger.debug(f"extracted terms: {terms}")
-        return terms
+        return terms or query.strip()
     except Exception as e:
         logger.error(f"Error extracting search terms: {e}")
         return query.strip()
