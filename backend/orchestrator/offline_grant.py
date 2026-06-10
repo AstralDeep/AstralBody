@@ -52,7 +52,12 @@ def _now_ms() -> int:
 class OfflineGrantStore:
     """Persistence + crypto for offline grants. Token bytes never leave this class."""
 
-    def __init__(self, db) -> None:
+    def __init__(self, db=None) -> None:
+        if db is None:
+            # Lazy default (mirrors session_store.WebSessionStore): callers
+            # like web_auth.auth_logout construct the store bare at sign-out.
+            from shared.database import Database
+            db = Database()
         self.db = db
 
     def capture(self, user_id: str, refresh_token: str, agent_id: Optional[str] = None) -> str:
