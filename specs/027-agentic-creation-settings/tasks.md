@@ -95,10 +95,10 @@ shows outcome; approve → gate → live → original request succeeds same-sess
 
 ## Phase 7: Polish & Real-Browser Gate (Constitution X)
 
-- [ ] T030 [P] Docstrings + structured logs sweep over all new modules (Constitution VI/X); `ruff check backend/` clean (py311 target).
-- [ ] T031 [P] Update [CLAUDE.md](../../CLAUDE.md) manual section + [docs/](../../docs/) for the chrome layer (`webrender/chrome/`, `chrome_render`, meta-tools, FF_AGENTIC_CREATION).
-- [ ] T032 Full suite in container: 026 suites stay green + all 027 suites; coverage ≥90% changed code.
-- [ ] T033 **GATE** Rebuild image, restart containers, real-browser E2E (Playwright vs :8001): menu keyboard nav + role gating; every surface opens; permissions save round-trip; theme preset applies + persists across reload; audit paging; tour run (skips deferred-chrome targets); guide; sign-out → signed-out screen; **agentic flow**: unserved request → auto-create+self-test card → approve → original request succeeds same-session (SC-001/SC-002); drafts surface shows the chat-created draft (SC-007). Record evidence under `specs/027-agentic-creation-settings/evidence/`.
+- [x] T030 [P] Docstrings + structured logs sweep over all new modules (Constitution VI/X); `ruff check backend/` clean (py311 target).
+- [x] T031 [P] Update [CLAUDE.md](../../CLAUDE.md) manual section + [docs/](../../docs/) for the chrome layer (`webrender/chrome/`, `chrome_render`, meta-tools, FF_AGENTIC_CREATION).
+- [x] T032 Full suite in container: 026 suites stay green + all 027 suites; coverage ≥90% changed code.
+- [x] T033 **GATE** Rebuild image, restart containers, real-browser E2E (Playwright vs :8001): menu keyboard nav + role gating; every surface opens; permissions save round-trip; theme preset applies + persists across reload; audit paging; tour run (skips deferred-chrome targets); guide; sign-out → signed-out screen; **agentic flow**: unserved request → auto-create+self-test card → approve → original request succeeds same-session (SC-001/SC-002); drafts surface shows the chat-created draft (SC-007). Record evidence under `specs/027-agentic-creation-settings/evidence/`.
 
 ---
 
