@@ -143,12 +143,13 @@ def _param_field(field: Dict[str, Any]) -> str:
     help_html = f'<span class="text-xs text-astral-muted">{esc(help_)}</span>' if help_ else ""
     if kind == "boolean":
         checked = " checked" if default else ""
+        help_html = f'<div class="text-xs text-astral-muted">{esc(help_)}</div>' if help_ else ""
         return (
             f'<label class="flex items-start gap-3 text-sm">'
             f'<input type="checkbox" data-field="{_attr(name)}" data-kind="boolean"{checked} '
             f'class="astral-pp-field mt-1 h-4 w-4 rounded border-white/20 bg-white/10">'
             f'<div class="flex-1"><div class="text-astral-text font-medium">{esc(label)}</div>'
-            f'{("<div class=\"text-xs text-astral-muted\">" + esc(help_) + "</div>") if help_ else ""}</div></label>'
+            f'{help_html}</div></label>'
         )
     if kind == "number":
         step = field.get("step", 1)
@@ -547,10 +548,13 @@ def render_file_download(c):
     url = c.get("url")
     filename = c.get("filename")
     valid = bool(url) and url != "#" and str(url).startswith("http")
+    # Built outside the f-string: escaped quotes inside an f-string expression
+    # are a SyntaxError on Python <=3.11 (the container runtime).
+    download_attr = f' download="{_attr(filename)}"' if filename else ""
     if valid:
         return (
             f'<div{_base_attrs(c)} class="flex items-center gap-3 py-2">'
-            f'<a href="{_attr(safe_url(url))}"{(" download=\"" + _attr(filename) + "\"") if filename else ""} '
+            f'<a href="{_attr(safe_url(url))}"{download_attr} '
             f'class="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors '
             f'bg-astral-secondary/20 hover:bg-astral-secondary/30 text-astral-secondary border border-astral-secondary/30">'
             f'<span>{esc(label)}</span></a></div>'
@@ -583,21 +587,6 @@ def render_audio(c):
             f'{label_html}{media}{desc_html}</div>')
 
 
-def render_combined(c):
-    """Render the orchestrator's `combined` passthrough primitive.
-
-    The combine step (Orchestrator._render_unified_to_html) pre-renders a
-    unified view by running webrender over already-sanitized, ROTE-adapted
-    primitives and wraps the result as ``{"type": "combined", "html": ...}``.
-    The HTML is therefore server-generated, trusted webrender output — emit it
-    verbatim. Re-escaping here would double-encode that trusted markup, and
-    leaving the type unhandled falls through to the unsupported-placeholder
-    path (the bug this fixes). Defensive: missing/non-str ``html`` -> "".
-    """
-    html_value = c.get("html")
-    return html_value if isinstance(html_value, str) else ""
-
-
 PRIMITIVE_RENDERERS.update({
     "container": render_container, "text": render_text, "button": render_button, "input": render_input,
     "param_picker": render_param_picker, "card": render_card, "table": render_table, "list": render_list,
@@ -606,7 +595,7 @@ PRIMITIVE_RENDERERS.update({
     "collapsible": render_collapsible, "bar_chart": render_bar_chart, "line_chart": render_line_chart,
     "pie_chart": render_pie_chart, "plotly_chart": render_plotly_chart, "color_picker": render_color_picker,
     "theme_apply": render_theme_apply, "file_upload": render_file_upload, "file_download": render_file_download,
-    "audio": render_audio, "combined": render_combined,
+    "audio": render_audio,
 })
 
 
