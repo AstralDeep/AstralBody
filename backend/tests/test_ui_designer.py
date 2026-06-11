@@ -312,6 +312,24 @@ def test_design_round_all_refs_invalid_falls_back():
     assert set(ui_designer.iter_refs(layout)) == {"wc_a", "wc_b"}
 
 
+def test_renderer_emits_nested_morph_anchor():
+    """FR-021: a materialized nested ref's attributes["data-component-id"]
+    must reach the HTML so ui_upsert morphs find it inside arrangements —
+    and only safe data-* attributes are honored (no handler injection)."""
+    from webrender import render_one
+
+    comp = {"type": "table", "headers": ["A"], "rows": [["1"]],
+            "attributes": {"data-component-id": "wc_anchor1",
+                           "onclick": "alert(1)", "DATA-OK": "yes"}}
+    html_out = render_one(comp)
+    assert 'data-component-id="wc_anchor1"' in html_out
+    assert "onclick" not in html_out, "non-data attributes must never render"
+    assert 'data-ok="yes"' in html_out, "data-* keys are case-normalized and allowed"
+    # Components without attributes render byte-identically to before.
+    plain = render_one({"type": "table", "headers": ["A"], "rows": [["1"]]})
+    assert "data-component-id" not in plain
+
+
 def test_prompt_carries_ids_palette_and_rules():
     messages = build_design_messages(
         "x" * 5000, _round_components(),

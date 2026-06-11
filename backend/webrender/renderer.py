@@ -72,10 +72,32 @@ def render_children(items: List[Any]) -> str:
     return "".join(render_one(c) for c in items if isinstance(c, dict))
 
 
+import re as _re
+
+_SAFE_DATA_ATTR = _re.compile(r"^data-[a-z0-9-]+$")
+
+
 def _base_attrs(comp: Dict[str, Any]) -> str:
-    """Render id (the only base attr applied to the fragment root in the live app)."""
+    """Render id plus whitelisted ``data-*`` entries from ``attributes``.
+
+    ``attributes`` is astralprims' documented free-form escape hatch; the web
+    renderer honors only ``data-*`` keys (escaped) so authors cannot inject
+    event handlers or override structural attributes. Feature 029 relies on
+    this for nested morph anchors: the designer's materializer stamps
+    ``attributes["data-component-id"]`` on refs nested inside arrangements so
+    ``ui_upsert`` morphs keep finding them in the DOM.
+    """
+    parts = []
     cid = comp.get("id")
-    return f' id="{_attr(cid)}"' if cid else ""
+    if cid:
+        parts.append(f' id="{_attr(cid)}"')
+    attrs = comp.get("attributes")
+    if isinstance(attrs, dict):
+        for key, value in attrs.items():
+            key_s = str(key).lower()
+            if _SAFE_DATA_ATTR.match(key_s):
+                parts.append(f' {key_s}="{_attr(value)}"')
+    return "".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +116,7 @@ def render_text(c):
         cls = ("prose prose-invert max-w-none text-sm text-astral-text leading-relaxed "
                "prose-headings:text-astral-text prose-a:text-astral-primary prose-strong:text-astral-text "
                "prose-code:text-astral-accent")
-        return f'<div class="{cls}">{block_md(content)}</div>'
+        return f'<div{_base_attrs(c)} class="{cls}">{block_md(content)}</div>'
     classes = {
         "h1": "text-2xl font-bold text-astral-text",
         "h2": "text-xl font-semibold text-astral-text",
@@ -104,7 +126,7 @@ def render_text(c):
     }
     tag = {"h1": "h1", "h2": "h2", "h3": "h3"}.get(variant, "p")
     cls = classes.get(variant, classes["body"])
-    return f'<{tag} class="{cls}">{esc(content)}</{tag}>'
+    return f'<{tag}{_base_attrs(c)} class="{cls}">{esc(content)}</{tag}>'
 
 
 def render_button(c):
@@ -213,7 +235,7 @@ def render_param_picker(c):
                  if description else "")
     rows = "".join(_param_field(f) for f in fields)
     return (
-        f'<div class="astral-param-picker bg-white/5 rounded-lg border border-white/10 p-4 my-2" '
+        f'<div{_base_attrs(c)} class="astral-param-picker bg-white/5 rounded-lg border border-white/10 p-4 my-2" '
         f'data-template="{_attr(template)}">{title_html}{desc_html}'
         f'<div class="flex flex-col gap-3 max-h-[28rem] overflow-y-auto pr-1">{rows}</div>'
         f'<div class="mt-4 flex items-center justify-end gap-2">'
@@ -306,7 +328,7 @@ def render_list(c):
     if not items:
         return ""
     if c.get("variant") == "detailed":
-        out = ['<div class="space-y-3">']
+        out = [f'<div{_base_attrs(c)} class="space-y-3">']
         for it in items:
             if not isinstance(it, dict):
                 it = {"title": str(it)}
@@ -331,7 +353,7 @@ def render_list(c):
     lis = "".join(
         f'<li class="leading-relaxed">{inline_md(it) if isinstance(it, str) else esc(json.dumps(it))}</li>'
         for it in items)
-    return f'<{tag} class="space-y-2 text-sm {lcls} list-inside text-astral-text">{lis}</{tag}>'
+    return f'<{tag}{_base_attrs(c)} class="space-y-2 text-sm {lcls} list-inside text-astral-text">{lis}</{tag}>'
 
 
 def _alert_icon(variant: str) -> str:
@@ -429,7 +451,7 @@ def render_image(c):
         attrs += f' width="{_attr(c.get("width"))}"'
     if c.get("height"):
         attrs += f' height="{_attr(c.get("height"))}"'
-    return f'<img {attrs} class="max-w-full rounded-lg">'
+    return f'<img{_base_attrs(c)} {attrs} class="max-w-full rounded-lg">'
 
 
 def render_grid(c):
@@ -450,7 +472,7 @@ def render_grid(c):
 def render_tabs(c):
     # No live renderer; provide a basic <details>-based fallback for completeness.
     tabs = c.get("tabs") or []
-    out = ['<div class="astral-tabs space-y-2">']
+    out = [f'<div{_base_attrs(c)} class="astral-tabs space-y-2">']
     for i, t in enumerate(tabs):
         if not isinstance(t, dict):
             continue
@@ -472,7 +494,7 @@ def render_collapsible(c):
     is_open = bool(c.get("default_open"))
     body = render_children(_children(c))
     return (
-        f'<details class="astral-collapsible overflow-hidden"{" open" if is_open else ""}>'
+        f'<details{_base_attrs(c)} class="astral-collapsible overflow-hidden"{" open" if is_open else ""}>'
         f'<summary class="flex items-center w-full gap-2 px-3 py-2 hover:bg-white/[0.03] transition-colors text-left cursor-pointer list-none">'
         f'<span class="text-[11px] font-medium text-astral-muted/70 uppercase tracking-wider flex-1 truncate">{esc(title)}</span></summary>'
         f'<div class="px-3 pb-3 pt-1.5 border-t border-white/[0.04] space-y-2 max-h-[420px] overflow-y-auto scrollbar-thin">{body}</div></details>'
