@@ -71,9 +71,12 @@ logger = logging.getLogger('Orchestrator')
 
 class EndpointFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
-        # Filter out uvicorn access logs for specific "poll" endpoints
+        # Filter out uvicorn access logs for "poll" endpoints and the
+        # container/orchestrator health probes (they fire every few seconds).
         msg = record.getMessage()
-        return "/.well-known/agent-card.json" not in msg
+        return not any(path in msg for path in (
+            "/.well-known/agent-card.json", "/healthz", "/readyz",
+        ))
 
 # Filter uvicorn access logs if they exist
 logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
@@ -5837,11 +5840,24 @@ COMPONENT UPDATE RULES:
             openapi_url="/api/openapi.json",
         )
 
-        # CORS — configurable via CORS_ORIGINS env var (comma-separated)
-        cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
+        # CORS — the web UI is same-origin since feature 026 (the orchestrator
+        # serves it), so cross-origin access is the exception, not the rule.
+        # Default allowlist = this deployment's own public URLs; extend with
+        # CORS_ORIGINS (comma-separated) for legitimate external consumers.
+        # (The former :5173 React-dev defaults are gone with the SPA.)
+        if os.getenv("CORS_ORIGINS"):
+            cors_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
+        else:
+            cors_origins = sorted({
+                o.rstrip("/") for o in (
+                    os.getenv("PUBLIC_BASE_URL", ""),
+                    os.getenv("BACKEND_PUBLIC_URL", ""),
+                    f"http://localhost:{os.getenv('ORCHESTRATOR_PORT', '8001')}",
+                ) if o
+            })
         app.add_middleware(
             CORSMiddleware,
-            allow_origins=[o.strip() for o in cors_origins],
+            allow_origins=cors_origins,
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
@@ -5849,6 +5865,26 @@ COMPONENT UPDATE RULES:
 
         # Store Orchestrator instance on app.state so REST API routes can access it
         app.state.orchestrator = self
+
+        # ── Health probes (ungated; no user data) ───────────────────────────
+        # /healthz: liveness — the process is serving. /readyz: readiness —
+        # the database answers. Wired into the compose healthcheck and any
+        # orchestration platform (k8s livenessProbe/readinessProbe).
+        @app.get("/healthz", include_in_schema=False)
+        async def healthz():
+            return {"status": "ok"}
+
+        @app.get("/readyz", include_in_schema=False)
+        async def readyz():
+            from fastapi.responses import JSONResponse as _JSON
+            try:
+                row = await asyncio.to_thread(self.history.db.fetch_one, "SELECT 1 AS ok")
+                if not row:
+                    raise RuntimeError("empty health-probe result")
+            except Exception as exc:
+                logger.warning("readyz: database probe failed: %s", exc)
+                return _JSON({"status": "degraded", "db": "unreachable"}, status_code=503)
+            return {"status": "ok", "db": "ok", "agents": len(self.agent_cards)}
 
         @app.websocket("/ws")
         async def websocket_endpoint(websocket: WebSocket):
@@ -5986,8 +6022,17 @@ COMPONENT UPDATE RULES:
                         await self.discover_a2a_agent(url)
             asyncio.create_task(_discover_external())
 
-        # Start combined server
-        config = uvicorn.Config(app, host="0.0.0.0", port=PORT, log_level="info")
+        # Start combined server. proxy_headers honors X-Forwarded-Proto/-For
+        # from a TLS-terminating reverse proxy (production deployments) so
+        # request.base_url is https — which drives the session cookie's
+        # `secure` flag and the OIDC redirect_uri. Only proxies listed in
+        # FORWARDED_ALLOW_IPS are trusted (default: loopback only).
+        config = uvicorn.Config(
+            app, host="0.0.0.0", port=PORT,
+            log_level=os.getenv("LOG_LEVEL", "info").lower(),
+            proxy_headers=True,
+            forwarded_allow_ips=os.getenv("FORWARDED_ALLOW_IPS", "127.0.0.1"),
+        )
         server = uvicorn.Server(config)
         logger.info(f"Consolidated server (Gateway) listening on http://0.0.0.0:{PORT}")
         logger.info(f"API docs available at http://localhost:{PORT}/docs")

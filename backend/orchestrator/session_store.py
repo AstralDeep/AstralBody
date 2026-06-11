@@ -34,19 +34,67 @@ def is_dev_mode() -> bool:
     return os.getenv("ASTRAL_ENV", "").strip().lower() in _DEV_VALUES
 
 
+# Shipped placeholder values that must never reach production.
+_DEV_PLACEHOLDER_SECRETS = (
+    "dev-audit-hmac-secret-change-me-in-prod",
+    "change-me",
+)
+
+
 def assert_production_posture() -> None:
-    """Fail-closed boot gate (028 FR-015): refuse to serve with mock auth on
-    outside explicitly declared development mode. Raises ``SystemExit(78)``
-    (EX_CONFIG) — called from ``Orchestrator.start``."""
+    """Fail-closed boot gate (028 FR-015, production hardening): refuse to
+    serve a production-mode process with a configuration that would silently
+    run open or unprotected. Collects EVERY problem before exiting so the
+    operator gets one actionable checklist. Raises ``SystemExit(78)``
+    (EX_CONFIG) — called from ``Orchestrator.start``.
+
+    Development mode (``ASTRAL_ENV=development``) skips everything except the
+    advisory warnings — local dev stays friction-free (spec A13)."""
     mock_on = os.getenv("VITE_USE_MOCK_AUTH", "").strip().lower() in ("1", "true", "yes")
-    if mock_on and not is_dev_mode():
+    if is_dev_mode():
+        return
+    problems = []
+    if mock_on:
+        problems.append(
+            "USE_MOCK_AUTH is enabled. Mock authentication accepts any token as "
+            "an admin user. Set USE_MOCK_AUTH=false and configure KEYCLOAK_*, "
+            "or set ASTRAL_ENV=development (local dev only)."
+        )
+    if not _enc_key():
+        problems.append(
+            "WEB_SESSION_ENC_KEY (or OFFLINE_GRANT_ENC_KEY) is unset — durable "
+            "web sessions cannot be encrypted at rest. Generate one: python -c "
+            "\"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+        )
+    audit_secret = os.getenv("AUDIT_HMAC_SECRET", "").strip()
+    if not audit_secret or audit_secret in _DEV_PLACEHOLDER_SECRETS:
+        problems.append(
+            "AUDIT_HMAC_SECRET is unset or still the shipped dev placeholder — "
+            "the audit hash chain would be forgeable. Set a high-entropy value."
+        )
+    if not mock_on:
+        for var, aliases in (
+            ("KEYCLOAK_AUTHORITY", ("VITE_KEYCLOAK_AUTHORITY",)),
+            ("KEYCLOAK_CLIENT_ID", ("VITE_KEYCLOAK_CLIENT_ID",)),
+            ("KEYCLOAK_CLIENT_SECRET", ()),
+        ):
+            if not any(os.getenv(name, "").strip() for name in (var, *aliases)):
+                problems.append(f"{var} is unset — the OIDC flow cannot operate.")
+    if problems:
         logger.critical(
-            "REFUSING TO START: USE_MOCK_AUTH is enabled but ASTRAL_ENV is not "
-            "'development'. Mock authentication accepts any token as an admin "
-            "user. Either set ASTRAL_ENV=development (local dev only) or set "
-            "USE_MOCK_AUTH=false and configure KEYCLOAK_* for production."
+            "REFUSING TO START (production posture, ASTRAL_ENV != development) — "
+            "fix the following before deploying:\n%s",
+            "\n".join(f"  [{i + 1}] {p}" for i, p in enumerate(problems)),
         )
         raise SystemExit(78)  # EX_CONFIG
+    if not os.getenv("AGENT_API_KEY", "").strip():
+        # Not fatal: agent registrations are refused (fail closed) — but the
+        # operator should know no specialist agents will come up.
+        logger.warning(
+            "AGENT_API_KEY is unset in production mode: ALL agent registrations "
+            "will be refused (fail closed, 028 FR-016). Configure it if this "
+            "deployment is meant to run specialist agents."
+        )
 
 
 def _enc_key() -> Optional[bytes]:
