@@ -808,8 +808,156 @@ class Database:
             ON saved_components (chat_id, component_id) WHERE component_id IS NOT NULL
         ''')
 
+        # ── Feature 029: adaptive UI designer — canvas arrangements ─────────
+        # A layout is a per-round designed tree whose leaves REFERENCE live
+        # saved_components rows by component_id (overlay model: layouts never
+        # own component content, so dropping this table degrades cleanly to
+        # the flat position-ordered canvas). Rollback: DROP TABLE.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS workspace_layout (
+                id SERIAL PRIMARY KEY,
+                chat_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                layout_key TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                layout TEXT NOT NULL,
+                created_at BIGINT NOT NULL,
+                updated_at BIGINT NOT NULL,
+                FOREIGN KEY (chat_id) REFERENCES chats (id) ON DELETE CASCADE
+            )
+        ''')
+        cursor.execute('''
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_workspace_layout_chat_key
+            ON workspace_layout (chat_id, layout_key)
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS ix_workspace_layout_chat_pos
+            ON workspace_layout (chat_id, position)
+        ''')
+        # Snapshots additionally capture the live arrangements at turn
+        # boundaries so the read-only timeline can materialize historical
+        # designed states. NULL == pre-029 snapshot (rendered flat).
+        # Rollback: ALTER TABLE workspace_snapshot DROP COLUMN layouts.
+        if not self._column_exists(cursor, 'workspace_snapshot', 'layouts'):
+            cursor.execute("ALTER TABLE workspace_snapshot ADD COLUMN layouts TEXT NULL")
+
+        # ── Feature 029: agent catalog migrations (data-model.md) ───────────
+        self._migrate_agent_catalog_029(cursor)
+
         conn.commit()
         conn.close()
+
+    # Feature 029 identity sets (specs/029-agents-adaptive-ui-ci/baseline.md).
+    # Both the declared hyphenated agent ids and the legacy underscore
+    # directory-name rows exist in deployed databases — cover both.
+    _ML_MERGED_AGENT_IDS = ('classify', 'classify-1', 'forecaster', 'forecaster-1',
+                            'llm_factory', 'llm-factory-1')
+    _ML_AGENT_ID = 'ml-services-1'
+    # The five verb names classify and forecaster shared pre-merge; each is
+    # exposed service-prefixed by the consolidated registry.
+    _ML_PREFIXED_VERBS = ('submit_dataset', 'start_training_job', 'get_job_status',
+                          'get_results', 'delete_dataset')
+    _RETIRED_AGENT_IDS = ('email_tracker', 'email-tracker-1',
+                          'grant_budgets', 'grant-budgets-1',
+                          'grants', 'grants-1',
+                          'linkedin', 'linkedin-1',
+                          'nefarious', 'nefarious-1',
+                          'nocodb', 'nocodb-1')
+
+    def _migrate_agent_catalog_029(self, cursor):
+        """Feature 029 one-time (idempotent) catalog migrations.
+
+        1. classify/forecaster/llm_factory → ml-services-1 identity remap with
+           settings carry-forward (FR-008): scopes merge with OR semantics
+           (granted on any predecessor stays granted), per-tool overrides
+           merge with AND semantics (disabled on any predecessor stays
+           disabled — fail-safe), credentials/ownership carry over, and the
+           five colliding verb names gain their service prefixes in stored
+           per-tool rows.
+        2. Permission/credential rows for the six retired agents are deleted
+           (FR-003; lead-approved destructive — audit/chats/saved_components
+           rows are intentionally preserved per data-model.md).
+
+        Every statement is a no-op on re-run (UPDATE/DELETE match nothing,
+        INSERT...SELECT reads an empty source), so this is safe at every boot.
+        """
+        ml_ids = self._ML_MERGED_AGENT_IDS
+        ml_ph = ", ".join(["%s"] * len(ml_ids))
+        retired = self._RETIRED_AGENT_IDS
+        retired_ph = ", ".join(["%s"] * len(retired))
+        verb_ph = ", ".join(["%s"] * len(self._ML_PREFIXED_VERBS))
+
+        # (1a) Service-prefix the colliding verbs BEFORE the id remap (the
+        # old agent id is what tells us which prefix a row needs).
+        for table in ('tool_overrides', 'tool_permissions'):
+            for prefix, old_ids in (('classify_', ('classify', 'classify-1')),
+                                    ('forecaster_', ('forecaster', 'forecaster-1'))):
+                cursor.execute(
+                    f"UPDATE {table} SET tool_name = %s || tool_name "
+                    f"WHERE agent_id IN (%s, %s) AND tool_name IN ({verb_ph})",
+                    (prefix, *old_ids, *self._ML_PREFIXED_VERBS),
+                )
+
+        # (1b) Ownership: one surviving row (UNIQUE(agent_id)).
+        cursor.execute(
+            f"""INSERT INTO agent_ownership (agent_id, owner_email, is_public, created_at, updated_at)
+                SELECT %s, owner_email, is_public, created_at, updated_at
+                FROM agent_ownership WHERE agent_id IN ({ml_ph})
+                ORDER BY updated_at DESC NULLS LAST LIMIT 1
+                ON CONFLICT (agent_id) DO NOTHING""",
+            (self._ML_AGENT_ID, *ml_ids),
+        )
+
+        # (1c) Scopes: OR-merge per (user, scope).
+        cursor.execute(
+            f"""INSERT INTO agent_scopes (user_id, agent_id, scope, enabled, updated_at)
+                SELECT user_id, %s, scope, BOOL_OR(enabled), MAX(updated_at)
+                FROM agent_scopes WHERE agent_id IN ({ml_ph})
+                GROUP BY user_id, scope
+                ON CONFLICT DO NOTHING""",
+            (self._ML_AGENT_ID, *ml_ids),
+        )
+
+        # (1d) Per-tool overrides: AND-merge per (user, tool, kind) — a tool a
+        # user disabled on any predecessor stays disabled on the merged agent.
+        cursor.execute(
+            f"""INSERT INTO tool_overrides (user_id, agent_id, tool_name, enabled, updated_at, permission_kind)
+                SELECT user_id, %s, tool_name, BOOL_AND(enabled), MAX(updated_at), permission_kind
+                FROM tool_overrides WHERE agent_id IN ({ml_ph})
+                GROUP BY user_id, tool_name, permission_kind
+                ON CONFLICT DO NOTHING""",
+            (self._ML_AGENT_ID, *ml_ids),
+        )
+        cursor.execute(
+            f"""INSERT INTO tool_permissions (user_id, agent_id, tool_name, allowed, updated_at)
+                SELECT user_id, %s, tool_name, BOOL_AND(allowed), MAX(updated_at)
+                FROM tool_permissions WHERE agent_id IN ({ml_ph})
+                GROUP BY user_id, tool_name
+                ON CONFLICT DO NOTHING""",
+            (self._ML_AGENT_ID, *ml_ids),
+        )
+
+        # (1e) Credentials: key names are service-distinct (CLASSIFY_*,
+        # FORECASTER_*, LLM_FACTORY_*), so rows carry over verbatim.
+        cursor.execute(
+            f"""INSERT INTO user_credentials (user_id, agent_id, credential_key, encrypted_value, created_at, updated_at)
+                SELECT user_id, %s, credential_key, encrypted_value, created_at, updated_at
+                FROM user_credentials WHERE agent_id IN ({ml_ph})
+                ON CONFLICT DO NOTHING""",
+            (self._ML_AGENT_ID, *ml_ids),
+        )
+
+        # (1f) Chat bindings follow the merged identity, then the old rows go.
+        cursor.execute(f"UPDATE chats SET agent_id = %s WHERE agent_id IN ({ml_ph})",
+                       (self._ML_AGENT_ID, *ml_ids))
+        for table in ('agent_ownership', 'agent_scopes', 'tool_overrides',
+                      'tool_permissions', 'user_credentials'):
+            cursor.execute(f"DELETE FROM {table} WHERE agent_id IN ({ml_ph})", ml_ids)
+
+        # (2) Retired agents: permission/credential rows are destroyed.
+        for table in ('agent_ownership', 'agent_scopes', 'tool_overrides',
+                      'tool_permissions', 'user_credentials'):
+            cursor.execute(f"DELETE FROM {table} WHERE agent_id IN ({retired_ph})", retired)
 
     def execute(self, query: str, params: Tuple = ()):
         """Execute a write operation (INSERT, UPDATE, DELETE)."""

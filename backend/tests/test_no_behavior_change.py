@@ -28,19 +28,12 @@ if BACKEND not in sys.path:
 # agents like `medical` whose import depends on env-specific native libs unrelated
 # to this migration).
 AGENT_TOOL_MODULES = [
-    "agents.classify.mcp_tools",
     "agents.general.mcp_tools",
     "agents.weather.mcp_tools",
-    "agents.grants.mcp_tools",
-    "agents.grant_budgets.mcp_tools",
-    "agents.nocodb.mcp_tools",
-    "agents.linkedin.mcp_tools",
     "agents.etf_tracker_1.mcp_tools",
-    "agents.email_tracker.mcp_tools",
     "agents.journal_review.mcp_tools",
-    "agents.forecaster.mcp_tools",
-    "agents.llm_factory.mcp_tools",
-    "agents.nefarious.mcp_tools",
+    # 029: classify + forecaster + llm_factory consolidated into ml_services.
+    "agents.ml_services.mcp_tools",
 ]
 
 
