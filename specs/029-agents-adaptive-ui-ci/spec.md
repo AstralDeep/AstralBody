@@ -136,7 +136,7 @@ A user opening the product sees a modern, cohesive interface: consistent typogra
 
 #### Agent consolidation
 
-- **FR-006**: The classify, forecaster, and llm_factory agents MUST be replaced by a single consolidated ML-services agent exposing the union of their tools with unchanged tool names, input schemas, scopes, and output behavior.
+- **FR-006**: The classify, forecaster, and llm_factory agents MUST be replaced by a single consolidated ML-services agent exposing the union of their tools with unchanged input schemas, scopes, and output behavior. Tool names remain unchanged except where the merge creates a name collision (five dataset/job verbs shared by the classification and forecasting services); colliding names gain a service prefix, and stored per-user tool permissions for the old names MUST be remapped automatically. *(Planning finding 2026-06-11: a flat tool namespace cannot hold two `submit_dataset` tools — see research.md R7.)*
 - **FR-007**: The consolidated agent MUST be built on one shared external-service-wrapper foundation (single credential-probe pattern, retry shim, and egress-gated HTTP usage) rather than three copies.
 - **FR-008**: The three credential bundles (classification service URL/key, forecaster service URL/key, LLM-factory service URL/key) MUST remain distinct and MUST surface through the existing credential-management experience; credentials and per-user tool permissions saved under the three retired agent identities MUST carry forward to the consolidated agent via an idempotent, automatically-run remap migration.
 - **FR-009**: Knowledge files (capabilities/techniques) for the three merged agents MUST be carried into the consolidated agent's knowledge identity so routing quality does not regress.
