@@ -341,6 +341,10 @@
         setStatus("Read-only history view — go back to live to interact.");
         return;
       }
+      // A chat_message action (e.g. the welcome examples' buttons) is exactly
+      // a typed message — present it the same way: user bubble + the standard
+      // chat payload shape.
+      if (act === "chat_message" && payload.message) { sendChat(payload.message); return; }
       if (act) action(act, payload);
       return;
     }

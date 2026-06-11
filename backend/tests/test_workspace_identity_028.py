@@ -208,6 +208,63 @@ def test_idless_single_source_supersede_still_updates_in_place(ws, chat):
 
 
 # ----------------------------------------------------------------------
+# Multi-component tool results: ordinal identities, no sibling supersede
+# ----------------------------------------------------------------------
+
+
+def test_multicomponent_batch_keeps_every_component(ws, chat):
+    """A single tool result carrying many id-less components must persist
+    them ALL — without ordinal identities they share one fingerprint and
+    supersede each other down to a single surviving row (the bug that
+    collapsed dashboard tool output to its last caption)."""
+    chat_id, user_id = chat
+    batch = [_comp("agentA", "dash", {"q": 1}, type=t, body=f"w{n}")
+             for n, t in enumerate(["hero", "metric", "table", "text"])]
+
+    ops = ws.upsert(chat_id, user_id, batch)
+    ids = [op["component_id"] for op in ops]
+    assert len(set(ids)) == 4, "every component keeps its own identity"
+    assert all(op["created"] for op in ops)
+
+    rows = ws.live_rows(chat_id, user_id)
+    assert len(rows) == 4
+    assert [r["component_data"]["body"] for r in rows] == ["w0", "w1", "w2", "w3"]
+
+
+def test_duplicate_explicit_ids_in_one_batch_coexist(ws, chat):
+    """Parallel calls of a tool that hardcodes an author id (the general
+    agent's chart-card) land in one round — they must all survive, not
+    supersede each other onto au_<id>."""
+    chat_id, user_id = chat
+    batch = [_comp("general-1", "generate_dynamic_chart", {"q": n},
+                   id="chart-card", body=f"chart{n}") for n in range(3)]
+    ops = ws.upsert(chat_id, user_id, batch)
+    ids = [op["component_id"] for op in ops]
+    assert len(set(ids)) == 3
+    assert ids[0] == "au_chart-card", "first occurrence keeps the plain identity"
+    assert all(i.startswith("au_chart-card") for i in ids), "ordinal ids keep the au_ prefix"
+    assert len(ws.live_rows(chat_id, user_id)) == 3
+
+
+def test_multicomponent_rerun_supersedes_slot_for_slot(ws, chat):
+    chat_id, user_id = chat
+    first = ws.upsert(chat_id, user_id, [
+        _comp("agentA", "dash", {"q": 1}, type="hero", body="old-hero"),
+        _comp("agentA", "dash", {"q": 1}, type="metric", body="old-metric"),
+    ])
+    rerun = ws.upsert(chat_id, user_id, [
+        _comp("agentA", "dash", {"q": 1}, type="hero", body="new-hero"),
+        _comp("agentA", "dash", {"q": 1}, type="metric", body="new-metric"),
+    ])
+    assert [op["component_id"] for op in rerun] == [op["component_id"] for op in first], \
+        "ordinal identities are deterministic — re-runs morph in place"
+    assert all(op["created"] is False for op in rerun)
+    rows = ws.live_rows(chat_id, user_id)
+    assert len(rows) == 2
+    assert sorted(r["component_data"]["body"] for r in rows) == ["new-hero", "new-metric"]
+
+
+# ----------------------------------------------------------------------
 # FR-037: stale force_component_id target degrades to a graceful append
 # ----------------------------------------------------------------------
 

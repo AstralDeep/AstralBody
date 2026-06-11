@@ -320,6 +320,11 @@ class Orchestrator:
         self._ws_timeline_mode: Dict[int, bool] = {}
         self._workspace_locks: Dict[str, asyncio.Lock] = {}
 
+        # Sockets currently showing the server-driven welcome canvas (example
+        # queries pushed after register_ui). The first chat message blanks the
+        # canvas so flat ui_upsert appends never land under the examples.
+        self._ws_welcome: Dict[int, bool] = {}
+
         # Feature 014 — per-active-turn step recorders, keyed by id(websocket).
         # Created at the start of handle_chat_message and torn down at the end
         # of _serialized_chat. The cancel_task handler reads this map to invoke
@@ -1021,6 +1026,18 @@ class Orchestrator:
 
                     # Notify UI of success (optional, or just send dashboard)
                     await self.send_dashboard(websocket)
+
+                    # Initial canvas: server-driven welcome examples when this
+                    # socket has no chat to resume — ordinary astralprims
+                    # components over the normal ui_render path (Constitution
+                    # II: ROTE adapts them per device; nothing client-specific).
+                    try:
+                        if not self._ws_active_chat.get(id(websocket)):
+                            from orchestrator.welcome import welcome_components
+                            await self.send_ui_render(websocket, welcome_components())
+                            self._ws_welcome[id(websocket)] = True
+                    except Exception as _e:  # non-fatal — an empty canvas is fine
+                        logger.debug(f"welcome canvas render failed (non-fatal): {_e}")
                 else:
                     logger.warning("UI registration failed: Invalid or missing token")
                     # Feature 016 (FR-015): When the client said it was
@@ -1164,6 +1181,13 @@ class Orchestrator:
                     user_message = msg.payload.get("message", "")
                     chat_id = msg.session_id or msg.payload.get("chat_id")
                     draft_agent_id = msg.payload.get("draft_agent_id")
+                    # Leaving the welcome canvas: blank it so flat ui_upsert
+                    # appends start from an empty canvas on every target.
+                    if self._ws_welcome.pop(id(websocket), None):
+                        try:
+                            await self.send_ui_render(websocket, [])
+                        except Exception:
+                            pass
                     # Feature 013 / FR-018, FR-024: in-chat tool picker
                     # selection narrows the orchestrator's tool list. None
                     # / absent ≡ no narrowing (existing default behavior).
@@ -1368,6 +1392,9 @@ class Orchestrator:
                             except Exception as e:
                                 logger.warning(f"pause_chat failed: {e}")
                         self._ws_active_chat[ws_id] = chat_id
+                        # Loading a chat replaces the canvas — the welcome
+                        # blank-on-first-message must not fire afterwards.
+                        self._ws_welcome.pop(ws_id, None)
                         # Feature 028 (FR-031/FR-032): switching chats ends any
                         # historical timeline view — the new chat opens live,
                         # and the client is told so its banner/mode clears.
@@ -5881,6 +5908,7 @@ COMPONENT UPDATE RULES:
                     logger.warning(f"stream_manager.detach failed: {e}")
             self._ws_active_chat.pop(id(websocket), None)
             self._ws_timeline_mode.pop(id(websocket), None)
+            self._ws_welcome.pop(id(websocket), None)
             if websocket in self.ui_clients:
                 self.ui_clients.remove(websocket)
             if websocket in self.ui_sessions:
@@ -5913,6 +5941,7 @@ COMPONENT UPDATE RULES:
                     logger.warning(f"stream_manager.detach failed: {e}")
             self._ws_active_chat.pop(id(websocket), None)
             self._ws_timeline_mode.pop(id(websocket), None)
+            self._ws_welcome.pop(id(websocket), None)
             if websocket in self.ui_clients:
                 self.ui_clients.remove(websocket)
             if websocket in self.ui_sessions:
