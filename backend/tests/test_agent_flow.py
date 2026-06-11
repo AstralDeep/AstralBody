@@ -1,148 +1,113 @@
+"""Live-system WS smoke test (integration).
+
+Connects to the orchestrator's real UI WebSocket endpoint (``/ws``) the same
+way the web client does — register_ui with the dev-mode mock token — and
+asserts the registration handshake completes (``system_config`` received).
+
+Historic note: this file used to target ``ws://localhost:8000`` with no path
+and swallowed every exception, so it "passed" while logging
+``server rejected WebSocket connection: HTTP 403`` (Starlette's standard
+rejection for a WS upgrade on an unmatched route) to verification_log.txt.
+It now fails loudly when the system is unreachable or refuses registration.
+
+Run directly (``python tests/test_agent_flow.py``) for the long LLM-driven
+multi-agent flow with console narration.
+"""
+
 import asyncio
 import json
 import os
 import sys
-import pytest
 
+import pytest
 import websockets
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Define the complex query
-QUERY = "search all the patients, graph their age, then do an arxiv search about the main disease in this patient population, then give me the system stats (cpu, memory, storage, all of it)"
-URI = f"ws://localhost:{os.getenv('ORCHESTRATOR_PORT', '8000')}"
+QUERY = (
+    "search all the patients, graph their age, then do an arxiv search about "
+    "the main disease in this patient population, then give me the system "
+    "stats (cpu, memory, storage, all of it)"
+)
+URI = f"ws://localhost:{os.getenv('ORCHESTRATOR_PORT', '8001')}/ws"
+# Mock-auth literal accepted when USE_MOCK_AUTH=true + ASTRAL_ENV=development.
+DEV_TOKEN = os.getenv("TEST_UI_TOKEN", "dev-token")
 
-# Helper to print to both stdout and file
-log_file = open("verification_log.txt", "w", encoding="utf-8")
+REGISTER_MSG = {
+    "type": "register_ui",
+    "token": DEV_TOKEN,
+    "capabilities": ["text", "images"],
+    "session_id": "test_agent_flow",
+}
 
-def log(msg):
-    print(msg)
-    log_file.write(msg + "\n")
-    log_file.flush()
+
+async def _register(websocket) -> None:
+    """Send register_ui and wait for system_config (raises on auth refusal)."""
+    await websocket.send(json.dumps(REGISTER_MSG))
+    while True:
+        resp = json.loads(await asyncio.wait_for(websocket.recv(), timeout=30))
+        msg_type = resp.get("type")
+        if msg_type == "system_config":
+            return
+        if msg_type == "auth_required":
+            raise AssertionError(
+                "register_ui was refused (auth_required) — is the stack "
+                "running with USE_MOCK_AUTH=true and ASTRAL_ENV=development?"
+            )
+        if msg_type == "error":
+            raise AssertionError(f"register_ui error: {resp.get('message')}")
+
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_flow():
-    log(f"Connecting to {URI}...")
+async def test_ws_register_handshake():
+    """The UI WS endpoint accepts a dev-token registration end to end."""
     try:
         async with websockets.connect(URI) as websocket:
-            log("Connected.")
-            
-            # 1. Register/Handshake (Simulate UI)
-            # Orchestrator expects a RegisterUI message or just handles messages.
-            # looking at orchestrator.py, it handles UIEvent immediately.
-            # But let's send a register just in case, or just start chatting.
-            # Orchestrator handles `RegisterUI`.
-            
-            register_msg = {
-                "type": "register_ui",
-                "capabilities": ["text", "images"],
-                "session_id": "test_script_1"
-            }
-            await websocket.send(json.dumps(register_msg))
-            log("Sent RegisterUI.")
+            await _register(websocket)
+    except (OSError, websockets.exceptions.WebSocketException) as exc:
+        pytest.fail(f"Could not complete WS registration at {URI}: {exc}")
 
-            # Wait for system config/dashboard
-            while True:
-                resp_raw = await websocket.recv()
-                try:
-                    resp = json.loads(resp_raw)
-                except json.JSONDecodeError:
-                    log(f"Received non-JSON: {resp_raw}")
-                    continue
-                log(f"Received: {resp.get('type')}")
-                if resp.get("type") == "system_config":
-                    log("System ready.")
-                    break
 
-            # 2. Send Chat Message
-            chat_msg = {
-                "type": "ui_event",
-                "action": "chat_message",
-                "payload": {
-                    "message": QUERY
-                }
-            }
-            log(f"Sending Query: {QUERY}")
-            await websocket.send(json.dumps(chat_msg))
+async def run_full_flow() -> None:
+    """Manual long-form flow: drive a real multi-agent LLM query."""
+    print(f"Connecting to {URI}...")
+    async with websockets.connect(URI) as websocket:
+        await _register(websocket)
+        print("System ready.")
 
-            # 3. Listen for responses
-            # We expect:
-            # - chat_status (thinking)
-            # - chat_status (executing)
-            # - ui_render (with tool outputs) multiple times?
-            # - ui_render (final analysis)
-            
-            log("Listening for responses (Ctrl+C to stop)...")
-            start_time = asyncio.get_event_loop().time()
-            
-            while True:
-                if asyncio.get_event_loop().time() - start_time > 120:
-                    log("Timeout waiting for full flow.")
-                    break
-                    
-                resp_raw = await websocket.recv()
-                try:
-                    resp = json.loads(resp_raw)
-                except json.JSONDecodeError:
-                    log(f"Received non-JSON: {resp_raw}")
-                    continue
+        await websocket.send(json.dumps({
+            "type": "ui_event",
+            "action": "chat_message",
+            "payload": {"message": QUERY},
+        }))
+        print(f"Sent query: {QUERY}")
 
-                msg_type = resp.get("type")
-                
-                if msg_type == "chat_status":
-                    status = resp.get("status")
-                    message = resp.get("message")
-                    log(f"STATUS: {status} - {message}")
-                    
-                elif msg_type == "ui_render":
-                    components = resp.get("components", [])
-                    log(f"RENDER: {len(components)} components")
-                    for c in components:
-                        title = c.get("title", "No Title")
-                        c_type = c.get("type", "unknown")
-                        log(f"  - [{c_type}] {title}")
-                        
-                        # Detailed check for specific expected components
-                        if c_type == "card" and "Patient Search Results" in title:
-                            log("    -> FOUND: Patient Search Results")
-                        if c_type == "card" and "Patient Ages" in title:
-                            log("    -> FOUND: Graph/Chart")
-                        if c_type == "card" and "Wikipedia" in title:
-                            log("    -> FOUND: Wikipedia Results")
-                        
-                        # New UI check
-                        if c_type == "card" and "ArXiv Research" in title:
-                             log("    -> FOUND: Arxiv Research Card (New UI)")
-                             # Check for metrics
-                             content_str = str(c)
-                             if "MetricCard" in content_str and "Total Papers" in content_str:
-                                 log("    -> FOUND: Arxiv Metrics (Total Papers)")
+        start_time = asyncio.get_event_loop().time()
+        while asyncio.get_event_loop().time() - start_time < 240:
+            resp = json.loads(await websocket.recv())
+            msg_type = resp.get("type")
+            if msg_type == "chat_status":
+                print(f"STATUS: {resp.get('status')} - {resp.get('message')}")
+            elif msg_type in ("ui_render", "ui_upsert"):
+                components = resp.get("components", [])
+                ops = resp.get("ops", [])
+                print(f"{msg_type.upper()}: {len(components) or len(ops)} item(s)")
+                for c in components:
+                    print(f"  - [{c.get('type', 'unknown')}] {c.get('title', 'No Title')}")
+                    if c.get("title") == "Analysis":
+                        print("--- FINAL ANALYSIS RECEIVED ---")
+                        return
+            elif msg_type == "error":
+                print(f"ERROR: {resp.get('message')}")
+        print("Timeout waiting for full flow.")
 
-                        if "System Status" in title:
-                            log("    -> FOUND: System Status")
-
-                        if title == "Analysis":
-                            log("\n--- FINAL ANALYSIS RECEIVED ---")
-                            content = c.get("content", [])
-                            for item in content:
-                                if item.get("type") == "text":
-                                    log(f"Analysis Content: {item.get('content')[:500]}...")
-                            return
-
-                elif msg_type == "error":
-                    log(f"ERROR: {resp.get('message')}")
-
-    except Exception as e:
-        log(f"Connection error: {e}")
-    finally:
-        log_file.close()
 
 if __name__ == "__main__":
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     try:
-        if sys.platform == 'win32':
-             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-        asyncio.run(test_flow())
+        asyncio.run(run_full_flow())
     except KeyboardInterrupt:
         print("Stopped.")

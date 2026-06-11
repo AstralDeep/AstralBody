@@ -23,6 +23,9 @@ Resolution order for a top-level component entering the workspace:
    existing system-prompt contract ("re-call the SAME tool with corrected
    parameters — do NOT create duplicates") made real. With zero or multiple
    candidates the component appends as new (ambiguity ⇒ safest behavior).
+   Applies ONLY to fingerprint-derived identities: a component carrying an
+   explicit author/echoed id never supersedes a different identity — a new
+   explicit id appends (FR-019 "a new identity MUST append").
 
 Deterministic component actions bypass all of this: they target an explicit
 ``component_id`` and the result inherits it (contracts/component-action.md).
@@ -174,9 +177,13 @@ class WorkspaceManager:
                 cid = force_component_id
                 comp["component_id"] = cid
             else:
+                explicit_identity = bool(comp.get("component_id") or comp.get("id"))
                 cid = self.resolve_identity(comp)
-                if cid not in by_cid:
-                    # Single-source supersede (docstring rule 3).
+                if cid not in by_cid and not explicit_identity:
+                    # Single-source supersede (docstring rule 3) — only for
+                    # fingerprint-derived identities. An author-declared id is
+                    # authoritative (FR-019): a NEW explicit identity appends,
+                    # never steals an existing component's place.
                     key = (comp.get("_source_agent", ""), comp.get("_source_tool", ""))
                     candidates = by_source.get(key, [])
                     if (key != ("", "") and len(candidates) == 1

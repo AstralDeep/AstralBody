@@ -67,6 +67,9 @@ class WebSessionStore:
             db = Database()
         self.db = db
         self._cache: Dict[str, Dict[str, Any]] = {}
+        # sid -> why get() last returned None for it ('hard_cap'), so the
+        # /auth/session contract can report reason:'hard_cap' (auth-session.md).
+        self._death_reasons: Dict[str, str] = {}
         self._fernet = None
         key = _enc_key()
         if key:
@@ -155,8 +158,18 @@ class WebSessionStore:
             # 016 hard cap: only interactive login can start a new session.
             logger.info("session_store: session %s hit the 365-day cap — cleared", sid[:8])
             self.delete(sid)
+            self._record_death(sid, "hard_cap")
             return None
         return row
+
+    def _record_death(self, sid: str, reason: str) -> None:
+        if len(self._death_reasons) > 256:
+            self._death_reasons.clear()
+        self._death_reasons[sid] = reason
+
+    def pop_death_reason(self, sid: str) -> Optional[str]:
+        """Why get() last refused this sid ('hard_cap'), consumed on read."""
+        return self._death_reasons.pop(sid, None)
 
     def update_tokens(self, sid: str, *, access_token: str, refresh_token: str) -> None:
         """Rotate tokens after a silent refresh. NEVER moves the anchor (016 FR-001)."""

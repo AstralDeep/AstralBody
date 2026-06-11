@@ -38,7 +38,7 @@ AUTH_HEADER = {"Authorization": f"Bearer {MOCK_JWT_TOKEN}"}
 
 def _create_test_app():
     """Create a minimal FastAPI app for testing with a mock orchestrator."""
-    from unittest.mock import MagicMock
+    from unittest.mock import AsyncMock, MagicMock
     from orchestrator.history import HistoryManager
     import tempfile
 
@@ -62,6 +62,14 @@ def _create_test_app():
     mock_orch.agent_capabilities = {}
     mock_orch.ui_clients = []
     mock_orch.ui_sessions = {}
+    # Feature 028: the REST component verbs write through the workspace and
+    # await fan-out helpers. An empty upsert result drops the handlers onto
+    # the legacy history path these tests pin; the real workspace-backed REST
+    # behavior is covered by tests/test_rest_legacy_workspace.py.
+    mock_orch.workspace = MagicMock()
+    mock_orch.workspace.upsert.return_value = []
+    mock_orch.send_ui_upsert = AsyncMock()
+    mock_orch._reconcile_legacy_replacement = AsyncMock()
 
     app.state.orchestrator = mock_orch
 

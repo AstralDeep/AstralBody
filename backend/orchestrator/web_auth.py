@@ -53,6 +53,9 @@ web_auth_router = APIRouter()
 _SESSIONS: Dict[str, Dict[str, Any]] = {}
 # Pending logins: state -> {code_verifier, created_at, next}
 _PENDING: Dict[str, Dict[str, Any]] = {}
+# sid -> why the session died ('hard_cap'), so /auth/session can report the
+# contracted reason (auth-session.md) instead of a generic refresh_failed.
+_DEATH_REASONS: Dict[str, str] = {}
 
 HARD_MAX_SECONDS = int(os.getenv("OFFLINE_GRANT_MAX_DAYS", "365")) * 24 * 60 * 60
 COOKIE_NAME = "astral_session"
@@ -73,7 +76,11 @@ def _is_mock() -> bool:
 
 
 def _secret() -> bytes:
-    return (os.getenv("WEB_SESSION_SECRET") or os.getenv("OFFLINE_GRANT_ENC_KEY") or _PROCESS_SECRET).encode()
+    """Cookie-signing key. Must be identical across workers/restarts (FR-008):
+    falls back through every documented session key before the per-process
+    random secret (which only suits single-process dev)."""
+    return (os.getenv("WEB_SESSION_SECRET") or os.getenv("WEB_SESSION_ENC_KEY")
+            or os.getenv("OFFLINE_GRANT_ENC_KEY") or _PROCESS_SECRET).encode()
 
 
 def _sign(sid: str) -> str:
@@ -110,9 +117,11 @@ def _get_store():
 
 def reset_store_for_tests() -> None:
     """Test helper: drop the cached store so monkeypatched envs re-init."""
-    global _STORE, _STORE_FAILED
+    global _STORE, _STORE_FAILED, _IDP_OK_UNTIL
     _STORE = None
     _STORE_FAILED = False
+    _IDP_OK_UNTIL = 0.0
+    _DEATH_REASONS.clear()
 
 
 def _keycloak_config():
@@ -158,6 +167,12 @@ def _token_expires_at(token: str) -> Optional[int]:
 # Session lookup (cache → durable store) + silent refresh
 # ---------------------------------------------------------------------------
 
+def _record_death(sid: str, reason: str) -> None:
+    if len(_DEATH_REASONS) > 256:
+        _DEATH_REASONS.clear()
+    _DEATH_REASONS[sid] = reason
+
+
 def _session_by_sid(sid: str) -> Optional[Dict[str, Any]]:
     sess = _SESSIONS.get(sid)
     if sess is not None:
@@ -167,6 +182,7 @@ def _session_by_sid(sid: str) -> Optional[Dict[str, Any]]:
             if store is not None:
                 store.delete(sid)
             logger.info("web_auth: session %s exceeded 365-day cap — cleared", sid[:8])
+            _record_death(sid, "hard_cap")
             return None
         return sess
     store = _get_store()
@@ -174,6 +190,13 @@ def _session_by_sid(sid: str) -> Optional[Dict[str, Any]]:
         return None
     row = store.get(sid)  # enforces the hard cap itself
     if row is None:
+        reason = None
+        try:
+            reason = store.pop_death_reason(sid)
+        except AttributeError:
+            pass
+        if reason:
+            _record_death(sid, reason)
         return None
     sess = {
         "sid": sid,
@@ -311,6 +334,29 @@ def session_token(request: Request) -> str:
     return (sess or {}).get("access_token", "") or ""
 
 
+def session_resumed_flag(request: Request) -> bool:
+    """Is this page load a silent resume of an existing session?
+
+    False only for the load immediately following interactive sign-in
+    (one-shot — consuming it flips the session to resumed). The shell injects
+    this for the client to echo into register_ui's ``resumed`` field, so
+    ``auth.session_resumed`` keeps its 016 meaning instead of the client
+    guessing from per-page-load connection state (FR-011)."""
+    sess = get_session(request)
+    if sess is None:
+        return True
+    resumed = bool(sess.get("resumed", True))
+    if not resumed:
+        sess["resumed"] = True
+        store = _get_store()
+        if store is not None and sess.get("sid"):
+            try:
+                store.mark_resumed(sess["sid"])
+            except Exception:
+                logger.debug("web_auth: mark_resumed failed", exc_info=True)
+    return resumed
+
+
 def session_roles(request: Request) -> list:
     """Feature 027 — roles for shell-render UX gating (settings menu groups).
 
@@ -323,7 +369,11 @@ def session_roles(request: Request) -> list:
     if _is_mock():
         return ["admin", "user"]
     sess = get_session(request)
-    token = (sess or {}).get("access_token", "") or ""
+    return _roles_from_token((sess or {}).get("access_token", "") or "")
+
+
+def _roles_from_token(token: str) -> list:
+    """Realm + client roles from a JWT's claims (non-validating decode)."""
     payload = _jwt_payload(token)
     if not payload:
         return []
@@ -348,6 +398,27 @@ def _redirect_uri(request: Request) -> str:
 # Routes
 # ---------------------------------------------------------------------------
 
+# Positive IdP reachability result cached briefly so the happy path stays a
+# single redirect (FR-004: an unreachable IdP must yield the bounded error
+# page with a retry link, never a raw browser connection error).
+_IDP_OK_UNTIL = 0.0
+
+
+async def _idp_reachable(authority: str) -> bool:
+    global _IDP_OK_UNTIL
+    if time.time() < _IDP_OK_UNTIL:
+        return True
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            resp = await client.get(f"{authority}/.well-known/openid-configuration")
+        if resp.status_code < 500:
+            _IDP_OK_UNTIL = time.time() + 60
+            return True
+    except Exception:
+        logger.warning("web_auth: identity provider unreachable at %s", authority)
+    return False
+
+
 @web_auth_router.get("/auth/login")
 async def auth_login(request: Request):
     """Begin the OIDC Authorization-Code flow (PKCE)."""
@@ -358,6 +429,9 @@ async def auth_login(request: Request):
     authority, client_id, _secret_unused = _keycloak_config()
     if not authority:
         return _error_page(nxt, "OIDC is not configured on this server.", status=500)
+    if not await _idp_reachable(authority):
+        return _error_page(nxt, "The identity provider is unreachable right now. "
+                                "Please try again in a moment.", status=503)
     verifier, challenge = _pkce_pair()
     state = secrets.token_urlsafe(24)
     _PENDING[state] = {"code_verifier": verifier, "created_at": time.time(), "next": nxt}
@@ -378,9 +452,18 @@ async def auth_callback(request: Request):
     code = request.query_params.get("code")
     state = request.query_params.get("state")
     pending = _PENDING.pop(state, None) if state else None
+    # Recover the destination BEFORE any error exit — FR-003: a deep link is
+    # never silently dropped, even on a denied/failed callback.
+    nxt = _validate_next((pending or {}).get("next", "/"))
+    idp_error = request.query_params.get("error")
+    if idp_error:
+        # OIDC error response (e.g. access_denied when the user cancels at the
+        # IdP) — bounded recoverable page, retry preserves the destination.
+        desc = request.query_params.get("error_description") or idp_error
+        logger.info("web_auth: IdP returned error at callback: %s", idp_error)
+        return _error_page(nxt, f"Sign-in was not completed ({desc[:160]}). Please try again.")
     if not code or not pending:
-        return _error_page("/", "Sign-in could not be completed (invalid callback). Please try again.")
-    nxt = _validate_next(pending.get("next", "/"))
+        return _error_page(nxt, "Sign-in could not be completed (invalid callback). Please try again.")
     authority, client_id, client_secret = _keycloak_config()
     data = {
         "grant_type": "authorization_code", "code": code,
@@ -410,6 +493,17 @@ async def auth_callback(request: Request):
                             description="Prior session revoked by user switch on shared browser",
                             outcome="success")
 
+    # FR-005: entry requires a Keycloak-issued 'user' or 'admin' role. An
+    # authenticated account with neither gets an explicit no-access outcome —
+    # no session is established and the refresh credential is revoked.
+    roles = _roles_from_token(tok.get("access_token", ""))
+    if "user" not in roles and "admin" not in roles:
+        await _revoke_or_queue(sub, tok.get("refresh_token", ""))
+        await _audit("login_interactive", sub,
+                     "Sign-in refused: account has neither the 'user' nor 'admin' role",
+                     outcome="failure")
+        return _no_access_page()
+
     await _audit("login_interactive", sub, "Interactive login completed; new session established")
     return _establish_session(
         request,
@@ -427,13 +521,26 @@ async def auth_session(request: Request):
         return JSONResponse({"authenticated": True, "access_token": "dev-token", "resumed": True})
     sess = await ensure_session(request)
     if not sess:
-        had_cookie = bool(request.cookies.get(COOKIE_NAME))
-        reason = "refresh_failed" if had_cookie else "no_session"
+        raw = request.cookies.get(COOKIE_NAME, "")
+        sid = _unsign(raw) or ""
+        reason = _DEATH_REASONS.pop(sid, None) or ("refresh_failed" if raw else "no_session")
         return JSONResponse({"authenticated": False, "access_token": "", "resumed": False, "reason": reason})
+    resumed = bool(sess.get("resumed", True))
+    if not resumed:
+        # One-shot: only the fetch immediately following interactive login
+        # reports resumed=false; every later page load is a silent resume
+        # (016 audit semantics — the client echoes this in register_ui).
+        sess["resumed"] = True
+        store = _get_store()
+        if store is not None and sess.get("sid"):
+            try:
+                store.mark_resumed(sess["sid"])
+            except Exception:
+                logger.debug("web_auth: mark_resumed failed", exc_info=True)
     return JSONResponse({
         "authenticated": True,
         "access_token": sess.get("access_token", ""),
-        "resumed": bool(sess.get("resumed", True)),
+        "resumed": resumed,
         "user_id": sess.get("sub", ""),
     })
 
@@ -486,6 +593,22 @@ async def auth_error(request: Request):
     nxt = _validate_next(request.query_params.get("next", "/"))
     reason = (request.query_params.get("reason") or "Sign-in failed.")[:300]
     return _error_page(nxt, reason)
+
+
+def _no_access_page() -> HTMLResponse:
+    """FR-005: explicit, bounded no-access outcome for a signed-in account
+    holding neither the 'user' nor the 'admin' role. Ungated, no loop."""
+    body = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>AstralBody — no access</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body style="margin:0;display:grid;place-items:center;min-height:100vh;background:#0F1221;color:#F3F4F6;font-family:system-ui,sans-serif">
+<div style="max-width:440px;padding:2rem;border:1px solid rgba(255,255,255,.1);border-radius:12px;background:#1A1E2E;text-align:center">
+<h1 style="font-size:1.1rem;margin:0 0 .75rem">No access</h1>
+<p style="font-size:.9rem;color:#9CA3AF;margin:0 0 1.25rem">Your account signed in successfully but does not have access to this
+application. Ask an administrator to grant your account the <b>user</b> role, then sign in again.</p>
+<a href="/auth/login?next=%2F" style="display:inline-block;padding:.6rem 1.2rem;border-radius:8px;background:#6366F1;color:#fff;text-decoration:none;font-size:.9rem">Sign in again</a>
+</div></body></html>"""
+    return HTMLResponse(body, status_code=403)
 
 
 def _error_page(nxt: str, reason: str, status: int = 200) -> HTMLResponse:

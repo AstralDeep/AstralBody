@@ -301,7 +301,9 @@ def test_auth_callback_user_switch_revokes_prior_session(db, store, monkeypatch,
     web_auth._PENDING[state] = {"code_verifier": "v" * 43, "created_at": time.time(), "next": "/"}
 
     token_response = {
-        "access_token": _fake_jwt({"sub": user_b, "exp": int(time.time()) + 300}),
+        # carries the 'user' role: entry is role-gated since FR-005
+        "access_token": _fake_jwt({"sub": user_b, "exp": int(time.time()) + 300,
+                                   "realm_access": {"roles": ["user"]}}),
         "refresh_token": f"rtB-{uuid.uuid4()}",
     }
 

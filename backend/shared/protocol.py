@@ -252,6 +252,10 @@ class AgentCard:
 class RegisterAgent(Message):
     type: str = "register_agent"
     agent_card: Optional[AgentCard] = None
+    # 028 FR-016 (additive): shared-secret presented at registration; the
+    # orchestrator refuses keyless registrations outside dev mode when
+    # AGENT_API_KEY is configured/required (fail closed).
+    api_key: Optional[str] = None
 
     def to_json(self) -> str:
         data = asdict(self)

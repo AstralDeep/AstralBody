@@ -35,12 +35,14 @@ Each message object MAY now carry `html`: server-rendered transcript representat
 ## Re-hydration sequence (on `load_chat`)
 
 1. `chat_loaded {chat}` (messages incl. `html` fields)
-2. stream resume messages (existing)
-3. `ui_render {target:'canvas', components, html}` — full live workspace for this socket (FR-027). Empty workspace ⇒ no message (canvas stays clear).
+2. `ui_render {target:'canvas', components, html}` — full live workspace for this socket (FR-027). Empty workspace ⇒ no message (canvas stays clear).
+3. stream resume messages (existing)
+
+(Workspace render precedes stream resume so resumed streams merge into already-present components.) Entering a chat from a historical timeline view also emits `workspace_timeline_mode {active:false}` first — `load_chat` always lands live.
 
 ## Timeline (chrome-driven; messages reused)
 
-- Entry: topbar/chrome → `ui_event {action:'chrome_workspace_timeline', payload:{chat_id, page?}}` → `chrome_render {region:'modal', html}` (snapshot list, paginated 50/turn-page).
+- Entry: topbar/chrome → `ui_event {action:'chrome_open', payload:{surface:'workspace_timeline', params:{chat_id, page?}}}` (the 027 generic chrome-surface opener) → `chrome_render {region:'modal', html}` (snapshot list, paginated 50/turn-page).
 - Select: `ui_event {action:'chrome_workspace_timeline_view', payload:{chat_id, snapshot_id}}` → server audits `workspace.timeline_viewed` → `ui_render {target:'canvas', …historical components…}` + `chrome_render` banner ("Viewing turn N — read-only · Back to live"). Client sets `timelineMode=true` (canvas actions inert; live upserts deferred with indicator).
 - Back to live: `ui_event {action:'chrome_workspace_timeline_live', payload:{chat_id}}` → full live `ui_render` + banner cleared; `timelineMode=false`.
 - Server-side defense: while a socket is in timeline mode, `component_action` from it is refused (`workspace.action_denied`, reason `timeline_readonly`).

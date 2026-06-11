@@ -20,6 +20,10 @@
   var ws = null, attempts = 0, activeChatId = null, streamSeq = {}, firstConnect = true;
   var timelineMode = false; // Feature 028 — read-only workspace history view
   var authRetried = false;  // one silent auth_required recovery per connection
+  // Feature 028 (FR-011): the server says whether this page load resumes an
+  // existing session (false only right after interactive sign-in). Echoed
+  // into the first register_ui; reconnects within a page are always resumes.
+  var serverResumed = (window.__ASTRAL_RESUMED__ !== false);
 
   /** Redirect to the server-side Keycloak login, preserving the destination. */
   function gotoLogin() {
@@ -231,6 +235,13 @@
       case "workspace_timeline_mode": // Feature 028 — read-only history view
         timelineMode = !!data.active;
         setStatus(timelineMode ? "Viewing workspace history (read-only)" : "");
+        break;
+      case "chat_deleted": // Feature 028 — chat removed (possibly from another tab)
+        if (data.chat_id && data.chat_id === activeChatId) {
+          activeChatId = null; timelineMode = false;
+          setHTML(canvas, "");
+          setStatus("This chat was deleted.");
+        }
         break;
       case "auth_required": // Feature 028 — recoverable WS auth failure (D4)
         if (!authRetried) {
@@ -621,7 +632,8 @@
     ws.onopen = function () {
       attempts = 0; authRetried = false; setStatus("");
       send({ type: "register_ui", token: token, capabilities: ["render", "stream"],
-             session_id: "ui-" + Date.now(), device: detectDeviceCapabilities(), resumed: !firstConnect });
+             session_id: "ui-" + Date.now(), device: detectDeviceCapabilities(),
+             resumed: firstConnect ? serverResumed : true });
       firstConnect = false;
       action("get_history", {});
       var qp = new URLSearchParams(location.search).get("chat");

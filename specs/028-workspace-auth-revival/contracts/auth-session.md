@@ -29,8 +29,9 @@
 
 ### `auth_required` (server→client, NEW, additive)
 ```json
-{ "type": "auth_required", "reason": "expired|invalid|hard_cap" }
+{ "type": "auth_required", "reason": "expired|invalid" }
 ```
+(The hard-cap condition surfaces as `reason:'hard_cap'` on the follow-up `GET /auth/session`, which the client always performs — the WS layer cannot distinguish a capped session from any other dead token.)
 Client behavior: `fetch('/auth/session')` → if `authenticated`, retry `register_ui` with the fresh token; else `location = '/auth/login?next='+encodeURIComponent(location.pathname+location.search)`.
 Client also re-fetches `/auth/session` before every reconnect (never reuses a stale boot token) and the `'dev-token'` literal fallback is removed.
 
