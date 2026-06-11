@@ -96,7 +96,6 @@ class MCPAgentExecutor(AgentExecutor):
 
     async def _execute_tool_call(self, mcp_request, updater: TaskUpdater, context: RequestContext):
         """Dispatch an MCP tool call and publish results."""
-        from shared.protocol import MCPRequest
 
         tool_name = mcp_request.params.get("name", "unknown")
         logger.info(f"A2A dispatching tool call: {tool_name}")

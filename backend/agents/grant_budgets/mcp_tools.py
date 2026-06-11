@@ -19,18 +19,18 @@ from typing import Dict, Any, List, Optional
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from astralprims import (
-    Text, Card, Table, Alert, MetricCard, Grid, Grids,
-    BarChart, PieChart, List_, Tabs, TabItem,
+    Text, Card, Table, Alert, MetricCard, Grids,
+    PieChart, List_, Tabs, TabItem,
     create_ui_response,
 )
 from agents.grant_budgets.budget_knowledge import (
     CGS_BUDGET_CATEGORIES, NSF_PAPPG_RULES, NIH_BUDGET_RULES,
-    DEFAULT_RATES, SALARY_BANDS, COMMON_BUDGET_ITEMS,
+    DEFAULT_RATES, COMMON_BUDGET_ITEMS,
     BUDGET_SIGNAL_KEYWORDS, FA_EXCLUSION_RULES,
 )
 from agents.grant_budgets.uky_research_admin import (
-    OFFICES, FORMS_AND_TEMPLATES, POLICIES, INSTITUTIONAL_INFO,
-    PROJECT_LIFECYCLE, QUESTION_ROUTING, DEADLINE_RULES, SEARCH_INDEX,
+    OFFICES, FORMS_AND_TEMPLATES, INSTITUTIONAL_INFO,
+    QUESTION_ROUTING, DEADLINE_RULES, SEARCH_INDEX,
 )
 
 logger = logging.getLogger("GrantBudgetTools")
@@ -791,11 +791,9 @@ def calculate_fa_costs(
     breakdown_rows = []
 
     for cat, amount in direct_costs.items():
-        included = True
         exclusion_note = ""
 
         if cat in excluded_categories:
-            included = False
             exclusion_note = "Excluded from MTDC"
             excluded_total += amount
         elif cat == "subawards":
@@ -1427,7 +1425,7 @@ def search_research_admin(
                 Text(content=f"Contact: {entry['email']}", variant="caption")
             )
         office_label = entry.get("office", "")
-        cat_label = entry.get("category", "").title()
+        entry.get("category", "").title()
 
         result_cards.append(
             Card(
@@ -1917,7 +1915,7 @@ def lookup_forms_templates(
 
     rows = []
     for form in filtered:
-        url_text = form.get("url", "Contact office")
+        form.get("url", "Contact office")
         deadline = form.get("deadline_rule", "—")
         rows.append([
             form["name"],

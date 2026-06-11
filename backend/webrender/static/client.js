@@ -11,9 +11,42 @@
   var WS_URL = (location.protocol === "https:" ? "wss:" : "ws:") + "//" + location.host + "/ws";
   var API_URL = location.origin;
   var TOKEN_KEY = "astralbody.token";
-  var token = sessionStorage.getItem(TOKEN_KEY) || window.__ASTRAL_TOKEN__ || "dev-token";
+  // Feature 028: the shell-injected token bootstraps the first connect; every
+  // reconnect re-fetches /auth/session (which silently refreshes server-side)
+  // instead of reusing a stale token. The 'dev-token' literal fallback is
+  // gone — mock-auth dev still works because /auth/session answers for it.
+  var token = sessionStorage.getItem(TOKEN_KEY) || window.__ASTRAL_TOKEN__ || "";
 
   var ws = null, attempts = 0, activeChatId = null, streamSeq = {}, firstConnect = true;
+  var timelineMode = false; // Feature 028 — read-only workspace history view
+  var authRetried = false;  // one silent auth_required recovery per connection
+  // Feature 028 (FR-011): the server says whether this page load resumes an
+  // existing session (false only right after interactive sign-in). Echoed
+  // into the first register_ui; reconnects within a page are always resumes.
+  var serverResumed = (window.__ASTRAL_RESUMED__ !== false);
+
+  /** Redirect to the server-side Keycloak login, preserving the destination. */
+  function gotoLogin() {
+    var next = encodeURIComponent(location.pathname + location.search);
+    location.href = "/auth/login?next=" + next;
+  }
+
+  /** Refresh the session token via /auth/session (server refreshes silently).
+   * Calls cb(true) when authenticated; redirects to login when the session
+   * is truly gone and `redirect` is set. */
+  function refreshToken(redirect, cb) {
+    fetch(API_URL + "/auth/session", { credentials: "same-origin" })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (j && j.authenticated && j.access_token) {
+          token = j.access_token;
+          try { sessionStorage.setItem(TOKEN_KEY, token); } catch (e) {}
+          if (cb) cb(true);
+        } else if (redirect) { gotoLogin(); }
+        else if (cb) cb(false);
+      })
+      .catch(function () { if (cb) cb(false); });
+  }
 
   var canvas = document.getElementById("astral-canvas");
   var chat = document.getElementById("astral-chat");
@@ -133,6 +166,44 @@
     chat.scrollTop = chat.scrollHeight;
   }
 
+  // ---- Feature 028: workspace upsert morph (contracts/ws-workspace-protocol.md) ----
+  // Each op targets [data-component-id]: replace the node in place when it
+  // exists (no flicker, neighbors untouched), append when new, remove on op
+  // 'remove'. Side effects (Plotly/theme) re-run on inserted subtrees only.
+  function applyUpsert(msg) {
+    if (msg.chat_id && activeChatId && msg.chat_id !== activeChatId) return;
+    if (timelineMode) {
+      setStatus("Live workspace updated — use “Back to live” to see it.");
+      return;
+    }
+    var ops = msg.ops || [];
+    var renderer = canvas.querySelector(".dynamic-renderer");
+    if (!renderer) {
+      renderer = document.createElement("div");
+      renderer.className = "dynamic-renderer space-y-3";
+      canvas.innerHTML = "";
+      canvas.appendChild(renderer);
+    }
+    for (var i = 0; i < ops.length; i++) {
+      var op = ops[i];
+      if (!op || !op.component_id) continue;
+      var sel = '[data-component-id="' + (window.CSS && CSS.escape ? CSS.escape(op.component_id) : op.component_id) + '"]';
+      var node = canvas.querySelector(sel);
+      if (op.op === "remove") {
+        if (node) node.parentNode.removeChild(node);
+        continue;
+      }
+      if (!op.html) continue;
+      var holder = document.createElement("div");
+      holder.innerHTML = op.html;
+      var fresh = holder.firstElementChild;
+      if (!fresh) continue;
+      if (node) node.replaceWith(fresh);
+      else renderer.appendChild(fresh);
+      processSideEffects(fresh);
+    }
+  }
+
   // ---- streaming merge: replace-or-append a per-stream node keyed by stream_id ----
   function mergeStream(msg) {
     var id = "stream-" + msg.stream_id;
@@ -158,8 +229,31 @@
         if (data.target === "chat") appendChatBubble("assistant", data.html);
         else setHTML(canvas, data.html);
         break;
+      case "ui_upsert": applyUpsert(data); break; // Feature 028 — in-place workspace updates
       case "ui_update": setHTML(canvas, data.html); break;
       case "ui_append": appendHTML(canvas, data.html); break;
+      case "workspace_timeline_mode": // Feature 028 — read-only history view
+        timelineMode = !!data.active;
+        setStatus(timelineMode ? "Viewing workspace history (read-only)" : "");
+        break;
+      case "chat_deleted": // Feature 028 — chat removed (possibly from another tab)
+        if (data.chat_id && data.chat_id === activeChatId) {
+          activeChatId = null; timelineMode = false;
+          setHTML(canvas, "");
+          setStatus("This chat was deleted.");
+        }
+        break;
+      case "auth_required": // Feature 028 — recoverable WS auth failure (D4)
+        if (!authRetried) {
+          authRetried = true;
+          refreshToken(true, function (ok) {
+            if (ok && ws && ws.readyState === 1) {
+              send({ type: "register_ui", token: token, capabilities: ["render", "stream"],
+                     session_id: "ui-" + Date.now(), device: detectDeviceCapabilities(), resumed: true });
+            } else if (ok) { try { ws.close(); } catch (e) {} }
+          });
+        } else { gotoLogin(); }
+        break;
       case "ui_stream_data": {
         if (data.session_id && activeChatId && data.session_id !== activeChatId) return;
         var last = streamSeq[data.stream_id]; if (last == null) last = -1;
@@ -182,8 +276,14 @@
       case "chat_created": if (data.payload) { activeChatId = data.payload.chat_id; } break;
       case "chat_loaded":
         activeChatId = data.chat && data.chat.id; chat.innerHTML = ""; canvas.innerHTML = "";
+        timelineMode = false; setStatus("");
+        // Feature 028 (FR-028): component-bearing history messages carry a
+        // server-rendered `html` form — no more empty bubbles. The workspace
+        // itself re-hydrates via the ui_render the server pushes right after.
         if (data.chat && data.chat.messages) data.chat.messages.forEach(function (m) {
-          appendChatBubble(m.role, typeof m.content === "string" ? escapeText(m.content) : "");
+          if (typeof m.content === "string") appendChatBubble(m.role, escapeText(m.content));
+          else if (m.html) appendChatBubble(m.role, m.html);
+          else appendChatBubble(m.role, "");
         });
         break;
       case "user_preferences":
@@ -232,6 +332,15 @@
     if (btn) {
       var act = btn.getAttribute("data-action"); var payload = {};
       try { payload = JSON.parse(btn.getAttribute("data-payload") || "{}"); } catch (_) {}
+      // Feature 028: actions emitted inside a workspace component carry its
+      // identity (FR-034); historical views are inert except chrome actions.
+      var compHost = btn.closest && btn.closest("[data-component-id]");
+      if (compHost && !payload.component_id) payload.component_id = compHost.getAttribute("data-component-id");
+      if (!payload.chat_id && activeChatId) payload.chat_id = activeChatId;
+      if (timelineMode && compHost && act && act.indexOf("chrome_") !== 0) {
+        setStatus("Read-only history view — go back to live to interact.");
+        return;
+      }
       if (act) action(act, payload);
       return;
     }
@@ -280,15 +389,26 @@
     });
     sendChat(msg);
   }
+  // Feature 028 (FR-038): pagination carries the table's component identity
+  // so the server updates ONLY that table in place via the standardized
+  // component_action pipeline (pre-028 it replaced the whole canvas).
+  function paginateComponentId(el) {
+    var host = el && el.closest && el.closest("[data-component-id]");
+    return host ? host.getAttribute("data-component-id") : null;
+  }
   function paginate(el, dir) {
     if (!el) return; var ctx; try { ctx = JSON.parse(el.getAttribute("data-ctx") || "{}"); } catch (e) { return; }
+    if (timelineMode) { setStatus("Read-only history view — go back to live to interact."); return; }
     var size = ctx.page_size, off = Math.max(0, (ctx.page_offset || 0) + dir * size);
     action("table_paginate", { tool_name: ctx.source_tool, agent_id: ctx.source_agent,
+      component_id: paginateComponentId(el), chat_id: activeChatId,
       params: Object.assign({}, ctx.source_params, { limit: size, offset: off }) });
   }
   function paginateSize(el, size) {
     if (!el) return; var ctx; try { ctx = JSON.parse(el.getAttribute("data-ctx") || "{}"); } catch (e) { return; }
+    if (timelineMode) { setStatus("Read-only history view — go back to live to interact."); return; }
     action("table_paginate", { tool_name: ctx.source_tool, agent_id: ctx.source_agent,
+      component_id: paginateComponentId(el), chat_id: activeChatId,
       params: Object.assign({}, ctx.source_params, { limit: size, offset: 0 }) });
   }
 
@@ -408,6 +528,12 @@
     if (el.getAttribute("data-ui-collect") === "true") {
       payload.fields = collectChromeFields(el.closest("[data-ui-form]") || modalRoot);
     }
+    // Feature 028: the timeline surface needs the active chat, which only
+    // the client knows at click time (the static menu is rendered per shell).
+    if (act === "chrome_open" && payload.surface === "workspace_timeline") {
+      payload.params = payload.params || {};
+      if (!payload.params.chat_id && activeChatId) payload.params.chat_id = activeChatId;
+    }
     if (act === "chrome_open") setMenu(false, false);
     action(act, payload);
   });
@@ -504,9 +630,10 @@
   function connect() {
     ws = new WebSocket(WS_URL);
     ws.onopen = function () {
-      attempts = 0; setStatus("");
+      attempts = 0; authRetried = false; setStatus("");
       send({ type: "register_ui", token: token, capabilities: ["render", "stream"],
-             session_id: "ui-" + Date.now(), device: detectDeviceCapabilities(), resumed: !firstConnect });
+             session_id: "ui-" + Date.now(), device: detectDeviceCapabilities(),
+             resumed: firstConnect ? serverResumed : true });
       firstConnect = false;
       action("get_history", {});
       var qp = new URLSearchParams(location.search).get("chat");
@@ -516,7 +643,12 @@
     ws.onerror = function () { try { ws.close(); } catch (e) {} };
     ws.onclose = function () {
       setStatus("Disconnected"); attempts++;
-      if (attempts <= 10) setTimeout(connect, 3000);
+      // Feature 028 (D4): refresh the session token BEFORE reconnecting so a
+      // register_ui after the access-token TTL recovers silently instead of
+      // dead-ending. First connect uses the shell-injected token directly.
+      if (attempts <= 10) setTimeout(function () {
+        refreshToken(false, function () { connect(); });
+      }, 3000);
     };
   }
   setTimeout(connect, 200);

@@ -157,8 +157,9 @@ _SIGNING_IN = "".join([
         ),
     ),
     _p(
-        'If you sign in but see an "Unauthorized access" page, your account doesn\'t have '
-        "either role yet — contact an administrator.",
+        "If you sign in and the app immediately asks you to sign in again (or shows an "
+        "authentication error), your account doesn't have either role yet — contact an "
+        "administrator.",
     ),
     _h2("Signing out"),
     _p(

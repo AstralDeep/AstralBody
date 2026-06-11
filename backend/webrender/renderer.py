@@ -626,3 +626,34 @@ def render(components: List[Dict[str, Any]], profile: Any = None) -> str:
     """Render a list of ROTE-adapted primitive dicts into a web HTML fragment."""
     inner = "".join(render_one(c) for c in (components or []) if isinstance(c, dict))
     return f'<div class="dynamic-renderer space-y-3">{inner}</div>'
+
+
+# ---------------------------------------------------------------------------
+# Feature 028 — workspace fragments (contracts/ws-workspace-protocol.md)
+# ---------------------------------------------------------------------------
+
+def render_component_fragment(component: Dict[str, Any]) -> str:
+    """Render one top-level workspace component wrapped in its identity anchor.
+
+    The ``data-component-id`` wrapper is the morph target for ``ui_upsert``
+    ops on the web client (replace-node-by-id, else append). Components
+    without an identity render unwrapped (legacy behavior preserved).
+    """
+    if not isinstance(component, dict):
+        return ""
+    cid = component.get("component_id")
+    inner = render_one(component)
+    if not cid:
+        return inner
+    return f'<div class="astral-component" data-component-id="{_attr(cid)}">{inner}</div>'
+
+
+def render_workspace(components: List[Dict[str, Any]], profile: Any = None) -> str:
+    """Render the full workspace with per-component identity wrappers.
+
+    Used for canvas-targeted full renders (re-hydration, timeline views,
+    device re-adapt) so every top-level component remains an upsert target.
+    Markup is identical to :func:`render` except for the wrappers.
+    """
+    inner = "".join(render_component_fragment(c) for c in (components or []) if isinstance(c, dict))
+    return f'<div class="dynamic-renderer space-y-3">{inner}</div>'

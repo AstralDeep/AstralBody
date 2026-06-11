@@ -10,7 +10,6 @@ from __future__ import annotations
 import io
 import os
 import sys
-import time
 import uuid
 from pathlib import Path
 from typing import Tuple
@@ -126,7 +125,6 @@ def make_pptx(slides: list[tuple[str, str]]) -> bytes:
     from pptx import Presentation  # type: ignore
 
     prs = Presentation()
-    blank_layout = prs.slide_layouts[5]
     title_layout = prs.slide_layouts[0]
     for title, body in slides:
         slide = prs.slides.add_slide(title_layout)

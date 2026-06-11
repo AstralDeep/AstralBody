@@ -48,8 +48,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-from dataclasses import dataclass, field, asdict
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from dataclasses import dataclass, asdict
+from typing import Any, Callable, Dict, List, Optional
 
 
 # --- Errors --------------------------------------------------------------

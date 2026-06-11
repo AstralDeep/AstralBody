@@ -21,7 +21,6 @@ This test demonstrates the invariant by:
 """
 from __future__ import annotations
 
-import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest

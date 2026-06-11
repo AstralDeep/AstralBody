@@ -247,8 +247,12 @@ class BaseA2AAgent:
         self.orchestrator_connections.add(websocket)
 
         try:
-            # Send registration with agent card
-            register_msg = RegisterAgent(agent_card=self.card)
+            # Send registration with agent card. The shared AGENT_API_KEY (if
+            # configured) authenticates this agent to the orchestrator — the
+            # orchestrator refuses keyless registrations outside dev mode
+            # (028 FR-016 fail-closed).
+            register_msg = RegisterAgent(agent_card=self.card,
+                                         api_key=os.getenv("AGENT_API_KEY") or None)
             await websocket.send_text(register_msg.to_json())
             self._logger.info(f"Sent RegisterAgent with {len(self.card.skills)} skills")
 

@@ -20,13 +20,13 @@ from typing import Any, Dict, Optional
 import aiohttp
 import websockets as ws_client
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Query, UploadFile, File, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse, Response
+from fastapi.responses import JSONResponse, HTMLResponse, Response
 
 from orchestrator.models import (
     ChatMessageRequest, ChatMessageResponse,
     ChatListResponse, ChatSummary,
     ChatCreateRequest, ChatCreateResponse,
-    ChatDetailResponse, ChatDetail, ChatMessage,
+    ChatDetailResponse, ChatDetail,
     DeleteResponse,
     ComponentSaveRequest, ComponentSaveResponse, SavedComponent,
     ComponentListResponse,
@@ -141,6 +141,23 @@ async def delete_chat(
 ):
     orch = _get_orchestrator(request)
     orch.history.delete_chat(chat_id, user_id=user_id)
+    # Feature 028 (spec edge case): another tab time-traveling through this
+    # chat must have its historical view ended gracefully, not left staring
+    # at a snapshot of a chat that no longer exists.
+    for ws in list(getattr(orch, "ui_clients", []) or []):
+        try:
+            if (orch._get_user_id(ws) == user_id
+                    and orch._ws_active_chat.get(id(ws)) == chat_id):
+                orch._ws_active_chat.pop(id(ws), None)
+                if orch._ws_timeline_mode.pop(id(ws), None):
+                    await orch._safe_send(ws, json.dumps({
+                        "type": "workspace_timeline_mode", "active": False,
+                    }))
+                await orch._safe_send(ws, json.dumps({
+                    "type": "chat_deleted", "chat_id": chat_id,
+                }))
+        except Exception:
+            logger.debug("delete_chat socket notification failed", exc_info=True)
     return DeleteResponse(message=f"Chat {chat_id} deleted")
 
 
@@ -355,13 +372,25 @@ async def save_component(
     user_id: str = Depends(require_user_id),
 ):
     orch = _get_orchestrator(request)
-    component_id = orch.history.save_component(
-        chat_id,
-        body.component_data,
-        body.component_type,
-        body.title,
-        user_id=user_id,
-    )
+    # Feature 028 (D18/FR-026): explicit saves are a deprecated alias — route
+    # dict payloads through the workspace so the row gets a stable identity
+    # and every connected client sees the mutation (ui_upsert), mirroring the
+    # WS save_component reconciliation.
+    component_id = None
+    if isinstance(body.component_data, dict):
+        ops = orch.workspace.upsert(chat_id, user_id, [body.component_data])
+        if ops:
+            await orch.send_ui_upsert(None, chat_id, user_id, ops)
+            row = orch.workspace.get_by_component_id(chat_id, user_id, ops[0]["component_id"])
+            component_id = (row or {}).get("id")
+    if component_id is None:
+        component_id = orch.history.save_component(
+            chat_id,
+            body.component_data,
+            body.component_type,
+            body.title,
+            user_id=user_id,
+        )
     return ComponentSaveResponse(
         component=SavedComponent(
             id=component_id,
@@ -386,9 +415,31 @@ async def delete_component(
     user_id: str = Depends(require_user_id),
 ):
     orch = _get_orchestrator(request)
+    # Feature 028 (D18/FR-026): resolve the row first so the workspace
+    # identity can be removed on every client and the removal snapshotted +
+    # audited — a REST delete must not mutate the workspace invisibly.
+    row = orch.history.get_component_by_id(component_id, user_id=user_id)
+    ws_component_id = None
+    chat_id_for_row = row.get("chat_id") if row else None
+    if row and isinstance(row.get("component_data"), dict):
+        ws_component_id = row["component_data"].get("component_id")
+
     success = orch.history.delete_component(component_id, user_id=user_id)
     if not success:
         raise HTTPException(status_code=404, detail="Component not found")
+    if ws_component_id and chat_id_for_row:
+        await orch.send_ui_upsert(None, chat_id_for_row, user_id, [
+            {"op": "remove", "component_id": ws_component_id}
+        ])
+        try:
+            orch.workspace.snapshot(chat_id_for_row, user_id, cause="remove")
+            from audit.hooks import record_workspace_event
+            asyncio.create_task(record_workspace_event(
+                user_id=user_id, action="component_removed",
+                chat_id=chat_id_for_row, component_id=ws_component_id,
+            ))
+        except Exception:
+            logger.debug("workspace remove bookkeeping failed (REST)", exc_info=True)
     return DeleteResponse(message=f"Component {component_id} deleted")
 
 
@@ -423,6 +474,9 @@ async def combine_components(
         chat_id,
         user_id=user_id,
     )
+    # Feature 028 (D18/FR-026): stamp workspace identities on the fresh rows,
+    # snapshot, and push the new canvas to the user's connected clients.
+    await orch._reconcile_legacy_replacement(None, chat_id, user_id, cause="combine")
     return ComponentCombineResponse(
         removed_ids=[body.source_id, body.target_id],
         new_components=[SavedComponent(**c) for c in new_components],
@@ -463,6 +517,8 @@ async def condense_components(
         chat_id,
         user_id=user_id,
     )
+    # Feature 028 (D18/FR-026): same reconciliation as the WS condense path.
+    await orch._reconcile_legacy_replacement(None, chat_id, user_id, cause="condense")
     return ComponentCombineResponse(
         removed_ids=body.component_ids,
         new_components=[SavedComponent(**c) for c in new_components],

@@ -15,7 +15,9 @@ from typing import List, Dict, Any
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from agents.grants.caai_knowledge import (
+# Intentional re-exports: linkedin/mcp_tools.py imports the organizational
+# data from THIS module so there is a single knowledge path (see docstring).
+from agents.grants.caai_knowledge import (  # noqa: E402, F401
     CAAI_MISSION, EXPERTISE_AREAS, KEY_PERSONNEL, PROJECT_HISTORY,
 )
 

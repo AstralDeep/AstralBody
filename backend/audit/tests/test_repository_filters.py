@@ -5,7 +5,6 @@ Backs the contract obligations in
 """
 from __future__ import annotations
 
-import uuid
 from datetime import datetime, timedelta, timezone
 
 

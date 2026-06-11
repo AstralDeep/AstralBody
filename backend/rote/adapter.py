@@ -87,7 +87,7 @@ class ComponentAdapter:
             return comp
 
         # Degrade chart → metric card
-        chart_type = comp.get("type", "chart")
+        comp.get("type", "chart")
         title = comp.get("title", "Result")
 
         # Try to extract a single meaningful value

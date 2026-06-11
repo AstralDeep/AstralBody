@@ -19,7 +19,7 @@ import os
 import json
 import time
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 logger = logging.getLogger("ToolPermissions")
 
@@ -75,7 +75,7 @@ class ToolPermissionManager:
             return
         try:
             with open(json_path, "r", encoding="utf-8") as f:
-                permissions = json.load(f)
+                json.load(f)
             # Legacy format was per-tool; we can't auto-migrate to scopes meaningfully
             # Just rename the file so migration doesn't re-run
             os.rename(json_path, json_path + ".bak")

@@ -113,7 +113,7 @@ class TestBackgroundTaskManager:
             pass
         t1 = await mgr.submit("c1", "u1", dummy)
         t2 = await mgr.submit("c2", "u1", dummy)
-        t3 = await mgr.submit("c3", "u2", dummy)
+        await mgr.submit("c3", "u2", dummy)
         await _collect(mgr)
         u1_tasks = await mgr.list_for_user("u1")
         assert len(u1_tasks) == 2
@@ -175,7 +175,6 @@ class TestBackgroundTaskManager:
 
     def test_background_task_to_dict(self):
         """BackgroundTask.to_dict produces expected shape."""
-        from datetime import datetime, timezone
         t = BackgroundTask(task_id="t99", chat_id="c99", user_id="u99")
         d = t.to_dict()
         assert d["task_id"] == "t99"

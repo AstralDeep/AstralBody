@@ -133,9 +133,7 @@ def test_rest_auth_dependency_accepts_dev_token(mock_auth_env):
         query_params: dict = {}
 
     creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials="dev-token")
-    payload = asyncio.get_event_loop().run_until_complete(
-        get_current_user_payload(_Req(), creds)
-    )
+    payload = asyncio.run(get_current_user_payload(_Req(), creds))
     _assert_test_user(payload)
 
 
@@ -150,7 +148,5 @@ def test_rest_auth_dependency_rejects_missing_token(mock_auth_env):
         query_params: dict = {}
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.get_event_loop().run_until_complete(
-            get_current_user_payload(_Req(), None)
-        )
+        asyncio.run(get_current_user_payload(_Req(), None))
     assert exc.value.status_code == 401

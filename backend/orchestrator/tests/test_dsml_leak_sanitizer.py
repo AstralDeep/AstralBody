@@ -8,7 +8,6 @@ Exercises the same chain the chat-message handler uses:
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import pytest
 
 from orchestrator.orchestrator import (
     Orchestrator,

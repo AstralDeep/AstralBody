@@ -6,10 +6,7 @@ created lazily via ``Database._init_db``; each test uses a unique
 """
 from __future__ import annotations
 
-import os
 import threading
-import uuid
-from datetime import datetime, timezone
 
 
 def test_genesis_row_uses_zero_prev_hash(repo, make_event, unique_user, database):
@@ -80,8 +77,10 @@ def test_concurrent_inserts_serialize_through_for_update(repo, make_event, uniqu
 
     t1 = threading.Thread(target=insert_one, args=("auth.t1",))
     t2 = threading.Thread(target=insert_one, args=("auth.t2",))
-    t1.start(); t2.start()
-    t1.join(); t2.join()
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
 
     assert len(results) == 2
     # Chain integrity: verify the user's chain is still well-formed
