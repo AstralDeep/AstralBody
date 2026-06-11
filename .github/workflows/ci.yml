@@ -1,0 +1,289 @@
+# AstralBody CI — feature 029 (T027).
+# Authoritative job contract: specs/029-agents-adaptive-ui-ci/contracts/ci-pipeline.md
+#
+# Gates (FR-034..FR-038), each an independently-reported job:
+#   lint · build · test · coverage-gate · smoke · secret-scan · publish (main only)
+#
+# CI-only tooling (Constitution V/XI — pipeline environment, NOT product deps):
+#   ruff, pytest-cov/coverage, diff-cover, gitleaks (action).
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Cancel superseded runs on PRs only; pushes to main always run to completion.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # ── FR-034: repo-root lint (ruff.toml lives at the repo root, NOT in the image) ──
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install ruff
+        run: pip install ruff
+      - name: ruff check (repo root)
+        run: ruff check .
+
+  # ── FR-035: the production image (incl. spaCy en_core_web_lg bake) still builds
+  #    from a clean checkout. Exported as an artifact for test/smoke/publish. ──
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: astralbody:ci
+          outputs: type=docker,dest=/tmp/astralbody.tar
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image
+          path: /tmp/astralbody.tar
+          retention-days: 1
+
+  # ── FR-034: complete backend test suite inside the built image against a real
+  #    Postgres, development posture. Both invocations per the contract; combined
+  #    coverage.xml handed to coverage-gate. ──
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: build
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: astral
+          POSTGRES_PASSWORD: astral_ci
+          POSTGRES_DB: astralbody
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U astral -d astralbody"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: image
+          path: /tmp
+      - name: Load built image
+        run: docker load -i /tmp/astralbody.tar
+      # The checkout's backend/ is mounted over the baked /app/backend so tests run
+      # against THIS commit's source inside the production dependency environment.
+      # --network host lets localhost:5432 reach the postgres service container.
+      # pytest-cov/coverage are CI-only and installed ad hoc (not product deps).
+      - name: Run both pytest invocations inside the image
+        run: |
+          docker run --rm --network host \
+            -v "$PWD/backend:/app/backend" \
+            -e ASTRAL_ENV=development \
+            -e DB_HOST=localhost \
+            -e DB_PORT=5432 \
+            -e DB_NAME=astralbody \
+            -e DB_USER=astral \
+            -e DB_PASSWORD=astral_ci \
+            -e AGENT_API_KEY=ci-test-agent-key \
+            -e AUDIT_HMAC_SECRET=ci-test-hmac-secret \
+            -w /app/backend --entrypoint bash astralbody:ci \
+            -c "pip install pytest-cov 'coverage[toml]' && python -m pytest -q -m 'not integration' --cov=. --cov-report= && python -m pytest audit/tests llm_config/tests orchestrator/tests onboarding/tests personalization/tests scheduler/tests dreaming/tests -q --cov=. --cov-append --cov-report=xml:coverage.xml"
+      # coverage.xml lands in the mounted checkout at backend/coverage.xml.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: backend/coverage.xml
+
+  # ── FR-034: changed-code coverage ≥ 90% vs origin/main (Constitution III). ──
+  coverage-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install diff-cover
+        run: pip install diff-cover
+      - uses: actions/download-artifact@v4
+        with:
+          name: coverage
+          path: backend
+      # Tests ran at /app/backend inside the image, so coverage.xml's <source>
+      # says /app/backend; rewrite it to backend so diff-cover maps measured
+      # files onto the git diff's repo-root-relative paths.
+      - name: Map container paths to repo paths
+        run: sed -i 's|/app/backend|backend|g' backend/coverage.xml
+      - name: Ensure origin/main exists locally
+        run: |
+          git rev-parse --verify --quiet origin/main >/dev/null \
+            || git fetch origin main:refs/remotes/origin/main
+      # NOTE: diff-cover exits 0 when the diff vs origin/main contains no
+      # measurable Python lines — that vacuous pass is intentional (FR-034:
+      # the gate measures CHANGED code; docs/CSS/YAML-only diffs pass).
+      - name: Enforce 90% on changed Python lines
+        run: diff-cover backend/coverage.xml --compare-branch origin/main --fail-under 90
+
+  # ── FR-036: boot-smoke the built image. (1) dev posture answers /healthz +
+  #    /readyz with a real DB; (2) production posture with placeholder/missing
+  #    secrets exits EXACTLY 78 (EX_CONFIG — the fail-closed boot gate). ──
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: build
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: astral
+          POSTGRES_PASSWORD: astral_ci
+          POSTGRES_DB: astralbody
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U astral -d astralbody"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: image
+          path: /tmp
+      - name: Load built image
+        run: docker load -i /tmp/astralbody.tar
+      # Default CMD = start-docker.sh: waits for Postgres (the service is up),
+      # then exec start.py which boots the orchestrator on :8001.
+      - name: Dev-posture boot answers /healthz and /readyz
+        run: |
+          docker run -d --name astralbody-smoke --network host \
+            -e ASTRAL_ENV=development \
+            -e DB_HOST=localhost \
+            -e DB_PORT=5432 \
+            -e DB_NAME=astralbody \
+            -e DB_USER=astral \
+            -e DB_PASSWORD=astral_ci \
+            -e AGENT_API_KEY=ci-test-agent-key \
+            -e AUDIT_HMAC_SECRET=ci-test-hmac-secret \
+            astralbody:ci
+          ok=""
+          for i in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://localhost:8001/healthz \
+               && curl -fsS -o /dev/null http://localhost:8001/readyz; then
+              ok=1
+              break
+            fi
+            sleep 2
+          done
+          if [ -z "$ok" ]; then
+            echo "::error::/healthz + /readyz did not both answer 200 within 120s"
+            docker logs astralbody-smoke
+            exit 1
+          fi
+          echo "liveness + readiness OK (dev posture, real DB)"
+      - name: Cleanup dev-posture container
+        if: always()
+        run: docker rm -f astralbody-smoke || true
+      # Fail-closed proof. assert_production_posture (orchestrator/session_store.py)
+      # raises SystemExit(78) from Orchestrator.start when ASTRAL_ENV != development
+      # and mock auth is on / secrets are placeholders. The image's default CMD
+      # (start-docker.sh -> start.py) SUPERVISES the orchestrator as a child and
+      # exits 0 when it dies, swallowing the gate's code — so this runs the
+      # orchestrator process directly, exactly as start.py spawns it (cwd
+      # /app/backend; orchestrator.py self-inserts its parent dir on sys.path).
+      # DB env points at the live service so boot reaches the posture gate.
+      # `timeout 300` turns a hung boot into a failure (124) instead of a block.
+      - name: Fail-closed proof — production posture must exit 78
+        run: |
+          set +e
+          timeout 300 docker run --rm --network host \
+            -e DB_HOST=localhost \
+            -e DB_PORT=5432 \
+            -e DB_NAME=astralbody \
+            -e DB_USER=astral \
+            -e DB_PASSWORD=astral_ci \
+            -e USE_MOCK_AUTH=true \
+            -e AUDIT_HMAC_SECRET=change-me \
+            -w /app/backend --entrypoint python \
+            astralbody:ci orchestrator/orchestrator.py
+          code=$?
+          set -e
+          if [ "$code" -ne 78 ]; then
+            echo "::error::expected exit 78 (EX_CONFIG fail-closed boot gate), got $code"
+            exit 1
+          fi
+          echo "fail-closed boot gate refused to serve with exit 78, as documented"
+
+  # ── FR-037: committed-credential scan over full history. Allowlist for the
+  #    repo's intentional dev/test placeholders lives in .gitleaks.toml
+  #    (auto-discovered at the repo root; pinned explicitly below). ──
+  secret-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: ${{ github.workspace }}/.gitleaks.toml
+          # PR comments would need pull-requests: write; keep permissions minimal.
+          GITLEAKS_ENABLE_COMMENTS: "false"
+          # Only required if the repo is organization-owned; no-op when unset.
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+  # ── FR-038: publish the EXACT verified image to GHCR on main pushes only.
+  #    Needs every verification gate, so a publish failure is distinguishable
+  #    from a verification failure (the gates stay green/visible). ──
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [lint, build, test, coverage-gate, smoke, secret-scan]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: image
+          path: /tmp
+      - name: Load built image
+        run: docker load -i /tmp/astralbody.tar
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # GHCR requires a lowercase repository path; ${{ github.repository }} may
+      # carry uppercase (e.g. AstralDeep/...), so lowercase it in the shell.
+      - name: Tag and push (immutable sha tag + moving latest)
+        run: |
+          REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          docker tag astralbody:ci "ghcr.io/$REPO_LC:sha-${{ github.sha }}"
+          docker tag astralbody:ci "ghcr.io/$REPO_LC:latest"
+          docker push "ghcr.io/$REPO_LC:sha-${{ github.sha }}"
+          docker push "ghcr.io/$REPO_LC:latest"

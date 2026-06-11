@@ -318,6 +318,46 @@ class ComponentAdapter:
             lang = comp.get("language", "")
             parts.append(f"[Code block: {lang}]")
 
+        elif comp_type in ("card", "collapsible"):
+            if comp.get("title"):
+                parts.append(str(comp["title"]))
+
+        elif comp_type == "badge":
+            parts.append(comp.get("label", ""))
+
+        elif comp_type == "hero":
+            for key in ("eyebrow", "title", "subtitle"):
+                if comp.get(key):
+                    parts.append(str(comp[key]))
+            badges = [b for b in comp.get("badges", []) if isinstance(b, str)]
+            if badges:
+                parts.append(", ".join(badges))
+
+        elif comp_type == "keyvalue":
+            if comp.get("title"):
+                parts.append(str(comp["title"]))
+            for item in comp.get("items", []):
+                if isinstance(item, dict):
+                    parts.append(f"{item.get('label', '')}: {item.get('value', '')}")
+
+        elif comp_type == "timeline":
+            if comp.get("title"):
+                parts.append(str(comp["title"]))
+            for item in comp.get("items", []):
+                if isinstance(item, dict):
+                    entry = str(item.get("title", ""))
+                    if item.get("time"):
+                        entry = f"{item['time']} — {entry}"
+                    if item.get("description"):
+                        entry = f"{entry}: {item['description']}"
+                    parts.append(entry)
+
+        elif comp_type == "rating":
+            label = comp.get("label", "rating")
+            value = comp.get("value", 0)
+            max_value = comp.get("max_value", 5)
+            parts.append(f"{label}: {value} out of {max_value} stars")
+
         # Recurse into children/content/tabs
         for key in ("children", "content"):
             for child in comp.get(key, []):

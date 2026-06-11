@@ -190,6 +190,20 @@ class BaseA2AAgent:
         self._public_key = self._private_key.public_key()
         self._public_key_jwk = build_jwk(self._public_key)
 
+        # Feature 029: predecessor keys for consolidated agents. Credentials
+        # saved while a PREDECESSOR identity was live are ECIES-encrypted to
+        # that identity's key; loading those keys keeps them decryptable
+        # after a catalog merge (FR-008) instead of forcing a re-save.
+        self._fallback_private_keys = []
+        for pred_id in getattr(self, "predecessor_agent_ids", ()) or ():
+            pred_path = os.path.join(backend_dir, "data", "agent_keys", f"{pred_id}.pem")
+            if os.path.exists(pred_path):
+                try:
+                    self._fallback_private_keys.append(load_private_key(pred_path))
+                    logger.info(f"Loaded predecessor ECIES key for '{pred_id}'")
+                except Exception:
+                    logger.warning(f"Could not load predecessor key {pred_path}", exc_info=True)
+
     def _build_agent_card(self) -> AgentCard:
         """Build custom AgentCard from registered MCP tools."""
         skills = []
@@ -600,7 +614,7 @@ class BaseA2AAgent:
         for key, value in encrypted_creds.items():
             try:
                 if is_e2e_encrypted(value):
-                    plaintext_creds[key] = decrypt_from_orchestrator(value, self._private_key)
+                    plaintext_creds[key] = self._decrypt_with_fallbacks(value)
                 else:
                     # Legacy Fernet value — agent cannot decrypt, pass through as-is
                     self._logger.warning(f"Credential '{key}' is not E2E-encrypted, skipping")
@@ -613,6 +627,23 @@ class BaseA2AAgent:
         if had_decrypt_failure:
             args["_credentials_stale"] = True
         args.pop("_credentials_encrypted", None)
+
+    def _decrypt_with_fallbacks(self, value: str) -> str:
+        """Decrypt an E2E blob with this agent's key, then any predecessor keys.
+
+        Consolidated agents (feature 029) declare ``predecessor_agent_ids``;
+        credentials encrypted to a predecessor's key remain readable without
+        a re-save. Raises when no loaded key decrypts the blob.
+        """
+        try:
+            return decrypt_from_orchestrator(value, self._private_key)
+        except Exception:
+            for fallback in getattr(self, "_fallback_private_keys", []) or []:
+                try:
+                    return decrypt_from_orchestrator(value, fallback)
+                except Exception:
+                    continue
+            raise
 
     # =========================================================================
     # Agent-to-Agent Communication

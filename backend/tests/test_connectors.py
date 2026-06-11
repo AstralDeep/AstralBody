@@ -441,16 +441,29 @@ class TestCanva:
 
 
 class TestArtifactsGraphsDesign:
-    def test_artifacts_generates_cards(self):
+    def test_artifacts_generates_real_widgets(self):
         result = handle_artifacts({
             "title": "Sales Dashboard",
             "sections": [
-                {"widget_type": "metric", "title": "Revenue", "data_source": "DB"},
-                {"widget_type": "chart", "title": "Trend", "data_source": "API"},
+                {"widget_type": "metric", "title": "Revenue", "data_source": "DB", "value": "12400"},
+                {"widget_type": "chart", "title": "Trend", "data_source": "API",
+                 "chart_kind": "line", "labels": ["Jan", "Feb"], "values": [5, 9]},
+                {"widget_type": "table", "title": "Bookings"},
+                {"widget_type": "timeline", "title": "Today"},
             ],
         })
-        cards = _by_type(_comps(result), "card")
-        assert len(cards) == 2
+        comps = _comps(result)
+        assert comps[0]["type"] == "hero", "dashboard leads with a masthead"
+        assert comps[0]["title"] == "Sales Dashboard"
+        metric = _by_type(comps, "metric")[0]
+        assert metric["value"] == "12400" and "DB" in metric["subtitle"]
+        line = _by_type(comps, "line_chart")[0]
+        assert line["labels"] == ["Jan", "Feb"]
+        assert line["datasets"][0]["data"] == [5, 9]
+        table = _by_type(comps, "table")[0]
+        assert table["headers"] and table["rows"], "table gets sample rows when none provided"
+        timeline = _by_type(comps, "timeline")[0]
+        assert timeline["items"], "timeline gets sample entries when none provided"
 
     def test_graphs_returns_nodes_and_edges(self):
         result = handle_graphs({
@@ -462,8 +475,12 @@ class TestArtifactsGraphsDesign:
 
     def test_design_returns_palette(self):
         result = handle_design({"context": "web", "style_preferences": "corporate"})
-        cards = _by_type(_comps(result), "card")
-        assert len(cards) > 0
+        comps = _comps(result)
+        assert comps[0]["type"] == "hero"
+        pie = _by_type(comps, "pie_chart")[0]
+        assert pie["colors"] == pie["labels"], "swatch wheel is colored by the palette itself"
+        assert _by_type(comps, "keyvalue"), "typography/spacing foundations"
+        assert _by_type(comps, "alert"), "accessibility callout"
 
 
 # ---------------------------------------------------------------------------

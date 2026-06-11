@@ -17,6 +17,8 @@ from __future__ import annotations
 import html
 import json
 import logging
+import math
+import re as _re
 from typing import Any, Callable, Dict, List
 
 logger = logging.getLogger("webrender")
@@ -72,10 +74,30 @@ def render_children(items: List[Any]) -> str:
     return "".join(render_one(c) for c in items if isinstance(c, dict))
 
 
+_SAFE_DATA_ATTR = _re.compile(r"^data-[a-z0-9-]+$")
+
+
 def _base_attrs(comp: Dict[str, Any]) -> str:
-    """Render id (the only base attr applied to the fragment root in the live app)."""
+    """Render id plus whitelisted ``data-*`` entries from ``attributes``.
+
+    ``attributes`` is astralprims' documented free-form escape hatch; the web
+    renderer honors only ``data-*`` keys (escaped) so authors cannot inject
+    event handlers or override structural attributes. Feature 029 relies on
+    this for nested morph anchors: the designer's materializer stamps
+    ``attributes["data-component-id"]`` on refs nested inside arrangements so
+    ``ui_upsert`` morphs keep finding them in the DOM.
+    """
+    parts = []
     cid = comp.get("id")
-    return f' id="{_attr(cid)}"' if cid else ""
+    if cid:
+        parts.append(f' id="{_attr(cid)}"')
+    attrs = comp.get("attributes")
+    if isinstance(attrs, dict):
+        for key, value in attrs.items():
+            key_s = str(key).lower()
+            if _SAFE_DATA_ATTR.match(key_s):
+                parts.append(f' {key_s}="{_attr(value)}"')
+    return "".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +116,7 @@ def render_text(c):
         cls = ("prose prose-invert max-w-none text-sm text-astral-text leading-relaxed "
                "prose-headings:text-astral-text prose-a:text-astral-primary prose-strong:text-astral-text "
                "prose-code:text-astral-accent")
-        return f'<div class="{cls}">{block_md(content)}</div>'
+        return f'<div{_base_attrs(c)} class="{cls}">{block_md(content)}</div>'
     classes = {
         "h1": "text-2xl font-bold text-astral-text",
         "h2": "text-xl font-semibold text-astral-text",
@@ -104,7 +126,7 @@ def render_text(c):
     }
     tag = {"h1": "h1", "h2": "h2", "h3": "h3"}.get(variant, "p")
     cls = classes.get(variant, classes["body"])
-    return f'<{tag} class="{cls}">{esc(content)}</{tag}>'
+    return f'<{tag}{_base_attrs(c)} class="{cls}">{esc(content)}</{tag}>'
 
 
 def render_button(c):
@@ -112,15 +134,18 @@ def render_button(c):
     action = c.get("action", "")
     payload = c.get("payload", {}) or {}
     variant = c.get("variant", "primary")
+    # 029 visual refresh: primary = accent gradient (via .astral-btn-primary in
+    # astral.css, layered over the bg utility), secondary = outline, ghost = text.
+    # `.astral-action` stays the FIRST class — client.js dispatches on it.
     vcls = {
-        "primary": "bg-astral-primary hover:bg-astral-primary/80 text-white",
-        "secondary": "bg-astral-secondary hover:bg-astral-secondary/80 text-white",
-        "ghost": "bg-white/5 hover:bg-white/10 text-astral-text border border-white/10",
-    }.get(variant, "bg-astral-primary hover:bg-astral-primary/80 text-white")
+        "primary": "astral-btn-primary bg-astral-primary text-white",
+        "secondary": "astral-btn-secondary bg-transparent hover:bg-astral-primary/10 text-astral-text border border-astral-primary/40",
+        "ghost": "astral-btn-ghost bg-transparent hover:bg-white/5 text-astral-muted hover:text-astral-text",
+    }.get(variant, "astral-btn-primary bg-astral-primary text-white")
     data = _attr(json.dumps(payload))
     return (
         f'<button type="button" data-action="{_attr(action)}" data-payload="{data}" '
-        f'class="astral-action px-4 py-2 rounded-lg text-sm font-medium transition-colors {vcls}">'
+        f'class="astral-action astral-btn px-4 py-2 rounded-lg text-sm font-medium transition-colors {vcls}">'
         f'{esc(label)}</button>'
     )
 
@@ -130,7 +155,7 @@ def render_input(c):
     return (
         f'<input type="text" name="{_attr(c.get("name",""))}" value="{_attr(c.get("value",""))}" '
         f'placeholder="{_attr(c.get("placeholder",""))}" '
-        f'class="rounded bg-white/10 border border-white/10 px-2 py-1 text-astral-text w-full">'
+        f'class="astral-field rounded bg-white/10 border border-white/10 px-2 py-1 text-astral-text w-full">'
     )
 
 
@@ -157,7 +182,7 @@ def _param_field(field: Dict[str, Any]) -> str:
         return (
             f'<label class="flex flex-col gap-1 text-sm"><span class="text-astral-text font-medium">{esc(label)}</span>'
             f'{help_html}<input type="number" step="{_attr(step)}" value="{val}" data-field="{_attr(name)}" data-kind="number" '
-            f'class="astral-pp-field rounded bg-white/10 border border-white/10 px-2 py-1 text-astral-text w-40"></label>'
+            f'class="astral-pp-field astral-field rounded bg-white/10 border border-white/10 px-2 py-1 text-astral-text w-40"></label>'
         )
     if kind == "checklist":
         opts = field.get("options") or []
@@ -188,14 +213,14 @@ def _param_field(field: Dict[str, Any]) -> str:
         return (
             f'<label class="flex flex-col gap-1 text-sm"><span class="text-astral-text font-medium">{esc(label)}</span>'
             f'{help_html}<select data-field="{_attr(name)}" data-kind="select" '
-            f'class="astral-pp-field rounded bg-white/10 border border-white/10 px-2 py-1 text-astral-text w-60">{options}</select></label>'
+            f'class="astral-pp-field astral-field rounded bg-white/10 border border-white/10 px-2 py-1 text-astral-text w-60">{options}</select></label>'
         )
     # text (default)
     val = "" if default is None else _attr(default)
     return (
         f'<label class="flex flex-col gap-1 text-sm"><span class="text-astral-text font-medium">{esc(label)}</span>'
         f'{help_html}<input type="text" value="{val}" data-field="{_attr(name)}" data-kind="text" '
-        f'class="astral-pp-field rounded bg-white/10 border border-white/10 px-2 py-1 text-astral-text w-full"></label>'
+        f'class="astral-pp-field astral-field rounded bg-white/10 border border-white/10 px-2 py-1 text-astral-text w-full"></label>'
     )
 
 
@@ -210,12 +235,12 @@ def render_param_picker(c):
                  if description else "")
     rows = "".join(_param_field(f) for f in fields)
     return (
-        f'<div class="astral-param-picker bg-white/5 rounded-lg border border-white/10 p-4 my-2" '
+        f'<div{_base_attrs(c)} class="astral-param-picker bg-white/5 rounded-lg border border-white/10 p-4 my-2" '
         f'data-template="{_attr(template)}">{title_html}{desc_html}'
         f'<div class="flex flex-col gap-3 max-h-[28rem] overflow-y-auto pr-1">{rows}</div>'
         f'<div class="mt-4 flex items-center justify-end gap-2">'
-        f'<button type="button" class="astral-pp-submit px-4 py-2 rounded-lg text-sm font-medium transition-colors '
-        f'bg-astral-primary hover:bg-astral-primary/80 text-white">{esc(submit_label)}</button></div></div>'
+        f'<button type="button" class="astral-pp-submit astral-btn astral-btn-primary px-4 py-2 rounded-lg text-sm '
+        f'font-medium transition-colors bg-astral-primary text-white">{esc(submit_label)}</button></div></div>'
     )
 
 
@@ -228,7 +253,9 @@ def render_card(c):
             '<span class="w-1 h-4 rounded-full bg-astral-primary inline-block"></span>'
             f'{inline_md(title)}</h3></div>'
         )
-    return f'<div{_base_attrs(c)}>{title_html}<div class="space-y-3">{render_children(_children(c))}</div></div>'
+    # 029: .astral-card carries the layered surface/elevation (astral.css);
+    # the children wrapper class stays exactly "space-y-3" (golden-pinned).
+    return f'<div{_base_attrs(c)} class="astral-card">{title_html}<div class="space-y-3">{render_children(_children(c))}</div></div>'
 
 
 def _cell(cell: Any) -> str:
@@ -287,7 +314,7 @@ def render_table(c):
             f'</div></div>'
         )
     return (
-        f'<div{_base_attrs(c)} class="rounded-lg border border-white/10">'
+        f'<div{_base_attrs(c)} class="astral-table-wrap rounded-lg border border-white/10">'
         f'<div class="p-3 border-b border-white/5 bg-astral-primary/5 flex items-center justify-between">'
         f'<div class="text-sm font-medium text-astral-text">{inline_md(title)}</div>{showing}</div>'
         f'<div class="overflow-x-auto"><table class="w-full text-sm">'
@@ -301,7 +328,7 @@ def render_list(c):
     if not items:
         return ""
     if c.get("variant") == "detailed":
-        out = ['<div class="space-y-3">']
+        out = [f'<div{_base_attrs(c)} class="space-y-3">']
         for it in items:
             if not isinstance(it, dict):
                 it = {"title": str(it)}
@@ -315,7 +342,7 @@ def render_list(c):
             sub = f'<p class="text-xs text-astral-muted">{inline_md(it.get("subtitle",""))}</p>' if it.get("subtitle") else ""
             desc = f'<div class="text-sm text-astral-text/80 line-clamp-2">{block_md(it.get("description",""))}</div>' if it.get("description") else ""
             out.append(
-                '<div class="p-3 hover:bg-white/5 transition-colors"><div class="flex justify-between items-start gap-4">'
+                '<div class="astral-list-item p-3 hover:bg-white/5 transition-colors"><div class="flex justify-between items-start gap-4">'
                 f'<div class="space-y-1 w-full"><h4 class="text-sm font-semibold text-astral-text flex items-center justify-between">{title_node}</h4>{sub}{desc}</div></div></div>'
             )
         out.append("</div>")
@@ -326,7 +353,7 @@ def render_list(c):
     lis = "".join(
         f'<li class="leading-relaxed">{inline_md(it) if isinstance(it, str) else esc(json.dumps(it))}</li>'
         for it in items)
-    return f'<{tag} class="space-y-2 text-sm {lcls} list-inside text-astral-text">{lis}</{tag}>'
+    return f'<{tag}{_base_attrs(c)} class="space-y-2 text-sm {lcls} list-inside text-astral-text">{lis}</{tag}>'
 
 
 def _alert_icon(variant: str) -> str:
@@ -349,13 +376,14 @@ def render_alert(c):
         "success": ("bg-green-500/10", "border-green-500/20", "text-green-400"),
         "warning": ("bg-yellow-500/10", "border-yellow-500/20", "text-yellow-400"),
         "error": ("bg-red-500/10", "border-red-500/20", "text-red-400"),
-    }.get(variant, ("bg-blue-500/10", "border-blue-500/20", "text-blue-400"))
-    bg, border, txt = cfg
+    }
+    vkey = variant if variant in cfg else "info"  # whitelisted — safe in a class name
+    bg, border, txt = cfg[vkey]
     title = c.get("title")
     title_html = f'<p class="font-medium text-sm {txt}">{inline_md(title)}</p>' if title else ""
     msg = c.get("message", "")
     return (
-        f'<div{_base_attrs(c)} class="{bg} {border} border rounded-lg p-4 flex items-start gap-3">'
+        f'<div{_base_attrs(c)} class="astral-alert astral-alert--{vkey} {bg} {border} border rounded-lg p-4 flex items-start gap-3">'
         f'<span class="{txt}">{_alert_icon(variant)}</span>'
         f'<div class="flex-1"><div>{title_html}<div class="text-sm text-astral-text/80">{block_md(msg)}</div></div></div></div>'
     )
@@ -371,19 +399,22 @@ def render_progress(c):
         pct_span = f'<span>{round(value * 100)}%</span>' if show_pct is not False else ""
         header = (f'<div class="flex justify-between text-xs text-astral-muted w-full mb-1"><span>{inline_md(label)}</span>{pct_span}</div>')
     return (
-        f'<div{_base_attrs(c)}>{header}<div class="h-2 bg-white/10 rounded-full overflow-hidden">'
+        f'<div{_base_attrs(c)} class="astral-progress">{header}'
+        f'<div class="astral-progress-track h-2 bg-white/10 rounded-full overflow-hidden">'
         f'<div class="h-full bg-gradient-to-r from-astral-primary to-astral-secondary rounded-full" style="width:{pct}%"></div></div></div>'
     )
 
 
 def render_metric(c):
     variant = c.get("variant", "default")
-    vbg = {
+    vmap = {
         "default": "from-astral-primary/20 to-astral-primary/5",
         "warning": "from-yellow-500/20 to-yellow-500/5",
         "error": "from-red-500/20 to-red-500/5",
         "success": "from-green-500/20 to-green-500/5",
-    }.get(variant, "from-astral-primary/20 to-astral-primary/5")
+    }
+    vkey = variant if variant in vmap else "default"  # whitelisted — safe in a class name
+    vbg = vmap[vkey]
     subtitle = c.get("subtitle")
     sub_html = f'<p class="text-xs text-astral-muted mt-1">{inline_md(subtitle)}</p>' if subtitle else ""
     progress = c.get("progress")
@@ -394,7 +425,7 @@ def render_metric(c):
         prog_html = (f'<div class="mt-3 h-1.5 bg-white/10 rounded-full overflow-hidden">'
                      f'<div class="h-full rounded-full {color}" style="width:{pw}%"></div></div>')
     return (
-        f'<div{_base_attrs(c)} class="rounded-xl p-4 bg-gradient-to-br {vbg} border border-white/5 relative">'
+        f'<div{_base_attrs(c)} class="astral-metric astral-metric--{vkey} rounded-xl p-4 bg-gradient-to-br {vbg} border border-white/5 relative">'
         f'<p class="text-xs text-astral-muted font-medium uppercase tracking-wider mb-1">{inline_md(c.get("title",""))}</p>'
         f'<div class="flex-1"><p class="text-2xl font-bold text-astral-text">{esc(c.get("value",""))}</p>{sub_html}</div>{prog_html}</div>'
     )
@@ -404,7 +435,7 @@ def render_code(c):
     language = c.get("language")
     lang_html = f'<div class="px-4 py-2 border-b border-white/5 text-xs text-astral-muted">{esc(language)}</div>' if language else ""
     return (
-        f'<div{_base_attrs(c)} class="rounded-lg bg-black/40 border border-white/5 overflow-hidden">{lang_html}'
+        f'<div{_base_attrs(c)} class="astral-code rounded-lg bg-black/40 border border-white/5 overflow-hidden">{lang_html}'
         f'<pre class="p-4 text-sm overflow-x-auto" style="font-family:\'JetBrains Mono\',monospace">'
         f'<code class="text-green-400">{esc(c.get("code",""))}</code></pre></div>'
     )
@@ -420,7 +451,7 @@ def render_image(c):
         attrs += f' width="{_attr(c.get("width"))}"'
     if c.get("height"):
         attrs += f' height="{_attr(c.get("height"))}"'
-    return f'<img {attrs} class="max-w-full rounded-lg">'
+    return f'<img{_base_attrs(c)} {attrs} class="max-w-full rounded-lg">'
 
 
 def render_grid(c):
@@ -441,13 +472,14 @@ def render_grid(c):
 def render_tabs(c):
     # No live renderer; provide a basic <details>-based fallback for completeness.
     tabs = c.get("tabs") or []
-    out = ['<div class="space-y-2">']
+    out = [f'<div{_base_attrs(c)} class="astral-tabs space-y-2">']
     for i, t in enumerate(tabs):
         if not isinstance(t, dict):
             continue
         label = t.get("label", f"Tab {i+1}")
         body = render_children(t.get("content") or [])
-        out.append(f'<details{" open" if i == 0 else ""}><summary class="text-sm font-medium text-astral-text cursor-pointer">{esc(label)}</summary>'
+        out.append(f'<details class="astral-tab"{" open" if i == 0 else ""}>'
+                   f'<summary class="text-sm font-medium text-astral-text cursor-pointer">{esc(label)}</summary>'
                    f'<div class="space-y-3 pt-2">{body}</div></details>')
     out.append("</div>")
     return "".join(out)
@@ -462,7 +494,7 @@ def render_collapsible(c):
     is_open = bool(c.get("default_open"))
     body = render_children(_children(c))
     return (
-        f'<details class="overflow-hidden"{" open" if is_open else ""}>'
+        f'<details{_base_attrs(c)} class="astral-collapsible overflow-hidden"{" open" if is_open else ""}>'
         f'<summary class="flex items-center w-full gap-2 px-3 py-2 hover:bg-white/[0.03] transition-colors text-left cursor-pointer list-none">'
         f'<span class="text-[11px] font-medium text-astral-muted/70 uppercase tracking-wider flex-1 truncate">{esc(title)}</span></summary>'
         f'<div class="px-3 pb-3 pt-1.5 border-t border-white/[0.04] space-y-2 max-h-[420px] overflow-y-auto scrollbar-thin">{body}</div></details>'
@@ -473,7 +505,7 @@ def _chart_div(c, chart_type, payload):
     title = c.get("title")
     title_html = f'<p class="text-sm font-medium text-astral-text mb-3">{esc(title)}</p>' if title else ""
     data = _attr(json.dumps(payload))
-    return (f'<div{_base_attrs(c)} class="w-full">{title_html}'
+    return (f'<div{_base_attrs(c)} class="astral-chart-card w-full">{title_html}'
             f'<div class="astral-chart" data-chart-type="{chart_type}" data-chart="{data}" style="min-height:320px"></div></div>')
 
 
@@ -536,7 +568,7 @@ def render_file_upload(c):
     accept = c.get("accept", "*/*")
     return (
         f'<div{_base_attrs(c)} class="flex items-center gap-3 py-2">'
-        f'<label class="cursor-pointer inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors '
+        f'<label class="astral-btn cursor-pointer inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors '
         f'bg-astral-primary/20 hover:bg-astral-primary/30 text-astral-primary border border-astral-primary/30">'
         f'<span>{esc(label)}</span>'
         f'<input type="file" class="astral-file-upload hidden" accept="{_attr(accept)}"></label></div>'
@@ -555,7 +587,7 @@ def render_file_download(c):
         return (
             f'<div{_base_attrs(c)} class="flex items-center gap-3 py-2">'
             f'<a href="{_attr(safe_url(url))}"{download_attr} '
-            f'class="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors '
+            f'class="astral-btn inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors '
             f'bg-astral-secondary/20 hover:bg-astral-secondary/30 text-astral-secondary border border-astral-secondary/30">'
             f'<span>{esc(label)}</span></a></div>'
         )
@@ -587,6 +619,154 @@ def render_audio(c):
             f'{label_html}{media}{desc_html}</div>')
 
 
+# ---------------------------------------------------------------------------
+# Dashboard & status primitives (astralprims >= 0.2.0)
+# ---------------------------------------------------------------------------
+
+_BADGE_VARIANTS = {
+    "default": "bg-white/10 text-astral-text border-white/15",
+    "success": "bg-green-500/15 text-green-400 border-green-500/25",
+    "warning": "bg-yellow-500/15 text-yellow-400 border-yellow-500/25",
+    "error": "bg-red-500/15 text-red-400 border-red-500/25",
+    "info": "bg-blue-500/15 text-blue-400 border-blue-500/25",
+    "accent": "bg-astral-primary/15 text-astral-primary border-astral-primary/25",
+}
+
+
+def _badge_span(label, variant, icon=None, extra_attrs=""):
+    try:
+        vkey = variant if variant in _BADGE_VARIANTS else "default"
+    except TypeError:  # unhashable variant from raw LLM/agent JSON
+        vkey = "default"
+    icon_html = f'<span class="astral-badge-icon">{esc(icon)}</span>' if icon else ""
+    return (
+        f'<span{extra_attrs} class="astral-badge astral-badge--{vkey} inline-flex items-center gap-1 '
+        f'px-2 py-0.5 rounded-full border text-xs font-medium {_BADGE_VARIANTS[vkey]}">'
+        f'{icon_html}<span class="astral-badge-label">{esc(label)}</span></span>'
+    )
+
+
+def render_badge(c):
+    return _badge_span(c.get("label", ""), c.get("variant", "default"),
+                       icon=c.get("icon"), extra_attrs=_base_attrs(c))
+
+
+def render_hero(c):
+    variant = c.get("variant", "default")
+    vkey = variant if variant in ("default", "gradient", "subtle") else "default"
+    eyebrow = c.get("eyebrow")
+    subtitle = c.get("subtitle")
+    icon = c.get("icon")
+    badges = [b for b in (c.get("badges") or []) if isinstance(b, str) and b.strip()]
+    eyebrow_html = (f'<p class="text-xs font-semibold uppercase tracking-widest text-astral-primary mb-1">'
+                    f'{esc(eyebrow)}</p>') if eyebrow else ""
+    icon_html = f'<span class="astral-hero-icon text-3xl mr-3">{esc(icon)}</span>' if icon else ""
+    subtitle_html = f'<p class="text-sm text-astral-muted mt-1">{inline_md(subtitle)}</p>' if subtitle else ""
+    badges_html = ""
+    if badges:
+        badges_html = ('<div class="flex flex-wrap items-center gap-2 mt-3">'
+                       + "".join(_badge_span(b, "accent") for b in badges) + "</div>")
+    return (
+        f'<div{_base_attrs(c)} class="astral-hero astral-hero--{vkey} rounded-xl p-5">'
+        f'{eyebrow_html}<div class="flex items-center">{icon_html}'
+        f'<h2 class="text-2xl font-bold text-astral-text tracking-tight">{inline_md(c.get("title", ""))}</h2></div>'
+        f'{subtitle_html}{badges_html}</div>'
+    )
+
+
+def render_keyvalue(c):
+    items = [i for i in (c.get("items") or []) if isinstance(i, dict)]
+    if not items:
+        return ""
+    cols = c.get("columns", 2)
+    try:
+        n = int(cols)
+    except (TypeError, ValueError, OverflowError):  # NaN/Infinity/non-numeric
+        n = 2
+    n = min(max(n, 1), 4)
+    col_map = {
+        1: "grid-cols-1",
+        2: "grid-cols-1 sm:grid-cols-2",
+        3: "grid-cols-1 sm:grid-cols-2 lg:grid-cols-3",
+        4: "grid-cols-1 sm:grid-cols-2 lg:grid-cols-4",
+    }[n]
+    title = c.get("title")
+    title_html = f'<p class="text-sm font-semibold text-astral-text mb-3">{inline_md(title)}</p>' if title else ""
+    rows = []
+    for item in items:
+        hint = item.get("hint")
+        hint_html = f'<p class="text-xs text-astral-muted mt-0.5">{inline_md(str(hint))}</p>' if hint else ""
+        rows.append(
+            f'<div class="astral-kv-item">'
+            f'<dt class="text-xs text-astral-muted font-medium uppercase tracking-wider">{inline_md(str(item.get("label", "")))}</dt>'
+            f'<dd class="text-sm font-semibold text-astral-text mt-0.5">{esc(item.get("value", ""))}</dd>'
+            f'{hint_html}</div>'
+        )
+    return (f'<div{_base_attrs(c)} class="astral-kv rounded-lg p-4">{title_html}'
+            f'<dl class="grid {col_map} gap-3">{"".join(rows)}</dl></div>')
+
+
+_TIMELINE_VARIANTS = ("default", "success", "warning", "error", "info")
+
+
+def render_timeline(c):
+    items = [i for i in (c.get("items") or []) if isinstance(i, dict)]
+    if not items:
+        return ""
+    title = c.get("title")
+    title_html = f'<p class="text-sm font-semibold text-astral-text mb-3">{inline_md(title)}</p>' if title else ""
+    rows = []
+    for item in items:
+        ivar = item.get("variant", "default")
+        ikey = ivar if ivar in _TIMELINE_VARIANTS else "default"
+        time = item.get("time")
+        desc = item.get("description")
+        time_html = (f'<span class="astral-tl-time text-xs font-mono text-astral-muted whitespace-nowrap">'
+                     f'{esc(str(time))}</span>') if time else ""
+        desc_html = f'<p class="text-xs text-astral-muted mt-0.5">{inline_md(str(desc))}</p>' if desc else ""
+        rows.append(
+            f'<li class="astral-tl-item astral-tl-item--{ikey}">'
+            f'<div class="flex items-baseline gap-3">{time_html}'
+            f'<div class="min-w-0"><p class="text-sm font-medium text-astral-text">{inline_md(str(item.get("title", "")))}</p>'
+            f'{desc_html}</div></div></li>'
+        )
+    return (f'<div{_base_attrs(c)} class="astral-timeline rounded-lg p-4">{title_html}'
+            f'<ol class="astral-tl-list space-y-3">{"".join(rows)}</ol></div>')
+
+
+def render_rating(c):
+    try:
+        max_value = int(c.get("max_value", 5))
+    except (TypeError, ValueError, OverflowError):  # incl. float Infinity
+        max_value = 5
+    max_value = min(max(max_value, 1), 10)
+    try:
+        value = float(c.get("value", 0.0))
+    except (TypeError, ValueError):
+        value = 0.0
+    if not math.isfinite(value):  # NaN survives min/max clamping
+        value = 0.0
+    value = min(max(value, 0.0), float(max_value))
+    filled = int(round(value))
+    stars = "".join(
+        f'<span class="astral-star{" astral-star--filled" if i < filled else ""}">★</span>'
+        for i in range(max_value)
+    )
+    label = c.get("label")
+    subtitle = c.get("subtitle")
+    label_html = (f'<p class="text-xs text-astral-muted font-medium uppercase tracking-wider mb-1">'
+                  f'{inline_md(label)}</p>') if label else ""
+    # value formatted from validated floats — no escaping needed
+    value_html = ""
+    if c.get("show_value", True) is not False:
+        value_html = (f'<span class="text-sm font-semibold text-astral-text ml-2">'
+                      f'{value:g}/{max_value}</span>')
+    sub_html = f'<p class="text-xs text-astral-muted mt-1">{inline_md(subtitle)}</p>' if subtitle else ""
+    return (f'<div{_base_attrs(c)} class="astral-rating rounded-lg p-4">{label_html}'
+            f'<div class="flex items-center"><span class="astral-stars text-lg leading-none">{stars}</span>'
+            f'{value_html}</div>{sub_html}</div>')
+
+
 PRIMITIVE_RENDERERS.update({
     "container": render_container, "text": render_text, "button": render_button, "input": render_input,
     "param_picker": render_param_picker, "card": render_card, "table": render_table, "list": render_list,
@@ -596,12 +776,25 @@ PRIMITIVE_RENDERERS.update({
     "pie_chart": render_pie_chart, "plotly_chart": render_plotly_chart, "color_picker": render_color_picker,
     "theme_apply": render_theme_apply, "file_upload": render_file_upload, "file_download": render_file_download,
     "audio": render_audio,
+    "badge": render_badge, "hero": render_hero, "keyvalue": render_keyvalue,
+    "timeline": render_timeline, "rating": render_rating,
 })
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+def allowed_primitive_types() -> frozenset:
+    """The authoritative renderable-type set (feature 029, FR-020).
+
+    Single source of truth for every LLM-output validator (combine/condense,
+    final-response parsing, the adaptive UI designer): a type the renderer
+    registry can render is valid; anything else is not. Hand-copied
+    whitelists drift — import this instead.
+    """
+    return frozenset(PRIMITIVE_RENDERERS.keys())
+
 
 def render_one(component: Dict[str, Any]) -> str:
     """Render a single primitive dict to an HTML fragment. Never raises on an
