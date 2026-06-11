@@ -5,6 +5,7 @@ renders them into a client target's output (web HTML now); ROTE adapts per
 device upstream. New targets are added via :func:`register_target`.
 """
 from .renderer import (  # noqa: F401
+    allowed_primitive_types,
     render,
     render_one,
     render_component_fragment,

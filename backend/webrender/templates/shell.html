@@ -33,18 +33,19 @@
 <body class="bg-astral-bg text-astral-text">
   <div class="flex flex-col h-screen">
     <!-- Feature 027: server-rendered top bar + static settings menu
-         (role-gated at GET / time; see webrender/chrome/topbar.py) -->
-    <header id="astral-topbar" class="flex items-center border-b border-white/5">%%ASTRAL_TOPBAR%%</header>
+         (role-gated at GET / time; see webrender/chrome/topbar.py).
+         Feature 029: glass/border styling moved into astral.css (#astral-topbar). -->
+    <header id="astral-topbar" class="flex items-center">%%ASTRAL_TOPBAR%%</header>
     <main class="flex flex-1 min-h-0">
       <!-- Canvas: server-rendered UI (astralprims primitives) -->
-      <section id="astral-canvas" class="flex-1 overflow-y-auto p-4 space-y-3"></section>
-      <!-- Chat panel -->
-      <aside class="w-[380px] max-w-[40%] flex flex-col border-l border-white/5 min-h-0">
+      <section id="astral-canvas" class="astral-canvas-panel flex-1 overflow-y-auto p-4 space-y-3"></section>
+      <!-- Chat panel: raised glass rail (astral.css owns surface/border) -->
+      <aside class="astral-chat-panel w-[380px] max-w-[40%] flex flex-col min-h-0">
         <div id="astral-chat" class="flex-1 overflow-y-auto p-3 space-y-2"></div>
-        <form id="astral-form" class="p-3 border-t border-white/5 flex gap-2">
+        <form id="astral-form" class="astral-chat-form p-3 flex gap-2">
           <input id="astral-input" type="text" autocomplete="off" placeholder="Message an agent…" data-tour-target="chat.input"
-                 class="flex-1 rounded-lg bg-white/5 border border-white/10 px-3 py-2 text-sm text-astral-text focus:outline-none focus:border-astral-primary">
-          <button type="submit" class="px-4 py-2 rounded-lg text-sm font-medium bg-astral-primary hover:bg-astral-primary/80 text-white">Send</button>
+                 class="astral-field flex-1 rounded-lg bg-white/5 border border-white/10 px-3 py-2 text-sm text-astral-text">
+          <button type="submit" class="astral-btn astral-btn-primary px-4 py-2 rounded-lg text-sm font-medium bg-astral-primary text-white">Send</button>
         </form>
       </aside>
     </main>
