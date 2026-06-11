@@ -5,11 +5,9 @@ Supports Python-like expressions with row context, using AST validation
 for security. Provides fallback to restricted eval for performance.
 '''
 import ast
-import operator
 import math
-import re
 import numpy as np
-from typing import Any, Dict, Optional, Union, Callable
+from typing import Any, Dict, Callable
 
 
 class ExpressionEvaluator:
@@ -126,7 +124,7 @@ class ExpressionEvaluator:
                     if attr_name not in self.ALLOWED_ATTRIBUTES:
                         # Sometimes node.func corresponds to an object's attribute (like pd.Series.str.contains)
                         # Let's be lenient on pandas attribute chains for string manipulation within eval
-                        if not attr_name in ['contains', 'str', 'where']:
+                        if attr_name not in ['contains', 'str', 'where']:
                             raise ValueError(f"Disallowed attribute: {attr_name}")
     
     def compile(self) -> Callable:

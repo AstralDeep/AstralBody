@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import uuid
 
-import pytest
 
 
 def test_list_is_scoped_to_caller(repo, make_event):

@@ -11,15 +11,12 @@ This test simulates the user journey and verifies that:
 
 import sys
 import os
-import json
-import asyncio
-from unittest.mock import Mock, patch, AsyncMock
-from typing import Dict, Any, List
+from unittest.mock import Mock, AsyncMock
 
 # Add backend to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from shared.progress import ProgressPhase, ProgressStep, ProgressEvent, ProgressEmitter
+from shared.progress import ProgressPhase, ProgressStep, ProgressEmitter
 
 
 def simulate_user_journey():
@@ -153,7 +150,7 @@ def test_error_handling():
     assert error_event is not None
     assert error_event.step == ProgressStep.ERROR
     assert error_event.percentage == 100
-    assert error_event.data["error"] == True
+    assert error_event.data["error"] is True
     assert "API timeout" in str(error_event.data["error_details"])
     
     # Verify UI would transition back to chat (as per AgentCreatorPage.tsx line 104-106)
@@ -168,7 +165,6 @@ def test_progress_state_transitions():
     print("\nTesting progress state transitions...")
     
     # Simulate what the frontend hook does
-    from shared.progress import ProgressEvent
     
     # Create a sample event stream
     events = []

@@ -4,11 +4,10 @@ Adaptive Runtime Intelligence tool for the Claude Connectors Agent — US-22.
 Analyzes incoming requests and recommends optimal agent dispatch.
 """
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 from astralprims import (
-    Table, Card, Text, Alert, Container,
-    create_ui_response,
+    Table, Text, Alert, create_ui_response,
 )
 
 logger = logging.getLogger("Connectors.Runtime")
@@ -74,7 +73,7 @@ def handle_adaptive_routing(args: Dict[str, Any]) -> Dict[str, Any]:
         rows.append([agent["name"], confidence, reason])
 
     components = [
-        Text(content=f"Adaptive Routing Recommendation", variant="h2"),
+        Text(content="Adaptive Routing Recommendation", variant="h2"),
         Text(content=f"Query: {query[:100]}", variant="caption"),
         Table(headers=headers, rows=rows),
     ]

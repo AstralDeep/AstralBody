@@ -8,25 +8,22 @@ Tools split into two categories:
 """
 import os
 import sys
-import json
 import logging
-from datetime import datetime
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from astralprims import (
     Text, Card, Table, Alert, MetricCard, Grid,
-    BarChart, PieChart, LineChart, List_, Tabs, TabItem,
+    List_, Tabs, TabItem,
     create_ui_response,
 )
-from agents.linkedin.linkedin_api import LinkedInClient, REACTION_TYPES
+from agents.linkedin.linkedin_api import LinkedInClient
 from agents.linkedin.caai_linkedin_knowledge import (
     CONTENT_FRAMES, CONTENT_FRAME_BY_ID,
-    CAAI_BRAND_VOICE, ENGAGEMENT_BEST_PRACTICES, INDUSTRY_BENCHMARKS,
-    LINKEDIN_PAGE,
-    classify_post_to_frame, get_benchmark_rating,
-    CAAI_MISSION, EXPERTISE_AREAS, KEY_PERSONNEL, PROJECT_HISTORY,
+    CAAI_BRAND_VOICE, ENGAGEMENT_BEST_PRACTICES, LINKEDIN_PAGE,
+    get_benchmark_rating,
+    EXPERTISE_AREAS, PROJECT_HISTORY,
 )
 
 logger = logging.getLogger("LinkedInTools")
@@ -86,7 +83,7 @@ def get_my_profile(
 
     name = profile.get("name", "Unknown")
     email = profile.get("email", "N/A")
-    picture = profile.get("picture", "")
+    profile.get("picture", "")
     person_id = profile.get("sub", "")
     verified = profile.get("email_verified", False)
 

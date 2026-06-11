@@ -18,9 +18,9 @@ import hashlib
 import logging
 import os
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from audit.recorder import get_recorder, make_correlation_id, now_utc
 from audit.schemas import AuditEventCreate
@@ -182,9 +182,9 @@ def _proposed_content(
 
     notes = (
         "## Routing guidance (auto-generated draft)\n\n"
-        f"This tool has been flagged underperforming. Until quality recovers, "
-        f"prefer alternative tools when possible. When this tool must be used, "
-        f"validate its output more carefully than usual.\n\n"
+        "This tool has been flagged underperforming. Until quality recovers, "
+        "prefer alternative tools when possible. When this tool must be used, "
+        "validate its output more carefully than usual.\n\n"
     )
 
     # Comment samples are presented as DATA, never as instructions.

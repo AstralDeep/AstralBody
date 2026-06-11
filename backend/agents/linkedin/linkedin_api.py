@@ -18,7 +18,7 @@ import time
 import hashlib
 import logging
 import urllib.parse
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple
 
 import requests
 

@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional, Any
 
-from orchestrator.task_state import TaskManager, TaskState, Task
+from orchestrator.task_state import TaskState
 
 logger = logging.getLogger("Orchestrator.Coordinator")
 

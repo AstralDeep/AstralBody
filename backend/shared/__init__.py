@@ -24,3 +24,11 @@ for _new, _old in (
 del _new, _old, _os
 
 from .progress import ProgressEvent, ProgressPhase, ProgressStep, ProgressEmitter, create_log_event  # noqa: E402
+
+__all__ = [
+    "ProgressEvent",
+    "ProgressPhase",
+    "ProgressStep",
+    "ProgressEmitter",
+    "create_log_event",
+]

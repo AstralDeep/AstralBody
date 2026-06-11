@@ -7,7 +7,7 @@ runtime-concurrency limit is handled by reusing the existing
 """
 from __future__ import annotations
 
-from .cron import ScheduleError, interval_seconds
+from .cron import interval_seconds
 
 
 class GovernanceError(ValueError):

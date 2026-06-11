@@ -1,5 +1,4 @@
 """US-21: Audio primitive serialization and create_ui_response tests."""
-import pytest
 from astralprims import Audio, create_ui_response
 
 
