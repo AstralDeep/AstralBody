@@ -51,6 +51,42 @@ EXPECTED = {
 }
 
 
+# Dashboard primitives introduced by astralprims 0.2.0 (feature 029 follow-up:
+# badge/hero/keyvalue/timeline/rating). Skipped while the environment still has
+# 0.1.x installed so pre-publish images keep passing; once 0.2.0 lands in the
+# image these assert exactly like the durable catalog above.
+EXPECTED_0_2 = {
+    "badge": ("Badge", {"label", "variant", "icon"}),
+    "hero": ("Hero", {"title", "subtitle", "eyebrow", "icon", "variant", "badges"}),
+    "keyvalue": ("KeyValue", {"title", "items", "columns"}),
+    "timeline": ("Timeline", {"title", "items", "variant"}),
+    "rating": ("Rating", {"value", "max_value", "label", "subtitle", "show_value"}),
+}
+
+_HAS_0_2 = all(hasattr(astralprims, cls) for cls, _ in EXPECTED_0_2.values())
+needs_astralprims_0_2 = pytest.mark.skipif(
+    not _HAS_0_2, reason="astralprims < 0.2.0 installed — dashboard primitives ship with 0.2.0"
+)
+
+
+@needs_astralprims_0_2
+@pytest.mark.parametrize("type_name", sorted(EXPECTED_0_2))
+def test_astralprims_exposes_dashboard_type_and_fields(type_name):
+    cls_name, fields = EXPECTED_0_2[type_name]
+    cls = getattr(astralprims, cls_name)
+    inst = cls()
+    assert inst.to_dict()["type"] == type_name
+    missing = fields - set(cls.model_fields.keys())
+    assert not missing, f"{cls_name} missing fields: {missing}"
+
+
+@needs_astralprims_0_2
+def test_from_dict_roundtrips_dashboard_types():
+    for type_name in EXPECTED_0_2:
+        rebuilt = Primitive.from_dict({"type": type_name})
+        assert rebuilt.to_dict()["type"] == type_name
+
+
 @pytest.mark.parametrize("type_name", sorted(EXPECTED))
 def test_astralprims_exposes_type_and_fields(type_name):
     cls_name, fields = EXPECTED[type_name]
