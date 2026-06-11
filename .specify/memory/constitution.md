@@ -1,6 +1,37 @@
 <!--
   Sync Impact Report
   ==================
+  Version change: 2.0.1 → 2.1.0 (MINOR — Principle XI added; III, IX clarified)
+
+  Amendment (2026-06-11, v2.1.0):
+    XI. Continuous Integration (NEW) — the repository MUST carry an automated
+        CI pipeline (GitHub Actions) whose named gates are the enforceable
+        definition of "passes CI" used throughout this constitution: lint,
+        full test suite against a real database, changed-code coverage ≥ 90%,
+        production image build, boot smoke (liveness/readiness probes + the
+        fail-closed configuration gate), secret scan, and registry publish of
+        a versioned image from the main branch.
+    III. Testing Standards — clarified that the 90% threshold is measured on
+        the lines changed by a PR (changed-code coverage), which is the gate
+        CI mechanically enforces; aspirational module-wide coverage remains
+        encouraged but is not the merge gate.
+    IX. Database Migrations — corrected the framework clause to name the
+        project's actual sanctioned mechanism: idempotent, guarded schema
+        migrations executed automatically at application startup
+        (shared/database.py::_init_db). The Alembic wording was an example
+        that never matched reality. Technology Stack updated to match.
+    Development Workflow — "PRs MUST pass CI checks" now references the
+        Principle XI gate set explicitly.
+
+  Templates requiring updates:
+    ✅ .specify/templates/plan-template.md — generic Constitution Check gate,
+       compatible (no gate enumeration embedded)
+    ✅ .specify/templates/spec-template.md — generic, compatible
+    ✅ .specify/templates/tasks-template.md — generic, compatible
+
+  Follow-up TODOs: None
+
+  -- Prior amendment (2026-05-29, v2.0.1) --------------------------------
   Version change: 2.0.0 → 2.0.1 (PATCH — Principle II render-ownership clause corrected)
 
   Amendment (2026-05-29, v2.0.1):
@@ -108,10 +139,15 @@ the same primitives — rather than a parallel reimplementation.
 ### III. Testing Standards
 
 Every new feature MUST include unit and integration tests with
-a minimum of 90% code coverage.
+a minimum of 90% code coverage on the code it changes.
 
 - Tests MUST be written for all new code paths.
-- Coverage MUST be measured and enforced in CI.
+- Coverage MUST be measured and enforced in CI as
+  **changed-code coverage**: the lines added or modified by a
+  pull request MUST be ≥ 90% covered by the test suite. This is
+  the mechanical merge gate (see Principle XI).
+- Module-wide and repository-wide coverage improvements remain
+  encouraged but are not the merge gate.
 - No feature branch may merge without meeting the 90%
   threshold on changed code.
 
@@ -196,10 +232,11 @@ environments is prohibited.
   application startup or as a dedicated step in the deployment
   pipeline. Manual DBA intervention MUST NOT be required for
   routine schema evolution.
-- The project's migration framework (e.g., Alembic for
-  SQLAlchemy) MUST be the single source of truth for schema
-  state. Direct ALTER/CREATE statements applied outside the
-  migration framework are prohibited.
+- The project's migration mechanism — idempotent, guarded
+  schema migrations executed automatically at application
+  startup (`shared/database.py::_init_db`) — MUST be the single
+  source of truth for schema state. Direct ALTER/CREATE
+  statements applied outside this mechanism are prohibited.
 - Migrations MUST be idempotent or guarded against
   re-execution so that repeated deploys are safe.
 - Migrations MUST provide a documented rollback path (down
@@ -249,6 +286,51 @@ incident. Setting the merge bar at production-ready — not
 "works on my machine" — keeps the main branch continuously
 deployable and prevents stub code from rotting in place.
 
+### XI. Continuous Integration
+
+The repository MUST carry an automated CI pipeline that runs on
+every pull request and every push to the main branch. Its gates
+are the enforceable definition of "passes CI" wherever this
+constitution requires it.
+
+- The pipeline MUST run, as independently-reported checks:
+  1. **Lint** — Python lint from the repository-root
+     configuration (Principle IV).
+  2. **Tests** — the complete backend test suite (default suite
+     plus all module suites) against a real database service,
+     excluding only tests that require a live deployed
+     orchestrator.
+  3. **Coverage** — the changed-code coverage gate at ≥ 90%
+     (Principle III).
+  4. **Image build** — the production container image MUST
+     build from a clean checkout on every run.
+  5. **Boot smoke** — the built image MUST answer its liveness
+     and readiness probes in development posture, and a
+     production-posture boot with placeholder or missing
+     secrets MUST exit with the documented configuration-error
+     code, proving the fail-closed gate end-to-end.
+  6. **Secret scan** — committed credential material MUST fail
+     the pipeline (Principle VII).
+- On main-branch pushes that pass all gates, the pipeline MUST
+  publish the container image to the project's container
+  registry with an immutable commit-derived tag and a moving
+  latest tag. The published image is the production deployment
+  artifact.
+- Verification failures and publish failures MUST be
+  distinguishable; a publish failure MUST NOT mask green
+  verification gates.
+- CI-only tooling (linters, coverage tools, scanners) installed
+  in the pipeline environment is not a product dependency under
+  Principle V, but adding one MUST still be documented in the
+  PR that introduces it.
+- No branch may merge to main with a failing required gate.
+
+**Rationale**: Principles III, IV, VII, and X are only as real
+as their enforcement. A named, versioned gate set turns
+"production ready" from a review opinion into a reproducible
+machine verdict, and the registry-published image makes every
+green main commit deployable by pull.
+
 ## Technology Stack
 
 - **Backend**: Python (FastAPI or equivalent ASGI framework)
@@ -259,16 +341,21 @@ deployable and prevents stub code from rotting in place.
   future native targets additive via new orchestrator renderers)
 - **Authentication**: Keycloak IAM
 - **Agent Auth**: RFC 8693 token exchange with attenuated scopes
-- **Database Migrations**: Automated migration framework
-  (e.g., Alembic for SQLAlchemy) executed on deploy/startup
+- **Database Migrations**: Idempotent, guarded startup
+  migrations (`shared/database.py::_init_db`) executed
+  automatically at application boot
+- **Continuous Integration**: GitHub Actions running the
+  Principle XI gate set; container images published to GitHub
+  Container Registry
 - **Containerization**: Docker / Docker Compose
 - **License**: Apache 2.0
 
 ## Development Workflow
 
 - All changes MUST go through pull requests.
-- PRs MUST pass CI checks (linting, tests, coverage) before
-  merge.
+- PRs MUST pass the Principle XI CI gate set (lint, tests,
+  changed-code coverage, image build, boot smoke, secret scan)
+  before merge.
 - PRs introducing new dependencies MUST include lead developer
   approval.
 - PRs that modify the database schema MUST include the
@@ -303,4 +390,4 @@ guidance when conflicts arise.
   adherence to these principles. Violations MUST be resolved
   before merge.
 
-**Version**: 2.0.1 | **Ratified**: 2026-03-11 | **Last Amended**: 2026-05-29
+**Version**: 2.1.0 | **Ratified**: 2026-03-11 | **Last Amended**: 2026-06-11
