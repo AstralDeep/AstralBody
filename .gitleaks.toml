@@ -1,0 +1,46 @@
+# Gitleaks configuration — feature 029 (T028, FR-037).
+#
+# Extends the FULL default ruleset (nothing disabled). The allowlist below
+# excuses ONLY verified intentional placeholders and test fixtures:
+#   - backend test fixtures: pytest HMAC secrets ("pytest-audit-secret",
+#     "alternate-secret-for-test"), fake agent keys ("secret123",
+#     "test-secret-key"), and the hardcoded UNSIGNED mock JWT used by
+#     mock-auth tests (backend/tests, backend/*/tests)
+#   - .env.example shipped placeholders (the exit-78 boot gate refuses them
+#     in production: session_store.assert_production_posture)
+#   - mock-auth dev literals ("dev-token") and the documented placeholder
+#     secrets ("change-me", "dev-audit-hmac-secret-change-me-in-prod")
+#   - throwaway CI-only values used by .github/workflows/ci.yml
+#     (ci-test-agent-key, ci-test-hmac-secret, DB password astral_ci) and the
+#     local-dev compose default DB password (astral_dev)
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Verified intentional dev/test placeholders — not credentials"
+paths = [
+  # Backend test fixtures (mock JWTs, pytest-only secrets, fake keys)
+  '''backend/tests/.*''',
+  '''backend/.*/tests/.*''',
+  # Shipped example env file — placeholder values only; production boot
+  # refuses them (exit 78)
+  '''\.env\.example$''',
+]
+regexes = [
+  # Mock-auth literal token (development mode only; removed from client.js by 028)
+  '''dev-token''',
+  # Shipped audit-HMAC placeholder + its generic form; both are refused by the
+  # production boot gate (orchestrator/session_store._DEV_PLACEHOLDER_SECRETS)
+  '''dev-audit-hmac-secret-change-me-in-prod''',
+  '''change-me''',
+  # CI-only throwaway values defined in .github/workflows/ci.yml
+  '''ci-test-[A-Za-z0-9_-]+''',
+  '''astral_ci''',
+  # Local-dev default DB password (docker-compose / start-docker.sh fallback)
+  '''astral_dev''',
+  # The repo's hardcoded UNSIGNED mock JWT (alg HS256 header + a payload that
+  # starts with {"realm_access":..., empty signature segment). Lives in
+  # backend tests today and in deleted frontend/ files in git history.
+  '''eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.eyJyZWFsbV9hY2Nlc3M''',
+]
