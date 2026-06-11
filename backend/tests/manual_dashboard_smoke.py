@@ -102,7 +102,7 @@ page = f"""<!DOCTYPE html>
 <script src="/app/backend/webrender/static/vendor/tailwind.js"></script>
 <link rel="stylesheet" href="/app/backend/webrender/static/astral.css">
 </head><body><div id="astral-canvas" class="p-4 space-y-3">{html_out}</div></body></html>"""
-Path("/tmp/dashboard_smoke.html").write_text(page, encoding="utf-8")
+Path("./backend/tmp/dashboard_smoke.html").write_text(page, encoding="utf-8")
 
 checks = {
     "hero band": "astral-hero--gradient" in html_out,
