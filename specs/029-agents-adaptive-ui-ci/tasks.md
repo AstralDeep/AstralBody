@@ -48,7 +48,7 @@ Single SDUI backend: `backend/` at repo root; feature tests in `backend/tests/` 
 - [x] T011 [P] [US1] Unit tests for ui_designer: parse/validate/repair matrix (unknown type→container, unknown ref dropped, duplicate ref first-wins, omitted components repair-appended, ERROR refusal, empty layout, garnish id determinism, materializer stamping) — backend/tests/test_ui_designer.py
 - [x] T012 [P] [US1] Persistence + rendering tests: layout upsert/claim-pruning/live_layouts; render_workspace arrangement order, unclaimed fallthrough, data-component-id preservation; snapshot/timeline layout round-trip — backend/tests/test_workspace_layout.py
 - [x] T013 [P] [US1] Integration tests: designer round end-to-end with stubbed LLM (designed render contains all round component_ids), timeout→fallback, flag-off parity, single-component round skips designer, pagination/`component_action` on a referenced component morphs in place under an arrangement — backend/tests/test_ui_designer_integration.py
-- [ ] T014 [US1] Run quickstart designer scenarios in the container against the running orchestrator; verify ROTE degradation by viewport (TABLET/MOBILE widths) and logs (`ui_designer.invoked|designed|fallback`)
+- [x] T014 [US1] Run quickstart designer scenarios in the container against the running orchestrator; verify ROTE degradation by viewport (TABLET/MOBILE widths) and logs (`ui_designer.invoked|designed|fallback`)
 
 **Checkpoint**: US1 delivers the MVP — designed rounds, fail-open, identity intact.
 
@@ -101,7 +101,7 @@ Single SDUI backend: `backend/` at repo root; feature tests in `backend/tests/` 
 - [x] T031 [P] [US4] Create backend/agents/web_research/ per contracts/new-agent-tools.md: web_search (DDG HTML via shared.external_http + stdlib html.parser; optional SEARCH_API_URL/KEY bundle preferred), fetch_page (1 MB/15 s bounds, HTML→text), research_brief (search→fetch ≤5→LLM synthesis via per-session OpenAI-client pattern; cites only fetched URLs), no-fabrication failure Alerts; plus knowledge/capabilities+techniques files
 - [x] T032 [P] [US4] Create backend/agents/summarizer/ per contracts/new-agent-tools.md: summarize_url/summarize_text (Tabs TL;DR/Key points/Quotes, 24k-char cap with truncation Alert), compare_documents (Grid of Cards + differences Table); plus knowledge files
 - [x] T033 [P] [US4] Test suites backend/agents/web_research/tests/ and backend/agents/summarizer/tests/: registry/schema contract, HTML parsing fixtures, egress-gate refusal of private hosts, truncation notice, failure-path Alerts, LLM-stubbed brief/summary structure (≥90% changed-code coverage)
-- [ ] T034 [US4] Register-and-run verification in the container: both agents auto-discovered under AGENT_API_KEY enforcement, smoke prompts from quickstart.md produce the contracted components, audit rows recorded
+- [x] T034 [US4] Register-and-run verification in the container: both agents auto-discovered under AGENT_API_KEY enforcement, smoke prompts from quickstart.md produce the contracted components, audit rows recorded
 
 **Checkpoint**: Research & Knowledge pack live.
 
@@ -116,7 +116,7 @@ Single SDUI backend: `backend/` at repo root; feature tests in `backend/tests/` 
 - [x] T035 [US5] Introduce a CSS custom-property token system (type scale, spacing, semantic colors incl. dark-friendly palette, elevation, radii, motion durations) in backend/webrender/static/ stylesheet(s) and apply to the shell layout in backend/webrender/templates/shell.html (top bar, panels, scrollbars, focus rings)
 - [x] T036 [US5] Restyle the 26 primitive renderers' markup hooks in backend/webrender/renderer.py (classes only — no structural/behavioral changes; tables, cards, metric tiles, charts, tabs, alerts, forms) and the chrome surfaces in backend/webrender/chrome/; add component-arrival/update transitions gated by `prefers-reduced-motion`
 - [x] T037 [P] [US5] Renderer contract tests still green + snapshot-style assertions for the class hooks (no behavioral regressions: actions, param_picker submit, pagination footer, upload/download) — extend backend/tests test files covering webrender
-- [ ] T038 [US5] Browser pass at BROWSER/TABLET/MOBILE viewport widths over the quickstart scenarios; fix visual regressions; confirm reduced-motion honored
+- [x] T038 [US5] Browser pass at BROWSER/TABLET/MOBILE viewport widths over the quickstart scenarios; fix visual regressions; confirm reduced-motion honored
 
 **Checkpoint**: Visual refresh complete.
 
@@ -124,8 +124,8 @@ Single SDUI backend: `backend/` at repo root; feature tests in `backend/tests/` 
 
 ## Phase 8: Polish & Cross-Cutting
 
-- [ ] T039 Full verification in container: both pytest invocations green, `ruff check .` clean from repo root, migrations re-run idempotently on restart, quickstart executed top-to-bottom
-- [ ] T040 [P] Docstrings/documentation sweep for all new public functions (Constitution VI); update CLAUDE.md feature-029 summary block (agent-context script) and README agent list if present
+- [x] T039 Full verification in container: both pytest invocations green, `ruff check .` clean from repo root, migrations re-run idempotently on restart, quickstart executed top-to-bottom
+- [x] T040 [P] Docstrings/documentation sweep for all new public functions (Constitution VI); update CLAUDE.md feature-029 summary block (agent-context script) and README agent list if present
 - [ ] T041 Final live verification: restart stack from a clean image build (`make up`), open http://localhost:8001/ in a real browser, execute all five user-story independent tests, capture evidence for the PR
 - [ ] T042 Open PR to main with: constitution v2.1.0 note, CI-tooling declaration (ruff/pytest-cov/diff-cover/gitleaks — Constitution V/XI), destructive-migration approval note (removed-agent scope rows), and spec/plan links; confirm the CI pipeline runs green end-to-end on the PR
 
