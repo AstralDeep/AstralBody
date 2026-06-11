@@ -22,6 +22,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
+from orchestrator import ui_designer  # noqa: E402
 from orchestrator.orchestrator import Orchestrator  # noqa: E402
 from orchestrator.workspace import WorkspaceManager, layout_key_for  # noqa: E402
 
@@ -164,8 +165,11 @@ def test_designed_round_persists_layout_and_renders_canvas(chat_env, audit_event
     ops = _run(fake._deliver_round_components(ws, comps, chat_id, user_id,
                                               user_request="compare things"))
     assert [op["component_id"] for op in ops] == ids
-    # The designer LLM ran under the ui_designer audit feature.
-    assert [c["feature"] for c in fake._llm_calls] == ["ui_designer"]
+    # Every designer pass runs under the ui_designer audit feature. The stub
+    # regurgitates the same layout, so the multi-round loop deterministically
+    # converges at draft + one stable refinement = exactly 2 passes.
+    assert {c["feature"] for c in fake._llm_calls} == {"ui_designer"}
+    assert len(fake._llm_calls) == min(2, ui_designer.designer_max_rounds())
     # Arrangement persisted with the deterministic round key.
     live = fake.workspace.live_layouts(chat_id, user_id)
     assert len(live) == 1

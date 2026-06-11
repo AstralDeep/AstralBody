@@ -17,6 +17,8 @@ from __future__ import annotations
 import html
 import json
 import logging
+import math
+import re as _re
 from typing import Any, Callable, Dict, List
 
 logger = logging.getLogger("webrender")
@@ -71,8 +73,6 @@ def _children(comp: Dict[str, Any]) -> List[Dict[str, Any]]:
 def render_children(items: List[Any]) -> str:
     return "".join(render_one(c) for c in items if isinstance(c, dict))
 
-
-import re as _re
 
 _SAFE_DATA_ATTR = _re.compile(r"^data-[a-z0-9-]+$")
 
@@ -619,6 +619,154 @@ def render_audio(c):
             f'{label_html}{media}{desc_html}</div>')
 
 
+# ---------------------------------------------------------------------------
+# Dashboard & status primitives (astralprims >= 0.2.0)
+# ---------------------------------------------------------------------------
+
+_BADGE_VARIANTS = {
+    "default": "bg-white/10 text-astral-text border-white/15",
+    "success": "bg-green-500/15 text-green-400 border-green-500/25",
+    "warning": "bg-yellow-500/15 text-yellow-400 border-yellow-500/25",
+    "error": "bg-red-500/15 text-red-400 border-red-500/25",
+    "info": "bg-blue-500/15 text-blue-400 border-blue-500/25",
+    "accent": "bg-astral-primary/15 text-astral-primary border-astral-primary/25",
+}
+
+
+def _badge_span(label, variant, icon=None, extra_attrs=""):
+    try:
+        vkey = variant if variant in _BADGE_VARIANTS else "default"
+    except TypeError:  # unhashable variant from raw LLM/agent JSON
+        vkey = "default"
+    icon_html = f'<span class="astral-badge-icon">{esc(icon)}</span>' if icon else ""
+    return (
+        f'<span{extra_attrs} class="astral-badge astral-badge--{vkey} inline-flex items-center gap-1 '
+        f'px-2 py-0.5 rounded-full border text-xs font-medium {_BADGE_VARIANTS[vkey]}">'
+        f'{icon_html}<span class="astral-badge-label">{esc(label)}</span></span>'
+    )
+
+
+def render_badge(c):
+    return _badge_span(c.get("label", ""), c.get("variant", "default"),
+                       icon=c.get("icon"), extra_attrs=_base_attrs(c))
+
+
+def render_hero(c):
+    variant = c.get("variant", "default")
+    vkey = variant if variant in ("default", "gradient", "subtle") else "default"
+    eyebrow = c.get("eyebrow")
+    subtitle = c.get("subtitle")
+    icon = c.get("icon")
+    badges = [b for b in (c.get("badges") or []) if isinstance(b, str) and b.strip()]
+    eyebrow_html = (f'<p class="text-xs font-semibold uppercase tracking-widest text-astral-primary mb-1">'
+                    f'{esc(eyebrow)}</p>') if eyebrow else ""
+    icon_html = f'<span class="astral-hero-icon text-3xl mr-3">{esc(icon)}</span>' if icon else ""
+    subtitle_html = f'<p class="text-sm text-astral-muted mt-1">{inline_md(subtitle)}</p>' if subtitle else ""
+    badges_html = ""
+    if badges:
+        badges_html = ('<div class="flex flex-wrap items-center gap-2 mt-3">'
+                       + "".join(_badge_span(b, "accent") for b in badges) + "</div>")
+    return (
+        f'<div{_base_attrs(c)} class="astral-hero astral-hero--{vkey} rounded-xl p-5">'
+        f'{eyebrow_html}<div class="flex items-center">{icon_html}'
+        f'<h2 class="text-2xl font-bold text-astral-text tracking-tight">{inline_md(c.get("title", ""))}</h2></div>'
+        f'{subtitle_html}{badges_html}</div>'
+    )
+
+
+def render_keyvalue(c):
+    items = [i for i in (c.get("items") or []) if isinstance(i, dict)]
+    if not items:
+        return ""
+    cols = c.get("columns", 2)
+    try:
+        n = int(cols)
+    except (TypeError, ValueError, OverflowError):  # NaN/Infinity/non-numeric
+        n = 2
+    n = min(max(n, 1), 4)
+    col_map = {
+        1: "grid-cols-1",
+        2: "grid-cols-1 sm:grid-cols-2",
+        3: "grid-cols-1 sm:grid-cols-2 lg:grid-cols-3",
+        4: "grid-cols-1 sm:grid-cols-2 lg:grid-cols-4",
+    }[n]
+    title = c.get("title")
+    title_html = f'<p class="text-sm font-semibold text-astral-text mb-3">{inline_md(title)}</p>' if title else ""
+    rows = []
+    for item in items:
+        hint = item.get("hint")
+        hint_html = f'<p class="text-xs text-astral-muted mt-0.5">{inline_md(str(hint))}</p>' if hint else ""
+        rows.append(
+            f'<div class="astral-kv-item">'
+            f'<dt class="text-xs text-astral-muted font-medium uppercase tracking-wider">{inline_md(str(item.get("label", "")))}</dt>'
+            f'<dd class="text-sm font-semibold text-astral-text mt-0.5">{esc(item.get("value", ""))}</dd>'
+            f'{hint_html}</div>'
+        )
+    return (f'<div{_base_attrs(c)} class="astral-kv rounded-lg p-4">{title_html}'
+            f'<dl class="grid {col_map} gap-3">{"".join(rows)}</dl></div>')
+
+
+_TIMELINE_VARIANTS = ("default", "success", "warning", "error", "info")
+
+
+def render_timeline(c):
+    items = [i for i in (c.get("items") or []) if isinstance(i, dict)]
+    if not items:
+        return ""
+    title = c.get("title")
+    title_html = f'<p class="text-sm font-semibold text-astral-text mb-3">{inline_md(title)}</p>' if title else ""
+    rows = []
+    for item in items:
+        ivar = item.get("variant", "default")
+        ikey = ivar if ivar in _TIMELINE_VARIANTS else "default"
+        time = item.get("time")
+        desc = item.get("description")
+        time_html = (f'<span class="astral-tl-time text-xs font-mono text-astral-muted whitespace-nowrap">'
+                     f'{esc(str(time))}</span>') if time else ""
+        desc_html = f'<p class="text-xs text-astral-muted mt-0.5">{inline_md(str(desc))}</p>' if desc else ""
+        rows.append(
+            f'<li class="astral-tl-item astral-tl-item--{ikey}">'
+            f'<div class="flex items-baseline gap-3">{time_html}'
+            f'<div class="min-w-0"><p class="text-sm font-medium text-astral-text">{inline_md(str(item.get("title", "")))}</p>'
+            f'{desc_html}</div></div></li>'
+        )
+    return (f'<div{_base_attrs(c)} class="astral-timeline rounded-lg p-4">{title_html}'
+            f'<ol class="astral-tl-list space-y-3">{"".join(rows)}</ol></div>')
+
+
+def render_rating(c):
+    try:
+        max_value = int(c.get("max_value", 5))
+    except (TypeError, ValueError, OverflowError):  # incl. float Infinity
+        max_value = 5
+    max_value = min(max(max_value, 1), 10)
+    try:
+        value = float(c.get("value", 0.0))
+    except (TypeError, ValueError):
+        value = 0.0
+    if not math.isfinite(value):  # NaN survives min/max clamping
+        value = 0.0
+    value = min(max(value, 0.0), float(max_value))
+    filled = int(round(value))
+    stars = "".join(
+        f'<span class="astral-star{" astral-star--filled" if i < filled else ""}">★</span>'
+        for i in range(max_value)
+    )
+    label = c.get("label")
+    subtitle = c.get("subtitle")
+    label_html = (f'<p class="text-xs text-astral-muted font-medium uppercase tracking-wider mb-1">'
+                  f'{inline_md(label)}</p>') if label else ""
+    # value formatted from validated floats — no escaping needed
+    value_html = ""
+    if c.get("show_value", True) is not False:
+        value_html = (f'<span class="text-sm font-semibold text-astral-text ml-2">'
+                      f'{value:g}/{max_value}</span>')
+    sub_html = f'<p class="text-xs text-astral-muted mt-1">{inline_md(subtitle)}</p>' if subtitle else ""
+    return (f'<div{_base_attrs(c)} class="astral-rating rounded-lg p-4">{label_html}'
+            f'<div class="flex items-center"><span class="astral-stars text-lg leading-none">{stars}</span>'
+            f'{value_html}</div>{sub_html}</div>')
+
+
 PRIMITIVE_RENDERERS.update({
     "container": render_container, "text": render_text, "button": render_button, "input": render_input,
     "param_picker": render_param_picker, "card": render_card, "table": render_table, "list": render_list,
@@ -628,6 +776,8 @@ PRIMITIVE_RENDERERS.update({
     "pie_chart": render_pie_chart, "plotly_chart": render_plotly_chart, "color_picker": render_color_picker,
     "theme_apply": render_theme_apply, "file_upload": render_file_upload, "file_download": render_file_download,
     "audio": render_audio,
+    "badge": render_badge, "hero": render_hero, "keyvalue": render_keyvalue,
+    "timeline": render_timeline, "rating": render_rating,
 })
 
 

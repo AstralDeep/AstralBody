@@ -14,7 +14,7 @@ from typing import Dict, Any
 import requests
 
 from astralprims import (
-    Alert, Collapsible, Text, Container, Divider, Card,
+    Alert, Collapsible, Text, Container,
     create_ui_response,
 )
 from shared.external_http import request as http_request, ExternalHttpError, validate_egress_url
@@ -340,17 +340,113 @@ def handle_canva_credentials_check(args: Dict[str, Any]) -> Dict[str, Any]:
 # Interactive Artifacts / Dashboards
 # ---------------------------------------------------------------------------
 
+def _ui(components) -> Dict[str, Any]:
+    """create_ui_response for a mix of primitives and plain dicts.
+
+    Plain dicts let these tools emit primitive types newer than the
+    container's installed astralprims (e.g. hero/timeline/keyvalue from
+    0.2.0) — the renderer consumes dicts either way.
+    """
+    return {
+        "_ui_components": [c if isinstance(c, dict) else c.to_dict() for c in components],
+        "_data": None,
+    }
+
+
+_SAMPLE_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+
+
+def _sample_series(seed: int, n: int = 6) -> list:
+    """Deterministic, pleasant-looking placeholder series."""
+    return [((seed * 7 + k * 5) % 17) + 4 for k in range(n)]
+
+
+def _artifact_widget(section: Dict[str, Any], i: int) -> Dict[str, Any]:
+    """One real, immediately-renderable widget per dashboard section."""
+    wtype = section.get("widget_type", "text")
+    title = section.get("title", f"Widget {i + 1}")
+    source = section.get("data_source")
+    labels = section.get("labels") or _SAMPLE_LABELS
+    values = section.get("values") or _sample_series(i, len(labels))
+    subtitle = f"Source: {source}" if source else "Sample data"
+
+    if wtype == "metric":
+        return {"type": "metric", "title": title,
+                "value": str(section.get("value") or max(values)),
+                "subtitle": subtitle,
+                "variant": section.get("variant", "default")}
+
+    if wtype == "chart":
+        kind = section.get("chart_kind", "bar")
+        if kind == "pie":
+            return {"type": "pie_chart", "title": title,
+                    "labels": list(labels), "data": list(values)}
+        chart_type = "line_chart" if kind == "line" else "bar_chart"
+        return {"type": chart_type, "title": title, "labels": list(labels),
+                "datasets": [{"label": title, "data": list(values)}]}
+
+    if wtype == "table":
+        headers = section.get("headers") or ["Item", "Value"]
+        rows = section.get("rows") or [[label, value] for label, value in zip(labels, values)]
+        return {"type": "table", "title": title, "headers": list(headers),
+                "rows": [list(r) for r in rows]}
+
+    if wtype == "timeline":
+        events = [e for e in (section.get("events") or []) if isinstance(e, dict)]
+        if not events:
+            events = [{"time": f"{9 + k}:00", "title": f"{label} — sample entry"}
+                      for k, label in enumerate(labels[:4])]
+        return {"type": "timeline", "title": title, "items": events}
+
+    if wtype == "map":
+        items = [{"label": label, "value": str(value)} for label, value in zip(labels, values)]
+        return {"type": "keyvalue", "title": f"{title} (map preview)",
+                "items": items, "columns": 2}
+
+    # "text" and anything unrecognized
+    return {"type": "card", "title": title, "content": [
+        {"type": "text", "variant": "markdown",
+         "content": section.get("description") or subtitle},
+    ]}
+
+
 _ARTIFACTS_METADATA = {
     "name": "interactive_artifacts",
-    "description": "Generate interactive dashboard specifications.",
+    "description": (
+        "Build a live interactive dashboard preview from real UI widgets "
+        "(metrics, charts, tables, timelines, key-value sheets). Provide "
+        "realistic sample labels/values/rows per section — they render "
+        "immediately; omitted data falls back to placeholder series."
+    ),
     "input_schema": {
         "type": "object",
         "properties": {
             "title": {"type": "string", "description": "Dashboard title"},
+            "subtitle": {"type": "string", "description": "One-line dashboard subtitle"},
             "sections": {"type": "array", "items": {"type": "object", "properties": {
-                "widget_type": {"type": "string", "enum": ["chart", "metric", "table", "map", "text"]},
+                "widget_type": {"type": "string",
+                                "enum": ["chart", "metric", "table", "timeline", "map", "text"]},
                 "title": {"type": "string"},
                 "data_source": {"type": "string"},
+                "description": {"type": "string", "description": "Body text for text widgets"},
+                "chart_kind": {"type": "string", "enum": ["bar", "line", "pie"]},
+                "labels": {"type": "array", "items": {"type": "string"},
+                           "description": "Category/axis labels (realistic sample data encouraged)"},
+                "values": {"type": "array", "items": {"type": "number"},
+                           "description": "Series values matching labels"},
+                "value": {"type": "string", "description": "Headline value for metric widgets"},
+                "variant": {"type": "string", "enum": ["default", "success", "warning", "error"]},
+                "headers": {"type": "array", "items": {"type": "string"}},
+                "rows": {"type": "array", "items": {"type": "array"},
+                         "description": "Table rows matching headers"},
+                "events": {"type": "array", "description": "Timeline entries",
+                           "items": {"type": "object", "properties": {
+                               "time": {"type": "string"},
+                               "title": {"type": "string"},
+                               "description": {"type": "string"},
+                               "variant": {"type": "string",
+                                           "enum": ["default", "success", "warning", "error", "info"]},
+                           }}},
             }}},
         },
         "required": ["title", "sections"],
@@ -360,20 +456,21 @@ _ARTIFACTS_METADATA = {
 
 def handle_artifacts(args: Dict[str, Any]) -> Dict[str, Any]:
     title = args.get("title", "Dashboard")
-    sections = args.get("sections", [])
+    sections = [s for s in args.get("sections", []) if isinstance(s, dict)]
 
-    components = [
-        Text(content=title, variant="h2"),
-        Text(content="Dashboard layout specification — ready for implementation:", variant="caption"),
-        Divider(),
-    ]
-    for i, section in enumerate(sections):
-        desc = f"Type: {section.get('widget_type', 'unknown')} | Source: {section.get('data_source', 'N/A')}"
-        components.append(Card(
-            title=section.get("title", f"Widget {i + 1}"),
-            content=[Text(content=desc, variant="body")],
-        ))
-    return create_ui_response(components)
+    components: list = [{
+        "type": "hero",
+        "title": title,
+        "eyebrow": "Interactive dashboard",
+        "subtitle": args.get("subtitle")
+        or "Live preview with sample data — wire up data sources to go live.",
+        "variant": "gradient",
+        "badges": [f"{len(sections)} widgets"],
+    }]
+    components.extend(_artifact_widget(section, i) for i, section in enumerate(sections))
+    components.append({"type": "text", "variant": "caption",
+                       "content": "Values shown are sample data unless a section supplied real ones."})
+    return _ui(components)
 
 
 # ---------------------------------------------------------------------------
@@ -448,17 +545,27 @@ def handle_design(args: Dict[str, Any]) -> Dict[str, Any]:
     context = args.get("context", "web")
     style = args.get("style_preferences", "minimal")
 
-    palette = _COLOR_PALETTES.get(style, _COLOR_PALETTES["minimal"])
-    swatches = "  ".join(f"[{c}]" for c in palette)
+    style_key = style if style in _COLOR_PALETTES else "minimal"
+    palette = _COLOR_PALETTES[style_key]
 
     components = [
-        Text(content=f"Design Recommendations: {context} ({style})", variant="h2"),
-        Card(title="Color Palette", content=[Text(content=swatches)]),
-        Card(title="Typography", content=[Text(content="Headings: Inter, system-ui, sans-serif  |  Body: 16px, 1.6 line-height")]),
-        Card(title="Spacing", content=[Text(content="Use 8px grid: 8, 16, 24, 32, 48, 64")]),
-        Card(title="Accessibility", content=[Text(content="Ensure WCAG 2.1 AA contrast ratios. Test with keyboard and screen reader.")]),
+        {"type": "hero", "title": "Design recommendations",
+         "eyebrow": context, "subtitle": f"Aesthetic direction: {style_key}",
+         "variant": "subtle", "badges": [style_key, context]},
+        # Equal slices colored by the palette itself — a real swatch wheel.
+        {"type": "pie_chart", "title": f"Color palette — {style_key}",
+         "labels": list(palette), "data": [1] * len(palette), "colors": list(palette)},
+        {"type": "keyvalue", "title": "Foundations", "columns": 3, "items": [
+            {"label": "Headings", "value": "Inter / system-ui", "hint": "semibold, tight tracking"},
+            {"label": "Body", "value": "16px / 1.6", "hint": "max 70ch line length"},
+            {"label": "Spacing", "value": "8px grid", "hint": "8, 16, 24, 32, 48, 64"},
+        ]},
+        Alert(
+            variant="info", title="Accessibility",
+            message="Ensure WCAG 2.1 AA contrast ratios. Test with keyboard and screen reader.",
+        ),
     ]
-    return create_ui_response(components)
+    return _ui(components)
 
 
 # ---------------------------------------------------------------------------

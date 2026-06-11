@@ -1,14 +1,21 @@
 """Feature 029 — the adaptive UI designer (contracts/ui-designer-llm.md).
 
-After a chat round produces two or more rich components, one LLM pass designs
-an *arrangement*: a layout tree built ONLY from existing astralprims types
-whose leaves REFERENCE the round's workspace components by ``component_id``
-(``{"type": "ref", "component_id": ...}``). Tool-produced content is never
-rewritten, merged, or dropped — identities, in-place refresh, pagination and
-supersede semantics survive intact (the hybrid model the spec mandates).
-The designer may add its own "garnish" (headline metrics, narrative text,
-grouping containers) with deterministic ``dg_*`` ids so re-designs update
-rather than duplicate.
+After a chat round produces two or more rich components, the designer runs a
+bounded multi-round LLM conversation that produces an *arrangement*: a layout
+tree built ONLY from existing astralprims types whose leaves REFERENCE the
+round's workspace components by ``component_id``
+(``{"type": "ref", "component_id": ...}``). The first pass drafts the
+arrangement; while rounds remain (``UI_DESIGNER_MAX_ROUNDS``, default 3) the
+designer is shown its own current arrangement and asked to critique and
+improve it — replying ``DONE`` ends the loop early, and any failed refinement
+keeps the best arrangement so far. A first pass that produces unusable JSON
+gets bounded format-retries with the failure reason fed back.
+
+Tool-produced content is never rewritten, merged, or dropped — identities,
+in-place refresh, pagination and supersede semantics survive intact (the
+hybrid model the spec mandates). The designer may add its own "garnish"
+(headline metrics, narrative text, grouping containers) with deterministic
+``dg_*`` ids so re-designs update rather than duplicate.
 
 Failure semantics are strictly fail-open: any error, timeout, refusal or
 invalid output makes the caller fall back to the legacy flat append. The
@@ -36,8 +43,12 @@ logger = logging.getLogger("orchestrator.ui_designer")
 #: Rounds below this component count render directly (no designer latency).
 MIN_DESIGN_COMPONENTS = 2
 
-#: Designer time budget default; operator override via UI_DESIGNER_TIMEOUT_SECONDS.
+#: Designer per-pass time budget default; operator override via UI_DESIGNER_TIMEOUT_SECONDS.
 DEFAULT_TIMEOUT_SECONDS = 8.0
+
+#: Max LLM passes per design (1 draft + refinements/format-retries);
+#: operator override via UI_DESIGNER_MAX_ROUNDS. 1 == legacy single pass.
+DEFAULT_MAX_ROUNDS = 3
 
 REF_TYPE = "ref"
 GARNISH_ID_PREFIX = "dg_"
@@ -50,6 +61,8 @@ _CHILD_KEYS = ("children", "content")
 _MAX_REQUEST_CHARS = 1000
 _MAX_COMPONENT_EXCERPT_CHARS = 1500
 _MAX_CANVAS_LINES = 30
+_MAX_SKETCH_LINES = 60
+_MAX_LAYOUT_JSON_CHARS = 4000
 
 
 def designer_enabled() -> bool:
@@ -58,13 +71,23 @@ def designer_enabled() -> bool:
 
 
 def designer_timeout_seconds() -> float:
-    """Operator-configurable design budget (FR-023)."""
+    """Operator-configurable per-pass design budget (FR-023)."""
     raw = os.getenv("UI_DESIGNER_TIMEOUT_SECONDS", "")
     try:
         value = float(raw)
         return value if value > 0 else DEFAULT_TIMEOUT_SECONDS
     except (TypeError, ValueError):
         return DEFAULT_TIMEOUT_SECONDS
+
+
+def designer_max_rounds() -> int:
+    """Operator-configurable pass cap; total wall clock ≤ budget × rounds."""
+    raw = os.getenv("UI_DESIGNER_MAX_ROUNDS", "")
+    try:
+        value = int(raw)
+        return value if value >= 1 else DEFAULT_MAX_ROUNDS
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_ROUNDS
 
 
 def should_design(round_components: Sequence[Dict[str, Any]], *, timeline_mode: bool = False) -> bool:
@@ -79,22 +102,41 @@ def should_design(round_components: Sequence[Dict[str, Any]], *, timeline_mode: 
 
 _LAYOUT_GUIDANCE = """LAYOUT VOCABULARY (compose freely from these astralprims types):
 - {"type": "ref", "component_id": "<id>"} — places one of the round's components. THE ONLY way to include tool output.
+- "hero": {"type": "hero", "title": "...", "subtitle": "...", "eyebrow": "...", "variant": "default|gradient|subtle", "badges": ["..."]} — ONE anchoring masthead at the top of dashboard/report rounds.
 - "grid": {"type": "grid", "columns": 2, "children": [...]} — side-by-side groups (2-3 columns max).
 - "card": {"type": "card", "title": "...", "content": [...]} — titled grouping with an accent bar.
 - "tabs": {"type": "tabs", "tabs": [{"label": "...", "content": [...]}]} — alternate views of related detail.
 - "collapsible": {"type": "collapsible", "title": "...", "content": [...], "default_open": false} — secondary detail.
 - "text": {"type": "text", "content": "...", "variant": "h2|h3|body|caption|markdown"} — short connective narrative.
 - "metric": {"type": "metric", "title": "...", "value": "...", "subtitle": "...", "variant": "default|success|warning|error"} — headline takeaway.
+- "keyvalue": {"type": "keyvalue", "title": "...", "items": [{"label": "...", "value": "...", "hint": "..."}], "columns": 2} — compact fact sheet.
+- "timeline": {"type": "timeline", "title": "...", "items": [{"time": "...", "title": "...", "description": "...", "variant": "default|success|warning|error|info"}]} — schedules and event sequences.
+- "badge": {"type": "badge", "label": "...", "variant": "default|success|warning|error|info|accent"} — small status chip.
+- "rating": {"type": "rating", "value": 4.5, "max_value": 5, "label": "..."} — star score.
 - "alert", "divider", "list", "progress" — as in the standard palette.
 
 DESIGN RULES:
 1. Reference EVERY round component exactly once via a "ref" node. Never copy, rewrite, or summarize their internal data — place them.
-2. Lead with the most important thing: a headline metric or a one-line takeaway when the data supports one.
-3. Group related components side-by-side in grids (max 3 columns); push raw/secondary detail into collapsibles or tabs.
+2. Lead with a visual anchor: a hero masthead for dashboard/report rounds, or a headline metric/one-line takeaway when the data supports one.
+3. Establish hierarchy: headline strip first (metrics/ratings in a 2-4 column grid), main visuals next (charts/tables side-by-side in grids, max 3 columns), raw or secondary detail last (collapsibles/tabs).
 4. Give every card/tabs/collapsible a meaningful title — small screens flatten layouts to titles and text.
 5. Garnish must be brief and grounded ONLY in the component digests shown; never invent numbers or facts.
-6. Output ONLY JSON: {"layout": [ ...nodes... ]}. No markdown fences, no commentary.
-7. If the components genuinely cannot be improved by arrangement, reply exactly: ERROR: <brief reason>."""
+6. Vary the texture: never stack a run of same-type components; break them up with metrics, badges, keyvalue rows or grids.
+7. Output ONLY JSON: {"layout": [ ...nodes... ]}. No markdown fences, no commentary.
+8. If the components genuinely cannot be improved by arrangement, reply exactly: ERROR: <brief reason>."""
+
+
+_REFINE_GUIDANCE = """REVIEW CHECKLIST — judge the CURRENT ARRANGEMENT against it:
+1. Anchor — does the round open with a hero masthead or headline takeaway?
+2. Hierarchy — headline strip, then main visuals, then secondary detail; is anything important buried, or anything trivial leading?
+3. Balance — are charts/tables grouped side-by-side in grids instead of one full-width stack? Do grids avoid lonely single cells?
+4. Scannability — meaningful titles everywhere; garnish brief and grounded in the digests?
+5. Texture — are runs of identical component types broken up?
+
+RESPONSE FORMAT:
+- If the arrangement can be meaningfully improved, output ONLY the complete improved JSON {"layout": [ ...nodes... ]} — same rules as before: reference every round component exactly once via "ref" nodes, garnish grounded only in the digests.
+- Keep EVERY component the current arrangement references (including any marked "(canvas)") — an improved layout that loses one is rejected.
+- If the arrangement is already well-designed, reply exactly: DONE"""
 
 
 def _component_digest(comp: Dict[str, Any]) -> str:
@@ -162,6 +204,125 @@ FULL ALLOWED TYPE PALETTE: {palette}
     ]
 
 
+def _layout_sketch(
+    layout: Sequence[Any],
+    labels_by_id: Dict[str, str],
+    indent: int = 0,
+) -> List[str]:
+    """Indented structural outline of an arrangement — the 'current UI' the
+    refinement pass critiques. Refs resolve to component type/title labels."""
+    lines: List[str] = []
+    for node in layout:
+        if not isinstance(node, dict):
+            continue
+        pad = "  " * indent
+        ntype = str(node.get("type", "?"))
+        if ntype == REF_TYPE:
+            cid = str(node.get("component_id") or "?")
+            lines.append(f"{pad}- [component {cid}] {labels_by_id.get(cid, 'unknown')}")
+            continue
+        bits = [ntype]
+        if node.get("title"):
+            bits.append(f'title="{str(node["title"])[:60]}"')
+        if ntype == "grid":
+            bits.append(f"columns={node.get('columns', 2)}")
+        if ntype == "text":
+            bits.append(f'content="{str(node.get("content", ""))[:80]}"')
+        if ntype == "metric":
+            bits.append(f'value="{str(node.get("value", ""))[:40]}"')
+        lines.append(f"{pad}- {' '.join(bits)}")
+        for key in _CHILD_KEYS:
+            nested = node.get(key)
+            if isinstance(nested, list):
+                lines.extend(_layout_sketch(nested, labels_by_id, indent + 1))
+        tabs = node.get("tabs")
+        if isinstance(tabs, list):
+            for tab in tabs:
+                if isinstance(tab, dict):
+                    lines.append(f'{pad}  - tab "{str(tab.get("label", ""))[:60]}"')
+                    content = tab.get("content")
+                    if isinstance(content, list):
+                        lines.extend(_layout_sketch(content, labels_by_id, indent + 2))
+    return lines
+
+
+def build_refine_messages(
+    user_request: str,
+    current_layout: Sequence[Dict[str, Any]],
+    round_components: Sequence[Dict[str, Any]],
+    canvas_rows: Sequence[Dict[str, Any]],
+    allowed_types: Set[str],
+) -> List[Dict[str, str]]:
+    """Build the critique/improve messages for one refinement pass."""
+    request = (user_request or "").strip()
+    if len(request) > _MAX_REQUEST_CHARS:
+        request = request[:_MAX_REQUEST_CHARS] + "…"
+
+    digests = "\n".join(_component_digest(c) for c in round_components if isinstance(c, dict))
+
+    # Canvas components first so this round's richer labels win on collision —
+    # a draft may legitimately place prior-round canvas refs and the sketch
+    # must not present them as "unknown".
+    labels_by_id = {
+        str(r.get("component_id")): f"{r.get('component_type', '?')} — {r.get('title') or 'untitled'} (canvas)"
+        for r in (canvas_rows or [])
+        if isinstance(r, dict) and r.get("component_id")
+    }
+    labels_by_id.update({
+        str(c.get("component_id")): f"{c.get('type', '?')} — {c.get('title') or 'untitled'}"
+        for c in round_components
+        if isinstance(c, dict) and c.get("component_id")
+    })
+    sketch_lines = _layout_sketch(current_layout, labels_by_id)
+    if len(sketch_lines) > _MAX_SKETCH_LINES:
+        sketch_lines = sketch_lines[:_MAX_SKETCH_LINES] + ["  …(truncated)"]
+    layout_json = json.dumps(list(current_layout), default=str)
+    if len(layout_json) > _MAX_LAYOUT_JSON_CHARS:
+        layout_json = layout_json[:_MAX_LAYOUT_JSON_CHARS] + "…(truncated)"
+
+    palette = ", ".join(sorted(allowed_types))
+    user_prompt = f"""USER REQUEST FOR THIS ROUND:
+{request or '(not provided)'}
+
+THIS ROUND'S COMPONENTS (each must appear exactly once via a ref node):
+{digests}
+
+CURRENT ARRANGEMENT (structural outline):
+{chr(10).join(sketch_lines)}
+
+CURRENT ARRANGEMENT (JSON):
+{layout_json}
+
+FULL ALLOWED TYPE PALETTE: {palette}
+
+{_LAYOUT_GUIDANCE}
+
+{_REFINE_GUIDANCE}"""
+
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are an expert interface designer for a server-driven UI. "
+                "You critique your own arrangements and improve them. "
+                "Output ONLY valid JSON, the single word DONE, or an ERROR message."
+            ),
+        },
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+def _is_done_reply(content: str) -> bool:
+    """True when a refinement pass declares the arrangement finished."""
+    text = (content or "").strip()
+    if text.startswith("```"):
+        # Drop fence lines (including language-tagged openers like ```json).
+        text = "\n".join(
+            ln for ln in text.splitlines() if not ln.strip().startswith("```")
+        ).strip()
+    return text.upper().rstrip(".!").strip() == "DONE"
+
+
 # ─────────────────────────── parse / validate ────────────────────────────────
 
 class DesignRejected(Exception):
@@ -217,6 +378,13 @@ def _coerce_node(node: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+#: Types whose children/content (or tabs) the renderer actually renders.
+#: Refs nested anywhere else would be CLAIMED by the layout but never reach
+#: the DOM — a silent FR-018 visual drop — so the validator strips them and
+#: lets omission repair re-append the refs flat.
+_STRUCTURAL_TYPES = frozenset({"container", "card", "grid", "collapsible"})
+
+
 def validate_layout(
     layout: List[Any],
     allowed_ref_ids: Set[str],
@@ -228,6 +396,8 @@ def validate_layout(
     - other nodes: ``chart``→``plotly_chart``; unknown types rewritten to
       ``container`` (children preserved) — same posture as the existing
       ``_validate_component_tree``.
+    - non-structural leaf types lose list-valued ``children``/``content``/
+      ``tabs`` so they cannot invisibly swallow refs.
     Returns ``(clean_layout, referenced_ids_in_order)``.
     """
     seen_refs: List[str] = []
@@ -252,22 +422,32 @@ def validate_layout(
             node["type"] = ntype = "plotly_chart"
         if ntype and ntype not in allowed_types:
             logger.info("ui_designer: rewriting unknown type %r -> container", ntype)
-            node["type"] = "container"
+            node["type"] = ntype = "container"
+        structural = ntype in _STRUCTURAL_TYPES or not ntype
         for key in _CHILD_KEYS:
             nested = node.get(key)
-            if isinstance(nested, list):
+            if not isinstance(nested, list):
+                continue
+            if structural:
                 node[key] = [w for w in (walk(c) for c in nested) if w is not None]
+            else:
+                logger.info("ui_designer: stripping nested %s from leaf type %r", key, ntype)
+                node.pop(key)
         tabs = node.get("tabs")
         if isinstance(tabs, list):
-            new_tabs = []
-            for tab in tabs:
-                if isinstance(tab, dict):
-                    tab = dict(tab)
-                    content = tab.get("content")
-                    if isinstance(content, list):
-                        tab["content"] = [w for w in (walk(c) for c in content) if w is not None]
-                    new_tabs.append(tab)
-            node["tabs"] = new_tabs
+            if ntype != "tabs":
+                logger.info("ui_designer: stripping tabs from non-tabs type %r", ntype)
+                node.pop("tabs")
+            else:
+                new_tabs = []
+                for tab in tabs:
+                    if isinstance(tab, dict):
+                        tab = dict(tab)
+                        content = tab.get("content")
+                        if isinstance(content, list):
+                            tab["content"] = [w for w in (walk(c) for c in content) if w is not None]
+                        new_tabs.append(tab)
+                node["tabs"] = new_tabs
         return node
 
     clean = [w for w in (walk(n) for n in layout) if w is not None]
@@ -280,7 +460,8 @@ def repair_layout(
     round_ids_in_order: Sequence[str],
 ) -> List[Dict[str, Any]]:
     """FR-018 omission repair: round components the design missed append flat."""
-    missing = [cid for cid in round_ids_in_order if cid not in set(referenced)]
+    seen = set(referenced)
+    missing = [cid for cid in dict.fromkeys(round_ids_in_order) if cid not in seen]
     if missing:
         logger.info("ui_designer: repairing layout — appending %d omitted component(s): %s",
                     len(missing), missing)
@@ -374,21 +555,32 @@ async def design_round(
     allowed_types: Set[str],
     llm_call: Callable[[List[Dict[str, str]]], Awaitable[Optional[str]]],
     timeout_s: Optional[float] = None,
+    max_rounds: Optional[int] = None,
 ) -> Optional[List[Dict[str, Any]]]:
-    """Run one design pass; return the validated arrangement or ``None``.
+    """Run a bounded multi-round design conversation; return the validated
+    arrangement or ``None``.
 
-    ``None`` ALWAYS means "fall back to the legacy flat append" — every
-    failure mode (LLM error, timeout, refusal, unparseable/invalid output)
-    is logged with a structured reason and swallowed (FR-022 fail-open).
+    Pass 1 drafts the arrangement. While passes remain, the designer critiques
+    its own current arrangement and either improves it or replies ``DONE``.
+    A draft pass that produces unusable JSON gets format-retries with the
+    failure fed back; once any arrangement is valid, every later failure
+    simply keeps the best arrangement so far.
+
+    ``None`` ALWAYS means "fall back to the legacy flat append" — a first
+    pass that yields no usable arrangement (LLM error, timeout, refusal,
+    unparseable/invalid output, retries exhausted) is logged with a
+    structured reason and swallowed (FR-022 fail-open).
     """
     budget = timeout_s if timeout_s is not None else designer_timeout_seconds()
+    rounds = max_rounds if max_rounds is not None else designer_max_rounds()
+    rounds = max(1, rounds)
     round_ids = [c.get("component_id") for c in round_components
                  if isinstance(c, dict) and c.get("component_id")]
     canvas_ids = {r.get("component_id") for r in (canvas_rows or []) if r.get("component_id")}
     allowed_refs = set(round_ids) | canvas_ids
 
-    logger.info("ui_designer.invoked chat=%s components=%d budget_s=%.1f",
-                chat_id, len(round_ids), budget)
+    logger.info("ui_designer.invoked chat=%s components=%d budget_s=%.1f max_rounds=%d",
+                chat_id, len(round_ids), budget, rounds)
     started = time.monotonic()
 
     def _fallback(reason: str, detail: str = "") -> None:
@@ -396,37 +588,109 @@ async def design_round(
         logger.warning("ui_designer.fallback chat=%s reason=%s latency_ms=%d %s",
                        chat_id, reason, latency_ms, detail)
 
-    try:
-        messages = build_design_messages(user_request, round_components, canvas_rows, allowed_types)
-        content = await asyncio.wait_for(llm_call(messages), timeout=budget)
-    except asyncio.TimeoutError:
-        _fallback("timeout", f"budget_s={budget}")
-        return None
-    except Exception as e:  # LLM/transport errors — fail open, never up.
-        _fallback("llm_error", str(e))
+    current: Optional[List[Dict[str, Any]]] = None
+    passes_used = 0
+    messages = build_design_messages(user_request, round_components, canvas_rows, allowed_types)
+
+    for attempt in range(1, rounds + 1):
+        passes_used = attempt
+        try:
+            content = await asyncio.wait_for(llm_call(messages), timeout=budget)
+        except asyncio.TimeoutError:
+            if current is None:
+                _fallback("timeout", f"budget_s={budget}")
+                return None
+            logger.info("ui_designer.refine chat=%s round=%d outcome=timeout — keeping best",
+                        chat_id, attempt)
+            break
+        except Exception as e:  # LLM/transport errors — fail open, never up.
+            if current is None:
+                _fallback("llm_error", str(e))
+                return None
+            logger.info("ui_designer.refine chat=%s round=%d outcome=llm_error — keeping best",
+                        chat_id, attempt)
+            break
+
+        if not content:
+            if current is None:
+                _fallback("llm_error", "empty response")
+                return None
+            logger.info("ui_designer.refine chat=%s round=%d outcome=empty — keeping best",
+                        chat_id, attempt)
+            break
+
+        if current is not None and _is_done_reply(content):
+            logger.info("ui_designer.refine chat=%s round=%d outcome=done", chat_id, attempt)
+            break
+
+        rejection: Optional[Tuple[str, str]] = None
+        layout: Optional[List[Dict[str, Any]]] = None
+        try:
+            parsed = parse_design_response(content)
+        except DesignRejected as e:
+            rejection = (e.reason, str(e))
+        else:
+            clean, referenced = validate_layout(parsed, allowed_refs, allowed_types)
+            if current is None:
+                layout = repair_layout(clean, referenced, round_ids) or None
+                if layout is None:
+                    rejection = ("invalid", "layout empty after validation")
+            else:
+                # A refinement must stand on its own: everything the current
+                # arrangement places must stay placed. Repair-appending its
+                # omissions would silently demote good placements to flat
+                # refs (and launder ref-free meta-replies into "layouts"),
+                # so an incomplete refinement is rejected instead.
+                placed = set(iter_refs(current))
+                if clean and placed <= set(referenced):
+                    layout = clean
+                else:
+                    rejection = ("incomplete", "refinement lost placed components")
+
+        if layout is None:
+            reason, detail = rejection
+            if current is not None:
+                # A failed refinement never loses a good arrangement.
+                logger.info("ui_designer.refine chat=%s round=%d outcome=rejected:%s — keeping best",
+                            chat_id, attempt, reason)
+                break
+            if reason == "refusal" or attempt >= rounds:
+                _fallback(reason, detail)
+                return None
+            # Draft produced unusable output — feed the failure back (format retry).
+            messages = messages + [
+                {"role": "assistant", "content": str(content)[:2000]},
+                {"role": "user", "content": (
+                    f"Your previous response could not be used ({reason}: "
+                    f"{detail or 'no detail'}). Reply with ONLY the JSON object "
+                    '{"layout": [ ...nodes... ]} following the rules above — no markdown '
+                    "fences, no commentary."
+                )},
+            ]
+            continue
+
+        if current is not None and layout == current:
+            # The refinement regurgitated the same arrangement — converged.
+            logger.info("ui_designer.refine chat=%s round=%d outcome=stable", chat_id, attempt)
+            break
+        improved = current is not None
+        current = layout
+        if improved:
+            logger.info("ui_designer.refine chat=%s round=%d outcome=improved", chat_id, attempt)
+        if attempt < rounds:
+            messages = build_refine_messages(user_request, current, round_components,
+                                             canvas_rows, allowed_types)
+
+    if current is None:
+        _fallback("invalid", "no usable arrangement produced")
         return None
 
-    if not content:
-        _fallback("llm_error", "empty response")
-        return None
-
-    try:
-        layout = parse_design_response(content)
-    except DesignRejected as e:
-        _fallback(e.reason, str(e))
-        return None
-
-    layout, referenced = validate_layout(layout, allowed_refs, allowed_types)
-    layout = repair_layout(layout, referenced, round_ids)
-    if not layout:
-        _fallback("invalid", "layout empty after validation")
-        return None
-    layout = stamp_garnish_ids(layout, chat_id, layout_key)
+    layout = stamp_garnish_ids(current, chat_id, layout_key)
 
     garnish_count = sum(1 for n in layout if n.get("type") != REF_TYPE)
     latency_ms = int((time.monotonic() - started) * 1000)
-    logger.info("ui_designer.designed chat=%s layout_key=%s refs=%d garnish=%d latency_ms=%d",
-                chat_id, layout_key, len(set(iter_refs(layout))), garnish_count, latency_ms)
+    logger.info("ui_designer.designed chat=%s layout_key=%s refs=%d garnish=%d rounds=%d latency_ms=%d",
+                chat_id, layout_key, len(set(iter_refs(layout))), garnish_count, passes_used, latency_ms)
     return layout
 
 

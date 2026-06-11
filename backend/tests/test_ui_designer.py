@@ -342,3 +342,187 @@ def test_prompt_carries_ids_palette_and_rules():
     assert "plotly_chart" in prompt, "full palette is offered (FR-020)"
     assert "exactly once" in prompt
     assert len(prompt) < 20000, "prompt stays bounded on huge inputs"
+
+
+# ---------------------------------------------------------------------------
+# multi-round refinement — draft, critique, improve, keep-best
+# ---------------------------------------------------------------------------
+
+
+_DRAFT = '{"layout": [{"type": "ref", "component_id": "wc_a"}, {"type": "ref", "component_id": "wc_b"}]}'
+_IMPROVED = ('{"layout": [{"type": "metric", "title": "Headline", "value": "2"},'
+             ' {"type": "grid", "columns": 2, "children": ['
+             '{"type": "ref", "component_id": "wc_a"}, {"type": "ref", "component_id": "wc_b"}]}]}')
+
+
+def _scripted_llm(replies):
+    """An llm_call stub that walks through scripted replies (last one repeats)."""
+    calls = []
+
+    async def llm(messages):
+        calls.append(messages)
+        reply = replies[min(len(calls) - 1, len(replies) - 1)]
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    return llm, calls
+
+
+def test_designer_max_rounds_env(monkeypatch):
+    monkeypatch.delenv("UI_DESIGNER_MAX_ROUNDS", raising=False)
+    assert ui_designer.designer_max_rounds() == ui_designer.DEFAULT_MAX_ROUNDS
+    monkeypatch.setenv("UI_DESIGNER_MAX_ROUNDS", "5")
+    assert ui_designer.designer_max_rounds() == 5
+    monkeypatch.setenv("UI_DESIGNER_MAX_ROUNDS", "0")
+    assert ui_designer.designer_max_rounds() == ui_designer.DEFAULT_MAX_ROUNDS
+    monkeypatch.setenv("UI_DESIGNER_MAX_ROUNDS", "junk")
+    assert ui_designer.designer_max_rounds() == ui_designer.DEFAULT_MAX_ROUNDS
+
+
+def test_refine_pass_improves_the_draft():
+    llm, calls = _scripted_llm([_DRAFT, _IMPROVED, "DONE"])
+    layout = _drive(llm)
+    assert layout is not None
+    assert len(calls) == 3, "draft + refine + DONE"
+    assert layout[0]["type"] == "metric", "refined arrangement won"
+    assert layout[0]["id"].startswith("dg_"), "garnish stamped on the final layout"
+    assert set(ui_designer.iter_refs(layout)) == {"wc_a", "wc_b"}
+    # The refinement prompt showed the model its own current arrangement.
+    refine_prompt = calls[1][1]["content"]
+    assert "CURRENT ARRANGEMENT" in refine_prompt
+    assert "wc_a" in refine_prompt and "DONE" in refine_prompt
+
+
+def test_done_reply_keeps_the_draft():
+    llm, calls = _scripted_llm([_DRAFT, "DONE"])
+    layout = _drive(llm)
+    assert layout is not None
+    assert len(calls) == 2
+    assert [n["type"] for n in layout] == ["ref", "ref"]
+
+
+def test_stable_refinement_converges():
+    llm, calls = _scripted_llm([_DRAFT, _DRAFT, _DRAFT])
+    layout = _drive(llm)
+    assert layout is not None
+    assert len(calls) == 2, "identical refinement ends the loop"
+
+
+def test_failed_refinement_keeps_best_arrangement():
+    for bad_second in ("not json", "ERROR: meh", "", RuntimeError("boom")):
+        llm, calls = _scripted_llm([_IMPROVED, bad_second])
+        layout = _drive(llm)
+        assert layout is not None, f"second-pass {bad_second!r} must not lose the draft"
+        assert layout[0]["type"] == "metric"
+        assert set(ui_designer.iter_refs(layout)) == {"wc_a", "wc_b"}
+
+
+def test_degenerate_refinement_keeps_best_arrangement():
+    """Parseable-but-degenerate refinements (ref-free meta-commentary, empty
+    nodes, ref omissions) must be rejected — omission repair never runs on
+    refine passes, so they cannot launder into replacements."""
+    for degen in (
+        '{"layout": ["The arrangement is already well-designed"]}',
+        '{"layout": [""]}',
+        '{"layout": [{"type": "ref", "component_id": "wc_a"}]}',  # omits wc_b
+    ):
+        llm, calls = _scripted_llm([_IMPROVED, degen])
+        layout = _drive(llm)
+        assert layout is not None
+        assert layout[0]["type"] == "metric", f"draft lost to degenerate refinement {degen!r}"
+        assert set(ui_designer.iter_refs(layout)) == {"wc_a", "wc_b"}
+
+
+def test_refinement_must_keep_canvas_refs():
+    draft = ('{"layout": [{"type": "ref", "component_id": "wc_a"},'
+             ' {"type": "ref", "component_id": "wc_b"},'
+             ' {"type": "ref", "component_id": "wc_old"}]}')
+    llm, calls = _scripted_llm([draft, _IMPROVED])  # refinement loses wc_old
+    layout = asyncio.run(design_round(
+        user_request="rearrange everything into one dashboard",
+        round_components=_round_components(),
+        canvas_rows=[{"component_id": "wc_old", "title": "Old", "component_type": "card"}],
+        chat_id="chat-1",
+        layout_key="ly_test",
+        allowed_types=ALLOWED,
+        llm_call=llm,
+    ))
+    assert layout is not None
+    assert set(ui_designer.iter_refs(layout)) == {"wc_a", "wc_b", "wc_old"}, \
+        "a refinement that loses a placed canvas ref is rejected"
+    # The refine prompt labelled the canvas component instead of 'unknown'.
+    refine_prompt = calls[1][1]["content"]
+    assert "(canvas)" in refine_prompt
+    assert "unknown" not in refine_prompt
+
+
+def test_fenced_done_reply_ends_loop():
+    llm, calls = _scripted_llm([_DRAFT, "```json\nDONE\n```"])
+    layout = _drive(llm)
+    assert layout is not None
+    assert len(calls) == 2
+
+
+def test_leaf_garnish_cannot_swallow_refs():
+    layout = [
+        {"type": "metric", "title": "T", "value": "1", "content": [_ref("wc_a")]},
+        _ref("wc_b"),
+    ]
+    clean, referenced = validate_layout(layout, {"wc_a", "wc_b"}, ALLOWED)
+    assert referenced == ["wc_b"], "refs nested in leaf garnish are never claimed"
+    assert "content" not in clean[0], "leaf garnish loses its invisible children"
+    repaired = repair_layout(clean, referenced, ["wc_a", "wc_b"])
+    assert set(ui_designer.iter_refs(repaired)) == {"wc_a", "wc_b"}
+
+
+def test_repair_dedupes_duplicate_round_ids():
+    repaired = repair_layout([], [], ["wc_a", "wc_a", "wc_b"])
+    assert [n["component_id"] for n in repaired] == ["wc_a", "wc_b"]
+
+
+def test_refine_timeout_keeps_best_arrangement():
+    calls = []
+
+    async def llm(messages):
+        calls.append(messages)
+        if len(calls) > 1:
+            await asyncio.sleep(0.5)  # refine pass blows the per-pass budget
+        return _IMPROVED
+
+    layout = _drive(llm, timeout_s=0.2)
+    assert layout is not None
+    assert set(ui_designer.iter_refs(layout)) == {"wc_a", "wc_b"}
+
+
+def test_format_retry_recovers_unusable_draft():
+    llm, calls = _scripted_llm(["not json at all", _DRAFT, "DONE"])
+    layout = _drive(llm)
+    assert layout is not None
+    assert set(ui_designer.iter_refs(layout)) == {"wc_a", "wc_b"}
+    # The retry message carried the failure reason back to the model.
+    retry_messages = calls[1]
+    assert retry_messages[-1]["role"] == "user"
+    assert "could not be used" in retry_messages[-1]["content"]
+
+
+def test_max_rounds_one_is_single_pass():
+    llm, calls = _scripted_llm([_DRAFT])
+    layout = asyncio.run(design_round(
+        user_request="compare things",
+        round_components=_round_components(),
+        canvas_rows=[],
+        chat_id="chat-1",
+        layout_key="ly_test",
+        allowed_types=ALLOWED,
+        llm_call=llm,
+        max_rounds=1,
+    ))
+    assert layout is not None
+    assert len(calls) == 1, "max_rounds=1 restores the legacy single pass"
+
+
+def test_first_pass_refusal_never_retries():
+    llm, calls = _scripted_llm(["ERROR: cannot improve", _DRAFT])
+    assert _drive(llm) is None
+    assert len(calls) == 1, "a refusal is respected, not retried"
