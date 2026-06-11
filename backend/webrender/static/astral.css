@@ -1,9 +1,26 @@
 /* Feature 026 — Astral theme (ported from frontend/src/index.css, midnight preset).
    Tailwind utilities are provided by the self-hosted Play CDN (vendor/tailwind.js);
-   this file carries the CSS-var palette + custom utilities the renderer emits. */
+   this file carries the CSS-var palette + custom utilities the renderer emits.
+
+   Feature 029 (T035/T036 — FR-031/FR-032): design-token system + visual refresh.
+   No build step, no new framework — hand-written CSS only. Every behavioral
+   class/attribute the client queries (.astral-action, .astral-pp-*, .astral-page-*,
+   .astral-pagination, .astral-chart, .astral-theme-apply, .astral-file-upload,
+   .astral-color-picker, [data-component-id], .dynamic-renderer, chrome ids) is
+   untouched; this sheet only styles them. All motion is gated behind
+   prefers-reduced-motion: no-preference. */
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
+/* =========================================================================
+   1. Design tokens (FR-031)
+   The --astral-* RGB channel triplets are the LIVE theme palette: client.js
+   theme_apply mutates them at runtime and the vendored Tailwind runtime maps
+   them into utilities, so they keep their channel form and midnight defaults
+   (pinned by the Theme chrome surface). Every token below derives from them
+   so user themes restyle the whole system coherently.
+   ========================================================================= */
 :root {
+  /* live palette — deep-space navy with an indigo→violet accent (midnight) */
   --astral-bg:        15 18 33;     /* #0F1221 */
   --astral-surface:   26 30 46;     /* #1A1E2E */
   --astral-primary:   99 102 241;   /* #6366F1 */
@@ -11,16 +28,380 @@
   --astral-text:      243 244 246;  /* #F3F4F6 */
   --astral-muted:     156 163 175;  /* #9CA3AF */
   --astral-accent:    6 182 212;    /* #06B6D4 */
+
+  /* type scale */
+  --font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-xs: 0.75rem;
+  --font-sm: 0.875rem;
+  --font-base: 1rem;
+  --font-lg: 1.125rem;
+  --font-xl: 1.25rem;
+  --font-2xl: 1.5rem;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* spacing scale */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-7: 2rem;
+  --space-8: 3rem;
+
+  /* layered surfaces (0 = page floor … 3 = solid raised) */
+  --surface-0: rgb(var(--astral-bg));
+  --surface-1: rgb(var(--astral-surface) / 0.45);
+  --surface-2: rgb(var(--astral-surface) / 0.75);
+  --surface-3: rgb(var(--astral-surface));
+
+  /* accent + semantic status (channel triplets match the renderer's
+     green/yellow/red/blue-500 utility families) */
+  --accent: rgb(var(--astral-primary));
+  --accent-strong: rgb(var(--astral-secondary));
+  --accent-grad: linear-gradient(135deg, rgb(var(--astral-primary)) 0%, rgb(var(--astral-secondary)) 100%);
+  --color-success: 34 197 94;
+  --color-warning: 234 179 8;
+  --color-error:   239 68 68;
+  --color-info:    59 130 246;
+
+  /* text hierarchy */
+  --text-primary: rgb(var(--astral-text));
+  --text-secondary: rgb(var(--astral-text) / 0.78);
+  --text-muted: rgb(var(--astral-muted));
+
+  /* radii / borders / elevation */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --border-soft: 1px solid rgb(255 255 255 / 0.07);
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.25);
+  --shadow-2: 0 6px 16px -4px rgb(0 0 0 / 0.35);
+  --shadow-3: 0 16px 40px -8px rgb(0 0 0 / 0.5);
+  --glow-accent: 0 0 0 3px rgb(var(--astral-primary) / 0.18);
+
+  /* motion */
+  --motion-fast: 150ms;
+  --motion-base: 240ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
+/* =========================================================================
+   2. Base — page floor, typography, selection, focus, scrollbars
+   ========================================================================= */
 html, body { height: 100%; }
 body {
   margin: 0;
-  background: rgb(var(--astral-bg));
-  color: rgb(var(--astral-text));
-  font-family: 'Inter', system-ui, sans-serif;
+  /* deep-space floor: two faint nebula glows over the bg token */
+  background:
+    radial-gradient(1100px 700px at 82% -12%, rgb(var(--astral-secondary) / 0.10), transparent 60%),
+    radial-gradient(900px 650px at -10% 102%, rgb(var(--astral-primary) / 0.08), transparent 55%),
+    var(--surface-0);
+  background-attachment: fixed;
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--font-base);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 
+::selection {
+  background: rgb(var(--astral-primary) / 0.40);
+  color: #fff;
+}
+
+/* accessible accent-colored focus ring (keyboard nav) */
+:focus-visible {
+  outline: 2px solid rgb(var(--astral-primary) / 0.75);
+  outline-offset: 2px;
+}
+
+/* scrollbars (global) */
+* { scrollbar-width: thin; scrollbar-color: rgb(var(--astral-primary) / 0.3) transparent; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: rgb(var(--astral-primary) / 0.30);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--astral-primary) / 0.55);
+  background-clip: padding-box;
+}
+.scrollbar-thin { scrollbar-width: thin; }
+
+/* =========================================================================
+   3. Shell — top bar glass, canvas vs chat panel distinction, composer
+   ========================================================================= */
+#astral-topbar {
+  position: relative;
+  z-index: 40;
+  background: rgb(var(--astral-bg) / 0.65);
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+  border-bottom: 1px solid rgb(255 255 255 / 0.06);
+  box-shadow: var(--shadow-1);
+}
+#astral-settings-btn[aria-expanded="true"] {
+  color: var(--text-primary);
+  background: rgb(var(--astral-primary) / 0.15);
+}
+#astral-settings-menu {
+  background: rgb(var(--astral-surface) / 0.92);
+  backdrop-filter: blur(16px) saturate(1.3);
+  -webkit-backdrop-filter: blur(16px) saturate(1.3);
+  border-color: rgb(255 255 255 / 0.09);
+  box-shadow: var(--shadow-3);
+}
+.astral-menu-item { border-radius: var(--radius-sm); }
+
+/* canvas = open workspace on the page floor; chat = raised glass rail */
+.astral-canvas-panel { scrollbar-gutter: stable; }
+.astral-chat-panel {
+  background: rgb(var(--astral-surface) / 0.35);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-left: 1px solid rgb(255 255 255 / 0.06);
+  box-shadow: -8px 0 24px -12px rgb(0 0 0 / 0.4);
+}
+.astral-chat-form {
+  border-top: 1px solid rgb(255 255 255 / 0.06);
+  background: rgb(var(--astral-bg) / 0.45);
+}
+
+/* =========================================================================
+   4. Shared field + button polish (renderer adds .astral-field / .astral-btn
+      ALONGSIDE its existing classes — behavior hooks unchanged)
+   ========================================================================= */
+.astral-field { border-radius: var(--radius-sm); }
+.astral-field:focus {
+  outline: none;
+  border-color: rgb(var(--astral-primary) / 0.6);
+  box-shadow: var(--glow-accent);
+  background: rgb(255 255 255 / 0.08);
+}
+.astral-field:focus-visible { outline: none; }
+.astral-field option {
+  background: rgb(var(--astral-surface));
+  color: var(--text-primary);
+}
+.astral-field::placeholder { color: rgb(var(--astral-muted) / 0.7); }
+
+.astral-btn { letter-spacing: 0.01em; }
+.astral-btn:focus-visible {
+  outline: 2px solid rgb(var(--astral-primary) / 0.8);
+  outline-offset: 2px;
+}
+.astral-btn-primary {
+  background-image: var(--accent-grad);
+  box-shadow: var(--shadow-1), inset 0 1px 0 rgb(255 255 255 / 0.15);
+  text-shadow: 0 1px 2px rgb(0 0 0 / 0.25);
+}
+.astral-btn-primary:hover { filter: brightness(1.08); }
+.astral-btn-secondary { box-shadow: var(--shadow-1); }
+.astral-btn-ghost:hover { text-decoration: none; }
+
+/* =========================================================================
+   5. Primitive component polish (T036) — semantic classes added by
+      renderer.py alongside the existing utility classes
+   ========================================================================= */
+
+/* cards: layered surface, soft border, hover elevation */
+.astral-card {
+  background: var(--surface-1);
+  border: var(--border-soft);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  box-shadow: var(--shadow-1);
+}
+.astral-card:hover {
+  box-shadow: var(--shadow-2);
+  border-color: rgb(255 255 255 / 0.12);
+}
+
+/* metric tiles: big value typography + variant accent edge */
+.astral-metric {
+  box-shadow: var(--shadow-1);
+  overflow: hidden;
+}
+.astral-metric::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 3px;
+  background: rgb(var(--metric-accent, var(--astral-primary)));
+  opacity: 0.85;
+}
+.astral-metric--success { --metric-accent: var(--color-success); }
+.astral-metric--warning { --metric-accent: var(--color-warning); }
+.astral-metric--error   { --metric-accent: var(--color-error); }
+.astral-metric:hover { box-shadow: var(--shadow-2); }
+.astral-metric p.text-2xl {
+  font-size: 1.75rem;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+
+/* tables: surfaced wrap, sticky-feel header band, zebra subtlety */
+.astral-table-wrap {
+  background: var(--surface-1);
+  box-shadow: var(--shadow-1);
+  overflow: hidden;
+}
+.astral-table-wrap thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: rgb(var(--astral-surface) / 0.92);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+.astral-table-wrap tbody tr:nth-child(even) { background: rgb(255 255 255 / 0.02); }
+.astral-pagination {
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+.astral-page-prev, .astral-page-next { font-weight: var(--weight-medium); }
+
+/* alerts: left accent bar (inset shadow follows the rounded corners and
+   never fights the border-width utilities) over the tinted surface */
+.astral-alert { box-shadow: inset 3px 0 0 rgb(var(--alert-accent, var(--color-info))), var(--shadow-1); }
+.astral-alert--info    { --alert-accent: var(--color-info); }
+.astral-alert--success { --alert-accent: var(--color-success); }
+.astral-alert--warning { --alert-accent: var(--color-warning); }
+.astral-alert--error   { --alert-accent: var(--color-error); }
+
+/* chart containers */
+.astral-chart-card {
+  background: var(--surface-1);
+  border: var(--border-soft);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  box-shadow: var(--shadow-1);
+}
+
+/* tabs + collapsible: refined summary/details affordance (chevron) */
+.astral-tab, .astral-collapsible {
+  background: rgb(255 255 255 / 0.02);
+  border: var(--border-soft);
+  border-radius: var(--radius-md);
+}
+.astral-tab > summary { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); }
+.astral-tab > summary::after, .astral-collapsible > summary::after {
+  content: "";
+  width: 7px; height: 7px;
+  margin-left: auto;
+  flex-shrink: 0;
+  border-right: 1.5px solid rgb(var(--astral-muted));
+  border-bottom: 1.5px solid rgb(var(--astral-muted));
+  transform: rotate(45deg) translateY(-2px);
+}
+.astral-tab[open] > summary::after, .astral-collapsible[open] > summary::after {
+  transform: rotate(225deg) translateY(-1px);
+}
+.astral-tab > div { padding: 0 var(--space-3) var(--space-3); }
+
+/* progress bars: rounded track with an inner shadow; fill keeps its
+   accent-gradient utilities */
+.astral-progress-track { box-shadow: inset 0 1px 2px rgb(0 0 0 / 0.4); }
+
+/* code blocks: monospace polish */
+.astral-code { box-shadow: var(--shadow-1); }
+.astral-code pre { line-height: 1.6; }
+.astral-code code, .astral-code pre { font-family: var(--font-mono); }
+
+/* detailed lists as refined link cards */
+.astral-list-item {
+  background: var(--surface-1);
+  border: var(--border-soft);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-1);
+}
+.astral-list-item:hover { border-color: rgb(var(--astral-primary) / 0.35); }
+
+/* param picker + audio + misc surfaces */
+.astral-param-picker { box-shadow: var(--shadow-1); }
+.audio-component { box-shadow: var(--shadow-1); }
+
+/* =========================================================================
+   6. Chrome polish (feature 027/028 markup, styled here — token-matched)
+   ========================================================================= */
+#astral-modal .astral-modal-backdrop {
+  background: rgb(0 0 0 / 0.55);
+}
+#astral-modal .astral-modal-card {
+  background: rgb(var(--astral-surface) / 0.97);
+  backdrop-filter: blur(18px) saturate(1.2);
+  -webkit-backdrop-filter: blur(18px) saturate(1.2);
+  border-color: rgb(255 255 255 / 0.09);
+  box-shadow: var(--shadow-3);
+}
+.astral-chrome-notice, .astral-chrome-error { box-shadow: var(--shadow-1); }
+
+/* =========================================================================
+   7. Motion (FR-031) — component arrival/update transitions. Everything in
+      this block is gated on prefers-reduced-motion: no-preference; morph
+      replacements (ui_upsert replaceWith) are fresh insertions, so the
+      arrival animation doubles as the update transition with zero client.js
+      changes.
+   ========================================================================= */
+@keyframes astral-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes astral-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .dynamic-renderer > *, #astral-chat > * {
+    animation: astral-rise var(--motion-base) var(--ease-out) both;
+  }
+  /* gentle stagger on multi-component arrivals */
+  .dynamic-renderer > :nth-child(n+2) { animation-delay: 40ms; }
+  .dynamic-renderer > :nth-child(n+3) { animation-delay: 80ms; }
+  .dynamic-renderer > :nth-child(n+4) { animation-delay: 120ms; }
+
+  #astral-modal .astral-modal-backdrop { animation: astral-fade var(--motion-fast) ease-out both; }
+  #astral-modal .astral-modal-card { animation: astral-rise var(--motion-base) var(--ease-out) both; }
+
+  .astral-card, .astral-metric, .astral-list-item {
+    transition: box-shadow var(--motion-fast) ease, border-color var(--motion-fast) ease,
+                transform var(--motion-fast) ease;
+  }
+  .astral-card:hover, .astral-metric:hover { transform: translateY(-1px); }
+  .astral-field {
+    transition: border-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease,
+                background var(--motion-fast) ease;
+  }
+  .astral-btn { transition: filter var(--motion-fast) ease, box-shadow var(--motion-fast) ease; }
+  .astral-menu-item { transition: background var(--motion-fast) ease, color var(--motion-fast) ease; }
+  .astral-progress-track > div { transition: width 400ms var(--ease-out); }
+  .astral-tab > summary::after, .astral-collapsible > summary::after {
+    transition: transform var(--motion-fast) ease;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* =========================================================================
+   8. Pre-029 rules (kept verbatim where still load-bearing)
+   ========================================================================= */
 .glass {
   background: rgb(var(--astral-surface) / 0.60);
   backdrop-filter: blur(12px);
@@ -33,11 +414,6 @@ body {
   border-radius: 0.75rem;
   box-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
 }
-
-/* scrollbars (global, matches index.css) */
-* { scrollbar-width: thin; scrollbar-color: rgb(var(--astral-primary) / 0.3) transparent; }
-*::-webkit-scrollbar { width: 6px; height: 6px; }
-*::-webkit-scrollbar-thumb { background: rgb(var(--astral-primary) / 0.3); border-radius: 999px; }
 
 /* line-clamp-2 fallback (used by detailed list descriptions) */
 .line-clamp-2 {
@@ -93,5 +469,6 @@ details > summary::-webkit-details-marker { display: none; }
   border-radius: 8px;
   position: relative;
   z-index: 65;
+  box-shadow: 0 0 0 6px rgb(var(--astral-primary) / 0.15);
 }
 #astral-tour-card { transform: translateX(-50%); }
