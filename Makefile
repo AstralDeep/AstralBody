@@ -5,19 +5,9 @@
 # both yield that form; native shells fall through to $(CURDIR).
 HOST_PWD := $(shell cygpath -m "$(CURDIR)" 2>/dev/null || pwd -W 2>/dev/null || echo "$(CURDIR)")
 
-# One-off node container used for any operation that needs npm/node.
-# A named volume caches node_modules across runs.
-NODE_RUN := docker run --rm \
-  -v "$(HOST_PWD)/frontend:/app/frontend" \
-  -v "$(HOST_PWD)/.env:/app/.env" \
-  -v astralbody_node_modules:/app/frontend/node_modules \
-  -w /app/frontend \
-  -e NODE_OPTIONS=--max-old-space-size=4096 \
-  node:20-alpine
-
 .PHONY: help up down restart build ps logs logs-db shell psql \
-        sync sync-frontend sync-backend \
-        test test-backend test-frontend lint lint-backend lint-frontend
+        sync sync-backend \
+        test test-backend lint lint-backend
 
 ## ---------- Lifecycle ----------
 
@@ -54,10 +44,6 @@ psql: ## Open psql against the postgres container (uses DB_USER/DB_NAME from .en
 
 ## ---------- Sync (no host toolchain; everything runs in containers) ----------
 
-sync-frontend: ## Build frontend in a node:20-alpine container, copy dist into astralbody
-	$(NODE_RUN) sh -c "npm install --no-audit --no-fund && npm run build"
-	docker cp frontend/dist/. astralbody:/app/frontend/dist/
-
 sync-backend: ## Tar backend source via an alpine container, copy into astralbody, restart
 	docker run --rm -v "$(HOST_PWD)/backend:/src:ro" alpine:3 tar \
 	  --exclude='.venv' --exclude='__pycache__' --exclude='data' --exclude='tmp' \
@@ -65,27 +51,21 @@ sync-backend: ## Tar backend source via an alpine container, copy into astralbod
 	  | docker cp - astralbody:/app/backend/
 	docker compose restart astralbody
 
-sync: sync-frontend sync-backend ## Sync both frontend and backend
+sync: sync-backend ## Sync backend source into the running container
 
 ## ---------- Tests ----------
-
-test-frontend: ## Run Vitest in a node:20-alpine container
-	$(NODE_RUN) sh -c "npm install --no-audit --no-fund && npm run test:run"
 
 test-backend: ## Run pytest inside the astralbody container
 	docker exec astralbody bash -c "cd /app/backend && python -m pytest -q"
 
-test: test-backend test-frontend ## Run all tests
+test: test-backend ## Run all tests
 
 ## ---------- Lint ----------
-
-lint-frontend: ## Run ESLint in a node:20-alpine container
-	$(NODE_RUN) sh -c "npm install --no-audit --no-fund && npm run lint"
 
 lint-backend: ## Run ruff inside the astralbody container
 	docker exec astralbody bash -c "cd /app/backend && ruff check ."
 
-lint: lint-backend lint-frontend ## Run all linters
+lint: lint-backend ## Run all linters
 
 ## ---------- Help ----------
 

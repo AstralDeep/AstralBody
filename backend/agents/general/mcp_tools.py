@@ -13,7 +13,7 @@ import sys
 from typing import List, Dict, Any, AsyncIterator
 import arxiv
 from openai import OpenAI
-from typing import Dict, Any, List, Optional
+from typing import Optional
 from collections import Counter
 import json
 import csv
@@ -32,18 +32,18 @@ except ImportError:
     PANDAS_AVAILABLE = False
 
 # Expression evaluator
-from shared.expression_evaluator import ExpressionEvaluator, safe_eval
+from shared.expression_evaluator import ExpressionEvaluator  # noqa: E402
+from shared.llm_text import strip_reasoning_markup  # noqa: E402
 
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from shared.primitives import (
-    Text, Card, Table, Container, MetricCard, ProgressBar,
-    Alert, Grid, BarChart, LineChart, PieChart, PlotlyChart, List_,
+from astralprims import (  # noqa: E402
+    Text, Card, Table, Container, MetricCard, Alert, Grid, PlotlyChart, List_,
     FileDownload, create_ui_response, ColorPicker, Button, Divider,
     ThemeApply
 )
-from shared.stream_sdk import streaming_tool, StreamComponents
+from shared.stream_sdk import streaming_tool, StreamComponents  # noqa: E402
 
 
 def generate_dynamic_chart(
@@ -74,13 +74,13 @@ def generate_dynamic_chart(
             data = json.loads(data)
         except json.JSONDecodeError:
             return {
-                "_ui_components": [Alert(message="Invalid data format provided. Expected JSON array.", variant="error").to_json()],
+                "_ui_components": [Alert(message="Invalid data format provided. Expected JSON array.", variant="error").to_dict()],
                 "_data": {}
             }
 
     if not data:
         return {
-            "_ui_components": [Alert(message="No data provided to graph.", variant="warning").to_json()],
+            "_ui_components": [Alert(message="No data provided to graph.", variant="warning").to_dict()],
             "_data": {}
         }
 
@@ -177,7 +177,7 @@ def generate_dynamic_chart(
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "labels": labels, 
             "values": values, 
@@ -468,7 +468,7 @@ def modify_data(
         ]
 
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {
                 "filename": filename,
                 "file_path": out_file_path,
@@ -485,8 +485,8 @@ def modify_data(
 # =============================================================================
 # SYSTEM TOOLS
 # =============================================================================
-import psutil
-import platform
+import psutil  # noqa: E402
+import platform  # noqa: E402
 
 # If running inside Docker with host procfs/sysfs mounted, point psutil at the host
 _host_proc = os.environ.get("HOST_PROC")
@@ -505,8 +505,10 @@ def get_system_status(session_id: str = "default", **kwargs) -> Dict[str, Any]:
     disk = psutil.disk_usage(_disk_root)
 
     def get_variant(percent):
-        if percent > 90: return "error"
-        if percent > 70: return "warning"
+        if percent > 90:
+            return "error"
+        if percent > 70:
+            return "warning"
         return "default"
 
     components = [
@@ -549,7 +551,7 @@ def get_system_status(session_id: str = "default", **kwargs) -> Dict[str, Any]:
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "cpu_percent": cpu_percent,
             "memory_percent": mem.percent,
@@ -587,7 +589,7 @@ def get_cpu_info(session_id: str = "default", **kwargs) -> Dict[str, Any]:
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {"cores": cpu_count, "frequency": cpu_freq.current if cpu_freq else 0}
     }
 
@@ -623,7 +625,7 @@ def get_memory_info(session_id: str = "default", **kwargs) -> Dict[str, Any]:
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {"ram_percent": mem.percent, "swap_percent": swap.percent}
     }
 
@@ -660,7 +662,7 @@ def get_disk_info(session_id: str = "default", **kwargs) -> Dict[str, Any]:
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {"partitions": len(rows)}
     }
 
@@ -788,7 +790,7 @@ async def live_system_metrics(
             )
 
             yield StreamComponents(
-                components=[card.to_json()],
+                components=[card.to_dict()],
                 raw={
                     "cpu_percent": cpu_percent,
                     "memory_percent": mem.percent,
@@ -809,7 +811,7 @@ async def live_system_metrics(
 # =============================================================================
 # SEARCH TOOLS
 # =============================================================================
-import requests
+import requests  # noqa: E402
 
 
 def search_wikipedia(query: str, language: str = "en", session_id: str = "default", **kwargs) -> Dict[str, Any]:
@@ -862,7 +864,7 @@ def search_wikipedia(query: str, language: str = "en", session_id: str = "defaul
         ]
 
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {"results": [{"title": r["title"], "pageid": r["pageid"]} for r in results]}
         }
 
@@ -915,9 +917,9 @@ def extract_search_terms(query: str, **kwargs) -> str:
             max_tokens=50,
             timeout=10 # Add timeout
         )
-        terms = response.choices[0].message.content.strip()
+        terms = strip_reasoning_markup(response.choices[0].message.content or "").strip()
         logger.debug(f"extracted terms: {terms}")
-        return terms
+        return terms or query.strip()
     except Exception as e:
         logger.error(f"Error extracting search terms: {e}")
         return query.strip()
@@ -1022,7 +1024,7 @@ def search_arxiv(query: str, max_results: int = 10, session_id: str = "default",
             ]
         
         return {
-            "_ui_components": [c.to_json() if hasattr(c, 'to_json') else c for c in components],
+            "_ui_components": [c.to_dict() if hasattr(c, 'to_json') else c for c in components],
             "_data": results
         }
     except Exception as e:
@@ -1123,7 +1125,7 @@ def change_theme(preset: str = None, **kwargs) -> Dict[str, Any]:
     components = [_build_theme_customization_card(preset)]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "message": "Theme customization panel rendered. Use the preset buttons or color pickers to change colors.",
             "presets": list(THEME_PRESETS.keys()),
@@ -1131,7 +1133,7 @@ def change_theme(preset: str = None, **kwargs) -> Dict[str, Any]:
     }
 
 
-import re
+import re  # noqa: E402
 
 def apply_theme_preset(preset: str, **kwargs) -> Dict[str, Any]:
     """Apply a predefined theme preset directly."""
@@ -1157,7 +1159,7 @@ def apply_theme_preset(preset: str, **kwargs) -> Dict[str, Any]:
         _build_theme_customization_card(preset),
     ]
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {"applied_preset": preset, "colors": colors, "message": message},
     }
 
@@ -1199,7 +1201,7 @@ def set_theme_color(color_key: str, hex_value: str, **kwargs) -> Dict[str, Any]:
         _build_theme_customization_card(),
     ]
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {"color_key": color_key, "color_value": hex_value, "message": message},
     }
 
@@ -1455,13 +1457,13 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
 # and to make it easy to iterate on the file-tool surface without touching the
 # rest of the registry.
 
-from agents.general.file_tools.read_document import read_document as _read_document
-from agents.general.file_tools.read_spreadsheet import read_spreadsheet as _read_spreadsheet
-from agents.general.file_tools.read_presentation import read_presentation as _read_presentation
-from agents.general.file_tools.read_text import read_text as _read_text
-from agents.general.file_tools.read_image import read_image as _read_image
-from agents.general.file_tools.list_attachments import list_attachments as _list_attachments
-from agents.general.file_tools.medical import (
+from agents.general.file_tools.read_document import read_document as _read_document  # noqa: E402
+from agents.general.file_tools.read_spreadsheet import read_spreadsheet as _read_spreadsheet  # noqa: E402
+from agents.general.file_tools.read_presentation import read_presentation as _read_presentation  # noqa: E402
+from agents.general.file_tools.read_text import read_text as _read_text  # noqa: E402
+from agents.general.file_tools.read_image import read_image as _read_image  # noqa: E402
+from agents.general.file_tools.list_attachments import list_attachments as _list_attachments  # noqa: E402
+from agents.general.file_tools.medical import (  # noqa: E402
     compute_volume_statistics as _compute_volume_statistics,
     extract_volume_slice as _extract_volume_slice,
     extract_wsi_region as _extract_wsi_region,

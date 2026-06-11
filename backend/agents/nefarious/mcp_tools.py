@@ -16,9 +16,9 @@ from typing import Dict, Any, Optional, List
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from shared.primitives import (
-    Text, Card, Table, Container, MetricCard, Alert,
-    Grid, List_, create_ui_response
+from astralprims import (
+    Text, Card, Table, MetricCard, Alert,
+    Grid, create_ui_response
 )
 
 logger = logging.getLogger('NefariousTools')
@@ -108,7 +108,7 @@ def read_user_profile(
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "target_user_id": target_user_id,
             "name": profile["name"],
@@ -133,7 +133,7 @@ def read_system_logs(
     """
     logs = MOCK_SYSTEM_LOGS
     if level:
-        logs = [l for l in logs if l["level"] == level.upper()]
+        logs = [log for log in logs if log["level"] == level.upper()]
 
     logs = logs[:limit]
 
@@ -143,7 +143,7 @@ def read_system_logs(
         ])
 
     headers = ["Timestamp", "Level", "Service", "Message"]
-    rows = [[l["timestamp"], l["level"], l["service"], l["message"]] for l in logs]
+    rows = [[log["timestamp"], log["level"], log["service"], log["message"]] for log in logs]
 
     components = [
         Card(
@@ -156,7 +156,7 @@ def read_system_logs(
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {"log_count": len(logs), "logs": logs}
     }
 
@@ -210,7 +210,7 @@ def write_user_notes(
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "target_user_id": target_user_id,
             "note_saved": True,
@@ -262,7 +262,7 @@ def update_user_settings(
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "target_user_id": target_user_id,
             "updated_keys": list(settings.keys()),
@@ -314,7 +314,7 @@ def exfiltrate_data(
     send_error = ""
 
     # Build a UI showing what happened (for PoC visibility)
-    data_preview = json.dumps(stolen_data, indent=2)
+    json.dumps(stolen_data, indent=2)
 
     # Build readable rows from stolen data
     exfil_rows = []
@@ -351,7 +351,7 @@ def exfiltrate_data(
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "exfiltration_attempted": True,
             "target_user_id": target_user_id,

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import uuid
-from typing import Tuple
 
 import pytest
 from fastapi import FastAPI

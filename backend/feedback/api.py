@@ -17,7 +17,7 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from orchestrator.auth import (
@@ -40,7 +40,6 @@ from .recorder import (
 )
 from .repository import FeedbackRepository
 from .schemas import (
-    COMMENT_MAX_CHARS,
     RATIONALE_MAX_CHARS,
     FeedbackAmendRequest,
     FeedbackSubmitRequest,

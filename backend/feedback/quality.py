@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Awaitable, Callable, List, Optional
+from typing import List, Optional
 
 from audit.recorder import get_recorder, make_correlation_id, now_utc
 from audit.schemas import AuditEventCreate

@@ -36,6 +36,10 @@ class Message:
             return UIUpdate(**data)
         elif msg_type == 'ui_append':
             return UIAppend(**data)
+        elif msg_type == 'ui_upsert':
+            return UIUpsert(**data)
+        elif msg_type == 'auth_required':
+            return AuthRequired(**data)
         elif msg_type == 'register_agent':
             return RegisterAgent.from_json(json_str)
         elif msg_type == 'register_ui':
@@ -136,17 +140,65 @@ class UIRender(Message):
     type: str = "ui_render"
     components: List[Dict[str, Any]] = field(default_factory=list)
     target: str = "canvas"  # "canvas" for SDUI main area, "chat" for floating chat panel
+    # Feature 026: server-rendered HTML for web clients (orchestrator renders
+    # astralprims primitives via webrender). Structured `components` remain on
+    # the wire for programmatic/non-web consumers (FR-018).
+    html: Optional[str] = None
 
 @dataclass
 class UIUpdate(Message):
     type: str = "ui_update"
     components: List[Dict[str, Any]] = field(default_factory=list)
+    html: Optional[str] = None  # Feature 026: server-rendered HTML (see UIRender)
 
 @dataclass
 class UIAppend(Message):
     type: str = "ui_append"
     target_id: str = ""
     data: Any = None
+
+
+@dataclass
+class UIUpsert(Message):
+    """Feature 028 — partial workspace update (additive to the 026 contract).
+
+    Each op carries BOTH the ROTE-adapted structured component dict and the
+    web renderer's HTML projection of exactly that dict, mirroring the
+    ``ui_stream_data`` dual shape so non-web targets consume the structured
+    layer (026 FR-018). ``op`` is ``"upsert"`` (replace node by
+    ``data-component-id``, else append) or ``"remove"``.
+    """
+    type: str = "ui_upsert"
+    chat_id: str = ""
+    ops: List[Dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class AuthRequired(Message):
+    """Feature 028 — server→client auth recovery signal.
+
+    Replaces the dead-end in-chat error Alert on ``register_ui`` validation
+    failure. The client re-fetches ``/auth/session`` (which silently
+    refreshes server-side) and retries ``register_ui``; if the session is
+    truly gone it redirects to ``/auth/login?next=…``.
+    """
+    type: str = "auth_required"
+    reason: str = "invalid"  # "expired" | "invalid" | "hard_cap"
+
+@dataclass
+class ChromeRender(Message):
+    """Feature 027 — server-rendered application chrome push.
+
+    Additive to the 026 protocol: carries trusted, server-rendered chrome
+    HTML (top bar / settings-surface modal) for the web shell's named
+    regions. Canvas/chat content continues to flow as UIRender/UIUpdate
+    with components+html (FR-018 untouched). Empty ``html`` for the modal
+    region clears it (close).
+    """
+    type: str = "chrome_render"
+    region: str = "modal"  # "modal" | "topbar"
+    html: str = ""
+    mode: str = "replace"  # reserved; only "replace" in 027
 
 # --- Agent2Agent Protocol ---
 @dataclass
@@ -200,6 +252,10 @@ class AgentCard:
 class RegisterAgent(Message):
     type: str = "register_agent"
     agent_card: Optional[AgentCard] = None
+    # 028 FR-016 (additive): shared-secret presented at registration; the
+    # orchestrator refuses keyless registrations outside dev mode when
+    # AGENT_API_KEY is configured/required (fail closed).
+    api_key: Optional[str] = None
 
     def to_json(self) -> str:
         data = asdict(self)

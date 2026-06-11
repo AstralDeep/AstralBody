@@ -15,7 +15,7 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from orchestrator.stream_manager import StreamManager, StreamState
+from orchestrator.stream_manager import StreamManager
 from shared.protocol import ToolStreamData
 
 

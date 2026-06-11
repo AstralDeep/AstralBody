@@ -1,36 +1,9 @@
 # Dockerfile for AstralBody Multi-Agent System
+#
+# Feature 026: single backend image. The orchestrator serves the server-driven
+# web UI (astralprims primitives rendered by webrender, adapted by ROTE) directly
+# on port 8001 — there is no separate React/Vite frontend build or static server.
 
-# ==========================================
-# Stage 1: Build Frontend
-# ==========================================
-FROM node:20-alpine AS frontend-builder
-WORKDIR /app/frontend
-
-# Copy .env to BOTH parent (for Vite envDir: '../') and current dir (as fallback)
-COPY .env /app/.env
-COPY .env ./.env
-
-# Copy frontend source
-COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci --no-audit --no-fund && npm install -g npm@latest
-
-COPY frontend/ ./
-# Sanitize all .env files to remove Windows line endings (\r)
-RUN find /app -name ".env" -exec sed -i 's/\r$//' {} +
-
-# Set memory limit for Node to prevent swap thrashing during Vite build
-ENV NODE_OPTIONS="--max-old-space-size=4096"
-
-# Strip Windows line endings, then extract only VITE_* vars.
-# awk wraps each value in single quotes to guard against shell metacharacters.
-RUN find /app -name ".env" -exec sed -i 's/\r$//' {} + && \
-    awk -F= '/^VITE_/ {printf "export %s='\''%s'\''\n", $1, substr($0, index($0,$2))}' /app/.env > /tmp/vite-env.sh && \
-    . /tmp/vite-env.sh && \
-    npm run build
-
-# ==========================================
-# Stage 2: Final Image (Backend + Nginx)
-# ==========================================
 FROM python:3.11-slim
 WORKDIR /app
 
@@ -59,20 +32,19 @@ RUN python -m spacy download en_core_web_lg
 # Copy backend source
 COPY backend/ ./backend/
 
-# Copy .env into backend where start.py expects it
-COPY .env ./backend/.env
-RUN sed -i 's/\r$//' ./backend/.env
-
-# Copy compiled frontend from Stage 1
-COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
+# NOTE: configuration is intentionally NOT baked into the image. Secrets in
+# image layers survive `docker rmi` in registry caches and leak via `docker
+# history`. Supply configuration at runtime instead:
+#   docker compose:  env_file: .env   (already wired in docker-compose.yml)
+#   docker run:      --env-file .env
+# load_dotenv(override=False) in start.py tolerates the absent file.
 
 # Setup entrypoint script
 COPY backend/start-docker.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/start-docker.sh
 
 # Expose ports
-# 8001: Orchestrator Gateway (WS + Auth API)
-# 5173: Static Frontend
-EXPOSE 8001 5173
+# 8001: Orchestrator Gateway — serves WS, REST API, and the server-driven web UI
+EXPOSE 8001
 
 CMD ["/usr/local/bin/start-docker.sh"]

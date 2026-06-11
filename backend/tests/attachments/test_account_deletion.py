@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 
 from orchestrator.attachments import store
 from orchestrator.attachments.account_lifecycle import purge_user_attachments

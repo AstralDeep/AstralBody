@@ -3,11 +3,9 @@ Backend Unit Tests — Protocol, Primitives, Tools, and Orchestrator.
 """
 import os
 import sys
-import json
 import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from dataclasses import asdict
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -114,85 +112,85 @@ class TestPrimitives:
     """Tests for UI Primitives serialization."""
 
     def test_text_serialization(self):
-        from shared.primitives import Text
+        from astralprims import Text
         t = Text(content="Hello", variant="h1", id="t1")
-        d = t.to_json()
+        d = t.to_dict()
         assert d["type"] == "text"
         assert d["content"] == "Hello"
         assert d["variant"] == "h1"
 
     def test_card_with_children(self):
-        from shared.primitives import Card, Text
+        from astralprims import Card, Text
         card = Card(title="Test Card", content=[
             Text(content="Body text", variant="body")
         ])
-        d = card.to_json()
+        d = card.to_dict()
         assert d["type"] == "card"
         assert d["title"] == "Test Card"
         assert len(d["content"]) == 1
         assert d["content"][0]["type"] == "text"
 
     def test_table_serialization(self):
-        from shared.primitives import Table
+        from astralprims import Table
         t = Table(headers=["A", "B"], rows=[["1", "2"], ["3", "4"]])
-        d = t.to_json()
+        d = t.to_dict()
         assert d["headers"] == ["A", "B"]
         assert len(d["rows"]) == 2
 
     def test_metric_card(self):
-        from shared.primitives import MetricCard
+        from astralprims import MetricCard
         m = MetricCard(title="CPU", value="45%", progress=0.45, variant="warning")
-        d = m.to_json()
+        d = m.to_dict()
         assert d["title"] == "CPU"
         assert d["progress"] == 0.45
 
     def test_grid_with_children(self):
-        from shared.primitives import Grid, MetricCard
+        from astralprims import Grid, MetricCard
         g = Grid(columns=2, children=[
             MetricCard(title="A", value="1"),
             MetricCard(title="B", value="2"),
         ])
-        d = g.to_json()
+        d = g.to_dict()
         assert d["columns"] == 2
         assert len(d["children"]) == 2
 
     def test_bar_chart(self):
-        from shared.primitives import BarChart
+        from astralprims import BarChart
         c = BarChart(title="Ages", labels=["A", "B"], datasets=[{"label": "Age", "data": [30, 40]}])
-        d = c.to_json()
+        d = c.to_dict()
         assert d["type"] == "bar_chart"
         assert len(d["labels"]) == 2
 
     def test_line_chart(self):
-        from shared.primitives import LineChart
+        from astralprims import LineChart
         c = LineChart(title="HR", labels=["A"], datasets=[{"label": "HR", "data": [70]}])
-        d = c.to_json()
+        d = c.to_dict()
         assert d["type"] == "line_chart"
 
     def test_pie_chart(self):
-        from shared.primitives import PieChart
+        from astralprims import PieChart
         c = PieChart(title="Status", labels=["A", "B"], data=[60, 40], colors=["#f00", "#0f0"])
-        d = c.to_json()
+        d = c.to_dict()
         assert d["type"] == "pie_chart"
         assert d["data"] == [60, 40]
 
     def test_alert(self):
-        from shared.primitives import Alert
+        from astralprims import Alert
         a = Alert(message="Error!", variant="error", title="Oh no")
-        d = a.to_json()
+        d = a.to_dict()
         assert d["variant"] == "error"
         assert d["title"] == "Oh no"
 
     def test_create_ui_response(self):
-        from shared.primitives import Text, create_ui_response
+        from astralprims import Text, create_ui_response
         result = create_ui_response([Text(content="Hello")])
         assert "_ui_components" in result
         assert len(result["_ui_components"]) == 1
 
     def test_component_from_json(self):
-        from shared.primitives import Component, Text
+        from astralprims import Primitive, Text
         data = {"type": "text", "content": "Hi", "variant": "body"}
-        c = Component.from_json(data)
+        c = Primitive.from_dict(data)
         assert isinstance(c, Text)
         assert c.content == "Hi"
 
@@ -360,17 +358,22 @@ class TestMCPServerErrorClassification:
         from agents.general.mcp_server import MCPServer
         from shared.protocol import MCPRequest
         server = MCPServer()
-        # Register a mock tool that raises ConnectionError
+        # Register a mock tool that raises ConnectionError.
+        # server.tools IS the module-level TOOL_REGISTRY — pop the key after,
+        # or the pollution fails test_no_behavior_change's registry guard.
         server.tools["failing_tool"] = {
             "function": lambda: (_ for _ in ()).throw(ConnectionError("Connection refused")),
             "description": "A tool that fails with ConnectionError",
             "input_schema": {"type": "object", "properties": {}}
         }
-        req = MCPRequest(request_id="r-retry", method="tools/call",
-                         params={"name": "failing_tool", "arguments": {}})
-        resp = server.process_request(req)
-        assert resp.error is not None
-        assert resp.error.get("retryable") is True
+        try:
+            req = MCPRequest(request_id="r-retry", method="tools/call",
+                             params={"name": "failing_tool", "arguments": {}})
+            resp = server.process_request(req)
+            assert resp.error is not None
+            assert resp.error.get("retryable") is True
+        finally:
+            server.tools.pop("failing_tool", None)
 
     def test_non_retryable_type_error(self):
         """TypeError should be classified as non-retryable."""
@@ -382,17 +385,20 @@ class TestMCPServerErrorClassification:
             "description": "A tool that fails with TypeError",
             "input_schema": {"type": "object", "properties": {}}
         }
-        req = MCPRequest(request_id="r-noretry", method="tools/call",
-                         params={"name": "bad_args_tool", "arguments": {}})
-        resp = server.process_request(req)
-        assert resp.error is not None
-        assert resp.error.get("retryable") is False
+        try:
+            req = MCPRequest(request_id="r-noretry", method="tools/call",
+                             params={"name": "bad_args_tool", "arguments": {}})
+            resp = server.process_request(req)
+            assert resp.error is not None
+            assert resp.error.get("retryable") is False
+        finally:
+            server.tools.pop("bad_args_tool", None)
 
     def test_tool_alert_error_detection(self):
         """Tool returning Alert with variant='error' should be detected as an error."""
         from agents.general.mcp_server import MCPServer
         from shared.protocol import MCPRequest
-        from shared.primitives import Alert, create_ui_response
+        from astralprims import Alert, create_ui_response
         server = MCPServer()
         # Register a tool that returns an error alert (like Wikipedia does on failure)
         server.tools["alert_tool"] = {
@@ -402,12 +408,15 @@ class TestMCPServerErrorClassification:
             "description": "A tool that returns an error alert",
             "input_schema": {"type": "object", "properties": {}}
         }
-        req = MCPRequest(request_id="r-alert", method="tools/call",
-                         params={"name": "alert_tool", "arguments": {}})
-        resp = server.process_request(req)
-        assert resp.error is not None
-        assert resp.error.get("retryable") is True
-        assert "Something went wrong" in resp.error["message"]
+        try:
+            req = MCPRequest(request_id="r-alert", method="tools/call",
+                             params={"name": "alert_tool", "arguments": {}})
+            resp = server.process_request(req)
+            assert resp.error is not None
+            assert resp.error.get("retryable") is True
+            assert "Something went wrong" in resp.error["message"]
+        finally:
+            server.tools.pop("alert_tool", None)
 
     def test_classify_error_static_method(self):
         """Test the _classify_error static method directly."""
@@ -444,7 +453,7 @@ class TestOrchestratorRetry:
         from shared.protocol import MCPResponse
 
         call_count = 0
-        async def mock_execute(agent_id, tool_name, args, timeout=30.0):
+        async def mock_execute(agent_id, tool_name, args, timeout=30.0, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -469,7 +478,7 @@ class TestOrchestratorRetry:
         from shared.protocol import MCPResponse
 
         call_count = 0
-        async def mock_execute(agent_id, tool_name, args, timeout=30.0):
+        async def mock_execute(agent_id, tool_name, args, timeout=30.0, **kwargs):
             nonlocal call_count
             call_count += 1
             return MCPResponse(request_id=f"r{call_count}",
@@ -491,7 +500,7 @@ class TestOrchestratorRetry:
         from shared.protocol import MCPResponse
 
         call_count = 0
-        async def mock_execute(agent_id, tool_name, args, timeout=30.0):
+        async def mock_execute(agent_id, tool_name, args, timeout=30.0, **kwargs):
             nonlocal call_count
             call_count += 1
             return MCPResponse(request_id="r1",
@@ -510,7 +519,7 @@ class TestOrchestratorRetry:
         from shared.protocol import MCPResponse
 
         call_count = 0
-        async def mock_execute(agent_id, tool_name, args, timeout=30.0):
+        async def mock_execute(agent_id, tool_name, args, timeout=30.0, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count < 3:
@@ -636,16 +645,17 @@ class TestLLMRouting:
 
     def test_pending_request_lifecycle(self, orchestrator):
         """Test that pending requests can be created and resolved."""
-        future = asyncio.get_event_loop().create_future() if hasattr(asyncio, 'get_event_loop') else None
-        if future is None:
-            loop = asyncio.new_event_loop()
+        loop = asyncio.new_event_loop()
+        try:
             future = loop.create_future()
 
-        orchestrator.pending_requests["req-test"] = future
-        assert "req-test" in orchestrator.pending_requests
+            orchestrator.pending_requests["req-test"] = future
+            assert "req-test" in orchestrator.pending_requests
 
-        orchestrator.pending_requests.pop("req-test", None)
-        assert "req-test" not in orchestrator.pending_requests
+            orchestrator.pending_requests.pop("req-test", None)
+            assert "req-test" not in orchestrator.pending_requests
+        finally:
+            loop.close()
 
 
 if __name__ == "__main__":

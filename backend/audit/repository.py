@@ -33,13 +33,12 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
-from psycopg2.extras import RealDictCursor, Json
+from psycopg2.extras import Json
 
 from .pii import chain_hmac, get_active_key_id
 from .schemas import AuditEventCreate, AuditEventDTO, ArtifactPointer

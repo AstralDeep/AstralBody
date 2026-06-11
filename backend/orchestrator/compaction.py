@@ -9,7 +9,7 @@ Inspired by Claude Code's auto-compaction strategy.
 """
 import json
 import logging
-from typing import List, Dict, Optional, Tuple, Callable, Awaitable
+from typing import List, Dict, Tuple, Callable
 
 logger = logging.getLogger("Orchestrator.Compaction")
 

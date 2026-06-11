@@ -9,8 +9,8 @@ for emitting structured progress events during agent generation and testing.
 import json
 import time
 import logging
-from dataclasses import dataclass, asdict
-from typing import Optional, Dict, Any, Callable, Union
+from dataclasses import dataclass
+from typing import Optional, Dict, Any, Callable
 from enum import Enum
 
 logger = logging.getLogger("ProgressSystem")

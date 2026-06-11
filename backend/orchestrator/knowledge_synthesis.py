@@ -16,13 +16,13 @@ import time
 import re
 from collections import defaultdict
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
 from httpx import Timeout
 
 from orchestrator.hooks import HookContext, HookResponse
+from shared.llm_text import strip_reasoning_markup
 
 logger = logging.getLogger("Orchestrator.Knowledge")
 
@@ -386,7 +386,7 @@ Be concise and data-driven."""
                 ],
                 temperature=0.3,
             )
-            return response.choices[0].message.content
+            return strip_reasoning_markup(response.choices[0].message.content)
         except Exception as e:
             logger.warning(f"Knowledge LLM call failed: {e}")
             self._available = False  # stop retrying until next cycle
@@ -524,7 +524,7 @@ class KnowledgeIndex:
                 continue
 
             # Extract first few lines (compact summary)
-            summary_lines = [l for l in content.strip().split("\n") if l.strip()][:4]
+            summary_lines = [line for line in content.strip().split("\n") if line.strip()][:4]
             summary = "\n".join(summary_lines)
 
             if total_chars + len(summary) > ROUTING_HINTS_MAX_CHARS:
@@ -639,7 +639,7 @@ async def _refine_proposal_via_llm(synth: "KnowledgeSynthesizer", base_markdown:
             ],
             temperature=0.2,
         )
-        out = response.choices[0].message.content
+        out = strip_reasoning_markup(response.choices[0].message.content)
         return out if isinstance(out, str) and out.strip() else None
     except Exception as exc:
         logger.warning("refine_proposal LLM call failed: %s", exc)
@@ -680,7 +680,7 @@ async def _classify_comment_safe(synth: "KnowledgeSynthesizer", comment: str) ->
             ],
             temperature=0.0,
         )
-        verdict = (response.choices[0].message.content or "").strip().lower()
+        verdict = strip_reasoning_markup(response.choices[0].message.content or "").strip().lower()
         return verdict.startswith("safe")
     except Exception as exc:
         logger.warning("pre-pass classifier call failed: %s", exc)

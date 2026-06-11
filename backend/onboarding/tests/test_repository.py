@@ -5,7 +5,7 @@ import uuid
 
 import pytest
 
-from onboarding.repository import DuplicateSlug, OnboardingRepository, StepNotFound
+from onboarding.repository import DuplicateSlug, StepNotFound
 
 
 def _slug(request, suffix: str) -> str:

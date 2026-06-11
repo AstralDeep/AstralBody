@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from orchestrator.orchestrator import Orchestrator, ToolDiagnosticStatus
+from orchestrator.orchestrator import Orchestrator
 from shared.protocol import AgentCard, AgentSkill
 
 

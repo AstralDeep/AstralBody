@@ -61,12 +61,11 @@ def tools(knowledge):
     We pre-register the knowledge module so the tools module's
     ``from agents.grants.nsf_techaccess_knowledge import ...`` resolves.
     The same trick is applied to a stub for ``agents.grants.caai_knowledge``
-    and ``shared.primitives`` — primitives is the real thing, but
+    and ``astralprims`` — astralprims is the real thing, but
     caai_knowledge needs to load standalone (without the package init).
     """
-    # Real shared.primitives — imported via package path is fine since
-    # shared.primitives has no a2a dependency.
-    import shared.primitives  # noqa: F401
+    # Real astralprims (first-party UI primitives) — no a2a dependency.
+    import astralprims  # noqa: F401
 
     # Load caai_knowledge by path so ``from agents.grants.caai_knowledge ...``
     # resolves without triggering agents.grants.__init__.

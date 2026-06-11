@@ -6,7 +6,6 @@ free-form value, and that they emit the right shape via the recorder.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import List
 from unittest.mock import AsyncMock, MagicMock
 

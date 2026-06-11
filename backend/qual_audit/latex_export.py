@@ -486,9 +486,9 @@ def print_parallel_dispatch_summary():
     print("+----------------------------------------------------------------------+")
     if lat:
         print(f"|  Agents dispatched: {lat.get('agent_count', '?')}")
-        print(f"|    Weather  -- get_current_weather(city='New York')")
-        print(f"|    General  -- get_system_status()")
-        print(f"|    Medical  -- search_patients(30-60, diabetes)")
+        print("|    Weather  -- get_current_weather(city='New York')")
+        print("|    General  -- get_system_status()")
+        print("|    Medical  -- search_patients(30-60, diabetes)")
         print(f"|  Sequential: {lat.get('sequential_ms', '---')}ms")
         print(f"|  Parallel:   {lat.get('parallel_ms', '---')}ms")
         print(f"|  Speedup:    {lat.get('speedup', '---')}x")

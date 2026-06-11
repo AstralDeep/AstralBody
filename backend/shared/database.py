@@ -3,7 +3,7 @@ from psycopg2.extras import RealDictCursor
 import logging
 import os
 import json
-from typing import List, Dict, Optional, Any, Tuple
+from typing import List, Dict, Optional, Tuple
 
 logger = logging.getLogger('Database')
 
@@ -286,6 +286,20 @@ class Database:
                 updated_at BIGINT
             )
         ''')
+
+        # Feature 027 — agentic creation provenance on drafts. Additive,
+        # idempotent (Constitution IX); all columns nullable or defaulted so
+        # pre-027 code paths are unaffected. Rollback: redeploy prior image
+        # (columns ignored) or ALTER TABLE draft_agents DROP COLUMN <col>.
+        cursor.execute("ALTER TABLE draft_agents ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'manual'")
+        cursor.execute("ALTER TABLE draft_agents ADD COLUMN IF NOT EXISTS source_chat_id TEXT")
+        cursor.execute("ALTER TABLE draft_agents ADD COLUMN IF NOT EXISTS gap_fingerprint TEXT")
+        cursor.execute("ALTER TABLE draft_agents ADD COLUMN IF NOT EXISTS revises_agent_id TEXT")
+        cursor.execute("ALTER TABLE draft_agents ADD COLUMN IF NOT EXISTS self_test TEXT")
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_draft_gap "
+            "ON draft_agents (user_id, source_chat_id, gap_fingerprint)"
+        )
 
         # User attachments — chat-message file uploads, user-scoped (feature 002-file-uploads)
         cursor.execute('''
@@ -721,6 +735,79 @@ class Database:
         ''')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_consolidation_sweep_user_time ON consolidation_sweep(user_id, ran_at DESC)')
 
+        # ── Feature 028 — workspace-auth-revival ────────────────────────────
+        # Durable server-side OIDC sessions (replaces web_auth's in-memory
+        # dict as source of truth; tokens Fernet-encrypted at rest).
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS web_session (
+                sid TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                access_token_enc TEXT NOT NULL,
+                refresh_token_enc TEXT NOT NULL,
+                interactive_anchor BIGINT NOT NULL,
+                hard_expires_at BIGINT NOT NULL,
+                last_refresh_at BIGINT NOT NULL,
+                resumed BOOLEAN DEFAULT FALSE,
+                created_at BIGINT NOT NULL
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS ix_web_session_user ON web_session(user_id)')
+
+        # Offline-tolerant sign-out: refresh tokens awaiting best-effort
+        # revocation at Keycloak (server-side analog of 016's client queue).
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS auth_revocation_queue (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                refresh_token_enc TEXT NOT NULL,
+                enqueued_at BIGINT NOT NULL,
+                attempts INTEGER DEFAULT 0
+            )
+        ''')
+
+        # Per-turn full-state workspace snapshots (read-only timeline).
+        # components carries message-grade content; lifecycle == the chat's.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS workspace_snapshot (
+                id SERIAL PRIMARY KEY,
+                chat_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                turn_message_id INTEGER,
+                cause TEXT NOT NULL,
+                components TEXT NOT NULL,
+                created_at BIGINT NOT NULL,
+                FOREIGN KEY (chat_id) REFERENCES chats (id) ON DELETE CASCADE
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS ix_workspace_snapshot_chat ON workspace_snapshot(chat_id, created_at)')
+        # data-model.md declares turn_message_id as FK -> messages(id) ON
+        # DELETE CASCADE. Added as a named constraint (idempotent; covers
+        # deployments whose table predates the FK). NOT VALID skips
+        # re-validating historic rows; new writes are enforced.
+        cursor.execute('''
+            SELECT 1 FROM information_schema.table_constraints
+            WHERE table_name = 'workspace_snapshot'
+              AND constraint_name = 'fk_workspace_snapshot_turn_message'
+        ''')
+        if not cursor.fetchone():
+            cursor.execute('''
+                ALTER TABLE workspace_snapshot
+                ADD CONSTRAINT fk_workspace_snapshot_turn_message
+                FOREIGN KEY (turn_message_id) REFERENCES messages (id)
+                ON DELETE CASCADE NOT VALID
+            ''')
+
+        # saved_components becomes the live workspace store: stable identity,
+        # ordering, and in-place update timestamps (additive; legacy rows keep
+        # NULLs and sort by created_at).
+        for col, ddl in (("component_id", "TEXT"), ("position", "INTEGER"), ("updated_at", "BIGINT")):
+            if not self._column_exists(cursor, 'saved_components', col):
+                cursor.execute(f"ALTER TABLE saved_components ADD COLUMN {col} {ddl}")
+        cursor.execute('''
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_saved_components_chat_component
+            ON saved_components (chat_id, component_id) WHERE component_id IS NOT NULL
+        ''')
+
         conn.commit()
         conn.close()
 
@@ -998,17 +1085,41 @@ class Database:
 
     def create_draft_agent(self, draft_id: str, user_id: str, agent_name: str,
                            agent_slug: str, description: str, tools_spec: str = None,
-                           skill_tags: str = None, packages: str = None) -> None:
-        """Create a new draft agent record."""
+                           skill_tags: str = None, packages: str = None,
+                           origin: str = "manual", source_chat_id: str = None,
+                           gap_fingerprint: str = None, revises_agent_id: str = None) -> None:
+        """Create a new draft agent record.
+
+        Feature 027: ``origin`` records the entry point (``manual`` |
+        ``auto_chat`` | ``revision``); ``source_chat_id`` + ``gap_fingerprint``
+        scope capability-gap dedup; ``revises_agent_id`` links a revision
+        draft to the live agent it stages changes for.
+        """
         import time
         now = int(time.time() * 1000)
         self.execute(
             """INSERT INTO draft_agents (id, user_id, agent_name, agent_slug, description,
-               tools_spec, skill_tags, packages, status, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)""",
+               tools_spec, skill_tags, packages, status, origin, source_chat_id,
+               gap_fingerprint, revises_agent_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)""",
             (draft_id, user_id, agent_name, agent_slug, description,
-             tools_spec, skill_tags, packages, now, now)
+             tools_spec, skill_tags, packages, origin, source_chat_id,
+             gap_fingerprint, revises_agent_id, now, now)
         )
+
+    def find_gap_draft(self, user_id: str, source_chat_id: str,
+                       gap_fingerprint: str) -> Optional[Dict]:
+        """Feature 027 (FR-007): the non-terminal draft already staged for a
+        capability gap, or None. Terminal = live (resolved) or deleted
+        (discarded); rejected drafts stay editable so they still count."""
+        row = self.fetch_one(
+            """SELECT * FROM draft_agents
+               WHERE user_id = ? AND source_chat_id = ? AND gap_fingerprint = ?
+                 AND status != 'live'
+               ORDER BY created_at DESC LIMIT 1""",
+            (user_id, source_chat_id, gap_fingerprint)
+        )
+        return dict(row) if row else None
 
     def get_draft_agent(self, draft_id: str) -> Optional[Dict]:
         """Get a draft agent by ID."""

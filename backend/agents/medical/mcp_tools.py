@@ -4,7 +4,6 @@ Includes tools for synthetic patient data generation, data analysis, and file ha
 """
 import os
 import sys
-import json
 import random
 import csv
 import io
@@ -12,8 +11,8 @@ from typing import Dict, Any, List
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from shared.primitives import (
-    Card, Table, Grid, MetricCard, Alert, BarChart, Text,
+from astralprims import (
+    Card, Table, Grid, MetricCard, Alert, Text,
     FileUpload, FileDownload, create_ui_response
 )
 
@@ -100,7 +99,7 @@ def search_patients(min_age: int = 0, max_age: int = 200, condition: str = "", s
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {"patients": results, "total": len(results)}
     }
 
@@ -163,7 +162,7 @@ def generate_synthetic_patients(count: int = 50, session_id: str = "default", us
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {"generated_count": count, "preview": patients[:5], "file_path": file_path}
     }
 
@@ -194,7 +193,7 @@ def analyze_patient_data() -> Dict[str, Any]:
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {"status": "waiting_for_upload"}
     }
 
@@ -221,7 +220,7 @@ def _process_csv_data(rows: List[Dict[str, str]], fieldnames: List[str], missing
             components.append(Table(headers=["Column", "Missing Count"], rows=missing_stats_rows))
             components.append(Text(content="How would you like to handle the missing data? You can tell me to 'drop' the rows with missing data or 'fill' them with synthetic averages/defaults.", variant="body"))
             return {
-                "_ui_components": [c.to_json() for c in components],
+                "_ui_components": [c.to_dict() for c in components],
                 "_data": {"status": "waiting_for_missing_strategy", "missing_counts": missing_counts}
             }
         elif missing_strategy == 'drop':
@@ -248,7 +247,7 @@ def _process_csv_data(rows: List[Dict[str, str]], fieldnames: List[str], missing
                         for r in rows:
                             if not r.get(f, "").strip():
                                 r[f] = "Unknown"
-            components.append(Alert(message=f"Filled missing data with synthetic averages or defaults.", variant="success"))
+            components.append(Alert(message="Filled missing data with synthetic averages or defaults.", variant="success"))
 
     if not rows:
         return create_ui_response(components + [Alert(message="No data remaining after applying missing data strategy.", variant="error")])
@@ -287,7 +286,7 @@ def _process_csv_data(rows: List[Dict[str, str]], fieldnames: List[str], missing
     ))
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {"processed_rows": len(rows), "columns": fieldnames, "stats_computed": True}
     }
 

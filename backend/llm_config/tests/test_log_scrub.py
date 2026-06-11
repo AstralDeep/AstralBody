@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import logging
 
-import pytest
 
 from llm_config.log_scrub import (
     LLMKeyRedactionFilter,

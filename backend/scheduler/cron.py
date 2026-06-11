@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Set
+from typing import Optional, Set
 
 try:
     from zoneinfo import ZoneInfo

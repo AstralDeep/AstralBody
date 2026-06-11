@@ -219,7 +219,9 @@ async def toggle_skill(body: SkillToggleRequest, request: Request,
             status_code=403,
             detail=f"This skill needs the '{required_scope}' permission, which you haven't been granted.",
         )
-    tp.set_tool_overrides(user_id, body.agent_id, {body.tool_name: body.enabled})
+    # 027 fix: per-(tool, kind) row — the legacy NULL-kind row written before
+    # was silently outranked whenever a kind row existed (see set_skill_enabled).
+    tp.set_skill_enabled(user_id, body.agent_id, body.tool_name, body.enabled)
     await record_generic(
         claims=payload, event_class="skill",
         action_type="skill.enable" if body.enabled else "skill.disable",

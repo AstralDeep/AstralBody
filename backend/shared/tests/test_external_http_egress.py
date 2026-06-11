@@ -6,7 +6,6 @@ import pytest
 
 from shared.external_http import (
     EgressBlockedError,
-    ServiceUnreachableError,
     validate_egress_url,
 )
 
