@@ -232,8 +232,12 @@ class TestComponentEndpoints:
 
 class TestAgentEndpoints:
     def test_list_agents_empty(self, client):
-        """List agents when none are connected."""
+        """List agents when none are connected (auth required since 013 —
+        the response is scoped to the requesting user's disabled list)."""
         resp = client.get("/api/agents")
+        assert resp.status_code == 401  # no token ⇒ refused
+
+        resp = client.get("/api/agents", headers=AUTH_HEADER)
         assert resp.status_code == 200
         assert resp.json()["agents"] == []
 

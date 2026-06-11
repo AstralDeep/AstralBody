@@ -444,7 +444,7 @@ class TestOrchestratorRetry:
         from shared.protocol import MCPResponse
 
         call_count = 0
-        async def mock_execute(agent_id, tool_name, args, timeout=30.0):
+        async def mock_execute(agent_id, tool_name, args, timeout=30.0, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -469,7 +469,7 @@ class TestOrchestratorRetry:
         from shared.protocol import MCPResponse
 
         call_count = 0
-        async def mock_execute(agent_id, tool_name, args, timeout=30.0):
+        async def mock_execute(agent_id, tool_name, args, timeout=30.0, **kwargs):
             nonlocal call_count
             call_count += 1
             return MCPResponse(request_id=f"r{call_count}",
@@ -491,7 +491,7 @@ class TestOrchestratorRetry:
         from shared.protocol import MCPResponse
 
         call_count = 0
-        async def mock_execute(agent_id, tool_name, args, timeout=30.0):
+        async def mock_execute(agent_id, tool_name, args, timeout=30.0, **kwargs):
             nonlocal call_count
             call_count += 1
             return MCPResponse(request_id="r1",
@@ -510,7 +510,7 @@ class TestOrchestratorRetry:
         from shared.protocol import MCPResponse
 
         call_count = 0
-        async def mock_execute(agent_id, tool_name, args, timeout=30.0):
+        async def mock_execute(agent_id, tool_name, args, timeout=30.0, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count < 3:

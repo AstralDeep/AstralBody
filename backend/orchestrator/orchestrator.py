@@ -17,7 +17,6 @@ import logging
 import re
 from enum import Enum
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
-from dataclasses import asdict
 
 import websockets
 import websockets.exceptions
@@ -46,13 +45,12 @@ import uuid as _uuid
 
 from shared.protocol import (
     Message, MCPRequest, MCPResponse, UIEvent, UIRender, UIUpdate,
-    RegisterAgent, RegisterUI, AgentCard, AgentSkill, ToolProgress,
+    RegisterAgent, RegisterUI, AgentCard, ToolProgress,
     ToolStreamData, ToolStreamEnd, ToolStreamCancel,
     validate_streaming_metadata,
 )
 from astralprims import (
-    Container, Text, Card, Grid, Alert, MetricCard, ProgressBar,
-    Collapsible, create_ui_response
+    Text, Card, Alert, Collapsible
 )
 from rote.rote import ROTE
 from shared.feature_flags import flags
@@ -1120,7 +1118,6 @@ class Orchestrator:
                     # If no chat_id provided, create one
                     if not chat_id:
                         chat_id = self.history.create_chat(user_id=user_id)
-                        from_message = True
                         # Inform UI about new chat ID
                         await self._safe_send(websocket, json.dumps({
                             "type": "chat_created",
@@ -2038,7 +2035,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 if json_match:
                     result = json.loads(json_match.group())
                 else:
-                    return {"error": f"Failed to parse LLM response as JSON"}
+                    return {"error": "Failed to parse LLM response as JSON"}
             
             if "components" not in result or not isinstance(result["components"], list):
                 return {"error": "LLM response missing 'components' array"}
@@ -2092,7 +2089,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         node_type = raw_type.strip().lower()
         # Map generic 'chart' to 'plotly_chart' regardless of validity
         if node_type == "chart":
-            logger.info(f"Mapping generic component type 'chart' -> 'plotly_chart'")
+            logger.info("Mapping generic component type 'chart' -> 'plotly_chart'")
             node["type"] = "plotly_chart"
             node_type = "plotly_chart"  # update variable for subsequent checks
         
@@ -2841,7 +2838,8 @@ COMPONENT UPDATE RULES:
                     if len(llm_msg.tool_calls) == 1:
                         tc = llm_msg.tool_calls[0]
                         res = await self.execute_single_tool(websocket, tc, tool_to_agent, chat_id, user_id=user_id, tool_to_unqualified=tool_to_unqualified)
-                        if res: tool_results.append(res)
+                        if res:
+                            tool_results.append(res)
                     else:
                         res_list = await self.execute_parallel_tools(websocket, llm_msg.tool_calls, tool_to_agent, chat_id, user_id=user_id, tool_to_unqualified=tool_to_unqualified)
                         tool_results.extend(res_list)
@@ -3196,7 +3194,7 @@ COMPONENT UPDATE RULES:
                 try:
                     await self._safe_send(websocket, json.dumps({
                         "type": "chat_status", "status": "fixing",
-                        "message": f"Invalid tool schema detected — auto-fixing agent code..."
+                        "message": "Invalid tool schema detected — auto-fixing agent code..."
                     }))
                     fixed = await self.lifecycle_manager.auto_fix_tool_error(
                         draft_agent_id, "_schema_validation",
@@ -3365,7 +3363,6 @@ COMPONENT UPDATE RULES:
         # The resolved.model is the user's chosen model when source=USER,
         # else the operator default model (== self.llm_model).
         call_model = resolved.model
-        last_error = None
         for attempt in range(1, self.MAX_RETRIES + 1):
             try:
                 kwargs = {
@@ -3431,7 +3428,6 @@ COMPONENT UPDATE RULES:
                     )
                 return response.choices[0].message, usage
             except Exception as e:
-                last_error = e
                 error_str = str(e)
                 is_transient = any(code in error_str for code in ["502", "503", "504", "Bad Gateway", "Service Unavailable", "Connection", "timeout"])
                 is_fatal = any(code in error_str for code in ["424", "401", "403", "Repository Not Found", "Invalid username"])
@@ -5901,7 +5897,7 @@ COMPONENT UPDATE RULES:
         try:
             from orchestrator.a2a_orchestrator_executor import setup_orchestrator_a2a
             setup_orchestrator_a2a(app, self)
-            logger.info(f"A2A JSON-RPC endpoint mounted at /a2a/")
+            logger.info("A2A JSON-RPC endpoint mounted at /a2a/")
         except Exception as e:
             logger.warning(f"A2A server setup skipped: {e}")
 
@@ -5934,7 +5930,7 @@ COMPONENT UPDATE RULES:
                 try:
                     # This will connect if not already connected
                     await self.discover_agent(agent_url)
-                except Exception as e:
+                except Exception:
                     pass
             
             await asyncio.sleep(5)  # Check every 5 seconds
