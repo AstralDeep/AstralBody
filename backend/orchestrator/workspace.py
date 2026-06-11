@@ -65,6 +65,78 @@ def fingerprint(agent_id: str, tool_name: str, params: Optional[Dict[str, Any]])
     return "wc_" + hashlib.sha1(basis.encode()).hexdigest()[:16]
 
 
+def layout_key_for(chat_id: str, turn_marker: str) -> str:
+    """Deterministic per-round layout key (feature 029).
+
+    Re-designing the same round (same chat + turn marker) upserts the same
+    row, so garnish updates in place instead of duplicating (FR-019).
+    """
+    basis = f"{chat_id or ''}|{turn_marker or ''}"
+    return "ly_" + hashlib.sha1(basis.encode()).hexdigest()[:16]
+
+
+def iter_layout_refs(node: Any):
+    """Yield every ``ref`` node's component_id in a layout tree (depth-first).
+
+    Layout trees nest through the same keys the component validator walks:
+    ``children``, ``content``, and ``tabs[*].content``.
+    """
+    if isinstance(node, list):
+        for item in node:
+            yield from iter_layout_refs(item)
+        return
+    if not isinstance(node, dict):
+        return
+    if node.get("type") == "ref":
+        cid = node.get("component_id")
+        if cid:
+            yield str(cid)
+        return
+    for key in ("children", "content"):
+        nested = node.get(key)
+        if isinstance(nested, list):
+            yield from iter_layout_refs(nested)
+    tabs = node.get("tabs")
+    if isinstance(tabs, list):
+        for tab in tabs:
+            if isinstance(tab, dict):
+                yield from iter_layout_refs(tab.get("content"))
+
+
+def prune_layout_refs(node: Any, drop: set) -> Any:
+    """Return a copy of a layout tree with ``ref`` nodes in ``drop`` removed.
+
+    Containers that end up empty are kept (they may carry garnish text);
+    materialization simply renders them without the pruned leaves.
+    """
+    if isinstance(node, list):
+        out = []
+        for item in node:
+            pruned = prune_layout_refs(item, drop)
+            if pruned is not None:
+                out.append(pruned)
+        return out
+    if not isinstance(node, dict):
+        return node
+    if node.get("type") == "ref":
+        return None if str(node.get("component_id")) in drop else node
+    result = dict(node)
+    for key in ("children", "content"):
+        nested = node.get(key)
+        if isinstance(nested, list):
+            result[key] = prune_layout_refs(nested, drop)
+    tabs = node.get("tabs")
+    if isinstance(tabs, list):
+        new_tabs = []
+        for tab in tabs:
+            if isinstance(tab, dict):
+                tab = dict(tab)
+                tab["content"] = prune_layout_refs(tab.get("content") or [], drop)
+            new_tabs.append(tab)
+        result["tabs"] = new_tabs
+    return result
+
+
 class WorkspaceManager:
     """Owns workspace identity, upserts, ordering, snapshots and timeline reads."""
 
@@ -225,12 +297,101 @@ class WorkspaceManager:
             )
         return ops
 
+    # ── canvas arrangements (feature 029, adaptive UI designer) ──────────
+    def live_layouts(self, chat_id: str, user_id: str) -> List[Dict[str, Any]]:
+        """Ordered designed arrangements for a chat (overlay over components)."""
+        rows = self.db.fetch_all(
+            "SELECT layout_key, position, layout FROM workspace_layout "
+            "WHERE chat_id = ? AND user_id = ? ORDER BY position ASC, id ASC",
+            (chat_id, user_id),
+        )
+        out = []
+        for row in rows:
+            try:
+                tree = json.loads(row["layout"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            out.append({"layout_key": row["layout_key"], "position": row["position"],
+                        "layout": tree})
+        return out
+
+    def next_canvas_position(self, chat_id: str, user_id: str) -> int:
+        """Next position in the SHARED ordering space of components + layouts."""
+        comp_max = self.db.fetch_one(
+            "SELECT MAX(position) AS p FROM saved_components WHERE chat_id = ? AND user_id = ?",
+            (chat_id, user_id),
+        )
+        lay_max = self.db.fetch_one(
+            "SELECT MAX(position) AS p FROM workspace_layout WHERE chat_id = ? AND user_id = ?",
+            (chat_id, user_id),
+        )
+        return 1 + max((comp_max or {}).get("p") or 0, (lay_max or {}).get("p") or 0)
+
+    def upsert_layout(self, chat_id: str, user_id: str, layout_key: str,
+                      layout: List[Dict[str, Any]]) -> bool:
+        """Persist one designed arrangement; later layouts steal claimed refs.
+
+        A component_id may be claimed by at most one live arrangement: refs
+        the new layout claims are pruned from earlier layouts (later wins —
+        re-designing a round that re-uses an old component moves it).
+        Existing (chat, layout_key) rows update in place keeping position.
+        """
+        if not chat_id or not layout_key or not isinstance(layout, list):
+            return False
+        claimed = set(iter_layout_refs(layout))
+        if claimed:
+            for other in self.live_layouts(chat_id, user_id):
+                if other["layout_key"] == layout_key:
+                    continue
+                other_refs = set(iter_layout_refs(other["layout"]))
+                overlap = other_refs & claimed
+                if overlap:
+                    pruned = prune_layout_refs(other["layout"], overlap)
+                    self.db.execute(
+                        "UPDATE workspace_layout SET layout = ?, updated_at = ? "
+                        "WHERE chat_id = ? AND user_id = ? AND layout_key = ?",
+                        (json.dumps(pruned), _now_ms(), chat_id, user_id, other["layout_key"]),
+                    )
+        existing = self.db.fetch_one(
+            "SELECT id FROM workspace_layout WHERE chat_id = ? AND user_id = ? AND layout_key = ?",
+            (chat_id, user_id, layout_key),
+        )
+        if existing:
+            self.db.execute(
+                "UPDATE workspace_layout SET layout = ?, updated_at = ? "
+                "WHERE chat_id = ? AND user_id = ? AND layout_key = ?",
+                (json.dumps(layout), _now_ms(), chat_id, user_id, layout_key),
+            )
+        else:
+            self.db.execute(
+                "INSERT INTO workspace_layout (chat_id, user_id, layout_key, position, "
+                "layout, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (chat_id, user_id, layout_key, self.next_canvas_position(chat_id, user_id),
+                 json.dumps(layout), _now_ms(), _now_ms()),
+            )
+        return True
+
     def remove(self, chat_id: str, user_id: str, component_id: str) -> bool:
         cur = self.db.execute(
             "DELETE FROM saved_components WHERE chat_id = ? AND component_id = ? AND user_id = ?",
             (chat_id, component_id, user_id),
         )
         removed = bool(getattr(cur, "rowcount", 0))
+        if removed:
+            # Feature 029: a deleted component's refs vanish from arrangements
+            # (materialization would drop them anyway; pruning keeps stored
+            # layouts honest for snapshots/timeline).
+            try:
+                for lay in self.live_layouts(chat_id, user_id):
+                    if component_id in set(iter_layout_refs(lay["layout"])):
+                        pruned = prune_layout_refs(lay["layout"], {component_id})
+                        self.db.execute(
+                            "UPDATE workspace_layout SET layout = ?, updated_at = ? "
+                            "WHERE chat_id = ? AND user_id = ? AND layout_key = ?",
+                            (json.dumps(pruned), _now_ms(), chat_id, user_id, lay["layout_key"]),
+                        )
+            except Exception:
+                logger.debug("layout ref pruning failed on remove", exc_info=True)
         if removed:
             count = self.db.fetch_one(
                 "SELECT COUNT(*) as count FROM saved_components WHERE chat_id = ? AND user_id = ?",
@@ -250,10 +411,15 @@ class WorkspaceManager:
         if not chat_id:
             return None
         components = self.live_components(chat_id, user_id)
+        # Feature 029: arrangements snapshot alongside components so the
+        # timeline can materialize historical designed states. NULL-tolerant
+        # readers treat missing/NULL layouts as "render flat" (pre-029 rows).
+        layouts = self.live_layouts(chat_id, user_id)
         self.db.execute(
             "INSERT INTO workspace_snapshot (chat_id, user_id, turn_message_id, cause, "
-            "components, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (chat_id, user_id, turn_message_id, cause, json.dumps(components), _now_ms()),
+            "components, layouts, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (chat_id, user_id, turn_message_id, cause, json.dumps(components),
+             json.dumps(layouts) if layouts else None, _now_ms()),
         )
         # RealDictCursor rows; psycopg2 cursors expose lastrowid unreliably —
         # callers only need success/failure, the id is for tests/diagnostics.
@@ -296,11 +462,16 @@ class WorkspaceManager:
             components = json.loads(row["components"])
         except (json.JSONDecodeError, TypeError):
             components = []
+        try:
+            layouts = json.loads(row["layouts"]) if row.get("layouts") else []
+        except (json.JSONDecodeError, TypeError):
+            layouts = []
         return {
             "id": row["id"],
             "chat_id": row["chat_id"],
             "turn_message_id": row.get("turn_message_id"),
             "cause": row["cause"],
             "components": components,
+            "layouts": layouts,
             "created_at": row["created_at"],
         }
