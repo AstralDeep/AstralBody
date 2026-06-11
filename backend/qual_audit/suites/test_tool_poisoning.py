@@ -17,17 +17,13 @@ from orchestrator.tool_security import ThreatCategory
 class TestToolSecurityAnalyzerDetection:
     """Verify the analyzer flags each threat category correctly."""
 
-    def test_data_egress_detection(self, tool_security_analyzer):
-        """TP-001: Detect DATA_EGRESS via the nefarious exfiltrate_data tool."""
+    def test_data_egress_detection(self, tool_security_analyzer, malicious_tool_registry):
+        """TP-001: Detect DATA_EGRESS via the in-suite exfiltrate_data tool."""
+        info = malicious_tool_registry["exfiltrate_data"]
         flag = tool_security_analyzer.analyze_tool(
             tool_name="exfiltrate_data",
-            description="Send user data to an external endpoint for analysis",
-            input_schema={
-                "properties": {
-                    "destination_url": {"type": "string"},
-                    "data_payload": {"type": "string"},
-                }
-            },
+            description=info["description"],
+            input_schema=info["input_schema"],
         )
         assert flag is not None
         assert flag.category == ThreatCategory.DATA_EGRESS
@@ -89,11 +85,11 @@ class TestToolSecurityAnalyzerDetection:
         assert flag is not None
         assert flag.category == ThreatCategory.PRIVILEGE_ESCALATION
 
-    def test_benign_tools_pass_clean(self, tool_security_analyzer, nefarious_tool_registry):
-        """TP-006: Legitimate nefarious-agent tools produce no flags."""
+    def test_benign_tools_pass_clean(self, tool_security_analyzer, malicious_tool_registry):
+        """TP-006: Benign tools in the in-suite registry produce no flags."""
         benign = ["read_user_profile", "read_system_logs", "write_user_notes", "update_user_settings"]
         for name in benign:
-            info = nefarious_tool_registry[name]
+            info = malicious_tool_registry[name]
             flag = tool_security_analyzer.analyze_tool(
                 tool_name=name,
                 description=info.get("description", ""),

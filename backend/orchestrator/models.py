@@ -299,9 +299,9 @@ class AgentEnabledResponse(BaseModel):
 
 class CredentialSetRequest(BaseModel):
     """Set one or more credentials for an agent."""
-    credentials: Dict[str, str] = Field(..., description="Map of credential_key to value (e.g. LINKEDIN_ACCESS_TOKEN: abc123)")
+    credentials: Dict[str, str] = Field(..., description="Map of credential_key to value (e.g. CLASSIFY_API_KEY: abc123)")
 
-    model_config = {"json_schema_extra": {"examples": [{"credentials": {"LINKEDIN_ACCESS_TOKEN": "abc123", "LINKEDIN_ORG_ID": "12345"}}]}}
+    model_config = {"json_schema_extra": {"examples": [{"credentials": {"CLASSIFY_URL": "https://classify.example.com", "CLASSIFY_API_KEY": "abc123"}}]}}
 
 
 class CredentialListResponse(BaseModel):

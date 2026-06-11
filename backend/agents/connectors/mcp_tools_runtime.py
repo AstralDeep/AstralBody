@@ -17,7 +17,7 @@ _AGENT_ROUTING = [
     {"agent_id": "medical-1", "name": "Medical Agent", "tags": ["medical", "patient", "clinical", "health"]},
     {"agent_id": "weather-1", "name": "Weather Agent", "tags": ["weather", "forecast", "temperature"]},
     {"agent_id": "forecaster-1", "name": "Forecaster Agent", "tags": ["forecast", "prediction", "analysis"]},
-    {"agent_id": "grants-1", "name": "Grants Agent", "tags": ["grants", "funding", "budget", "application"]},
+    {"agent_id": "journal-review-1", "name": "Journal Review Agent", "tags": ["journal", "review", "manuscript", "publication"]},
     {"agent_id": "connectors-1", "name": "Connectors Agent", "tags": ["office", "excel", "ppt", "document", "email", "code", "review", "design"]},
 ]
 

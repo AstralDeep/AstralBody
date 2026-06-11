@@ -98,7 +98,7 @@ class CredentialManager:
         Args:
             user_id: The user who owns the credential.
             agent_id: The agent this credential is for.
-            key: Credential key name (e.g., "NOCODB_API_TOKEN").
+            key: Credential key name (e.g., "CLASSIFY_API_KEY").
             value: Plaintext credential value.
             e2e: If True and the agent has a registered public key, use ECIES.
                  If False, always use Fernet (for OAuth credentials the orchestrator needs).
