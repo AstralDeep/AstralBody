@@ -28,7 +28,16 @@ tests/
 
 ## Commands
 
-cd src; pytest; ruff check .
+Everything runs in the `astralbody` container (no host venv; backend needs py3.11):
+
+```bash
+docker compose up -d                                   # postgres + astralbody
+docker cp <file> astralbody:/app/<repo-rel-path>       # sync one edit (source is baked)
+docker exec astralbody bash -c "cd /app/backend && python -m pytest -q"   # full suite
+docker exec astralbody bash -c "cd /app/backend && python -m ruff check ."  # lint (repo-wide clean)
+```
+
+Dev posture: `.env` must have `ASTRAL_ENV=development` (unset == production fail-closed). Production: see [docs/production-deployment.md](docs/production-deployment.md) — runtime-only secrets (never baked into the image), TLS proxy with `FORWARDED_ALLOW_IPS`, `/healthz`+`/readyz` probes, boot gate refuses missing/placeholder secrets.
 
 ## Code Style
 
