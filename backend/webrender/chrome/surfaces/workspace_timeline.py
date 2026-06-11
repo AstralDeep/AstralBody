@@ -136,7 +136,25 @@ async def _view(orch, websocket, user_id, roles, payload):
         "type": "workspace_timeline_mode", "active": True, "chat_id": chat_id,
         "snapshot_id": snapshot_id,
     }))
-    components = _banner_components(snap, chat_id) + list(snap.get("components") or [])
+    # Feature 029: snapshots carry the designed arrangements that were live at
+    # capture time — materialize them so history looks the way it looked.
+    # (Pre-029 snapshots have no layouts and render flat, as before.)
+    snap_components = list(snap.get("components") or [])
+    layouts = [lay for lay in (snap.get("layouts") or []) if isinstance(lay, dict)]
+    if layouts:
+        from orchestrator.ui_designer import materialize
+        from orchestrator.workspace import iter_layout_refs
+        by_id = {c.get("component_id"): c for c in snap_components
+                 if isinstance(c, dict) and c.get("component_id")}
+        claimed = set()
+        for lay in layouts:
+            claimed |= set(iter_layout_refs(lay.get("layout") or []))
+        body = [c for c in snap_components
+                if isinstance(c, dict) and c.get("component_id") not in claimed]
+        for lay in sorted(layouts, key=lambda item: item.get("position") or 0):
+            body.extend(materialize(lay.get("layout") or [], by_id))
+        snap_components = body
+    components = _banner_components(snap, chat_id) + snap_components
     await orch.send_ui_render(websocket, components)
     # Close the modal so the historical canvas is visible.
     from shared.protocol import ChromeRender
@@ -153,7 +171,11 @@ async def _live(orch, websocket, user_id, roles, payload):
     }))
     if chat_id:
         try:
-            components = orch.workspace.live_components(chat_id, user_id)
+            # Feature 029: back-to-live restores the designed canvas when the
+            # orchestrator provides the materializer (test fakes may not).
+            canvas_fn = getattr(orch, "_canvas_components", None)
+            components = (canvas_fn(chat_id, user_id) if canvas_fn
+                          else orch.workspace.live_components(chat_id, user_id))
             await orch.send_ui_render(websocket, components or [])
         except Exception:
             import logging

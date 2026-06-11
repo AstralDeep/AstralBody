@@ -233,6 +233,48 @@ def _sanitize_text_response(content: str) -> str:
     return cleaned
 
 
+# Feature 029 — catalog change handling for historical components
+# (specs/029-agents-adaptive-ui-ci/baseline.md). Six agents are retired
+# outright; three merged into ml-services-1. Sources remap so refresh /
+# pagination on pre-merge components keeps working; retired sources get an
+# explicit retirement message instead of a dispatch crash. Module-level (not
+# class attributes) so unbound-method test fakes need no extra wiring.
+RETIRED_AGENT_IDS = frozenset({
+    "email_tracker", "email-tracker-1", "grant_budgets", "grant-budgets-1",
+    "grants", "grants-1", "linkedin", "linkedin-1",
+    "nefarious", "nefarious-1", "nocodb", "nocodb-1",
+})
+_MERGED_AGENT_REMAP = {
+    "classify": "ml-services-1", "classify-1": "ml-services-1",
+    "forecaster": "ml-services-1", "forecaster-1": "ml-services-1",
+    "llm_factory": "ml-services-1", "llm-factory-1": "ml-services-1",
+}
+_MERGED_TOOL_PREFIX = {
+    "classify": "classify_", "classify-1": "classify_",
+    "forecaster": "forecaster_", "forecaster-1": "forecaster_",
+}
+_MERGED_COLLIDING_VERBS = frozenset({
+    "submit_dataset", "start_training_job", "get_job_status",
+    "get_results", "delete_dataset",
+})
+
+
+def remap_merged_source(agent_id: str, tool_name: str):
+    """Map a pre-merge (agent, tool) provenance onto the ml-services-1 agent.
+
+    The five verbs classify and forecaster shared pre-merge carry a service
+    prefix in the consolidated registry; everything else keeps its name.
+    Unrelated agents pass through untouched.
+    """
+    new_agent = _MERGED_AGENT_REMAP.get(agent_id)
+    if not new_agent:
+        return agent_id, tool_name
+    prefix = _MERGED_TOOL_PREFIX.get(agent_id, "")
+    if prefix and tool_name in _MERGED_COLLIDING_VERBS:
+        tool_name = prefix + tool_name
+    return new_agent, tool_name
+
+
 class Orchestrator:
     def __init__(self):
         # 020-async-queries: background task manager for async chat processing
@@ -1360,7 +1402,8 @@ class Orchestrator:
                         # full ui_render after chat_loaded (stream-resume
                         # precedent below). No capabilities re-run.
                         try:
-                            ws_components = self.workspace.live_components(chat_id, user_id=user_id)
+                            # Feature 029: materialized arrangements re-hydrate too.
+                            ws_components = self._canvas_components(chat_id, user_id)
                             if ws_components:
                                 await self.send_ui_render(websocket, ws_components)
                         except Exception:
@@ -1694,7 +1737,9 @@ class Orchestrator:
                         active_chat = self._ws_active_chat.get(id(websocket))
                         if active_chat:
                             try:
-                                ws_components = self.workspace.live_components(active_chat, user_id=user_id)
+                                # Feature 029: re-adapt the designed canvas, not
+                                # just the flat component list.
+                                ws_components = self._canvas_components(active_chat, user_id)
                                 if ws_components:
                                     await self.send_ui_render(websocket, ws_components)
                                     handled_via_workspace = True
@@ -2083,13 +2128,13 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             if "components" not in result or not isinstance(result["components"], list):
                 return {"error": "LLM response missing 'components' array"}
             
-            # Known valid primitive types from primitives.py
-            VALID_TYPES = {
-                "container", "text", "button", "card", "table", "list",
-                "alert", "progress", "metric", "code", "image", "grid",
-                "tabs", "divider", "input", "bar_chart", "line_chart",
-                "pie_chart", "plotly_chart", "collapsible", "chart"
-            }
+            # Feature 029 (FR-020): the renderer registry is the single
+            # source of truth for valid types — hand-copied whitelists
+            # drifted (param_picker/audio/file IO were silently rewritten
+            # to containers). "chart" stays as an accepted alias; the tree
+            # validator maps it to plotly_chart.
+            from webrender import allowed_primitive_types
+            VALID_TYPES = set(allowed_primitive_types()) | {"chart"}
             
             # Validate each component
             for comp in result["components"]:
@@ -2936,9 +2981,11 @@ COMPONENT UPDATE RULES:
                                 tool_ui_components.append(comp)
 
                     if tool_ui_components:
-                        # Send components, upserting into the persistent workspace (028)
-                        ws_ops = await self._send_or_replace_components(
-                            websocket, tool_ui_components, chat_id, user_id=user_id
+                        # Feature 029: the adaptive designer arranges multi-
+                        # component rounds (fail-open to the 028 flat append).
+                        ws_ops = await self._deliver_round_components(
+                            websocket, tool_ui_components, chat_id, user_id=user_id,
+                            user_request=message,
                         )
                         if chat_id:
                             self.history.add_message(chat_id, "assistant", tool_ui_components, user_id=user_id)
@@ -3104,14 +3151,14 @@ COMPONENT UPDATE RULES:
                             if isinstance(data, list):
                                 for item in data:
                                     if isinstance(item, dict) and "type" in item:
-                                        # Recursively validate component structure to ensure frontend won't crash
-                                        self._validate_component_tree(item, {
-                                            "container", "text", "button", "card", "table", "list",
-                                            "alert", "progress", "metric", "code", "image", "grid",
-                                            "tabs", "divider", "input", "bar_chart", "line_chart",
-                                            "pie_chart", "plotly_chart", "collapsible",
-                                            "file_upload", "file_download"
-                                        })
+                                        # Recursively validate component structure so the
+                                        # client never sees an unrenderable type. Feature 029
+                                        # (FR-020): validate against the renderer registry,
+                                        # not a hand-copied subset.
+                                        from webrender import allowed_primitive_types
+                                        self._validate_component_tree(
+                                            item, set(allowed_primitive_types()) | {"chart"}
+                                        )
                                         valid_components.append(item)
                             
                             if valid_components:
@@ -3156,19 +3203,11 @@ COMPONENT UPDATE RULES:
                             final_ops = await self._send_or_replace_components(
                                 websocket, parsed_components, chat_id, user_id=user_id
                             ) or []
-                            chat_summary = list(leak_alerts) + [
-                                Card(title="Analysis", content=[
-                                    Text(content=content, variant="markdown")
-                                ]).to_dict()
-                            ]
+                            chat_summary = list(leak_alerts) + self._chat_narrative(content)
                             await self.send_ui_render(websocket, chat_summary, target="chat")
                             response_components = list(leak_alerts) + list(parsed_components)
                     else:
-                        response_components = list(leak_alerts) + [
-                            Card(title="Analysis", content=[
-                                Text(content=content, variant="markdown")
-                            ]).to_dict()
-                        ]
+                        response_components = list(leak_alerts) + self._chat_narrative(content)
                         # Pure text response goes to chat panel
                         await self.send_ui_render(websocket, response_components, target="chat")
 
@@ -3211,9 +3250,9 @@ COMPONENT UPDATE RULES:
                     if chat_id:
                         self.history.add_message(chat_id, "assistant", summary_components, user_id=user_id)
                 else:
-                    # Fallback if LLM summary fails
+                    # Fallback if LLM summary fails — descriptive, not boilerplate.
                     await self.send_ui_render(websocket, [
-                        Card(title="Summary", content=[
+                        Card(title="Round results", content=[
                             Text(content="Multiple tool operations were completed. Review the results above for details.", variant="body")
                         ]).to_dict()
                     ])
@@ -3642,10 +3681,13 @@ COMPONENT UPDATE RULES:
             summary_text = summary_text.strip()
 
             if summary_text:
+                # Feature 029 (FR-027): contextual title over the constant
+                # "Summary" — derived from the summary's own first heading.
                 return [
-                    Card(title="Summary", content=[
-                        Text(content=summary_text, variant="body")
-                    ]).to_dict()
+                    Card(title=self._derive_chat_title(summary_text, default="Round results"),
+                         content=[
+                             Text(content=summary_text, variant="body")
+                         ]).to_dict()
                 ]
 
         except Exception as e:
@@ -4115,7 +4157,8 @@ COMPONENT UPDATE RULES:
             ))
 
         # Don't render tool results immediately — the caller (handle_chat_message)
-        # batches all tool results into a single collapsible section.
+        # collects the round's components and either runs the adaptive UI
+        # designer over them or flat-appends them to the workspace (029).
         if result and result.error:
             # Errors are still shown immediately so the user knows something went wrong
             err_msg = result.error.get('message', 'Unknown error')
@@ -5099,6 +5142,161 @@ COMPONENT UPDATE RULES:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
+    @staticmethod
+    def _derive_chat_title(content: str, default: str = "Response") -> str:
+        """Feature 029 (FR-027): a contextual chat-card title.
+
+        Prefers the response's own first markdown heading; falls back to the
+        provided default. Never invents content — purely derivational.
+        """
+        for line in (content or "").splitlines():
+            line = line.strip()
+            if line.startswith("#"):
+                heading = line.lstrip("#").strip().rstrip(":")
+                if heading:
+                    return heading[:80]
+        return default
+
+    def _chat_narrative(self, content: str) -> List[Dict]:
+        """Feature 029 (FR-027): the final-turn chat-panel narrative.
+
+        Replaces the constant ``Card(title="Analysis")``: short plain answers
+        render as bare markdown (no card chrome); longer ones get a card with
+        a title derived from the response itself.
+        """
+        text = (content or "").strip()
+        if len(text) <= 280 and "\n\n" not in text and not text.startswith("#"):
+            return [Text(content=text, variant="markdown").to_dict()]
+        return [
+            Card(title=self._derive_chat_title(text), content=[
+                Text(content=text, variant="markdown")
+            ]).to_dict()
+        ]
+
+    def _canvas_components(self, chat_id: str, user_id: str) -> List[Dict]:
+        """Feature 029: the canvas as one component list — designed arrangements
+        materialized in place, unclaimed components flat — in shared position
+        order. With no arrangements this is exactly the pre-029 flat canvas."""
+        layouts = self.workspace.live_layouts(chat_id, user_id)
+        if not layouts:
+            return self.workspace.live_components(chat_id, user_id)
+        from orchestrator import ui_designer
+        from orchestrator.workspace import iter_layout_refs
+        by_id: Dict[str, Dict] = {}
+        comp_entries = []
+        for row in self.workspace.live_rows(chat_id, user_id):
+            data = row.get("component_data")
+            if not isinstance(data, dict):
+                continue
+            cid = row.get("component_id")
+            if cid and not data.get("component_id"):
+                data["component_id"] = cid
+            if cid:
+                by_id[cid] = data
+            comp_entries.append((row.get("position") or 0, cid, data))
+        claimed = set()
+        for lay in layouts:
+            claimed |= set(iter_layout_refs(lay["layout"]))
+        stream: List = [
+            (pos, 0, [data]) for pos, cid, data in comp_entries
+            if not (cid and cid in claimed)
+        ]
+        stream += [
+            (lay.get("position") or 0, 1, ui_designer.materialize(lay["layout"], by_id))
+            for lay in layouts
+        ]
+        out: List[Dict] = []
+        for _pos, _kind, payload in sorted(stream, key=lambda t: (t[0], t[1])):
+            out.extend(payload)
+        return out
+
+    async def _push_canvas(self, chat_id: str, user_id: str, originating_ws=None):
+        """Full-canvas ui_render (materialized arrangements) to every socket of
+        the user on this chat — the same fan-out + per-socket ROTE adaptation
+        the legacy reconciliation path uses."""
+        components = self._canvas_components(chat_id, user_id)
+        targets = [
+            ws for ws in self.ui_clients
+            if self._get_user_id(ws) == user_id
+            and self._ws_active_chat.get(id(ws)) == chat_id
+        ]
+        if originating_ws is not None and originating_ws not in targets:
+            targets.append(originating_ws)
+        for ws in targets:
+            await self.send_ui_render(ws, components)
+
+    async def _deliver_round_components(self, websocket, components: List[Dict], chat_id: str,
+                                        user_id: str, *, user_request: str = "") -> List[Dict]:
+        """Feature 029: deliver one round's rich components to the canvas.
+
+        Rounds with ≥2 components (flag-gated) get the adaptive designer pass:
+        components persist first (identities assigned by the unchanged 028
+        upsert), one LLM call arranges them (reference leaves + garnish), the
+        arrangement persists, and the full designed canvas fans out. EVERY
+        failure mode falls back to the legacy flat append — same persistence,
+        same ``ui_upsert`` delivery, no user-visible error (FR-022).
+        """
+        from orchestrator import ui_designer
+        from orchestrator.workspace import layout_key_for
+        timeline = self._ws_timeline_mode.get(id(websocket), False)
+        if not chat_id or not ui_designer.should_design(components, timeline_mode=timeline):
+            return await self._send_or_replace_components(websocket, components, chat_id, user_id)
+        try:
+            ops = self.workspace.upsert(chat_id, user_id, components)
+        except Exception:
+            logger.exception("workspace upsert failed — falling back to transient render")
+            await self.send_ui_render(websocket, components)
+            return []
+        layout = None
+        try:
+            turn_marker = str(self.history.get_latest_message_id(chat_id, user_id=user_id) or "")
+            layout_key = layout_key_for(chat_id, turn_marker)
+
+            async def _designer_llm(messages):
+                # Same credential resolution as the round itself (feature 006,
+                # websocket-scoped) and the same llm_call auditing (FR-028).
+                msg, _usage = await self._call_llm(
+                    websocket, messages, tools_desc=None,
+                    temperature=0.2, feature="ui_designer",
+                )
+                return (msg.content or "") if msg else None
+
+            from webrender import allowed_primitive_types
+            layout = await ui_designer.design_round(
+                user_request=user_request,
+                round_components=components,
+                canvas_rows=self.workspace.live_rows(chat_id, user_id),
+                chat_id=chat_id,
+                layout_key=layout_key,
+                allowed_types=set(allowed_primitive_types()),
+                llm_call=_designer_llm,
+            )
+        except Exception:
+            logger.exception("ui_designer crashed — falling back to flat append")
+            layout = None
+        delivered_designed = False
+        if layout:
+            try:
+                self.workspace.upsert_layout(chat_id, user_id, layout_key, layout)
+                await self._push_canvas(chat_id, user_id, originating_ws=websocket)
+                delivered_designed = True
+            except Exception:
+                logger.exception("designed canvas delivery failed — falling back to ui_upsert")
+        if not delivered_designed:
+            await self.send_ui_upsert(websocket, chat_id, user_id, ops)
+        # Audit the mutation (FR-023) — identical to the flat path.
+        try:
+            from audit.hooks import record_workspace_event
+            for op in ops:
+                asyncio.create_task(record_workspace_event(
+                    user_id=user_id,
+                    action="component_updated" if not op.get("created") else "component_added",
+                    chat_id=chat_id, component_id=op.get("component_id"),
+                ))
+        except Exception:
+            logger.debug("workspace audit failed", exc_info=True)
+        return ops
+
     async def _send_or_replace_components(self, websocket, components: List[Dict], chat_id: str,
                                           user_id: str, *, force_component_id: Optional[str] = None) -> List[Dict]:
         """Feature 028: persist rich components into the chat's workspace under
@@ -5201,6 +5399,20 @@ COMPONENT UPDATE RULES:
                 Alert(message="This component has no refreshable source.", variant="warning").to_dict()
             ], target="chat")
             return
+        # Feature 029 (FR-004): retired sources get a clear retirement message
+        # (audited), merged sources transparently reroute to ml-services-1.
+        if agent_id in RETIRED_AGENT_IDS:
+            await self._audit_workspace_denial(user_id, chat_id, component_id, "agent_retired")
+            await self.send_ui_render(websocket, [
+                Alert(
+                    title="Capability retired",
+                    message="This component came from an agent that has been retired; "
+                            "it can still be viewed but no longer refreshed.",
+                    variant="warning",
+                ).to_dict()
+            ], target="chat")
+            return
+        agent_id, tool_name = remap_merged_source(agent_id, tool_name)
         allowed, deny_reason = self._component_action_allowed(user_id, agent_id, tool_name)
         if not allowed:
             await self._audit_workspace_denial(user_id, chat_id, component_id, deny_reason)
@@ -5279,7 +5491,7 @@ COMPONENT UPDATE RULES:
                     (cid, json.dumps(data), now_ms, row["id"], user_id),
                 )
             self.workspace.snapshot(chat_id, user_id, cause=cause)
-            ws_components = self.workspace.live_components(chat_id, user_id)
+            ws_components = self._canvas_components(chat_id, user_id)
             # FR-040: the replacement is a workspace change — every socket of
             # this user on this chat gets the re-render, not just the
             # originator (REST-initiated calls pass websocket=None).
