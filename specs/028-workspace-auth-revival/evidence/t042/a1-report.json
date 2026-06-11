@@ -1,0 +1,24 @@
+{
+  "_meta": "t042_auth_gate.py run 2026-06-10 ~22:25 EDT with USE_MOCK_AUTH=false, ASTRAL_ENV=development (container astralbody, image rebuilt from 028 working tree). No credentials used; verifies the unauthenticated redirect chain only. Control run in mock mode returned HTTP 200 with the shell served directly (dev passthrough unchanged).",
+  "errors": [],
+  "gate": {
+    "status": 302,
+    "location": "/auth/login?next=%2F%3Fchat%3Dtest",
+    "body_len": 0,
+    "app_markup_in_body": false
+  },
+  "login_redirect": {
+    "status": 307,
+    "authorize_host": "iam.ai.uky.edu",
+    "is_keycloak": true,
+    "pkce": true,
+    "state": true,
+    "offline_access": true
+  },
+  "open_redirect_guard": {
+    "location_has_evil": false,
+    "redirect_uri": "http://localhost:8001/auth/callback"
+  },
+  "browser_final_url_host": "iam.ai.uky.edu",
+  "verdict": "PASS"
+}

@@ -14,12 +14,11 @@ import json
 from typing import Optional
 
 import aiohttp
-from fastapi import APIRouter, Request, UploadFile, File, Form
+from fastapi import APIRouter, Request
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import JSONResponse, FileResponse
 from jose import jwt as jose_jwt
-import shutil
 
 import shared  # noqa: F401 — normalizes USE_MOCK_AUTH/KEYCLOAK_* env aliases before the import-time read below
 
