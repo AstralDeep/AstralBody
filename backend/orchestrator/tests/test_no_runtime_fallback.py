@@ -34,7 +34,7 @@ from llm_config.audit_events import record_llm_call
 from llm_config.client_factory import build_llm_client
 from llm_config.operator_creds import OperatorDefaultCreds
 from llm_config.session_creds import SessionCreds
-from llm_config.types import CredentialSource, ResolvedConfig
+from llm_config.types import CredentialSource
 
 
 @pytest.fixture

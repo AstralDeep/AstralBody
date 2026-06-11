@@ -124,7 +124,7 @@ def test_internal_keys_filtered_out_of_listing(cm: CredentialManager) -> None:
     cm._fernet.encrypt.side_effect = lambda b: b"cipher:" + b
     cm.set_credential("alice", "classify-1", "PUBLIC_KEY", "v")
     cm.set_credential("alice", "classify-1", "_INTERNAL", "v")
-    keys = cm.list_credential_keys("alice", "classify-1")
+    cm.list_credential_keys("alice", "classify-1")
     # list_credential_keys returns ALL keys; filtering of '_'-prefixed happens in
     # get_agent_credentials_encrypted (the path tools see).
     creds = cm.get_agent_credentials_encrypted("alice", "classify-1")

@@ -23,7 +23,7 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request
 from openai import OpenAI
 from pydantic import BaseModel, Field, field_validator
 

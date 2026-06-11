@@ -1,16 +1,11 @@
 import os
 import sys
 from typing import Dict, Any, List, Optional
-import json
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from astralprims import (
-    Text, Card, Table, Container, MetricCard, ProgressBar,
-    Alert, Grid, BarChart, LineChart, PieChart, PlotlyChart, List_,
-    Divider, CodeBlock, Image, Tabs,
-    FileDownload, FileUpload, Button, Input, ColorPicker,
-    create_ui_response
+    Text, Card, Table, MetricCard, Alert, Grid, PieChart, Divider, create_ui_response
 )
 
 def search_stocks_by_criteria(sector: Optional[str] = None, industry: Optional[str] = None, dividend_yield_min: Optional[float] = None, market_cap_min: Optional[float] = None, market_cap_max: Optional[float] = None, volatility_max: Optional[float] = None, limit: int = 20, **kwargs) -> Dict[str, Any]:

@@ -29,10 +29,9 @@ import json
 import logging
 import os
 import threading
-import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Awaitable, Callable, Optional
 
 from .repository import AuditRepository
 from .schemas import AuditEventCreate, AuditEventDTO

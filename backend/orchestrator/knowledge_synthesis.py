@@ -16,7 +16,6 @@ import time
 import re
 from collections import defaultdict
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
@@ -525,7 +524,7 @@ class KnowledgeIndex:
                 continue
 
             # Extract first few lines (compact summary)
-            summary_lines = [l for l in content.strip().split("\n") if l.strip()][:4]
+            summary_lines = [line for line in content.strip().split("\n") if line.strip()][:4]
             summary = "\n".join(summary_lines)
 
             if total_chars + len(summary) > ROUTING_HINTS_MAX_CHARS:

@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional, Tuple
+from typing import Optional
 
 from audit.recorder import get_recorder, make_correlation_id, now_utc
 from audit.schemas import AuditEventCreate

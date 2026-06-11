@@ -15,7 +15,7 @@ import base64
 import hashlib
 import json
 import logging
-from typing import Tuple, Dict, Optional
+from typing import Tuple
 
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import serialization

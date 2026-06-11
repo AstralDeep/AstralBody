@@ -24,7 +24,6 @@ from typing import Optional, Dict, List
 
 import aiohttp
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
 
 from shared.crypto import build_jwk, compute_jwk_thumbprint

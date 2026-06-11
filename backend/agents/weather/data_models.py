@@ -48,7 +48,7 @@ class HistoricalWeatherData:
     @classmethod
     def from_api_response(cls, daily: Dict[str, Any], start_date: str, end_date: str) -> 'HistoricalWeatherData':
         """Create instance from Open-Meteo historical API response."""
-        times = daily.get('time', [])
+        daily.get('time', [])
         temps = daily.get('temperature_2m_max', [])
         precip = daily.get('precipitation_sum', [])
         codes = daily.get('weather_code', [])

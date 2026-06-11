@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import io
 import logging
-from pathlib import Path
 from typing import Any, Dict, Optional
 
 from agents.general.file_tools import resolve_attachment

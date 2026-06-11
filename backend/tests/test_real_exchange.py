@@ -4,7 +4,6 @@ This script reads credentials from environment variables (not hardcoded)
 and should only be run manually against a live Keycloak instance.
 """
 import os
-import sys
 import json
 import base64
 import asyncio
