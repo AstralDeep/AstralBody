@@ -12,7 +12,6 @@ import json
 import asyncio
 import base64
 import aiohttp
-import argparse
 
 
 def load_env(env_path: str):
@@ -84,11 +83,11 @@ async def step1b_get_frontend_token():
             body = await resp.json()
             if resp.status != 200:
                 print(f"  INFO: astral-frontend does not have service accounts ({body.get('error')})")
-                print(f"  This is expected — it's a frontend OIDC client.")
+                print("  This is expected — it's a frontend OIDC client.")
                 return None
             token = body["access_token"]
             payload = decode_jwt(token)
-            print(f"  OK: Got access token")
+            print("  OK: Got access token")
             print(f"  sub: {payload.get('sub')}")
             return token
 
@@ -121,11 +120,11 @@ async def step2_exchange_token_with(subject_token, from_client_id, from_client_s
                 print(f"  Description: {body.get('error_description')}")
                 return None, None
             payload = decode_jwt(body["access_token"])
-            print(f"\n  OK: Token exchange succeeded!")
+            print("\n  OK: Token exchange succeeded!")
             print(f"  token_type: {body.get('token_type')}")
             print(f"  expires_in: {body.get('expires_in')}s")
             print(f"  issued_token_type: {body.get('issued_token_type')}")
-            print(f"\n  Delegation token claims:")
+            print("\n  Delegation token claims:")
             print(f"    sub: {payload.get('sub')}")
             print(f"    azp: {payload.get('azp')}")
             print(f"    aud: {payload.get('aud')}")
@@ -155,7 +154,7 @@ async def step3_verify_agent_client():
 
 
 async def main():
-    print(f"\nKeycloak Token Exchange Verification")
+    print("\nKeycloak Token Exchange Verification")
     print(f"Authority: {AUTHORITY}")
     print(f"Frontend client: {CLIENT_ID}")
     print(f"Agent service: {AGENT_SERVICE_CLIENT_ID}")

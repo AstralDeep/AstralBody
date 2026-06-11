@@ -14,7 +14,7 @@ _backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
 
-from astralprims import (
+from astralprims import (  # noqa: E402
     Text, Card, Table, List_, Alert, ProgressBar, MetricCard,
     CodeBlock, Image, Grids, Tabs, Collapsible, Divider,
     BarChart, LineChart, PieChart, PlotlyChart, Container,

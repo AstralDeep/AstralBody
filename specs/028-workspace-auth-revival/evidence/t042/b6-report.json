@@ -1,0 +1,18 @@
+{
+  "_meta": "t042_denial.py run 2026-06-10 ~22:24 EDT on chat e492428c, mock auth. Disabled live_system_metrics (general-1) for test_user by flipping the existing per-kind tool_overrides row (tools:system) to enabled=FALSE — is_tool_allowed resolves per-kind rows first (013 FR-013). Prior state restored after the run.",
+  "errors": [],
+  "target": {
+    "user_id": "test_user",
+    "component_id": "wc_d1bc549d36abb56e",
+    "agent": "general-1",
+    "tool": "live_system_metrics"
+  },
+  "prior_override_rows": ["tools:system\tt"],
+  "denial_alert_shown": true,
+  "table_unchanged": true,
+  "audit_rows_before": 0,
+  "audit_rows_after": 1,
+  "audit_row_written": true,
+  "latest_denied_row": "workspace.action_denied\tComponent action denied: This tool is disabled in your permissions.\tfailure",
+  "verdict": "PASS"
+}

@@ -17,7 +17,7 @@ import pytest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from orchestrator.stream_manager import StreamManager, StreamState
-from shared.protocol import ToolStreamData, ToolStreamEnd
+from shared.protocol import ToolStreamData
 
 
 class FakeWS:

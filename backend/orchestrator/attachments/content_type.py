@@ -143,16 +143,18 @@ _EXTENSION_TO_MIME_PREFIXES: Dict[str, Tuple[str, ...]] = {
     "jpg": ("image/jpeg",), "jpeg": ("image/jpeg",),
     "gif": ("image/gif",),
     "webp": ("image/webp",),
-    # Medical formats. Most lack a registered MIME; libmagic commonly returns
-    # ``application/octet-stream`` for them, with an occasional ``image/tiff``
-    # for SVS/NDPI/OME-TIFF (which are TIFF-based). Be permissive — the reader
-    # tool will surface a structured parse error if the file is truly broken.
+    # Medical formats. Most lack a registered MIME; older libmagic returns
+    # ``application/octet-stream`` for them while newer releases know the
+    # dedicated ``image/x.nifti``/``image/x.nrrd`` types, with an occasional
+    # ``image/tiff`` for SVS/NDPI/OME-TIFF (which are TIFF-based). Accept all
+    # observed spellings — the reader tool will surface a structured parse
+    # error if the file is truly broken.
     "dcm": ("application/dicom", "application/octet-stream"),
     "dicom": ("application/dicom", "application/octet-stream"),
-    "nii": ("application/octet-stream",),
+    "nii": ("image/x.nifti", "application/octet-stream"),
     "nii.gz": ("application/gzip", "application/x-gzip", "application/octet-stream"),
     "czi": ("application/octet-stream",),
-    "nrrd": ("application/octet-stream", "text/plain"),  # NRRD header is ASCII
+    "nrrd": ("image/x.nrrd", "application/octet-stream", "text/plain"),  # NRRD header is ASCII
     "mha": ("application/octet-stream", "text/plain"),  # MetaImage header is ASCII
     "mhd": ("application/octet-stream", "text/plain"),
     "raw": ("application/octet-stream",),

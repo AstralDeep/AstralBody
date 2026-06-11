@@ -1,6 +1,4 @@
 """Tests for shared.attachment_resolver.resolve_attachment_path (T036, T041)."""
-import os
-import tempfile
 from unittest.mock import MagicMock, patch
 
 import pytest

@@ -11,7 +11,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Iterator, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import pytest
 

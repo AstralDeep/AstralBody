@@ -28,7 +28,6 @@ from orchestrator.stream_manager import (
     StreamManager,
     StreamState,
     StreamSubscription,
-    StreamChunk,
     classify_error,
     compute_backoff,
     params_hash,
@@ -232,7 +231,6 @@ class TestStreamSubscriptionInvariants:
 class TestTokenRevocationSweep:
     @pytest.mark.asyncio
     async def test_expired_token_triggers_unauthenticated_error(self):
-        import asyncio
         import json
         import time as time_mod
 

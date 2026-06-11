@@ -3,7 +3,7 @@ from psycopg2.extras import RealDictCursor
 import logging
 import os
 import json
-from typing import List, Dict, Optional, Any, Tuple
+from typing import List, Dict, Optional, Tuple
 
 logger = logging.getLogger('Database')
 
@@ -734,6 +734,79 @@ class Database:
             )
         ''')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_consolidation_sweep_user_time ON consolidation_sweep(user_id, ran_at DESC)')
+
+        # ── Feature 028 — workspace-auth-revival ────────────────────────────
+        # Durable server-side OIDC sessions (replaces web_auth's in-memory
+        # dict as source of truth; tokens Fernet-encrypted at rest).
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS web_session (
+                sid TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                access_token_enc TEXT NOT NULL,
+                refresh_token_enc TEXT NOT NULL,
+                interactive_anchor BIGINT NOT NULL,
+                hard_expires_at BIGINT NOT NULL,
+                last_refresh_at BIGINT NOT NULL,
+                resumed BOOLEAN DEFAULT FALSE,
+                created_at BIGINT NOT NULL
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS ix_web_session_user ON web_session(user_id)')
+
+        # Offline-tolerant sign-out: refresh tokens awaiting best-effort
+        # revocation at Keycloak (server-side analog of 016's client queue).
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS auth_revocation_queue (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                refresh_token_enc TEXT NOT NULL,
+                enqueued_at BIGINT NOT NULL,
+                attempts INTEGER DEFAULT 0
+            )
+        ''')
+
+        # Per-turn full-state workspace snapshots (read-only timeline).
+        # components carries message-grade content; lifecycle == the chat's.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS workspace_snapshot (
+                id SERIAL PRIMARY KEY,
+                chat_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                turn_message_id INTEGER,
+                cause TEXT NOT NULL,
+                components TEXT NOT NULL,
+                created_at BIGINT NOT NULL,
+                FOREIGN KEY (chat_id) REFERENCES chats (id) ON DELETE CASCADE
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS ix_workspace_snapshot_chat ON workspace_snapshot(chat_id, created_at)')
+        # data-model.md declares turn_message_id as FK -> messages(id) ON
+        # DELETE CASCADE. Added as a named constraint (idempotent; covers
+        # deployments whose table predates the FK). NOT VALID skips
+        # re-validating historic rows; new writes are enforced.
+        cursor.execute('''
+            SELECT 1 FROM information_schema.table_constraints
+            WHERE table_name = 'workspace_snapshot'
+              AND constraint_name = 'fk_workspace_snapshot_turn_message'
+        ''')
+        if not cursor.fetchone():
+            cursor.execute('''
+                ALTER TABLE workspace_snapshot
+                ADD CONSTRAINT fk_workspace_snapshot_turn_message
+                FOREIGN KEY (turn_message_id) REFERENCES messages (id)
+                ON DELETE CASCADE NOT VALID
+            ''')
+
+        # saved_components becomes the live workspace store: stable identity,
+        # ordering, and in-place update timestamps (additive; legacy rows keep
+        # NULLs and sort by created_at).
+        for col, ddl in (("component_id", "TEXT"), ("position", "INTEGER"), ("updated_at", "BIGINT")):
+            if not self._column_exists(cursor, 'saved_components', col):
+                cursor.execute(f"ALTER TABLE saved_components ADD COLUMN {col} {ddl}")
+        cursor.execute('''
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_saved_components_chat_component
+            ON saved_components (chat_id, component_id) WHERE component_id IS NOT NULL
+        ''')
 
         conn.commit()
         conn.close()

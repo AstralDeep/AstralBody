@@ -18,7 +18,7 @@ import time
 backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, backend_dir)
 
-from shared.database import Database
+from shared.database import Database  # noqa: E402
 
 OWNER_EMAIL = "sam.armstrong@uky.edu"
 

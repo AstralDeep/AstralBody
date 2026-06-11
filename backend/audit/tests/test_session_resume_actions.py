@@ -9,7 +9,6 @@ integration test that imports the WS register handler directly (see
 """
 from __future__ import annotations
 
-import asyncio
 import json
 from datetime import datetime, timezone
 

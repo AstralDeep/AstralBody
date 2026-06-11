@@ -23,7 +23,7 @@ def main():
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
     orchestrator_script = os.path.join(base_dir, "orchestrator", "orchestrator.py")
-    agent_script = os.path.join(base_dir, "agents", "general_agent.py")
+    os.path.join(base_dir, "agents", "general_agent.py")
     python_exe = sys.executable
 
     processes = []

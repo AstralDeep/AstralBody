@@ -12,7 +12,7 @@ import time
 import logging
 import hashlib
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
 
 import requests
@@ -20,13 +20,12 @@ import requests
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from astralprims import (
-    Text, Card, Table, Alert, MetricCard, Grid, Grids,
-    BarChart, PieChart, LineChart, List_, Tabs, TabItem,
+    Text, Card, Table, Alert, MetricCard, Grid, BarChart, PieChart, LineChart, List_, Tabs, TabItem,
     create_ui_response,
 )
 from agents.grants.caai_knowledge import (
     CAAI_MISSION, EXPERTISE_AREAS, KEY_PERSONNEL, PROJECT_HISTORY,
-    GRANT_PREFERENCES, AGENCY_CODES, compute_match_score,
+    AGENCY_CODES, compute_match_score,
 )
 from agents.grants.nsf_techaccess_knowledge import (
     SOLICITATION_META,
@@ -37,19 +36,15 @@ from agents.grants.nsf_techaccess_knowledge import (
     NSF_REQUIRED_METRICS,
     EXTENDED_METRIC_LAYERS,
     KY_PARTNERS,
-    KY_PRIORITY_SECTORS,
     KY_EQUITY_LENSES,
     AI_LITERACY_LEVELS,
     LOI_RULES,
     SUPPLEMENTAL_RULES,
-    FRAMING_RULES,
-    ADMINISTRATION_PRIORITIES,
     ADMINISTRATION_PRIORITY_PHRASES,
     PROGRAM_OFFICER_QUESTION_TOPICS,
     SOLICITATION_VERBATIM_PHRASES,
     PAGE_BUDGET,
     DEADLINES,
-    get_section,
     get_partner,
     get_hub_responsibilities_for_section,
     get_framing_rules_for_section,

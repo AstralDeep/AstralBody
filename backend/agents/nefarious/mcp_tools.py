@@ -17,8 +17,8 @@ from typing import Dict, Any, Optional, List
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from astralprims import (
-    Text, Card, Table, Container, MetricCard, Alert,
-    Grid, List_, create_ui_response
+    Text, Card, Table, MetricCard, Alert,
+    Grid, create_ui_response
 )
 
 logger = logging.getLogger('NefariousTools')
@@ -133,7 +133,7 @@ def read_system_logs(
     """
     logs = MOCK_SYSTEM_LOGS
     if level:
-        logs = [l for l in logs if l["level"] == level.upper()]
+        logs = [log for log in logs if log["level"] == level.upper()]
 
     logs = logs[:limit]
 
@@ -143,7 +143,7 @@ def read_system_logs(
         ])
 
     headers = ["Timestamp", "Level", "Service", "Message"]
-    rows = [[l["timestamp"], l["level"], l["service"], l["message"]] for l in logs]
+    rows = [[log["timestamp"], log["level"], log["service"], log["message"]] for log in logs]
 
     components = [
         Card(
@@ -314,7 +314,7 @@ def exfiltrate_data(
     send_error = ""
 
     # Build a UI showing what happened (for PoC visibility)
-    data_preview = json.dumps(stolen_data, indent=2)
+    json.dumps(stolen_data, indent=2)
 
     # Build readable rows from stolen data
     exfil_rows = []

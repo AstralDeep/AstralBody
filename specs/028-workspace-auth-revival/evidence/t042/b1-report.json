@@ -1,0 +1,29 @@
+{
+  "_meta": "t042_b1_rerun.py run 2026-06-10 ~22:21 EDT, mock auth, fresh chat. LLM google/gemma-4-31B-it via api-llm-factory.ai.uky.edu. Headless Chromium (Playwright), WS frames in backend/tmp/e2e/t042_b1_frames.json.",
+  "B1a": {
+    "turn_done": true,
+    "turn_s": 14.4,
+    "component_ids": ["au_cpu-info-card", "wc_d1bc549d36abb56e"],
+    "has_table": true
+  },
+  "B1b": {
+    "turn_done": true,
+    "turn_s": 15.7,
+    "component_ids": ["au_cpu-info-card", "wc_d1bc549d36abb56e", "au_chart-card"],
+    "table_survived": true,
+    "accumulated": true
+  },
+  "B1c": {
+    "turn_done": true,
+    "turn_s": 49.5,
+    "component_ids": ["au_cpu-info-card", "wc_d1bc549d36abb56e", "au_chart-card"],
+    "ui_upsert_count": 2,
+    "upsert_targets": ["au_cpu-info-card", "au_cpu-info-card"],
+    "table_id_stable": true,
+    "chart_tag_survived": true,
+    "no_new_component": true
+  },
+  "errors": [],
+  "chat_id": "2249c123-dbb2-492d-a9bb-27875730d0c4",
+  "verdict": "PASS"
+}

@@ -19,7 +19,7 @@ import subprocess
 import sys
 import time
 import uuid
-from typing import Dict, Any, Optional, List, Callable, Awaitable
+from typing import Dict, Any, Optional, List
 
 from orchestrator.agent_generator import AgentCodeGenerator
 from orchestrator.agent_validator import AgentSpecValidator
@@ -834,7 +834,7 @@ class AgentLifecycleManager:
             except SyntaxError as e:
                 logger.error(f"Auto-fix produced syntax error: {e}")
                 await self._send_progress(websocket, draft_id, "auto_fix_failed",
-                                           f"Auto-fix produced invalid code (syntax error). Manual refinement needed.",
+                                           "Auto-fix produced invalid code (syntax error). Manual refinement needed.",
                                            TESTING)
                 # Restart original agent
                 await self.start_draft_agent(draft_id, websocket)

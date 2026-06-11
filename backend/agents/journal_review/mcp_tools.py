@@ -20,9 +20,8 @@ import requests
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from astralprims import (
-    Text, Card, Table, Alert, MetricCard, Grid, Grids,
-    BarChart, PieChart, List_, Tabs, TabItem, Divider,
-    create_ui_response,
+    Text, Card, Table, Alert, MetricCard, Grids,
+    BarChart, PieChart, create_ui_response,
 )
 
 logger = logging.getLogger("JournalReviewTools")

@@ -197,6 +197,12 @@ class TestStreamCtx:
         ctx.emit(StreamComponents(components=[{"type": "metric"}]))
 
     def test_emit_rejects_non_streamcomponents(self):
-        ctx = StreamCtx(stream_id="s1")
-        with pytest.raises(StreamPayloadError):
-            ctx.emit({"not": "streamcomponents"})  # type: ignore
+        # Explicit loop: StreamCtx defaults to get_event_loop(), which raises
+        # outside async context on Python 3.12+ when no loop has been set.
+        loop = asyncio.new_event_loop()
+        try:
+            ctx = StreamCtx(stream_id="s1", loop=loop)
+            with pytest.raises(StreamPayloadError):
+                ctx.emit({"not": "streamcomponents"})  # type: ignore
+        finally:
+            loop.close()

@@ -181,7 +181,7 @@ curl -X POST "https://iam.ai.uky.edu/realms/Astral/protocol/openid-connect/token
   -H "Content-Type: application/x-www-form-urlencoded" \
   -d "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
   -d "client_id=astral-frontend" \
-  -d "client_secret=9nXTyUjjS4t5pKvLH1AQAmGJC8yBx0JK" \
+  -d "client_secret=<astral-frontend-client-secret>" \
   -d "subject_token=$USER_TOKEN" \
   -d "subject_token_type=urn:ietf:params:oauth:token-type:access_token" \
   -d "requested_token_type=urn:ietf:params:oauth:token-type:access_token" \
@@ -247,7 +247,7 @@ The existing variables remain unchanged:
 ```env
 VITE_KEYCLOAK_AUTHORITY=https://iam.ai.uky.edu/realms/Astral
 VITE_KEYCLOAK_CLIENT_ID=astral-frontend
-KEYCLOAK_CLIENT_SECRET=9nXTyUjjS4t5pKvLH1AQAmGJC8yBx0JK
+KEYCLOAK_CLIENT_SECRET=<astral-frontend-client-secret>
 ```
 
 ---

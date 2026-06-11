@@ -131,6 +131,48 @@ async def record_ws_action(
 
 
 # ---------------------------------------------------------------------------
+# Workspace lifecycle (feature 028 — FR-023/FR-033/FR-036)
+# ---------------------------------------------------------------------------
+
+async def record_workspace_event(
+    *, user_id: str, action: str, chat_id: Optional[str] = None,
+    component_id: Optional[str] = None, description: str = "",
+    outcome: str = "success", detail: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Record a workspace mutation / timeline view / denied component action.
+
+    ``action`` is the suffix after ``workspace.`` — e.g. ``component_added``,
+    ``component_updated``, ``component_removed``, ``action_denied``,
+    ``timeline_viewed``. Classified under ``conversation`` to match the
+    existing save/delete-component WS hook classification.
+    """
+    rec = get_recorder()
+    if rec is None or not user_id or user_id == "legacy":
+        return
+    inputs_meta: Dict[str, Any] = {}
+    if component_id:
+        inputs_meta["component_id"] = component_id
+    for k, v in (detail or {}).items():
+        if isinstance(v, (str, int, float, bool)):
+            inputs_meta[k] = v
+    try:
+        await rec.record(AuditEventCreate(
+            actor_user_id=user_id,
+            auth_principal=user_id,
+            event_class="conversation",
+            action_type=f"workspace.{action}",
+            description=description or f"Workspace {action.replace('_', ' ')}",
+            conversation_id=chat_id,
+            correlation_id=make_correlation_id(),
+            outcome=outcome,
+            inputs_meta=inputs_meta,
+            started_at=now_utc(),
+        ))
+    except Exception as exc:  # pragma: no cover
+        logger.debug("workspace audit record failed: %s", exc)
+
+
+# ---------------------------------------------------------------------------
 # Tool-dispatch hook (FR-001 + FR-021 — the headline scenario)
 # ---------------------------------------------------------------------------
 

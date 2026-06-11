@@ -1,0 +1,28 @@
+{
+  "_meta": "t042_component_action.py run 2026-06-10 ~22:21 EDT on chat e492428c (3 live components), mock auth. page1 desktop 1600x1000, page2 mobile 480x900 (per-socket ROTE). Deterministic trigger = renderer's own .astral-action markup injected into the table component's scope (NocoDB, the only paginated-table producer, unreachable in this environment); the click flows through the real client delegated handler and the real server component_action pipeline. table_paginate routing itself is unit-proven in backend/tests/test_component_action.py.",
+  "CA1": {
+    "table_cid": "au_cpu-info-card",
+    "ui_upsert_received": true,
+    "latency_s": 0.5,
+    "upsert_targets": ["au_cpu-info-card"],
+    "targets_only_table": true,
+    "other_components_untouched": true,
+    "component_ids_after": ["au_cpu-info-card", "wc_d1bc549d36abb56e", "au_chart-card"]
+  },
+  "CA2": {
+    "page2_upsert_received": true,
+    "latency_s": 0.3
+  },
+  "CA3": {
+    "snapshot_rows": 5,
+    "historical_banner": true,
+    "status": "Viewing workspace history (read-only)",
+    "inert_click_status": "Read-only history view — go back to live to interact.",
+    "live_moved_on_status": "Live workspace updated — use “Back to live” to see it.",
+    "back_to_live_ids": ["au_cpu-info-card", "wc_d1bc549d36abb56e", "au_chart-card"],
+    "live_restored": true,
+    "timeline_mode_cleared": true
+  },
+  "errors": [],
+  "verdict": "PASS"
+}

@@ -1,8 +1,6 @@
 """User-side API contract tests for the onboarding subsystem (feature 005)."""
 from __future__ import annotations
 
-import asyncio
-import uuid
 
 import pytest
 from fastapi import FastAPI

@@ -45,9 +45,9 @@ def _write_benchmark(key: str, data: dict):
 # Real agent MCP servers
 # ---------------------------------------------------------------------------
 
-from agents.weather.mcp_server import MCPServer as WeatherMCPServer
-from agents.general.mcp_server import MCPServer as GeneralMCPServer
-from agents.medical.mcp_server import MCPServer as MedicalMCPServer
+from agents.weather.mcp_server import MCPServer as WeatherMCPServer  # noqa: E402
+from agents.general.mcp_server import MCPServer as GeneralMCPServer  # noqa: E402
+from agents.medical.mcp_server import MCPServer as MedicalMCPServer  # noqa: E402
 
 
 def _build_request(tool_name: str, arguments: dict, request_id: str = "bench") -> MCPRequest:

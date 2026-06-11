@@ -9,7 +9,6 @@ import importlib.util
 import logging
 import os
 import sys
-import traceback
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Dict, Any, Optional, List
@@ -234,21 +233,21 @@ class AgentSpecValidator:
         # Check required keys
         if "function" not in tool_info:
             report.add(ValidationSeverity.ERROR, "REGISTRY",
-                       f"Missing 'function' key.", tool_name=tool_name)
+                       "Missing 'function' key.", tool_name=tool_name)
             return
 
         if not callable(tool_info["function"]):
             report.add(ValidationSeverity.ERROR, "REGISTRY",
-                       f"'function' is not callable.", tool_name=tool_name)
+                       "'function' is not callable.", tool_name=tool_name)
             return
 
         if "description" not in tool_info:
             report.add(ValidationSeverity.WARNING, "REGISTRY",
-                       f"Missing 'description' key.", tool_name=tool_name)
+                       "Missing 'description' key.", tool_name=tool_name)
 
         if "input_schema" not in tool_info:
             report.add(ValidationSeverity.WARNING, "REGISTRY",
-                       f"Missing 'input_schema' key.", tool_name=tool_name)
+                       "Missing 'input_schema' key.", tool_name=tool_name)
 
         # Generate sample inputs and call the tool
         schema = tool_info.get("input_schema", {"type": "object", "properties": {}})
@@ -303,8 +302,8 @@ class AgentSpecValidator:
                 tool_passed = False
             elif len(ui_comps) == 0:
                 report.add(ValidationSeverity.ERROR, "RETURN_FORMAT",
-                           f"'_ui_components' is an empty list. "
-                           f"Tools must return at least one UI component.",
+                           "'_ui_components' is an empty list. "
+                           "Tools must return at least one UI component.",
                            tool_name=tool_name)
                 tool_passed = False
             else:
@@ -315,7 +314,7 @@ class AgentSpecValidator:
 
         if "_data" not in result:
             report.add(ValidationSeverity.WARNING, "RETURN_FORMAT",
-                       f"Return dict missing '_data' key (recommended for LLM context).",
+                       "Return dict missing '_data' key (recommended for LLM context).",
                        tool_name=tool_name)
 
         if tool_passed:
@@ -379,7 +378,7 @@ class AgentSpecValidator:
     def _generate_sample_inputs(self, schema: Dict) -> Dict[str, Any]:
         """Generate sample inputs from a JSON schema."""
         props = schema.get("properties", {})
-        required = set(schema.get("required", []))
+        set(schema.get("required", []))
         sample = {}
 
         for name, prop in props.items():
@@ -411,13 +410,13 @@ class AgentSpecValidator:
             source = inspect.getsource(func)
             if "_ui_components" not in source:
                 report.add(ValidationSeverity.ERROR, "RETURN_FORMAT",
-                           f"Source code does not contain '_ui_components'. "
-                           f"Tool likely doesn't return the required format.",
+                           "Source code does not contain '_ui_components'. "
+                           "Tool likely doesn't return the required format.",
                            tool_name=tool_name)
             if ".to_json()" not in source and "to_json" not in source:
                 report.add(ValidationSeverity.WARNING, "RETURN_FORMAT",
-                           f"Source code doesn't call '.to_json()'. "
-                           f"Components may not be serialized correctly.",
+                           "Source code doesn't call '.to_json()'. "
+                           "Components may not be serialized correctly.",
                            tool_name=tool_name)
         except (OSError, TypeError):
             pass  # Can't inspect source, skip static check

@@ -32,9 +32,12 @@ RUN python -m spacy download en_core_web_lg
 # Copy backend source
 COPY backend/ ./backend/
 
-# Copy .env into backend where start.py expects it
-COPY .env ./backend/.env
-RUN sed -i 's/\r$//' ./backend/.env
+# NOTE: configuration is intentionally NOT baked into the image. Secrets in
+# image layers survive `docker rmi` in registry caches and leak via `docker
+# history`. Supply configuration at runtime instead:
+#   docker compose:  env_file: .env   (already wired in docker-compose.yml)
+#   docker run:      --env-file .env
+# load_dotenv(override=False) in start.py tolerates the absent file.
 
 # Setup entrypoint script
 COPY backend/start-docker.sh /usr/local/bin/

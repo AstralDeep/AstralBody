@@ -22,9 +22,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
-from uuid import UUID
 
-import psycopg2
 
 from .schemas import (
     DEFAULT_DEDUP_WINDOW_SECONDS,

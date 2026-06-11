@@ -10,24 +10,20 @@ Includes:
 import asyncio
 import os
 import sys
-import json
 import logging
-import time
 import concurrent.futures
-from typing import Dict, Any, List, Optional, Tuple, AsyncIterator
-from datetime import datetime, timedelta
+from typing import Dict, Any, Optional, Tuple, AsyncIterator
+from datetime import datetime
 
 import requests
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from astralprims import (
-    Text, Card, Table, Container, MetricCard, ProgressBar,
-    Alert, Grid, BarChart, LineChart, PieChart, PlotlyChart, List_,
-    FileDownload, create_ui_response
+    Text, Card, Table, MetricCard, Alert, Grid, PlotlyChart, create_ui_response
 )
 from shared.stream_sdk import streaming_tool, StreamComponents
-from .data_models import ExtendedWeatherData, HistoricalWeatherData
+from .data_models import ExtendedWeatherData, HistoricalWeatherData, WeatherAlert
 
 logger = logging.getLogger(__name__)
 
@@ -912,7 +908,7 @@ def get_weather_alerts(
             try:
                 effective_dt = datetime.fromisoformat(effective.replace('Z', '+00:00')) if effective else datetime.now()
                 expires_dt = datetime.fromisoformat(expires.replace('Z', '+00:00')) if expires else datetime.now()
-            except:
+            except Exception:
                 effective_dt = datetime.now()
                 expires_dt = datetime.now()
             
