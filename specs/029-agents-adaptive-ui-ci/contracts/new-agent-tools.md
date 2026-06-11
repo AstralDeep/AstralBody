@@ -4,7 +4,7 @@ All three agents follow the plug-and-play contract: `backend/agents/<name>/<name
 
 ## 1. ml_services (consolidates classify + forecaster + llm_factory)
 
-- **agent_id**: `ml_services-1` · **service_name**: "ML Services" · **skill_tags**: machine-learning, classification, timeseries, embeddings, transcription (drops the routing-colliding bare "forecast" tag — weather keeps it).
+- **agent_id**: `ml-services-1` · **service_name**: "ML Services" · **skill_tags**: machine-learning, classification, timeseries, embeddings, transcription (drops the routing-colliding bare "forecast" tag — weather keeps it).
 - **card_metadata.required_credentials** (three optional bundles, existing key names): `CLASSIFY_URL`+`CLASSIFY_API_KEY`, `FORECASTER_URL`+`FORECASTER_API_KEY`, `LLM_FACTORY_URL`+`LLM_FACTORY_API_KEY`.
 - **Shared foundation** `_wrapper.py`: credential probe, bounded retry shim (the formerly-duplicated mcp_server shim), `shared.external_http` egress-gated calls.
 
@@ -21,7 +21,7 @@ Input schemas, scopes, and output components are byte-compatible with the origin
 
 ## 2. web_research (NEW)
 
-- **agent_id**: `web_research-1` · **service_name**: "Web Research" · **skill_tags**: research, web, search, sources, brief.
+- **agent_id**: `web-research-1` · **service_name**: "Web Research" · **skill_tags**: research, web, search, sources, brief.
 - **card_metadata.required_credentials** (optional bundle): `SEARCH_API_URL`+`SEARCH_API_KEY` (operator/user-configured OpenAI-search-style or Tavily-compatible JSON endpoint). Absent ⇒ keyless DuckDuckGo HTML path.
 - **Egress**: every fetch through `shared.external_http` (SSRF/private-host gating); response cap 1 MB; timeout 15 s; ≤ 5 fetches per `research_brief`.
 
