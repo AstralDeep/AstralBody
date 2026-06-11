@@ -32,7 +32,7 @@ from shared.external_http import (
     ServiceUnreachableError,
     normalize_url,
 )
-from shared.primitives import Alert, Card, Text
+from astralprims import Alert, Card, Text
 
 logger = logging.getLogger("LlmFactoryAgentMCPTools")
 
@@ -52,7 +52,7 @@ def _ui(components, data=None, retryable: bool = True):
     serialized = []
     for c in components:
         if hasattr(c, "to_json"):
-            serialized.append(c.to_json())
+            serialized.append(c.to_dict())
         else:
             serialized.append(c)
     return {"_ui_components": serialized, "_data": data, "_retryable": retryable}

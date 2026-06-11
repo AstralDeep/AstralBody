@@ -9,8 +9,6 @@ needing a running PostgreSQL or Keycloak.
 
 from __future__ import annotations
 
-import io
-import os
 
 import pytest
 from fastapi import FastAPI

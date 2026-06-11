@@ -1,4 +1,5 @@
 # Core
+astralprims>=0.1.0  # first-party UI primitives package (feature 026); defines primitives + structured representation. Orchestrator renders, ROTE adapts.
 websockets>=12.0
 openai>=1.0.0
 python-dotenv>=1.0.0

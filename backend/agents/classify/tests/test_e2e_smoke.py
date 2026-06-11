@@ -118,7 +118,7 @@ def test_full_pipeline_against_live_service() -> None:
         assert start["_ui_components"][0].get("variant") != "error", (
             f"start_training_job failed: {start}"
         )
-        print(f"[E2E] start_training_job → started")
+        print("[E2E] start_training_job → started")
 
         # 4. Poll until Completed.
         client = mcp_tools.ClassifyHttpClient(creds)

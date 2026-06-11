@@ -19,10 +19,9 @@ import requests
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from shared.primitives import (
-    Text, Card, Table, Alert, MetricCard, Grid, Grids,
-    BarChart, PieChart, List_, Tabs, TabItem, Divider,
-    create_ui_response,
+from astralprims import (
+    Text, Card, Table, Alert, MetricCard, Grids,
+    BarChart, PieChart, create_ui_response,
 )
 
 logger = logging.getLogger("JournalReviewTools")
@@ -388,7 +387,7 @@ def find_matching_journals(
     }
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": data_summary,
     }
 
@@ -545,7 +544,7 @@ def get_journal_profile(
     }
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": profile_data,
     }
 
@@ -674,7 +673,7 @@ def compare_journals(
     }
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": compare_data,
     }
 
@@ -865,7 +864,7 @@ def analyze_paper_fit(
     }
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": data_out,
     }
 
@@ -1020,7 +1019,7 @@ def get_field_landscape(
     }
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": data_out,
     }
 

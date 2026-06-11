@@ -50,8 +50,9 @@ services:
     image: astralbody:latest
     container_name: astralbody
     ports:
+      # Feature 026: single port — orchestrator serves WS, REST API, and the
+      # server-driven web UI. The former :5173 static frontend server is removed.
       - "127.0.0.1:8001:8001"
-      - "127.0.0.1:5173:5173"
     env_file:
       - .env
     environment:
@@ -63,6 +64,11 @@ services:
       - ./backend/data:/app/backend/data
       - ./backend/tmp:/app/backend/tmp
       - ./backend/knowledge:/app/backend/knowledge
+      # Feature 027: user-created (generated) agents are written into
+      # backend/agents/<slug>/ at runtime — without this mount their code is
+      # wiped on every image rebuild, orphaning live DB rows. The host dir is
+      # the same content the image COPYs, so static agents are unaffected.
+      - ./backend/agents:/app/backend/agents
       # Mount host procfs/sysfs/rootfs so psutil reports real host metrics
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
@@ -72,6 +78,14 @@ services:
         condition: service_healthy
       # ollama:
       #   condition: service_healthy
+    healthcheck:
+      # /readyz = process serving AND database answering (the slim image has
+      # no curl; python ships with it). start_period covers agent auto-start.
+      test: ["CMD", "python3", "-c", "import urllib.request; r = urllib.request.urlopen('http://localhost:8001/readyz', timeout=5); exit(0 if r.status == 200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
     restart: unless-stopped
 
 volumes:

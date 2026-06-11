@@ -88,7 +88,7 @@ async def test_no_api_key_in_any_audit_payload(fake_recorder):
             actor_user_id="u",
             auth_principal="u",
             action="updated",
-            base_url=f"https://x.example/v1",
+            base_url="https://x.example/v1",
             model="m",
             transport="ws",
         )

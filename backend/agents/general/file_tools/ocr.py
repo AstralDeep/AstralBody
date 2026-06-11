@@ -12,12 +12,15 @@ import base64
 import io
 import logging
 from pathlib import Path
-from typing import List
+from typing import TYPE_CHECKING, List
+
+if TYPE_CHECKING:
+    from PIL import Image
 
 logger = logging.getLogger("FileTools.PDFImages")
 
 
-def rasterize_pdf(pdf_path: Path, *, dpi: int = 200, max_pages: int = 50) -> List["Image.Image"]:  # type: ignore[name-defined]
+def rasterize_pdf(pdf_path: Path, *, dpi: int = 200, max_pages: int = 50) -> List["Image.Image"]:
     """Return one PIL.Image per page (capped at *max_pages*).
 
     Raises :class:`RuntimeError` if poppler / pdf2image are unavailable.
@@ -30,7 +33,7 @@ def rasterize_pdf(pdf_path: Path, *, dpi: int = 200, max_pages: int = 50) -> Lis
     return list(images)
 
 
-def encode_images_for_vision(images: List["Image.Image"], *, fmt: str = "PNG") -> List[dict]:  # type: ignore[name-defined]
+def encode_images_for_vision(images: List["Image.Image"], *, fmt: str = "PNG") -> List[dict]:
     """Base64-encode each image for delivery to a vision model.
 
     Returns ``[{"content_type": "image/png", "image_base64": "..."}]``.

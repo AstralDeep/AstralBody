@@ -143,9 +143,11 @@ class ChatStepRecorder:
             )
             self._bump_step_count()
         except Exception as exc:  # pragma: no cover — defensive
+            # "step_name", not "name": `name` is a reserved LogRecord attribute
+            # and putting it in `extra` makes the logging call itself raise.
             logger.error(
                 "chat_steps.start_persist_failed",
-                extra={"chat_id": self.chat_id, "kind": kind, "name": name, "error": str(exc)},
+                extra={"chat_id": self.chat_id, "kind": kind, "step_name": name, "error": str(exc)},
             )
 
         self._in_flight[step_id] = name
@@ -166,9 +168,13 @@ class ChatStepRecorder:
             "started_at": started,
             "ended_at": None,
         })
+        # "step_name", not "name": `name` is a reserved LogRecord attribute and
+        # `extra` may not overwrite it — logging raises KeyError at INFO level,
+        # which the caller's defensive except turned into step_id=None, leaving
+        # every step permanently in_progress (no complete/error ever recorded).
         logger.info(
             "chat_steps.started",
-            extra={"step_id": step_id, "chat_id": self.chat_id, "kind": kind, "name": name},
+            extra={"step_id": step_id, "chat_id": self.chat_id, "kind": kind, "step_name": name},
         )
         return step_id
 

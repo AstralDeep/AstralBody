@@ -1,0 +1,7 @@
+# The deployment runtime is Python 3.11 (Dockerfile base image). Pinning
+# ruff's target rejects 3.12+-only syntax — e.g. backslash escapes inside
+# f-string expressions (PEP 701) — that newer local interpreters accept but
+# the container cannot import.
+target-version = "py311"
+
+exclude = [".venv", "node_modules", "backend/tmp", "backend/data"]

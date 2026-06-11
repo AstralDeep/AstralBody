@@ -1,10 +1,8 @@
+import importlib.util
 import os
 import sys
-import json
 import csv
-import io
 import tempfile
-import shutil
 
 # Add backend to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -158,14 +156,13 @@ def test_output_format_conversion():
     csv_data = "id,name\n1,Alice\n2,Bob"
     modifications = [{"action": "add_column", "name": "extra", "value": "x"}]
     # Request Excel output (if pandas available)
-    try:
-        import pandas as pd
+    if importlib.util.find_spec("pandas") is not None:
         result = modify_data(csv_data=csv_data, modifications=modifications, output_format="excel")
         data = result["_data"]
         assert data["output_format"] == "excel"
         assert data["file_path"].endswith(".xlsx")
         os.remove(data["file_path"])
-    except ImportError:
+    else:
         # pandas not installed, should fallback to CSV
         result = modify_data(csv_data=csv_data, modifications=modifications, output_format="excel")
         data = result["_data"]

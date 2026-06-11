@@ -13,7 +13,7 @@ from typing import Dict, Any
 
 import requests
 
-from shared.primitives import (
+from astralprims import (
     Alert, Collapsible, Text, Container, Divider, Card,
     create_ui_response,
 )

@@ -8,7 +8,7 @@ import os
 import json
 import asyncio
 import time
-from unittest.mock import Mock, patch, AsyncMock
+from unittest.mock import AsyncMock
 
 # Add backend to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -144,11 +144,10 @@ def test_progress_emitter_integration():
 def test_endpoint_simulation():
     """Simulate the generate-with-progress endpoint behavior."""
     # This test simulates what the endpoint does
-    from unittest.mock import AsyncMock
     
     # Simulate progress callback flow without agent_generator (module was removed)
     def mock_generate_code(session_id, progress_callback=None, user_id=None):
-        emitter = ProgressEmitter(ProgressPhase.GENERATION, progress_callback)
+        ProgressEmitter(ProgressPhase.GENERATION, progress_callback)
 
         if progress_callback:
             event1 = ProgressEvent(

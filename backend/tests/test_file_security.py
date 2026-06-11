@@ -9,16 +9,12 @@ These tests verify HIPAA-critical file access controls:
 """
 import os
 import sys
-import tempfile
-import shutil
 
 # Add backend to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from orchestrator.auth import auth_router
 from fastapi import FastAPI
-from fastapi.testclient import TestClient
-from unittest.mock import patch, Mock
 
 # Create a test app with auth_router included
 _test_app = FastAPI()

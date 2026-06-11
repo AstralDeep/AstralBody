@@ -8,25 +8,22 @@ Tools split into two categories:
 """
 import os
 import sys
-import json
 import logging
-from datetime import datetime
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from shared.primitives import (
+from astralprims import (
     Text, Card, Table, Alert, MetricCard, Grid,
-    BarChart, PieChart, LineChart, List_, Tabs, TabItem,
+    List_, Tabs, TabItem,
     create_ui_response,
 )
-from agents.linkedin.linkedin_api import LinkedInClient, REACTION_TYPES
+from agents.linkedin.linkedin_api import LinkedInClient
 from agents.linkedin.caai_linkedin_knowledge import (
     CONTENT_FRAMES, CONTENT_FRAME_BY_ID,
-    CAAI_BRAND_VOICE, ENGAGEMENT_BEST_PRACTICES, INDUSTRY_BENCHMARKS,
-    LINKEDIN_PAGE,
-    classify_post_to_frame, get_benchmark_rating,
-    CAAI_MISSION, EXPERTISE_AREAS, KEY_PERSONNEL, PROJECT_HISTORY,
+    CAAI_BRAND_VOICE, ENGAGEMENT_BEST_PRACTICES, LINKEDIN_PAGE,
+    get_benchmark_rating,
+    EXPERTISE_AREAS, PROJECT_HISTORY,
 )
 
 logger = logging.getLogger("LinkedInTools")
@@ -70,7 +67,7 @@ def get_my_profile(
 
     if not client.api_available:
         return {
-            "_ui_components": [c.to_json() for c in _no_token_alert()],
+            "_ui_components": [c.to_dict() for c in _no_token_alert()],
             "_data": {"status": "not_connected"},
         }
 
@@ -80,13 +77,13 @@ def get_my_profile(
             "_ui_components": [Alert(
                 message="Failed to fetch profile. Your token may have expired — try re-authorizing.",
                 variant="error", title="API Error",
-            ).to_json()],
+            ).to_dict()],
             "_data": {"status": "error"},
         }
 
     name = profile.get("name", "Unknown")
     email = profile.get("email", "N/A")
-    picture = profile.get("picture", "")
+    profile.get("picture", "")
     person_id = profile.get("sub", "")
     verified = profile.get("email_verified", False)
 
@@ -119,7 +116,7 @@ def get_my_profile(
         )
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "name": name,
             "email": email,
@@ -159,7 +156,7 @@ def publish_post(
 
     if not client.api_available:
         return {
-            "_ui_components": [c.to_json() for c in _no_token_alert()],
+            "_ui_components": [c.to_dict() for c in _no_token_alert()],
             "_data": {"status": "not_connected"},
         }
 
@@ -196,7 +193,7 @@ def publish_post(
                 message=f"Post failed: {result.get('error', 'Unknown error')}",
                 variant="error",
                 title="Publish Failed",
-            ).to_json()],
+            ).to_dict()],
             "_data": result,
         }
 
@@ -222,7 +219,7 @@ def publish_post(
         )
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "success": True,
             "post_urn": post_urn,
@@ -254,7 +251,7 @@ def react_to_post(
 
     if not client.api_available:
         return {
-            "_ui_components": [c.to_json() for c in _no_token_alert()],
+            "_ui_components": [c.to_dict() for c in _no_token_alert()],
             "_data": {"status": "not_connected"},
         }
 
@@ -275,7 +272,7 @@ def react_to_post(
             "_ui_components": [Alert(
                 message=f"Reaction failed: {result.get('error', 'Unknown error')}",
                 variant="error",
-            ).to_json()],
+            ).to_dict()],
             "_data": result,
         }
 
@@ -315,7 +312,7 @@ def comment_on_post(
 
     if not client.api_available:
         return {
-            "_ui_components": [c.to_json() for c in _no_token_alert()],
+            "_ui_components": [c.to_dict() for c in _no_token_alert()],
             "_data": {"status": "not_connected"},
         }
 
@@ -340,7 +337,7 @@ def comment_on_post(
             "_ui_components": [Alert(
                 message=f"Comment failed: {result.get('error', 'Unknown error')}",
                 variant="error",
-            ).to_json()],
+            ).to_dict()],
             "_data": result,
         }
 
@@ -509,7 +506,7 @@ def draft_linkedin_post(
     components = [Card(title="LinkedIn Post Draft", content=card_content)]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "frame": target_frame["name"],
             "structure": target_struct["name"],
@@ -612,7 +609,7 @@ def get_content_suggestions(
         frame_components.append(frame_card)
 
     return {
-        "_ui_components": [c.to_json() for c in frame_components],
+        "_ui_components": [c.to_dict() for c in frame_components],
         "_data": {
             "frames_covered": [fr["id"] for fr in target_frames],
             "suggestions": all_suggestions,
@@ -730,7 +727,7 @@ def suggest_engagement_actions(
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "focus": focus,
             "current_followers": followers,

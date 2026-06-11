@@ -6,8 +6,7 @@ Test the progress indication system.
 import sys
 import os
 import json
-import asyncio
-from unittest.mock import Mock, AsyncMock
+from unittest.mock import Mock
 
 # Add backend to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -189,7 +188,7 @@ def test_progress_emitter_error_warning():
     assert error_event is not None
     assert error_event.step == ProgressStep.ERROR
     assert error_event.percentage == 100  # Errors complete the phase
-    assert error_event.data["error"] == True
+    assert error_event.data["error"] is True
     assert error_event.data["error_type"] == "Exception"
     assert error_event.data["error_details"] == "Test error"
     assert error_event.data["extra"] == "info"
@@ -206,7 +205,7 @@ def test_progress_emitter_error_warning():
     
     assert warning_event is not None
     assert warning_event.step == ProgressStep.WARNING
-    assert warning_event.data["warning"] == True
+    assert warning_event.data["warning"] is True
     assert warning_event.data["warning_message"] == "This is a warning"
     assert warning_event.data["severity"] == "low"
     

@@ -18,19 +18,19 @@ from typing import Dict, Any, List, Optional
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from shared.primitives import (
-    Text, Card, Table, Alert, MetricCard, Grid, Grids,
-    BarChart, PieChart, List_, Tabs, TabItem,
+from astralprims import (
+    Text, Card, Table, Alert, MetricCard, Grids,
+    PieChart, List_, Tabs, TabItem,
     create_ui_response,
 )
 from agents.grant_budgets.budget_knowledge import (
     CGS_BUDGET_CATEGORIES, NSF_PAPPG_RULES, NIH_BUDGET_RULES,
-    DEFAULT_RATES, SALARY_BANDS, COMMON_BUDGET_ITEMS,
+    DEFAULT_RATES, COMMON_BUDGET_ITEMS,
     BUDGET_SIGNAL_KEYWORDS, FA_EXCLUSION_RULES,
 )
 from agents.grant_budgets.uky_research_admin import (
-    OFFICES, FORMS_AND_TEMPLATES, POLICIES, INSTITUTIONAL_INFO,
-    PROJECT_LIFECYCLE, QUESTION_ROUTING, DEADLINE_RULES, SEARCH_INDEX,
+    OFFICES, FORMS_AND_TEMPLATES, INSTITUTIONAL_INFO,
+    QUESTION_ROUTING, DEADLINE_RULES, SEARCH_INDEX,
 )
 
 logger = logging.getLogger("GrantBudgetTools")
@@ -220,7 +220,7 @@ def analyze_cover_letter(
         )
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "categories": {k: {"confidence": v["confidence"], "label": v["label"]}
                           for k, v in categories.items()},
@@ -399,7 +399,7 @@ def suggest_budget_items(
         )
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {"suggestions": suggestions, "agency": agency, "duration_years": duration_years},
     }
 
@@ -526,7 +526,7 @@ def calculate_salary_fte(
         )
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "total_salary": total_salary,
             "total_fringe": total_fringe,
@@ -625,7 +625,7 @@ def calculate_travel_costs(
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {"total_travel": total_travel, "trips": len(trips)},
     }
 
@@ -742,7 +742,7 @@ def estimate_equipment_costs(
         )
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "total_equipment": total_equipment,
             "total_supplies": total_supplies,
@@ -791,11 +791,9 @@ def calculate_fa_costs(
     breakdown_rows = []
 
     for cat, amount in direct_costs.items():
-        included = True
         exclusion_note = ""
 
         if cat in excluded_categories:
-            included = False
             exclusion_note = "Excluded from MTDC"
             excluded_total += amount
         elif cat == "subawards":
@@ -849,7 +847,7 @@ def calculate_fa_costs(
     ]
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "total_direct": total_direct,
             "mtdc_base": mtdc_base,
@@ -1082,7 +1080,7 @@ def generate_cgs_budget(
         )
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "project_title": project_title,
             "pi_name": pi_name,
@@ -1291,7 +1289,7 @@ def get_budget_guidelines(
         )
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {"agency": agency, "topic": topic},
     }
 
@@ -1427,7 +1425,7 @@ def search_research_admin(
                 Text(content=f"Contact: {entry['email']}", variant="caption")
             )
         office_label = entry.get("office", "")
-        cat_label = entry.get("category", "").title()
+        entry.get("category", "").title()
 
         result_cards.append(
             Card(
@@ -1446,7 +1444,7 @@ def search_research_admin(
     ] + result_cards
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "query": query,
             "result_count": len(top_results),
@@ -1565,7 +1563,7 @@ def find_office_contact(
             )
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "topic": topic,
             "routed_to": [r["office"] for _, r in unique_matches],
@@ -1727,7 +1725,7 @@ def calculate_submission_deadlines(
         )
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "sponsor_deadline": parsed.isoformat(),
             "pif_deadline": pif_deadline.isoformat(),
@@ -1860,7 +1858,7 @@ def get_institutional_info(
         )
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {"info_type": info_type},
     }
 
@@ -1917,7 +1915,7 @@ def lookup_forms_templates(
 
     rows = []
     for form in filtered:
-        url_text = form.get("url", "Contact office")
+        form.get("url", "Contact office")
         deadline = form.get("deadline_rule", "—")
         rows.append([
             form["name"],
@@ -1948,7 +1946,7 @@ def lookup_forms_templates(
         )
 
     return {
-        "_ui_components": [c.to_json() for c in components],
+        "_ui_components": [c.to_dict() for c in components],
         "_data": {
             "query": query,
             "result_count": len(filtered),

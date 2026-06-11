@@ -19,7 +19,6 @@ import logging
 import uuid
 from typing import Any, Dict, List, Optional
 
-from agentic_settings import SCHEDULE_MIN_INTERVAL_SECONDS
 from .cron import compute_next_run_ms
 
 logger = logging.getLogger("scheduler.runner")

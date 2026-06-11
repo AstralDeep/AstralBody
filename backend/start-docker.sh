@@ -1,10 +1,8 @@
 #!/bin/bash
 set -e
 
-# Start simple static server for frontend on port 5173
-echo "Starting Frontend Static Server on port 5173..."
-python3 -m http.server 5173 --directory /app/frontend/dist &
-
+# Feature 026: no separate frontend static server. The orchestrator serves the
+# server-driven web UI (shell + static assets) directly on port 8001.
 echo "Starting AstralBody Backend Services on port 8001..."
 # Orchestrator consolidated FastAPI app will run on 8001
 export ORCHESTRATOR_PORT=8001
@@ -59,12 +57,15 @@ else
     echo "No SQLite databases found. Nothing to migrate."
 fi
 
-# Run agent ownership migration in the background after services start
-# Waits for the orchestrator API to be reachable, then assigns unowned agents
+# Run agent ownership migration in the background after services start.
+# Probes the ungated /healthz endpoint with python (the slim image has no
+# curl — the previous curl probe never succeeded, and its mock bearer token
+# would be refused under real auth anyway).
 (
     echo "Waiting for orchestrator to start before running migrations..."
     for i in $(seq 1 30); do
-        if curl -sf http://localhost:8001/api/agents -H "Authorization: Bearer mock" > /dev/null 2>&1; then
+        if python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8001/healthz', timeout=3)" > /dev/null 2>&1; then
+            sleep 5  # give auto-started agents a moment to register
             echo "Running agent ownership migration..."
             python3 -m scripts.migrate_agent_ownership || true
             break

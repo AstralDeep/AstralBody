@@ -19,7 +19,7 @@ import subprocess
 import sys
 import time
 import uuid
-from typing import Dict, Any, Optional, List, Callable, Awaitable
+from typing import Dict, Any, Optional, List
 
 from orchestrator.agent_generator import AgentCodeGenerator
 from orchestrator.agent_validator import AgentSpecValidator
@@ -151,8 +151,8 @@ class AgentLifecycleManager:
                     "The generated tools FAILED spec validation with these errors:\n"
                     + "\n".join(error_lines)
                     + "\n\nFix ALL these issues. Ensure every tool returns "
-                    "{'_ui_components': [c.to_json() for c in components], '_data': {...}} "
-                    "using the shared.primitives classes."
+                    "{'_ui_components': [c.to_dict() for c in components], '_data': {...}} "
+                    "using the astralprims classes."
                 )
 
                 await self._send_progress(
@@ -455,8 +455,16 @@ class AgentLifecycleManager:
 
         raise RuntimeError("No available ports for draft agent")
 
-    async def start_draft_agent(self, draft_id: str, websocket=None) -> Dict[str, Any]:
-        """Start a draft agent subprocess for testing."""
+    async def start_draft_agent(self, draft_id: str, websocket=None,
+                                align_scopes: bool = True) -> Dict[str, Any]:
+        """Start a draft agent subprocess for testing.
+
+        Feature 027: ``align_scopes=False`` starts the process WITHOUT
+        rewriting ownership or enabling all scopes — used when restarting an
+        already-live agent (startup relaunch, revision swap), where the
+        testing-mode defaults would clobber the user's saved permissions and
+        reset a public agent to private.
+        """
         draft = self.db.get_draft_agent(draft_id)
         if not draft:
             raise ValueError(f"Draft {draft_id} not found")
@@ -523,14 +531,16 @@ class AgentLifecycleManager:
         else:
             await asyncio.sleep(2)
 
-        # Set ownership to creator (private by default)
-        user = self.db.get_user(draft["user_id"])
-        owner_email = user.get("email", draft["user_id"]) if user else draft["user_id"]
-        self.db.set_agent_ownership(agent_id, owner_email=owner_email, is_public=False)
+        # Set ownership to creator (private by default). Skipped on relaunch
+        # (align_scopes=False) so a user-set public flag is not reset.
+        if align_scopes:
+            user = self.db.get_user(draft["user_id"])
+            owner_email = user.get("email", draft["user_id"]) if user else draft["user_id"]
+            self.db.set_agent_ownership(agent_id, owner_email=owner_email, is_public=False)
 
         # Draft agents: all scopes ENABLED so the user can test tools.
         # Scopes get disabled when the agent is approved/moved to live.
-        if self.orchestrator:
+        if self.orchestrator and align_scopes:
             self.orchestrator.tool_permissions.set_agent_scopes(
                 draft["user_id"], agent_id,
                 {"tools:read": True, "tools:write": True, "tools:search": True, "tools:system": True}
@@ -824,7 +834,7 @@ class AgentLifecycleManager:
             except SyntaxError as e:
                 logger.error(f"Auto-fix produced syntax error: {e}")
                 await self._send_progress(websocket, draft_id, "auto_fix_failed",
-                                           f"Auto-fix produced invalid code (syntax error). Manual refinement needed.",
+                                           "Auto-fix produced invalid code (syntax error). Manual refinement needed.",
                                            TESTING)
                 # Restart original agent
                 await self.start_draft_agent(draft_id, websocket)

@@ -1,6 +1,5 @@
 """US-21: Audio primitive serialization and create_ui_response tests."""
-import pytest
-from shared.primitives import Audio, create_ui_response
+from astralprims import Audio, create_ui_response
 
 
 class TestAudioPrimitive:
@@ -10,7 +9,7 @@ class TestAudioPrimitive:
             contentType="audio/wav",
             label="Test Sound",
         )
-        data = audio.to_json()
+        data = audio.to_dict()
         assert data["type"] == "audio"
         assert data["src"] == "https://example.com/sound.wav"
         assert data["contentType"] == "audio/wav"
@@ -18,13 +17,15 @@ class TestAudioPrimitive:
 
     def test_defaults(self):
         audio = Audio(src="https://example.com/sound.wav")
-        data = audio.to_json()
+        data = audio.to_dict()
         assert data["autoplay"] is False
         assert data["loop"] is False
         assert data["showControls"] is True
-        assert data["label"] is None
-        assert data["description"] is None
-        assert data["contentType"] is None
+        # astralprims omits None-valued fields from to_dict() (cleaner wire form);
+        # the renderer treats absent fields as their default.
+        assert data.get("label") is None
+        assert data.get("description") is None
+        assert data.get("contentType") is None
 
     def test_full_config(self):
         audio = Audio(
@@ -36,7 +37,7 @@ class TestAudioPrimitive:
             label="Speech",
             description="Generated TTS",
         )
-        data = audio.to_json()
+        data = audio.to_dict()
         assert data["autoplay"] is True
         assert data["loop"] is True
         assert data["showControls"] is False

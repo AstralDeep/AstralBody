@@ -2,19 +2,13 @@ import os
 import sys
 import json
 import re
-import hashlib
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Any, List, Optional, Tuple
-from urllib.parse import urlencode
+from typing import Dict, Any, List, Optional
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from shared.primitives import (
-    Text, Card, Table, Container, MetricCard, ProgressBar,
-    Alert, Grid, BarChart, LineChart, PieChart, PlotlyChart, List_,
-    Divider, CodeBlock, Image, Tabs,
-    FileDownload, FileUpload, Button, Input, ColorPicker,
-    create_ui_response
+from astralprims import (
+    Text, Card, Table, Container, MetricCard, Alert, Grid, Divider, create_ui_response
 )
 
 try:
@@ -310,7 +304,7 @@ def get_auth_status(**kwargs) -> Dict[str, Any]:
         ]
         
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {
                 "auth_status": auth_status,
                 "has_client_id": has_client_id,
@@ -350,7 +344,7 @@ def fetch_recent_emails(days: int = 7, limit: int = 20, **kwargs) -> Dict[str, A
                 try:
                     dt = datetime.fromisoformat(received.replace('Z', '+00:00'))
                     received = dt.strftime("%Y-%m-%d %H:%M")
-                except:
+                except Exception:
                     pass
             
             email_rows.append([
@@ -379,7 +373,7 @@ def fetch_recent_emails(days: int = 7, limit: int = 20, **kwargs) -> Dict[str, A
         ]
         
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {
                 "total_emails": len(emails),
                 "sample_emails": emails[:5],
@@ -478,7 +472,7 @@ def analyze_email_for_tasks(email_id: str = "latest", **kwargs) -> Dict[str, Any
             )
         
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {
                 "email_id": email.get("id"),
                 "email_subject": subject,
@@ -518,7 +512,7 @@ def get_current_todo_tasks(list_name: str = "Tasks", **kwargs) -> Dict[str, Any]
                 try:
                     dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
                     created = dt.strftime("%Y-%m-%d")
-                except:
+                except Exception:
                     pass
             
             body_content = task.get("body", {}).get("content", "")
@@ -550,7 +544,7 @@ def get_current_todo_tasks(list_name: str = "Tasks", **kwargs) -> Dict[str, Any]
         ]
         
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {
                 "total_tasks": len(tasks),
                 "tasks": tasks[:10],
@@ -692,7 +686,7 @@ def triage_inbox_automated(days: int = 7, email_limit: int = 10, **kwargs) -> Di
             )
         
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {
                 "emails_processed": len(emails[:5]),
                 "tasks_extracted": len(all_extracted_tasks),
@@ -874,7 +868,7 @@ def get_inbox_todo_items(days: int = 7, email_limit: int = 10, **kwargs) -> Dict
         )
         
         return {
-            "_ui_components": [c.to_json() for c in components],
+            "_ui_components": [c.to_dict() for c in components],
             "_data": {
                 "total_emails_analyzed": min(email_limit, len(emails)),
                 "total_tasks_found": len(all_tasks),
