@@ -780,6 +780,22 @@ class Database:
             )
         ''')
         cursor.execute('CREATE INDEX IF NOT EXISTS ix_workspace_snapshot_chat ON workspace_snapshot(chat_id, created_at)')
+        # data-model.md declares turn_message_id as FK -> messages(id) ON
+        # DELETE CASCADE. Added as a named constraint (idempotent; covers
+        # deployments whose table predates the FK). NOT VALID skips
+        # re-validating historic rows; new writes are enforced.
+        cursor.execute('''
+            SELECT 1 FROM information_schema.table_constraints
+            WHERE table_name = 'workspace_snapshot'
+              AND constraint_name = 'fk_workspace_snapshot_turn_message'
+        ''')
+        if not cursor.fetchone():
+            cursor.execute('''
+                ALTER TABLE workspace_snapshot
+                ADD CONSTRAINT fk_workspace_snapshot_turn_message
+                FOREIGN KEY (turn_message_id) REFERENCES messages (id)
+                ON DELETE CASCADE NOT VALID
+            ''')
 
         # saved_components becomes the live workspace store: stable identity,
         # ordering, and in-place update timestamps (additive; legacy rows keep

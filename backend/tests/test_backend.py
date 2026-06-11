@@ -3,11 +3,9 @@ Backend Unit Tests — Protocol, Primitives, Tools, and Orchestrator.
 """
 import os
 import sys
-import json
 import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from dataclasses import asdict
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -360,17 +358,22 @@ class TestMCPServerErrorClassification:
         from agents.general.mcp_server import MCPServer
         from shared.protocol import MCPRequest
         server = MCPServer()
-        # Register a mock tool that raises ConnectionError
+        # Register a mock tool that raises ConnectionError.
+        # server.tools IS the module-level TOOL_REGISTRY — pop the key after,
+        # or the pollution fails test_no_behavior_change's registry guard.
         server.tools["failing_tool"] = {
             "function": lambda: (_ for _ in ()).throw(ConnectionError("Connection refused")),
             "description": "A tool that fails with ConnectionError",
             "input_schema": {"type": "object", "properties": {}}
         }
-        req = MCPRequest(request_id="r-retry", method="tools/call",
-                         params={"name": "failing_tool", "arguments": {}})
-        resp = server.process_request(req)
-        assert resp.error is not None
-        assert resp.error.get("retryable") is True
+        try:
+            req = MCPRequest(request_id="r-retry", method="tools/call",
+                             params={"name": "failing_tool", "arguments": {}})
+            resp = server.process_request(req)
+            assert resp.error is not None
+            assert resp.error.get("retryable") is True
+        finally:
+            server.tools.pop("failing_tool", None)
 
     def test_non_retryable_type_error(self):
         """TypeError should be classified as non-retryable."""
@@ -382,11 +385,14 @@ class TestMCPServerErrorClassification:
             "description": "A tool that fails with TypeError",
             "input_schema": {"type": "object", "properties": {}}
         }
-        req = MCPRequest(request_id="r-noretry", method="tools/call",
-                         params={"name": "bad_args_tool", "arguments": {}})
-        resp = server.process_request(req)
-        assert resp.error is not None
-        assert resp.error.get("retryable") is False
+        try:
+            req = MCPRequest(request_id="r-noretry", method="tools/call",
+                             params={"name": "bad_args_tool", "arguments": {}})
+            resp = server.process_request(req)
+            assert resp.error is not None
+            assert resp.error.get("retryable") is False
+        finally:
+            server.tools.pop("bad_args_tool", None)
 
     def test_tool_alert_error_detection(self):
         """Tool returning Alert with variant='error' should be detected as an error."""
@@ -402,12 +408,15 @@ class TestMCPServerErrorClassification:
             "description": "A tool that returns an error alert",
             "input_schema": {"type": "object", "properties": {}}
         }
-        req = MCPRequest(request_id="r-alert", method="tools/call",
-                         params={"name": "alert_tool", "arguments": {}})
-        resp = server.process_request(req)
-        assert resp.error is not None
-        assert resp.error.get("retryable") is True
-        assert "Something went wrong" in resp.error["message"]
+        try:
+            req = MCPRequest(request_id="r-alert", method="tools/call",
+                             params={"name": "alert_tool", "arguments": {}})
+            resp = server.process_request(req)
+            assert resp.error is not None
+            assert resp.error.get("retryable") is True
+            assert "Something went wrong" in resp.error["message"]
+        finally:
+            server.tools.pop("alert_tool", None)
 
     def test_classify_error_static_method(self):
         """Test the _classify_error static method directly."""
@@ -636,16 +645,17 @@ class TestLLMRouting:
 
     def test_pending_request_lifecycle(self, orchestrator):
         """Test that pending requests can be created and resolved."""
-        future = asyncio.get_event_loop().create_future() if hasattr(asyncio, 'get_event_loop') else None
-        if future is None:
-            loop = asyncio.new_event_loop()
+        loop = asyncio.new_event_loop()
+        try:
             future = loop.create_future()
 
-        orchestrator.pending_requests["req-test"] = future
-        assert "req-test" in orchestrator.pending_requests
+            orchestrator.pending_requests["req-test"] = future
+            assert "req-test" in orchestrator.pending_requests
 
-        orchestrator.pending_requests.pop("req-test", None)
-        assert "req-test" not in orchestrator.pending_requests
+            orchestrator.pending_requests.pop("req-test", None)
+            assert "req-test" not in orchestrator.pending_requests
+        finally:
+            loop.close()
 
 
 if __name__ == "__main__":

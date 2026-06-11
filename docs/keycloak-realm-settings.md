@@ -19,6 +19,7 @@ browser beyond the short-lived access token used for the WS handshake.
 | **Offline Session Max Limited** | **disabled**, or Max ≥ 365 days | Same as above. |
 | **Access Token Lifespan** | **5–15 minutes** | The orchestrator refreshes silently server-side (028 D2); short access tokens keep revocation latency bounded (SC-004). |
 | Revocation endpoint | enabled (default) | `/auth/logout` POSTs the refresh token to `…/protocol/openid-connect/revoke` (028 FR-012). |
+| Login → Remember Me | **OFF** (Keycloak default) | 028 FR-010 / 016 FR-001: the sign-in page must not offer a "Remember me"/"Stay signed in" choice — persistence is the app's 365-day server-side session, not a user toggle. |
 
 ## Roles (required)
 
@@ -55,7 +56,7 @@ USE_MOCK_AUTH=false              # mock auth refuses to boot in production
 WEB_SESSION_ENC_KEY=<fernet key> # encrypts durable web sessions at rest (REQUIRED in production)
 AGENT_API_KEY=<random secret>    # agent connections are refused without it in production
 OFFLINE_GRANT_ENC_KEY=<fernet>   # feature 025 offline grants (logout revokes them)
-WEB_SESSION_SECRET=<random>      # cookie HMAC (falls back to OFFLINE_GRANT_ENC_KEY)
+WEB_SESSION_SECRET=<random>      # cookie HMAC (falls back to WEB_SESSION_ENC_KEY, then OFFLINE_GRANT_ENC_KEY)
 ```
 
 Generate Fernet keys with

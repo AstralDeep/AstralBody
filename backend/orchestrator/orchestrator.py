@@ -475,6 +475,21 @@ class Orchestrator:
             logger.warning("RegisterAgent with no card")
             return
 
+        # 028 FR-016 — agent connections are authenticated. In production
+        # (ASTRAL_ENV != development) a missing/invalid key refuses the
+        # registration outright (fail closed); dev mode stays keyless.
+        from orchestrator.auth import validate_agent_api_key
+        if not validate_agent_api_key(getattr(msg, "api_key", None) or ""):
+            logger.warning(
+                "Refusing agent registration for '%s': missing or invalid agent "
+                "API key (028 FR-016 fail-closed)", card.agent_id)
+            if websocket is not None:
+                try:
+                    await websocket.close(code=1008, reason="agent authentication required")
+                except Exception:
+                    logger.debug("close after refused agent registration failed", exc_info=True)
+            return
+
         if websocket is not None:
             self.agents[card.agent_id] = websocket
         self.agent_cards[card.agent_id] = card
@@ -713,7 +728,10 @@ class Orchestrator:
             self.a2a_agent_cards[agent_id] = a2a_card
             self.agent_urls[agent_id] = base_url
 
-            register_msg = RegisterAgent(agent_card=custom_card)
+            # Internal registration of an operator-configured A2A discovery —
+            # carries the orchestrator's own configured key (FR-016).
+            register_msg = RegisterAgent(agent_card=custom_card,
+                                         api_key=os.getenv("AGENT_API_KEY") or None)
             await self.register_agent(None, register_msg)
 
             logger.info(f"External agent discovered via A2A (WebSocket unavailable): {agent_id} at {base_url}")
@@ -1305,6 +1323,14 @@ class Orchestrator:
                             except Exception as e:
                                 logger.warning(f"pause_chat failed: {e}")
                         self._ws_active_chat[ws_id] = chat_id
+                        # Feature 028 (FR-031/FR-032): switching chats ends any
+                        # historical timeline view — the new chat opens live,
+                        # and the client is told so its banner/mode clears.
+                        if self._ws_timeline_mode.pop(ws_id, None):
+                            await self._safe_send(websocket, json.dumps({
+                                "type": "workspace_timeline_mode",
+                                "active": False,
+                            }))
 
                         # Feature 028 (FR-028): component-bearing transcript
                         # messages get a server-rendered html form so the
@@ -1374,6 +1400,20 @@ class Orchestrator:
                     }))
 
                 # Saved components actions
+                elif msg.action in ("save_component", "delete_saved_component",
+                                    "combine_components", "condense_components") \
+                        and self._ws_timeline_mode.get(id(websocket)):
+                    # Feature 028 (FR-031): historical views are strictly
+                    # read-only — the shipped client makes these unreachable in
+                    # timeline mode, but a raw WS client must be refused too.
+                    await self._audit_workspace_denial(
+                        user_id, msg.payload.get("chat_id") or "",
+                        msg.payload.get("component_id") or "", "timeline_readonly")
+                    await self.send_ui_render(websocket, [
+                        Alert(message="You are viewing a past workspace state — return to live to interact.",
+                              variant="warning").to_dict()
+                    ], target="chat")
+
                 elif msg.action == "save_component":
                     chat_id = msg.payload.get("chat_id")
                     component_data = msg.payload.get("component_data")
@@ -5118,6 +5158,19 @@ COMPONENT UPDATE RULES:
         component_id = payload.get("component_id")
         target_id = payload.get("target_component_id") or component_id
         params_patch = payload.get("params_patch") or {}
+        # Contract (component-action.md): 'refresh' and 'invoke' are the
+        # deterministic kinds — both re-execute the source capability with the
+        # patched params. Anything else is refused explicitly (intent actions
+        # never arrive on this verb; they use the param_picker chat idiom).
+        kind = str(payload.get("kind") or "refresh").lower()
+        if kind not in ("refresh", "invoke"):
+            await self._audit_workspace_denial(user_id, chat_id or "", component_id or "",
+                                               f"unsupported_kind:{kind}")
+            await self.send_ui_render(websocket, [
+                Alert(message=f"Unsupported component action kind '{kind}'.",
+                      variant="error").to_dict()
+            ], target="chat")
+            return
         if not chat_id or not component_id:
             await self.send_ui_render(websocket, [
                 Alert(message="This action is missing its component context.", variant="error").to_dict()
@@ -5224,7 +5277,18 @@ COMPONENT UPDATE RULES:
                 )
             self.workspace.snapshot(chat_id, user_id, cause=cause)
             ws_components = self.workspace.live_components(chat_id, user_id)
-            await self.send_ui_render(websocket, ws_components)
+            # FR-040: the replacement is a workspace change — every socket of
+            # this user on this chat gets the re-render, not just the
+            # originator (REST-initiated calls pass websocket=None).
+            targets = [
+                ws for ws in self.ui_clients
+                if self._get_user_id(ws) == user_id
+                and self._ws_active_chat.get(id(ws)) == chat_id
+            ]
+            if websocket is not None and websocket not in targets:
+                targets.append(websocket)
+            for ws in targets:
+                await self.send_ui_render(ws, ws_components)
         except Exception:
             logger.exception("legacy replacement reconciliation failed (%s)", cause)
 
@@ -5838,6 +5902,16 @@ COMPONENT UPDATE RULES:
             except Exception:
                 logger.exception("chrome: topbar render failed — serving bare shell")
             shell = shell.replace("%%ASTRAL_TOKEN%%", token or "")
+            # Feature 028 (FR-011): server-derived resume flag — false only on
+            # the load right after interactive sign-in; the client echoes it
+            # into register_ui so auth.session_resumed keeps 016 semantics.
+            resumed_flag = "true"
+            try:
+                from orchestrator.web_auth import session_resumed_flag
+                resumed_flag = "true" if session_resumed_flag(request) else "false"
+            except Exception:
+                logger.debug("session_resumed_flag failed", exc_info=True)
+            shell = shell.replace("%%ASTRAL_RESUMED%%", resumed_flag)
             return _HTMLResponse(shell.replace("%%ASTRAL_TOPBAR%%", topbar))
 
         app.mount("/static", StaticFiles(directory=_os.path.join(_webrender_dir, "static")), name="static")

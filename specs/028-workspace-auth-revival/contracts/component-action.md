@@ -18,7 +18,7 @@ Buttons/primitives declare which kind they emit via their `data-action`/payload 
   "payload": {
     "chat_id": "…",
     "component_id": "wc_ab12…",          // REQUIRED: emitting component (FR-034)
-    "kind": "refresh",                    // 'refresh' (re-run source) | 'invoke' (named verb on source tool)
+    "kind": "refresh",                    // 'refresh' (re-run source) | 'invoke' (accepted as a deterministic alias of refresh in 028; distinct named-verb semantics deferred). Unknown kinds are refused (Alert + workspace.action_denied audit).
     "params_patch": { "page": 3 },       // optional shallow merge over _source_params
     "target_component_id": "wc_cd34…"    // optional cross-component target (FR-037); default = component_id
   }

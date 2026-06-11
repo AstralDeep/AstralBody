@@ -98,6 +98,20 @@ Format: `[ID] [P?] [Story] Description` — `[P]` = parallelizable with neighbor
 - [x] T042 Real-browser evidence gate per quickstart.md walkthrough → [evidence/t042/](evidence/t042/EVIDENCE.md) (EVIDENCE.md + 14 screenshots + boot log + 4 machine reports; Constitution X). A2–A4 environment-constrained (no realm credentials), compensated by `test_session_store_refresh.py`/`test_logout_revocation.py`
 - [x] T043 [P] CLAUDE.md: add feature-028 section (auth lifecycle + workspace protocol summary)
 
+## Phase 13: Post-T042 audit remediation (2026-06-11 FR-by-FR audit)
+
+A 51-agent adversarial audit of the finished branch confirmed 21 FRs fully implemented/tested and surfaced the gaps below — all closed:
+
+- [x] T044 FR-016 **wiring**: `validate_agent_api_key` had no production call site. `RegisterAgent` gained additive `api_key`; `Orchestrator.register_agent` refuses keyless/invalid registrations (closes WS 1008) outside dev; `BaseA2AAgent` sends `AGENT_API_KEY`; internal A2A discovery path carries the orchestrator's own key (`backend/tests/test_agent_key_enforcement.py`)
+- [x] T045 FR-003/004/005 callback hardening: OIDC `error` param handled; `next` recovered before every error exit; IdP-unreachable preflight at `/auth/login` (3 s probe, 60 s cache, bounded 503 page); role gate at callback — token without `user`/`admin` → 403 no-access page, refresh token revoked, `login_interactive outcome=failure` audited (`backend/tests/test_auth_callback_paths.py`)
+- [x] T046 CT-auth conformance: `/auth/session` reason `hard_cap` threaded from both cache and store deletions; one-shot `resumed` semantics (server-derived; shell injects `__ASTRAL_RESUMED__`, client echoes it — FR-011 meaning drift fixed); `_secret()` falls back through `WEB_SESSION_ENC_KEY`; contract docs amended where reality was chosen (auth_required reasons, timeline entry verb `chrome_open`, `invoke`-as-alias)
+- [x] T047 FR-019: single-source supersede exempted for explicit author identities (a NEW `au_`/echoed id always appends) (`backend/tests/test_workspace_identity_028.py`)
+- [x] T048 FR-026/T039 REST reconciliation: `save_component`/`delete_component`/`combine`/`condense` now write through `WorkspaceManager` with `ui_upsert`/snapshot/audit like their WS twins; `_reconcile_legacy_replacement` fans out when REST-initiated (`backend/tests/test_rest_legacy_workspace.py`)
+- [x] T049 component_action `kind` validated (`refresh`/`invoke` accepted; unknown → Alert + `workspace.action_denied unsupported_kind:*`); `load_chat` ends a stale timeline view; chat deletion ends historical views on other tabs (`chat_deleted` + timeline-mode clear — spec EC) (`backend/tests/test_component_action_extras.py`, `tests/chrome/test_surface_workspace_timeline.py`)
+- [x] T050 DM conformance: `workspace_snapshot.turn_message_id` FK → `messages(id) ON DELETE CASCADE` added idempotently (named constraint, `NOT VALID` for historic rows)
+- [x] T051 Test-gap closure: ~13 new test files covering ensure_session/auth_session decision layer, register_ui→`auth_required`, JWKS cache, snapshot turn sites, real offline-grant lifecycle (EC-3), real audit-hook emission (FR-023), client.js/shell source-level contract (Constitution III compensation for the no-JS-harness rule), concurrency serialization (EC-7), non-BROWSER `ui_upsert` adaptation (T038 debt)
+- [x] T052 Dev-environment repair: `.env` gained `ASTRAL_ENV=development` (the missing key made the 028 fail-closed posture reject the local stack — the "403 guardrail"); stale `test_agent_flow.py` rewritten against the real `/ws` endpoint (it previously swallowed its own connection failure); libmagic dependency drift fixed (`image/x.nifti`/`image/x.nrrd` accepted for `.nii`/`.nrrd`); `TOOL_REGISTRY` test pollution fixed
+
 ## Dependencies & Execution Order
 
 - Phase 1 → Phase 2 → everything else. T005/T006 block all of Part B; T004 blocks T011–T012, T032.
