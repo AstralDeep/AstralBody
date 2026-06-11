@@ -1,5 +1,5 @@
 # Core
-astralprims>=0.1.0  # first-party UI primitives package (feature 026); defines primitives + structured representation. Orchestrator renders, ROTE adapts.
+astralprims>=0.2.0  # first-party UI primitives package (feature 026); 0.2.0 adds the dashboard primitives (badge/hero/keyvalue/timeline/rating). Orchestrator renders, ROTE adapts.
 websockets>=12.0
 openai>=1.0.0
 python-dotenv>=1.0.0

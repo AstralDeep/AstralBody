@@ -65,6 +65,24 @@ def fingerprint(agent_id: str, tool_name: str, params: Optional[Dict[str, Any]])
     return "wc_" + hashlib.sha1(basis.encode()).hexdigest()[:16]
 
 
+def ordinal_identity(base_cid: str, ordinal: int) -> str:
+    """Identity for the Nth same-identity component within one upsert batch.
+
+    One round may carry MANY components that resolve to a single identity —
+    a multi-component tool result (shared source fingerprint) or parallel
+    calls to a tool that hardcodes an author id (the general agent's
+    ``chart-card``). Without disambiguation each would supersede the previous
+    down to a single surviving row. Ordinal 0 keeps the plain identity (full
+    backward compatibility for the common one-per-batch case); later
+    occurrences get a deterministic ``~N`` suffix — prefix-preserving (an
+    echoed ``wc_…~1``/``au_…~1`` still resolves verbatim) and stable, so
+    re-running the same round supersedes slot-for-slot.
+    """
+    if ordinal <= 0:
+        return base_cid
+    return f"{base_cid}~{ordinal}"
+
+
 def layout_key_for(chat_id: str, turn_marker: str) -> str:
     """Deterministic per-round layout key (feature 029).
 
@@ -242,6 +260,7 @@ class WorkspaceManager:
 
         ops: List[Dict[str, Any]] = []
         next_pos = 1 + max([r.get("position") or 0 for r in live], default=0)
+        batch_fp_seen: Dict[str, int] = {}
         for i, comp in enumerate(components):
             if not isinstance(comp, dict):
                 continue
@@ -251,6 +270,15 @@ class WorkspaceManager:
             else:
                 explicit_identity = bool(comp.get("component_id") or comp.get("id"))
                 cid = self.resolve_identity(comp)
+                # Same resolved identity twice in ONE batch (multi-component
+                # tool result, or parallel calls of a tool with a hardcoded
+                # author id): the 2nd+ occurrence gets a deterministic ordinal
+                # identity instead of superseding its batch siblings.
+                seen = batch_fp_seen.get(cid, 0)
+                batch_fp_seen[cid] = seen + 1
+                if seen:
+                    cid = ordinal_identity(cid, seen)
+                    comp["component_id"] = cid
                 if cid not in by_cid and not explicit_identity:
                     # Single-source supersede (docstring rule 3) — only for
                     # fingerprint-derived identities. An author-declared id is

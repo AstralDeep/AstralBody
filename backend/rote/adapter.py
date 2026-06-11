@@ -318,6 +318,10 @@ class ComponentAdapter:
             lang = comp.get("language", "")
             parts.append(f"[Code block: {lang}]")
 
+        elif comp_type in ("card", "collapsible"):
+            if comp.get("title"):
+                parts.append(str(comp["title"]))
+
         elif comp_type == "badge":
             parts.append(comp.get("label", ""))
 
