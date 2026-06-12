@@ -263,6 +263,17 @@ _MERGED_COLLIDING_VERBS = frozenset({
     "get_results", "delete_dataset",
 })
 
+# 030: per-tool dispatch ceilings for long-running verbs (everything else
+# keeps the 30 s default). research_brief legitimately performs one search
+# plus several 15 s-bounded page fetches — the default ceiling guaranteed
+# "Tool call timed out" (live incident).
+TOOL_TIMEOUT_OVERRIDES = {
+    "research_brief": 150.0,
+    "fetch_page": 45.0,
+    "summarize_url": 60.0,
+    "compare_documents": 60.0,
+}
+
 
 def remap_merged_source(agent_id: str, tool_name: str):
     """Map a pre-merge (agent, tool) provenance onto the ml-services-1 agent.
@@ -2661,6 +2672,18 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             if draft_agent_id and agent_id != draft_agent_id:
                 continue
 
+            # 030 follow-up: NON-LIVE drafts never enter normal chats. A
+            # draft under self-test registers with the orchestrator and the
+            # test flow enables its scopes — without this skip its generated
+            # tools leaked into every chat, colliding with (and shadowing)
+            # first-party tools (live incident: a generated Serper-keyed
+            # web_search shadowed the keyless built-in one).
+            if not draft_agent_id and self._is_draft_agent(agent_id):
+                logger.debug(
+                    f"Agent '{agent_id}' excluded user={user_id} reason=draft_not_live"
+                )
+                continue
+
             # Per-user agent disable (Feature 013 follow-up): user has
             # muted this agent; skip ALL its tools without touching
             # scope/permission state. Logged so operators can see when
@@ -2865,6 +2888,10 @@ PROCESS (Re-Act Loop):
 CRITICAL RULES:
 - **VERIFY**: Check if tool outputs actually contain the data you expect before stating it exists. If a search returns 0 results, do NOT try to graph them.
 - **FINAL RESPONSE**: When you have finished all actions, provide a natural language summary of what you did and what was found.
+- **CHAT IS CONCISE**: Your final chat reply must be SHORT — 2-4 plain sentences, no headings,
+  no tables, no long documents. Substantial content (drafts, documents, lists, tables,
+  structured data) belongs in UI components / tool outputs, not in the chat text; long text
+  replies are moved to the canvas automatically.
 - **VISUALIZATIONS**: If the user asks for a graph, YOU MUST call the graphing tool. Do not just describe the data.
 {canvas_context}
 COMPONENT UPDATE RULES:
@@ -3352,19 +3379,46 @@ COMPONENT UPDATE RULES:
                             await self.send_ui_render(websocket, response_components, target="chat")
                         else:
                             # Rich UI components -- canvas gets the parsed components,
-                            # chat gets the leak alerts + Analysis card. The persisted
-                            # message includes BOTH so reload shows the canvas + alerts.
+                            # chat gets the leak alerts + a CONCISE narrative (030:
+                            # the chat rail is words only; a long/structured
+                            # narrative becomes a durable canvas doc card). The
+                            # persisted message includes BOTH so reload shows
+                            # the canvas + alerts.
+                            _tools_ran = bool(task.tool_calls_made) if task else False
+                            if chat_id and self._narrative_is_long(content):
+                                parsed_components = list(parsed_components) + [
+                                    self._narrative_doc_card(chat_id, content)]
+                                chat_core = [
+                                    Text(content=self._concise_lead(content)).to_dict(),
+                                    Text(content="The full write-up is on the canvas.",
+                                         variant="caption").to_dict()]
+                            else:
+                                chat_core = self._chat_narrative(content)
                             final_ops = await self._send_or_replace_components(
                                 websocket, parsed_components, chat_id, user_id=user_id
                             ) or []
-                            _tools_ran = bool(task.tool_calls_made) if task else False
-                            chat_summary = (list(leak_alerts) + self._chat_narrative(content)
+                            chat_summary = (list(leak_alerts) + chat_core
                                             + [self._provenance_caption(_tools_ran)])
                             await self.send_ui_render(websocket, chat_summary, target="chat")
                             response_components = list(leak_alerts) + list(parsed_components)
                     else:
                         _tools_ran = bool(task.tool_calls_made) if task else False
-                        response_components = (list(leak_alerts) + self._chat_narrative(content)
+                        # 030: long/structured narrative (drafts, documents,
+                        # anything with headings/tables) is promoted to a
+                        # durable canvas card; the chat rail gets a concise
+                        # plain-words lead. Short answers stay chat-only.
+                        narrative_doc = None
+                        if chat_id and self._narrative_is_long(content):
+                            narrative_doc = self._narrative_doc_card(chat_id, content)
+                            final_ops = await self._send_or_replace_components(
+                                websocket, [narrative_doc], chat_id, user_id=user_id) or []
+                            chat_core = [
+                                Text(content=self._concise_lead(content)).to_dict(),
+                                Text(content="The full write-up is on the canvas.",
+                                     variant="caption").to_dict()]
+                        else:
+                            chat_core = self._chat_narrative(content)
+                        response_components = (list(leak_alerts) + chat_core
                                                + [self._provenance_caption(_tools_ran)])
                         # Feature 030: text-only turns for a never-configured
                         # account get a deterministic enable affordance — not
@@ -3372,8 +3426,11 @@ COMPONENT UPDATE RULES:
                         # panel where the agents were not even visible).
                         if is_text_only:
                             response_components += self._text_only_cta_components(user_id)
-                        # Pure text response goes to chat panel
+                        # Concise text response goes to chat panel
                         await self.send_ui_render(websocket, response_components, target="chat")
+                        if narrative_doc is not None:
+                            # Persist the doc with the turn so reload shows it.
+                            response_components = [narrative_doc] + response_components
 
                     # Save complete interaction to history
                     self.history.add_message(chat_id, "assistant", response_components, user_id=user_id)
@@ -4123,6 +4180,22 @@ COMPONENT UPDATE RULES:
         # gates (the pseudo-agent has no scopes/credentials; ownership and
         # approval gates live inside the handler — contracts/agentic-creation.md).
         agent_id = tool_to_agent.get(llm_tool_name)
+        if agent_id is None and tool_to_agent:
+            # 030: weak models routinely mangle hyphen/underscore in
+            # collision-qualified names ("web_research-1__web_search" for
+            # "web-research-1__web_search"), which used to dead-end as
+            # "No agent available" — and then bait the model into creating
+            # a duplicate capability. Recover deterministically when the
+            # normalized form matches exactly ONE offered tool.
+            wanted = llm_tool_name.replace("-", "_").lower()
+            matches = [k for k in tool_to_agent
+                       if k.replace("-", "_").lower() == wanted]
+            if len(matches) == 1:
+                logger.info(
+                    "Tool name normalized: %r -> %r", llm_tool_name, matches[0])
+                llm_tool_name = matches[0]
+                tool_name = (tool_to_unqualified or {}).get(llm_tool_name, tool_name)
+                agent_id = tool_to_agent.get(llm_tool_name)
         if agent_id == "__orchestrator__":
             from orchestrator import agentic_creation
             return await agentic_creation.handle_meta_tool(
@@ -4600,7 +4673,10 @@ COMPONENT UPDATE RULES:
         last_result = None
 
         for attempt in range(1, max_retries + 1):
-            result = await self.execute_tool_and_wait(agent_id, tool_name, args, ui_websocket=websocket)
+            result = await self.execute_tool_and_wait(
+                agent_id, tool_name, args,
+                timeout=TOOL_TIMEOUT_OVERRIDES.get(tool_name, 30.0),
+                ui_websocket=websocket)
             last_result = result
 
             # Success: no error at all
@@ -6056,6 +6132,53 @@ COMPONENT UPDATE RULES:
                 f"Consent enable (030): user={user_id} agents={enabled} (write excluded)")
         return enabled
 
+    # 030: chat rail vs canvas split — the chat bubble stays concise words;
+    # long/structured narrative content is promoted to a durable canvas card.
+    _NARRATIVE_PROMOTE_CHARS = 700
+
+    @classmethod
+    def _narrative_is_long(cls, content: str) -> bool:
+        """True when a final narrative is too long/structured for the chat rail."""
+        c = content or ""
+        return (len(c) > cls._NARRATIVE_PROMOTE_CHARS
+                or bool(re.search(r"(?m)^#{1,6}\s", c))
+                or bool(re.search(r"(?m)^\|.+\|\s*$", c)))
+
+    @staticmethod
+    def _concise_lead(content: str, limit: int = 320) -> str:
+        """First plain sentences of a narrative — headings/tables stripped."""
+        lines = [ln for ln in (content or "").splitlines()
+                 if ln.strip() and not ln.lstrip().startswith(("#", "|", ">"))]
+        text = " ".join(" ".join(lines).split())
+        if not text:
+            text = " ".join((content or "").split())
+        if len(text) <= limit:
+            return text
+        cut = text[:limit]
+        for sep in (". ", "! ", "? "):
+            idx = cut.rfind(sep)
+            if idx > 80:
+                return cut[:idx + 1]
+        return cut.rsplit(" ", 1)[0] + "…"
+
+    @staticmethod
+    def _narrative_doc_card(chat_id: str, content: str) -> Dict[str, Any]:
+        """Durable canvas card for a long-form narrative (drafts, documents).
+
+        Identity is derived from the chat and the document's own first
+        heading, so iterating on the same document ("revise the aims")
+        SUPERSEDES it in place while a different document appends — the
+        walkthrough found grant deliverables vanishing into chat scroll with
+        no workspace identity at all.
+        """
+        import hashlib
+        m = re.search(r"(?m)^#{1,6}\s+(.+)$", content or "")
+        title = (m.group(1).strip()[:120] if m else "Document")
+        digest = hashlib.sha1(f"{chat_id}|{title}".encode("utf-8")).hexdigest()[:12]
+        return Card(id=f"doc_{digest}", title=title, content=[
+            Text(content=content, variant="markdown"),
+        ]).to_dict()
+
     @staticmethod
     def _provenance_caption(tools_ran: bool) -> Dict[str, Any]:
         """Deterministic provenance chip for chat replies (feature 030).
@@ -6321,6 +6444,17 @@ COMPONENT UPDATE RULES:
                 await asyncio.sleep(interval)
 
         asyncio.create_task(_revocation_queue_loop())
+
+        # 030: purge permission rows leaked by drafts discarded before the
+        # delete-time purge existed (run in a thread — pure DB/dir checks).
+        try:
+            purged = await asyncio.to_thread(
+                self.lifecycle_manager.reconcile_orphaned_draft_permissions)
+            if purged:
+                logger.info("Startup sweep purged leaked draft permissions "
+                            f"for {purged} agent id(s)")
+        except Exception:
+            logger.debug("draft permission sweep failed (non-fatal)", exc_info=True)
 
         # Auto-discover agents (continuous monitor)
         agent_port = int(os.getenv("AGENT_PORT", 8003))
