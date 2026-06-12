@@ -17,6 +17,7 @@ backend/orchestrator/workspace.py:
 """
 from __future__ import annotations
 
+import logging
 import sys
 import time
 import uuid
@@ -28,7 +29,11 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from orchestrator.workspace import WorkspaceManager, fingerprint  # noqa: E402
+from orchestrator.workspace import (  # noqa: E402
+    WorkspaceManager,
+    family_base_identity,
+    fingerprint,
+)
 
 
 def _can_connect_to_db() -> bool:
@@ -244,6 +249,104 @@ def test_duplicate_explicit_ids_in_one_batch_coexist(ws, chat):
     assert ids[0] == "au_chart-card", "first occurrence keeps the plain identity"
     assert all(i.startswith("au_chart-card") for i in ids), "ordinal ids keep the au_ prefix"
     assert len(ws.live_rows(chat_id, user_id)) == 3
+
+
+def test_family_member_refresh_reassigns_slot_for_slot(ws, chat):
+    """Regression (verified corruption): a component_action refresh on a
+    NON-base member of a multi-component family re-executes the source tool,
+    which returns ALL members. Pinning only batch index 0 onto the clicked id
+    while the siblings ran the zero-based ordinal enumeration shifted every
+    output one slot and double-targeted the clicked id (the hero vanished,
+    the family was permanently corrupted). The fix re-assigns the batch
+    slot-for-slot onto the family's ordinal identities."""
+    chat_id, user_id = chat
+    types = ["hero", "line_chart", "metric", "metric", "timeline", "text"]
+
+    seed = ws.upsert(chat_id, user_id, [
+        _comp("agentA", "dash", {"q": 1}, type=t, body=f"old-{n}-{t}")
+        for n, t in enumerate(types)
+    ])
+    family = [op["component_id"] for op in seed]
+    base = fingerprint("agentA", "dash", {"q": 1})
+    assert family == [base] + [f"{base}~{n}" for n in range(1, 6)]
+    assert len(ws.live_rows(chat_id, user_id)) == 6
+
+    # User clicked the SECOND member (~1) — fresh dicts, like a re-executed tool.
+    refresh = ws.upsert(
+        chat_id, user_id,
+        [_comp("agentA", "dash", {"q": 1}, type=t, body=f"new-{n}-{t}")
+         for n, t in enumerate(types)],
+        force_component_id=f"{base}~1",
+    )
+    assert [op["component_id"] for op in refresh] == family, \
+        "outputs must land slot-for-slot on the family identities, no shift"
+    assert len(set(op["component_id"] for op in refresh)) == 6, "no duplicate targets"
+    assert all(op["created"] is False for op in refresh), "every member morphs in place"
+
+    rows = ws.live_rows(chat_id, user_id)
+    assert len(rows) == 6, "row count unchanged — no phantom appends"
+    assert [r["component_id"] for r in rows] == family
+    assert [r["position"] for r in rows] == [1, 2, 3, 4, 5, 6]
+    # Slot-for-slot content: hero stays at base, line_chart at ~1, etc.
+    for n, (row, t) in enumerate(zip(rows, types)):
+        assert row["component_data"]["type"] == t
+        assert row["component_data"]["body"] == f"new-{n}-{t}"
+
+
+def test_family_base_refresh_also_reassigns_slot_for_slot(ws, chat):
+    """Same contract when the clicked member IS the family base (no ~N
+    suffix to strip) — pre-fix this case double-targeted the base id."""
+    chat_id, user_id = chat
+    types = ["hero", "metric", "text"]
+    seed = ws.upsert(chat_id, user_id, [
+        _comp("agentA", "dash", {"q": 2}, type=t, body=f"old-{t}") for t in types
+    ])
+    family = [op["component_id"] for op in seed]
+    base = fingerprint("agentA", "dash", {"q": 2})
+    assert family == [base, f"{base}~1", f"{base}~2"]
+    assert family_base_identity(f"{base}~2") == base
+    assert family_base_identity(base) == base
+
+    refresh = ws.upsert(
+        chat_id, user_id,
+        [_comp("agentA", "dash", {"q": 2}, type=t, body=f"new-{t}") for t in types],
+        force_component_id=base,
+    )
+    assert [op["component_id"] for op in refresh] == family
+    assert all(op["created"] is False for op in refresh)
+    rows = ws.live_rows(chat_id, user_id)
+    assert len(rows) == 3
+    assert [r["component_data"]["body"] for r in rows] == [f"new-{t}" for t in types]
+
+
+def test_duplicate_target_guard_appends_never_overwrites(ws, chat, caplog):
+    """Within ONE batch the same resolved identity must never be written
+    twice: the collision falls back to appending under a free ordinal
+    identity with a structured warning (never a silent overwrite)."""
+    chat_id, user_id = chat
+    fp = fingerprint("agentA", "dash", {"q": 1})
+
+    # comp1 arrives pre-stamped with the ~1 family identity; comp2/comp3 are
+    # id-less siblings whose ordinal enumeration would ALSO produce fp~1.
+    comp1 = _comp("agentA", "dash", {"q": 1}, component_id=f"{fp}~1", body="stamped")
+    comp2 = _comp("agentA", "dash", {"q": 1}, body="sibling-0")
+    comp3 = _comp("agentA", "dash", {"q": 1}, body="sibling-1")
+
+    with caplog.at_level(logging.WARNING, logger="orchestrator.workspace"):
+        ops = ws.upsert(chat_id, user_id, [comp1, comp2, comp3])
+
+    ids = [op["component_id"] for op in ops]
+    assert ids == [f"{fp}~1", fp, f"{fp}~2"], \
+        "collision on fp~1 must divert to the next free ordinal, not overwrite"
+    assert len(set(ids)) == 3
+    assert "duplicate target" in caplog.text
+
+    rows = ws.live_rows(chat_id, user_id)
+    assert len(rows) == 3, "guard appends — nothing dropped"
+    by_id = {r["component_id"]: r["component_data"]["body"] for r in rows}
+    assert by_id[f"{fp}~1"] == "stamped", "first writer of fp~1 is untouched"
+    assert by_id[fp] == "sibling-0"
+    assert by_id[f"{fp}~2"] == "sibling-1"
 
 
 def test_multicomponent_rerun_supersedes_slot_for_slot(ws, chat):

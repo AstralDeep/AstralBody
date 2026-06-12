@@ -38,11 +38,42 @@ WELCOME_EXAMPLES = [
 ]
 
 
-def welcome_components() -> List[Dict[str, Any]]:
+def enable_agents_card() -> Dict[str, Any]:
+    """Consent affordance shown when the account has no enabled agent tools.
+
+    Feature 030 (walkthrough finding): a fresh user starts fail-closed —
+    every agent scope disabled — so all welcome examples silently degrade to
+    text-only chat. This card makes that state visible and actionable. The
+    "Enable" button is the explicit user grant (Constitution VII: the system
+    sets attenuated scopes; the user may adjust per agent afterwards) and is
+    handled server-side by the audited ``enable_recommended_agents`` action,
+    which never grants ``tools:write``.
+    """
+    return Card(title="🔌 Agents are off for this account", content=[
+        Text(content=("Replies will be plain text until agents are enabled. "
+                      "Enabling grants read/search permissions for the built-in "
+                      "public agents — never write access — and each agent can "
+                      "be adjusted or turned off any time."),
+             variant="caption"),
+        Button(label="Enable recommended agents",
+               action="enable_recommended_agents",
+               payload={"source": "welcome"}),
+        Button(label="Choose agents individually", action="chrome_open",
+               payload={"surface": "agents"}, variant="secondary"),
+    ]).to_dict()
+
+
+def welcome_components(tools_available: bool = True) -> List[Dict[str, Any]]:
     """The welcome canvas as plain component dicts (pre-ROTE).
 
     Not workspace components — no identities, never persisted; the canvas
     they occupy is replaced by the first real render/upsert of the session.
+
+    Args:
+        tools_available: per-user flag from
+            ``Orchestrator.compute_tools_available_for_user``. When False the
+            enable-agents consent card is prepended so the examples below are
+            honest promises instead of guaranteed failures (feature 030).
     """
     cards = [
         Card(title=title, content=[
@@ -63,4 +94,7 @@ def welcome_components() -> List[Dict[str, Any]]:
         Grids(columns=2, children=cards),
         Text(content="Run an example, or type your own request.", variant="caption"),
     ]
-    return [c.to_dict() for c in tree]
+    rendered = [c.to_dict() for c in tree]
+    if not tools_available:
+        rendered.insert(1, enable_agents_card())
+    return rendered

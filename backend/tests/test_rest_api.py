@@ -134,14 +134,21 @@ class TestChatEndpoints:
         resp = client.get("/api/chats")
         assert resp.status_code == 401
 
-    def test_create_and_list_chats(self, client):
-        """Create a chat and verify it appears in the list."""
+    def test_create_and_list_chats(self, client, orch):
+        """Create a chat, land its first message, verify it appears in the list.
+
+        Feature 030: zero-message chats are excluded from the listing, so
+        the chat needs a message before it shows up.
+        """
         # Create
         resp = client.post("/api/chats", headers=AUTH_HEADER)
         assert resp.status_code == 201
         data = resp.json()
         assert "chat_id" in data
         chat_id = data["chat_id"]
+
+        # First message lands (mock JWT sub is dev-user-id)
+        orch.history.add_message(chat_id, "user", "hello", user_id="dev-user-id")
 
         # List
         resp = client.get("/api/chats", headers=AUTH_HEADER)

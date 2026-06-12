@@ -39,7 +39,7 @@ _TABLE_SEP_CELL = re.compile(r"^:?-+:?$")
 _LIST_START = re.compile(r"^(?:[-*]|\d+\.)\s+")
 # A table body ends where any other block construct begins (GFM: tables break
 # at the start of another block-level structure).
-_TABLE_BODY_BREAK = re.compile(r"^(?:#{1,3}\s|>|```|(?:[-*]|\d+\.)\s)")
+_TABLE_BODY_BREAK = re.compile(r"^(?:#{1,6}\s|>|```|(?:[-*]|\d+\.)\s)")
 # GFM's only mechanism for a literal "|" inside a cell is "\|".
 _UNESCAPED_PIPE = re.compile(r"(?<!\\)\|")
 
@@ -164,14 +164,17 @@ def block_md(text: Any) -> str:
                        f'<pre class="p-4 text-sm overflow-x-auto"><code class="text-green-400">{code}</code></pre></div>')
             continue
 
-        # headings
-        m = re.match(r"^(#{1,3})\s+(.*)$", stripped)
+        # headings (ATX, all six levels)
+        m = re.match(r"^(#{1,6})\s+(.*)$", stripped)
         if m:
             flush_para(para)
             level = len(m.group(1))
             cls = {1: "text-2xl font-bold text-astral-text",
                    2: "text-xl font-semibold text-astral-text",
-                   3: "text-lg font-medium text-astral-text"}[level]
+                   3: "text-lg font-medium text-astral-text",
+                   4: "text-base font-semibold text-astral-text",
+                   5: "text-sm font-semibold text-astral-text",
+                   6: "text-sm font-medium text-astral-muted"}[level]
             out.append(f'<h{level} class="{cls} mb-2">{inline_md(m.group(2))}</h{level}>')
             i += 1
             continue

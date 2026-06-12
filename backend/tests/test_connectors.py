@@ -1,6 +1,8 @@
 """US-22: Claude Connectors agent tests."""
 
 import json
+import os
+import shutil
 from unittest.mock import patch
 
 import pytest
@@ -46,7 +48,9 @@ def session_args(monkeypatch):
 
     def _fake_write(args, filename, contents):
         sid = args.get("session_id", "default")
-        return f"http://localhost:8001/api/download/{sid}/{filename}"
+        # Mirrors the real writer: ROOT-RELATIVE so the browser resolves it
+        # against the serving origin (no hard-coded localhost — Constitution X).
+        return f"/api/download/{sid}/{filename}"
 
     monkeypatch.setattr(
         "agents.connectors.mcp_tools_office._write_download_file",
@@ -74,7 +78,7 @@ class TestExcel:
         # Filename is path-safe (spaces -> underscores).
         assert downloads[0]["filename"] == "Test_Data.csv"
 
-    def test_download_url_is_populated(self, session_args):
+    def test_download_url_is_relative(self, session_args):
         result = handle_excel_generate({
             **session_args,
             "title": "X",
@@ -82,8 +86,30 @@ class TestExcel:
             "rows": [["1"]],
         })
         download = _by_type(_comps(result), "file_download")[0]
-        assert download["url"].startswith("http://")
-        assert "/api/download/s1/X.csv" in download["url"]
+        # Root-relative: the browser resolves it against the serving origin.
+        # A hard-coded http://localhost origin breaks non-localhost deploys.
+        assert download["url"] == "/api/download/s1/X.csv"
+
+    def test_real_writer_returns_relative_url(self):
+        """Pin the REAL _write_download_file (not the fixture stub): it must
+        persist the file and return an origin-less /api/download/... URL."""
+        import agents.connectors.mcp_tools_office as office
+
+        url = office._write_download_file(
+            {"user_id": "dl-test-user", "session_id": "dl-test-sess"},
+            "f.txt",
+            b"hello",
+        )
+        assert url == "/api/download/dl-test-sess/f.txt"
+        backend_dir = os.path.abspath(
+            os.path.join(os.path.dirname(office.__file__), "..", "..")
+        )
+        written = os.path.join(backend_dir, "tmp", "dl-test-user", "dl-test-sess", "f.txt")
+        assert os.path.exists(written)
+        with open(written, "rb") as f:
+            assert f.read() == b"hello"
+        shutil.rmtree(os.path.join(backend_dir, "tmp", "dl-test-user", "dl-test-sess"),
+                      ignore_errors=True)
 
     def test_description_or_title_in_header(self, session_args):
         result = handle_excel_generate({
@@ -139,7 +165,7 @@ class TestWord:
         })
         downloads = _by_type(_comps(result), "file_download")
         assert len(downloads) == 1
-        assert downloads[0]["url"].endswith("/api/download/s1/Doc.md")
+        assert downloads[0]["url"] == "/api/download/s1/Doc.md"
 
     def test_download_can_be_disabled(self, session_args):
         result = handle_word_document({

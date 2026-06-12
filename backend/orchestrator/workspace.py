@@ -35,11 +35,15 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("orchestrator.workspace")
+
+# Ordinal family suffix produced by ordinal_identity() — ``~<N>`` at the end.
+_ORDINAL_SUFFIX_RE = re.compile(r"~\d+$")
 
 # Private/system keys excluded from identity fingerprints.
 _PRIVATE_PARAM_PREFIX = "_"
@@ -81,6 +85,15 @@ def ordinal_identity(base_cid: str, ordinal: int) -> str:
     if ordinal <= 0:
         return base_cid
     return f"{base_cid}~{ordinal}"
+
+
+def family_base_identity(component_id: str) -> str:
+    """Base identity of an ordinal family member (``wc_abc~3`` → ``wc_abc``).
+
+    An identity without an ``~N`` suffix is its own base. Inverse of
+    :func:`ordinal_identity` for the suffixed members.
+    """
+    return _ORDINAL_SUFFIX_RE.sub("", component_id or "")
 
 
 def layout_key_for(chat_id: str, turn_marker: str) -> str:
@@ -235,8 +248,14 @@ class WorkspaceManager:
 
         Returns the ordered op list for a ``ui_upsert`` message:
         ``[{op:'upsert', component_id, component}]``. ``force_component_id``
-        (deterministic component actions) pins the FIRST component of the
-        batch onto an existing identity regardless of its own fingerprint.
+        (deterministic component actions) pins the result onto an existing
+        identity regardless of its own fingerprint: a single-component result
+        pins the FIRST component of the batch onto that exact identity; a
+        MULTI-component result re-assigns the whole batch slot-for-slot onto
+        the ordinal-identity family of the pinned id's base (``wc_<fp>``,
+        ``wc_<fp>~1``, …), so refreshing ANY member of a multi-component
+        family morphs every member in place instead of shifting the family
+        one slot and colliding on the clicked id.
         """
         if not chat_id or not components:
             return []
@@ -261,10 +280,27 @@ class WorkspaceManager:
         ops: List[Dict[str, Any]] = []
         next_pos = 1 + max([r.get("position") or 0 for r in live], default=0)
         batch_fp_seen: Dict[str, int] = {}
+        # Family-aware pinning: when a component action's re-executed tool
+        # returns MULTIPLE components, pinning only batch index 0 while the
+        # siblings run through the zero-based ordinal enumeration below would
+        # shift every output one identity slot AND collide on the clicked id
+        # whenever the clicked member was not the family base (data
+        # corruption). Instead, re-assign the whole batch slot-for-slot onto
+        # the ordinal identities of the clicked member's family base.
+        # Single-component results keep the exact-id pin (FR-037 contract).
+        force_family_base: Optional[str] = None
+        if force_component_id and sum(1 for c in components if isinstance(c, dict)) > 1:
+            force_family_base = family_base_identity(force_component_id)
+        batch_targets: set = set()
+        slot = -1
         for i, comp in enumerate(components):
             if not isinstance(comp, dict):
                 continue
-            if force_component_id and i == 0:
+            slot += 1
+            if force_family_base is not None:
+                cid = ordinal_identity(force_family_base, slot)
+                comp["component_id"] = cid
+            elif force_component_id and i == 0:
                 cid = force_component_id
                 comp["component_id"] = cid
             else:
@@ -290,6 +326,27 @@ class WorkspaceManager:
                             and batch_source_counts.get(key, 0) == 1):
                         cid = candidates[0]["component_id"] or cid
                         comp["component_id"] = cid
+            # Duplicate-target guard: one batch must never write the same
+            # resolved identity twice — the second write would silently
+            # overwrite the first (the pre-fix corruption signature). Fall
+            # back to APPENDING under the first free ordinal identity of the
+            # colliding id's family and leave a structured trace.
+            if cid in batch_targets:
+                base = family_base_identity(cid)
+                n = 1
+                while True:
+                    candidate = ordinal_identity(base, n)
+                    if candidate not in batch_targets and candidate not in by_cid:
+                        break
+                    n += 1
+                logger.warning(
+                    "workspace.upsert duplicate target: chat_id=%s component_id=%s "
+                    "already written in this batch; appending as %s instead of overwriting",
+                    chat_id, cid, candidate,
+                )
+                cid = candidate
+                comp["component_id"] = cid
+            batch_targets.add(cid)
             existing = by_cid.get(cid)
             created = existing is None
             if existing:

@@ -579,7 +579,9 @@ def render_file_download(c):
     label = c.get("label", "Download File")
     url = c.get("url")
     filename = c.get("filename")
-    valid = bool(url) and url != "#" and str(url).startswith("http")
+    # Root-relative URLs (/api/download/...) are valid: the browser resolves
+    # them against the serving origin (no hard-coded host — Constitution X).
+    valid = bool(url) and url != "#" and str(url).startswith(("http", "/"))
     # Built outside the f-string: escaped quotes inside an f-string expression
     # are a SyntaxError on Python <=3.11 (the container runtime).
     download_attr = f' download="{_attr(filename)}"' if filename else ""

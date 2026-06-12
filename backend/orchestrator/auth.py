@@ -234,6 +234,53 @@ async def require_user_id(
     return user_id
 
 
+async def get_download_user_payload(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+):
+    """Auth for the download route ONLY: Bearer/``?token=`` first (unchanged
+    contract), then a GET-only fallback to the ``astral_session`` cookie so
+    plain browser anchor clicks — which send cookies but cannot attach an
+    Authorization header — can download files.
+
+    The cookie session's access token is validated through the exact same
+    JWT path as a Bearer token (:func:`get_current_user_payload`, mock/JWKS),
+    which also sets ``request.state.audit_claims`` for audit attribution.
+    """
+    has_token = bool(credentials) or bool(request.query_params.get("token"))
+    if has_token or request.method != "GET":
+        # Existing behavior (including the OPTIONS short-circuit and the
+        # 401 raised when no token is present on non-GET methods).
+        return await get_current_user_payload(request, credentials)
+
+    # Lazy import to avoid an import cycle at module load.
+    from orchestrator.web_auth import ensure_session
+    try:
+        session = await ensure_session(request)
+    except Exception as e:
+        logger.warning(f"Download cookie-session resolution failed: {e}")
+        session = None
+    access_token = (session or {}).get("access_token", "")
+    if not access_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    cookie_credentials = HTTPAuthorizationCredentials(
+        scheme="Bearer", credentials=access_token
+    )
+    return await get_current_user_payload(request, cookie_credentials)
+
+
+async def require_download_user_id(
+    request: Request,
+    payload: dict = Depends(get_download_user_payload),
+) -> str:
+    """:func:`require_user_id` with the download route's GET-only cookie fallback."""
+    return await require_user_id(request, payload)
+
+
 def _extract_roles(user_data: dict) -> list:
     logger.debug(f"Extracting roles from user_data: {json.dumps(user_data, indent=2)}")
     roles = user_data.get("realm_access", {}).get("roles", [])
@@ -287,9 +334,13 @@ async def verify_admin(user_data: dict = Depends(get_current_user_payload)):
     "/api/download/{session_id}/{filename}",
     tags=["Files"],
     summary="Download a file",
-    description="Download a previously uploaded or generated file by session ID and filename.",
+    description=(
+        "Download a previously uploaded or generated file by session ID and filename. "
+        "Auth: Bearer token, ?token= query param, or the astral_session cookie "
+        "(browser anchor clicks)."
+    ),
 )
-async def download_file(session_id: str, filename: str, user_id: str = Depends(require_user_id)):
+async def download_file(session_id: str, filename: str, user_id: str = Depends(require_download_user_id)):
     """
     Serve files from the downloads directory for a specific session.
     """

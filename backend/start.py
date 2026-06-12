@@ -65,7 +65,11 @@ def main():
                 for agent_name in all_agents:
                     ownership = db.get_agent_ownership(agent_name)
                     if not ownership:
-                        db.set_agent_ownership(agent_name, default_owner, is_public=False)
+                        # Feature 030: bundled (non-draft) agents default to
+                        # public so they are discoverable in the Agents
+                        # surface; drafts stay private until approved.
+                        is_draft = os.path.exists(os.path.join(agents_dir, agent_name, ".draft"))
+                        db.set_agent_ownership(agent_name, default_owner, is_public=not is_draft)
                         print(f"  Assigned owner '{default_owner}' to agent: {agent_name}")
                 db.close()
 
