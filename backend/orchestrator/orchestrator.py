@@ -1804,7 +1804,7 @@ class Orchestrator:
                         await self.send_ui_render(websocket, [Alert(
                             message=(
                                 f"Enabled {len(enabled_now)} agents for this account "
-                                "(read/search only) — ask your question again to use them."
+                                "(read-only — never write) — ask your question again to use them."
                                 if enabled_now else
                                 "No public agents were available to enable."
                             ),
