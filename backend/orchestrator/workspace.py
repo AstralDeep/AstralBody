@@ -26,6 +26,18 @@ Resolution order for a top-level component entering the workspace:
    Applies ONLY to fingerprint-derived identities: a component carrying an
    explicit author/echoed id never supersedes a different identity — a new
    explicit id appends (FR-019 "a new identity MUST append").
+4. **Slot-matched family supersede** (030, S7 regression) — rule 3 scaled to
+   multi-component results. A re-invocation with corrected parameters mints
+   a brand-new fingerprint family, which used to stack a duplicate dashboard
+   above the stale one. When an id-less batch of ≥2 components from one
+   (agent, tool) dispatch is fingerprint-new and the live workspace holds
+   exactly ONE fingerprint family from that same (agent, tool) with an
+   identical component count and identical ordered component types, the
+   batch re-assigns that family's identities slot-for-slot — the re-run
+   updates in place. Reused ids mean any ``workspace_layout`` arrangement
+   referencing the family keeps resolving (now to fresh data). Zero or
+   multiple prior families, count/type divergence, or ANY explicit id (in
+   the batch or the live family) ⇒ append exactly as before (no guessing).
 
 Deterministic component actions bypass all of this: they target an explicit
 ``component_id`` and the result inherits it (contracts/component-action.md).
@@ -35,11 +47,15 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("orchestrator.workspace")
+
+# Ordinal family suffix produced by ordinal_identity() — ``~<N>`` at the end.
+_ORDINAL_SUFFIX_RE = re.compile(r"~\d+$")
 
 # Private/system keys excluded from identity fingerprints.
 _PRIVATE_PARAM_PREFIX = "_"
@@ -81,6 +97,21 @@ def ordinal_identity(base_cid: str, ordinal: int) -> str:
     if ordinal <= 0:
         return base_cid
     return f"{base_cid}~{ordinal}"
+
+
+def family_base_identity(component_id: str) -> str:
+    """Base identity of an ordinal family member (``wc_abc~3`` → ``wc_abc``).
+
+    An identity without an ``~N`` suffix is its own base. Inverse of
+    :func:`ordinal_identity` for the suffixed members.
+    """
+    return _ORDINAL_SUFFIX_RE.sub("", component_id or "")
+
+
+def _ordinal_of(component_id: str) -> int:
+    """Slot ordinal of a family member (``wc_abc~3`` → 3; the base → 0)."""
+    m = _ORDINAL_SUFFIX_RE.search(component_id or "")
+    return int(m.group(0)[1:]) if m else 0
 
 
 def layout_key_for(chat_id: str, turn_marker: str) -> str:
@@ -235,8 +266,14 @@ class WorkspaceManager:
 
         Returns the ordered op list for a ``ui_upsert`` message:
         ``[{op:'upsert', component_id, component}]``. ``force_component_id``
-        (deterministic component actions) pins the FIRST component of the
-        batch onto an existing identity regardless of its own fingerprint.
+        (deterministic component actions) pins the result onto an existing
+        identity regardless of its own fingerprint: a single-component result
+        pins the FIRST component of the batch onto that exact identity; a
+        MULTI-component result re-assigns the whole batch slot-for-slot onto
+        the ordinal-identity family of the pinned id's base (``wc_<fp>``,
+        ``wc_<fp>~1``, …), so refreshing ANY member of a multi-component
+        family morphs every member in place instead of shifting the family
+        one slot and colliding on the clicked id.
         """
         if not chat_id or not components:
             return []
@@ -250,46 +287,138 @@ class WorkspaceManager:
                 if key != ("", ""):
                     by_source.setdefault(key, []).append(r)
 
-        # Count same-(agent,tool) components within THIS batch — parallel
-        # same-tool calls in one turn must coexist, never supersede.
-        batch_source_counts: Dict[Tuple[str, str], int] = {}
+        # Group same-(agent,tool) components within THIS batch (in batch
+        # order) — parallel same-tool calls in one turn must coexist, never
+        # supersede, and the family-supersede plan below needs slot order.
+        batch_by_source: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
         for comp in components:
             if isinstance(comp, dict):
                 key = (comp.get("_source_agent", ""), comp.get("_source_tool", ""))
-                batch_source_counts[key] = batch_source_counts.get(key, 0) + 1
+                batch_by_source.setdefault(key, []).append(comp)
+
+        # Slot-matched family supersede (docstring rule 4, 030/S7): a multi-
+        # component re-run with CHANGED params mints a brand-new fingerprint
+        # family, which would append a duplicate dashboard above the stale
+        # one. When the live workspace holds exactly ONE fingerprint family
+        # from that (agent, tool) and the id-less batch matches it
+        # slot-for-slot (same count, same ordered types), reuse the existing
+        # identities so the re-run updates in place. Anything ambiguous —
+        # zero/many live families, count or type divergence, any explicit
+        # id on either side — appends exactly as before.
+        family_remap: Dict[Tuple[str, str], List[str]] = {}
+        family_slot: Dict[Tuple[str, str], int] = {}
+        if force_component_id is None:
+            for key, batch_comps in batch_by_source.items():
+                if key == ("", "") or len(batch_comps) < 2:
+                    continue  # single-component case stays with rule 3
+                if any(c.get("component_id") or c.get("id") for c in batch_comps):
+                    continue  # explicit/echoed ids are authoritative (FR-019)
+                live_family = by_source.get(key, [])
+                if len(live_family) != len(batch_comps):
+                    continue  # divergent shape — no guessing, append
+                live_ids = [r.get("component_id") or "" for r in live_family]
+                if not all(i.startswith("wc_") for i in live_ids):
+                    continue  # explicit-id rows are never superseded
+                live_bases = {family_base_identity(i) for i in live_ids}
+                if len(live_bases) != 1:
+                    continue  # more than one prior family ⇒ ambiguous
+                new_bases = {fingerprint(key[0], key[1], c.get("_source_params"))
+                             for c in batch_comps}
+                if len(new_bases) != 1 or live_bases & new_bases:
+                    # Parallel distinct calls aren't one re-run; an identical
+                    # fingerprint already supersedes via the ordinal path.
+                    continue
+                ordered_rows = sorted(
+                    live_family, key=lambda r: _ordinal_of(r.get("component_id") or ""))
+                if ([str(r.get("component_type")) for r in ordered_rows]
+                        != [str(c.get("type", "unknown")) for c in batch_comps]):
+                    continue  # divergent ordered types — append
+                family_remap[key] = [r["component_id"] for r in ordered_rows]
+                family_slot[key] = 0
+                logger.info(
+                    "workspace.family_supersede: chat_id=%s family=%s agent=%s "
+                    "tool=%s size=%d — fingerprint-new re-run updates in place",
+                    chat_id, next(iter(live_bases)), key[0], key[1], len(batch_comps),
+                )
 
         ops: List[Dict[str, Any]] = []
         next_pos = 1 + max([r.get("position") or 0 for r in live], default=0)
         batch_fp_seen: Dict[str, int] = {}
+        # Family-aware pinning: when a component action's re-executed tool
+        # returns MULTIPLE components, pinning only batch index 0 while the
+        # siblings run through the zero-based ordinal enumeration below would
+        # shift every output one identity slot AND collide on the clicked id
+        # whenever the clicked member was not the family base (data
+        # corruption). Instead, re-assign the whole batch slot-for-slot onto
+        # the ordinal identities of the clicked member's family base.
+        # Single-component results keep the exact-id pin (FR-037 contract).
+        force_family_base: Optional[str] = None
+        if force_component_id and sum(1 for c in components if isinstance(c, dict)) > 1:
+            force_family_base = family_base_identity(force_component_id)
+        batch_targets: set = set()
+        slot = -1
         for i, comp in enumerate(components):
             if not isinstance(comp, dict):
                 continue
-            if force_component_id and i == 0:
+            slot += 1
+            if force_family_base is not None:
+                cid = ordinal_identity(force_family_base, slot)
+                comp["component_id"] = cid
+            elif force_component_id and i == 0:
                 cid = force_component_id
                 comp["component_id"] = cid
             else:
-                explicit_identity = bool(comp.get("component_id") or comp.get("id"))
-                cid = self.resolve_identity(comp)
-                # Same resolved identity twice in ONE batch (multi-component
-                # tool result, or parallel calls of a tool with a hardcoded
-                # author id): the 2nd+ occurrence gets a deterministic ordinal
-                # identity instead of superseding its batch siblings.
-                seen = batch_fp_seen.get(cid, 0)
-                batch_fp_seen[cid] = seen + 1
-                if seen:
-                    cid = ordinal_identity(cid, seen)
+                src_key = (comp.get("_source_agent", ""), comp.get("_source_tool", ""))
+                if src_key in family_remap:
+                    # Slot-matched family supersede (docstring rule 4): take
+                    # the prior family's identity for this slot so the re-run
+                    # morphs the existing components instead of appending.
+                    cid = family_remap[src_key][family_slot[src_key]]
+                    family_slot[src_key] += 1
                     comp["component_id"] = cid
-                if cid not in by_cid and not explicit_identity:
-                    # Single-source supersede (docstring rule 3) — only for
-                    # fingerprint-derived identities. An author-declared id is
-                    # authoritative (FR-019): a NEW explicit identity appends,
-                    # never steals an existing component's place.
-                    key = (comp.get("_source_agent", ""), comp.get("_source_tool", ""))
-                    candidates = by_source.get(key, [])
-                    if (key != ("", "") and len(candidates) == 1
-                            and batch_source_counts.get(key, 0) == 1):
-                        cid = candidates[0]["component_id"] or cid
+                else:
+                    explicit_identity = bool(comp.get("component_id") or comp.get("id"))
+                    cid = self.resolve_identity(comp)
+                    # Same resolved identity twice in ONE batch (multi-component
+                    # tool result, or parallel calls of a tool with a hardcoded
+                    # author id): the 2nd+ occurrence gets a deterministic ordinal
+                    # identity instead of superseding its batch siblings.
+                    seen = batch_fp_seen.get(cid, 0)
+                    batch_fp_seen[cid] = seen + 1
+                    if seen:
+                        cid = ordinal_identity(cid, seen)
                         comp["component_id"] = cid
+                    if cid not in by_cid and not explicit_identity:
+                        # Single-source supersede (docstring rule 3) — only for
+                        # fingerprint-derived identities. An author-declared id is
+                        # authoritative (FR-019): a NEW explicit identity appends,
+                        # never steals an existing component's place.
+                        candidates = by_source.get(src_key, [])
+                        if (src_key != ("", "") and len(candidates) == 1
+                                and len(batch_by_source.get(src_key, ())) == 1):
+                            cid = candidates[0]["component_id"] or cid
+                            comp["component_id"] = cid
+            # Duplicate-target guard: one batch must never write the same
+            # resolved identity twice — the second write would silently
+            # overwrite the first (the pre-fix corruption signature). Fall
+            # back to APPENDING under the first free ordinal identity of the
+            # colliding id's family and leave a structured trace.
+            if cid in batch_targets:
+                base = family_base_identity(cid)
+                n = 1
+                while True:
+                    candidate = ordinal_identity(base, n)
+                    if candidate not in batch_targets and candidate not in by_cid:
+                        break
+                    n += 1
+                logger.warning(
+                    "workspace.upsert duplicate target: chat_id=%s component_id=%s "
+                    "already written in this batch; appending as %s instead of overwriting",
+                    chat_id, cid, candidate,
+                )
+                cid = candidate
+                comp["component_id"] = cid
+            batch_targets.add(cid)
             existing = by_cid.get(cid)
             created = existing is None
             if existing:

@@ -1,82 +1,88 @@
--- Seed canonical tutorial steps for feature 005-tooltips-tutorial.
--- Idempotent: re-running this file does not duplicate or overwrite admin edits.
--- Steps are owned by an internal "system" identifier; admin edits will rewrite
--- title/body but preserve slug.
+-- Canonical tutorial steps — rewritten by feature 030-wiring-onboarding.
+--
+-- Idempotent: every INSERT is ON CONFLICT (slug) DO NOTHING, so re-running
+-- never duplicates rows or overwrites admin edits (admins rewrite copy in
+-- Tutorial admin; slug is the stable identity and is create-only).
+--
+-- Because DO NOTHING means edited copy under an EXISTING slug never reaches
+-- an already-seeded database, this rewrite uses all-new slugs. The pre-030
+-- steps (welcome, chat-with-agent, personalize-*, open-agents-panel,
+-- enable-agents, open-audit-log, give-feedback, finish, admin-feedback-*,
+-- admin-tutorial-editor) are archived once by
+-- Database._migrate_tutorial_steps_030: four of them targeted UI removed by
+-- feature 026 (the React feedback control and the sdui ParamPicker panels)
+-- and the rest described the pre-030 enablement flow and a Quarantine admin
+-- tab that no longer exists. Archived rows stay restorable from Tutorial
+-- admin.
+--
+-- Copy rules: plain text only (the tour card renders via textContent),
+-- title <= 120 chars, body <= 1000 chars. target_key must match a real
+-- [data-tour-target] anchor: chat.input + canvas.workspace (shell.html),
+-- topbar.settings / topbar.brand (chrome/topbar.py), or sidebar.<menu-key>
+-- for settings-menu entries (auto-opens the menu while highlighted).
 
--- User-flow steps (audience='user') ----------------------------------------
+-- User flow (audience='user') -----------------------------------------------
 INSERT INTO tutorial_step (slug, audience, display_order, target_kind, target_key, title, body)
 VALUES
-    ('welcome', 'user', 10, 'none', NULL,
+    ('welcome-tour', 'user', 10, 'none', NULL,
      'Welcome to AstralDeep',
-     'A quick tour of how intelligent agents help you work. Take a minute now or come back later — your call.'),
+     'AstralDeep is a chat-first workspace: ask in plain language and agents answer with live, interactive results. This one-minute tour points out the main controls. Use Next and Back to move through it, or Skip tour at any time — you can replay it later from Settings, under Take the tour.'),
 
-    ('chat-with-agent', 'user', 20, 'static', 'chat.input',
-     'Chat with an agent',
-     'Type a message here to start a conversation. Your agent can search, analyze, and render rich results back to you.'),
+    ('meet-the-canvas', 'user', 20, 'static', 'canvas.workspace',
+     'The canvas — where results appear',
+     'The highlighted area is your canvas. When agents respond with rich components — dashboards, charts, tables, timelines, cited briefs — they land here and stay with the chat, so later answers can build on earlier ones. On a fresh account it starts with example requests you can run with one click.'),
 
-    ('open-agents-panel', 'user', 30, 'static', 'sidebar.agents',
-     'Browse available agents',
-     'Open the Agents panel to see who you can talk to, what tools they have, and how to manage their access.'),
+    ('turn-on-agents', 'user', 30, 'static', 'canvas.workspace',
+     'Turn your agents on',
+     'New accounts start with every agent switched off, so replies are plain text until you say otherwise. The fastest fix is the welcome card on the canvas: Enable recommended agents switches on read-only access for the built-in agents in one click — search, data, file and system reads, never write. While your agents are all off, the same buttons appear under replies answered without them — and you can enable or fine-tune agents any time from Agents & permissions in Settings.'),
 
-    -- Feature 008-llm-text-only-chat: explicit step nudging users to
-    -- turn on at least one agent so they unlock tool-augmented chat.
-    -- Until they do, AstralDeep falls back to text-only chat and
-    -- shows the persistent banner over the chat surface.
-    ('enable-agents', 'user', 35, 'static', 'sidebar.agents',
-     'Turn an agent on',
-     'Switch on at least one agent to unlock tool-augmented chat. Without it, your agent can talk but can''t act.'),
+    ('ask-in-plain-language', 'user', 40, 'static', 'chat.input',
+     'Ask in plain language',
+     'This is the chat panel — type what you need and press Send. Try a live weather dashboard, a cited research brief on a topic you care about, or a summary of a web page. Agents pick the right tools, stream their progress, and render results to the canvas. Follow-up messages refine what''s already there, and every chat keeps its own canvas and history.'),
 
-    ('open-audit-log', 'user', 40, 'static', 'sidebar.audit',
-     'Review the audit log',
-     'Every agent action is recorded in your private audit log. Check it anytime to verify what happened.'),
+    ('open-settings-menu', 'user', 50, 'static', 'topbar.settings',
+     'Settings — everything else lives here',
+     'The Settings button in the top bar opens the menu for your account: Agents & permissions, LLM settings, Personalization, Audit log, Theme, and the Workspace timeline — plus the User guide, this tour, and sign out. The next few steps walk through the ones worth knowing on day one.'),
 
-    ('give-feedback', 'user', 50, 'static', 'feedback.control',
-     'Tell us what worked',
-     'Use the feedback control to flag useful or broken results. Your input shapes how the system improves.'),
+    ('agents-and-permissions', 'user', 60, 'static', 'sidebar.agents',
+     'Agents & permissions',
+     'This is the fine-grained companion to the one-click enable: browse every agent available to you (the built-ins live under the Public tab), open one to see its tools, then switch whole permission sections on or off — or override a single tool — and press Save permissions. Nothing an agent does ever exceeds what you''ve granted here, and you can change your mind at any time.'),
 
-    ('finish', 'user', 60, 'none', NULL,
-     'You''re all set',
-     'That''s the tour! Replay it anytime from the sidebar. Happy chatting.')
-
-ON CONFLICT (slug) DO NOTHING;
-
--- Feature 025-agentic-soul-integration: personalization steps. These are
--- server-generated (sdui) ParamPicker panels — profession/goals capture,
--- skill enablement, and personality. target_key routes the frontend to the
--- GET /api/onboarding/personalize/{step} panel for that step.
-INSERT INTO tutorial_step (slug, audience, display_order, target_kind, target_key, title, body)
-VALUES
-    ('personalize-profession', 'user', 22, 'sdui', 'personalize.profession',
+    ('personalize-your-assistant', 'user', 70, 'static', 'sidebar.personalization',
      'Make it yours',
-     'Tell your assistant what you do and what you''re working on. It''s personalization, not medical data, and you can change it anytime.'),
+     'Personalization is where the assistant learns to work your way: set your profession and goals, review the durable memory it keeps across sessions, enable skills, and manage scheduled jobs and dreaming — the background pass that promotes recurring signals into long-term memory. Personality shapes tone only; it never weakens privacy or safety rules.'),
 
-    ('personalize-skills', 'user', 24, 'sdui', 'personalize.skills',
-     'Turn on the right skills',
-     'Based on your work, switch on the capabilities you want. You only ever get access you''re authorized for.'),
+    ('review-your-audit-log', 'user', 80, 'static', 'sidebar.audit',
+     'Your private audit log',
+     'Every sign-in, agent action, and tool call on your account is recorded in an append-only, signed log that only you can see. Open it any time to verify exactly what happened — filter by event class or outcome, and drill into any entry for the full details.'),
 
-    ('personalize-personality', 'user', 26, 'sdui', 'personalize.personality',
-     'Give it a personality',
-     'Choose how your assistant sounds. This shapes tone only — it never changes how your data is protected.')
+    ('workspace-timeline', 'user', 90, 'static', 'sidebar.timeline',
+     'Step back through your workspace',
+     'The Workspace timeline shows a read-only snapshot of your canvas after each turn of the conversation, so you can see how a result took shape. Browsing the past never changes the present — your live workspace stays exactly as you left it.'),
+
+    ('help-anytime', 'user', 100, 'static', 'sidebar.guide',
+     'Help, whenever you need it',
+     'The User guide covers every surface in more depth — attachments, voice, themes, privacy, and what data stays yours. And if you ever want this walkthrough again, Take the tour sits right above it in this menu.'),
+
+    ('tour-complete', 'user', 110, 'none', NULL,
+     'You''re all set',
+     'That''s the tour. Enable your agents if you haven''t yet, then ask your first question — or run one of the examples waiting on the canvas. Happy building.')
 
 ON CONFLICT (slug) DO NOTHING;
 
--- Admin-flow steps (audience='admin', appended after user-flow) ------------
+-- Admin flow (audience='admin', appended after the user flow) ----------------
 INSERT INTO tutorial_step (slug, audience, display_order, target_kind, target_key, title, body)
 VALUES
-    ('admin-feedback-flagged', 'admin', 100, 'static', 'sidebar.tool-quality',
-     'Admin: Flagged tools',
-     'As an admin, you can see which tools have flagged quality issues. Open Feedback admin to review the data behind a flag.'),
+    ('admin-tool-quality', 'admin', 200, 'static', 'sidebar.tool-quality',
+     'Admin: Tool quality',
+     'Tool quality lists underperforming tools across all agents, flagged by failure rate and negative feedback over a rolling window — so you can spot trouble before users report it. Each entry shows the dispatch counts and categories behind the flag.'),
 
-    ('admin-feedback-proposals', 'admin', 110, 'static', 'sidebar.tool-quality',
-     'Admin: Knowledge update proposals',
-     'When the system identifies a likely fix for an underperforming tool, it surfaces a proposal here. You decide whether to apply it.'),
+    ('admin-knowledge-proposals', 'admin', 210, 'static', 'sidebar.tool-quality',
+     'Admin: Knowledge proposals',
+     'When the system finds a likely fix for a flagged tool, it drafts a knowledge-update proposal with the evidence and the exact diff. Review it on the same Tool quality surface and Approve & apply or Reject — nothing changes without an admin decision.'),
 
-    ('admin-feedback-quarantine', 'admin', 120, 'static', 'sidebar.tool-quality',
-     'Admin: Quarantined feedback',
-     'Feedback flagged for unsafe content lands in quarantine. Release or dismiss items here to keep the synthesizer pool clean.'),
-
-    ('admin-tutorial-editor', 'admin', 130, 'static', 'sidebar.tutorial-admin',
+    ('admin-edit-this-tour', 'admin', 220, 'static', 'sidebar.tutorial-admin',
      'Admin: Edit this tour',
-     'You can edit the copy of every step in this tour from the Tutorial admin panel. Changes go live the next time anyone replays.')
+     'Tutorial admin lets you reshape this tour: edit any step''s title, copy, audience, order, or highlight target; add new steps; or archive ones you no longer want (and restore them later). Changes go live the next time anyone starts the tour, and every edit is kept in the step''s revision history.')
 
 ON CONFLICT (slug) DO NOTHING;
