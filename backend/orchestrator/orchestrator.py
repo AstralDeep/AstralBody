@@ -50,7 +50,7 @@ from shared.protocol import (
     validate_streaming_metadata,
 )
 from astralprims import (
-    Text, Card, Alert, Collapsible
+    Text, Card, Alert, Button, Collapsible
 )
 from rote.rote import ROTE
 from shared.feature_flags import flags
@@ -107,6 +107,11 @@ TEXT-ONLY MODE (no agents currently available):
   agents are enabled — never the raw token form.
 - Do NOT fabricate tool output, pretend to have searched/fetched/created anything,
   or invent file/database/API results. If you don't actually know it, say so.
+- When the user asks about recent literature, current events, news, prices, or
+  anything time-sensitive: state clearly that NO live sources were retrieved and
+  that your answer is general background from training data. Do NOT present
+  specific dated findings, statistics, or "last N years" claims as if they were
+  retrieved results, and do NOT enumerate citations you cannot source.
 - If the user asks for an action that would normally require an agent (reading
   a file, searching a system, creating/modifying anything outside this chat),
   briefly note that no agents are currently enabled and suggest the user enable
@@ -649,7 +654,15 @@ class Orchestrator:
         if not ownership:
             default_owner = os.environ.get("DEFAULT_AGENT_OWNER", "")
             if default_owner:
-                self.history.db.set_agent_ownership(card.agent_id, default_owner, is_public=False)
+                # Feature 030: ownerless registrations are operator-bundled
+                # agents (user-created agents get explicit creator ownership
+                # from agent_lifecycle before they register), so default them
+                # PUBLIC — otherwise they are invisible in every Agents tab
+                # and users cannot discover or enable them. Drafts stay
+                # private.
+                self.history.db.set_agent_ownership(
+                    card.agent_id, default_owner,
+                    is_public=not self._is_draft_agent(card.agent_id))
                 ownership = self.history.db.get_agent_ownership(card.agent_id) or {}
                 logger.info(f"Auto-assigned agent '{card.agent_id}' to {default_owner}")
             else:
@@ -1034,7 +1047,17 @@ class Orchestrator:
                     try:
                         if not self._ws_active_chat.get(id(websocket)):
                             from orchestrator.welcome import welcome_components
-                            await self.send_ui_render(websocket, welcome_components())
+                            # Feature 030: tell the welcome canvas whether any
+                            # tools are dispatchable so it can lead with the
+                            # enable-agents consent card instead of promising
+                            # examples that would silently degrade to text.
+                            _welcome_user = self._get_user_id(websocket)
+                            try:
+                                _tools_avail = self.compute_tools_available_for_user(_welcome_user)
+                            except Exception:
+                                _tools_avail = True
+                            await self.send_ui_render(
+                                websocket, welcome_components(tools_available=_tools_avail))
                             self._ws_welcome[id(websocket)] = True
                     except Exception as _e:  # non-fatal — an empty canvas is fine
                         logger.debug(f"welcome canvas render failed (non-fatal): {_e}")
@@ -1745,6 +1768,41 @@ class Orchestrator:
                             asyncio.create_task(self.send_dashboard(client))
                             asyncio.create_task(self.send_agent_list(client))
 
+                elif msg.action == "enable_recommended_agents":
+                    # Feature 030 — one-click consent enable. The click IS the
+                    # explicit user grant (Constitution VII: the system sets
+                    # attenuated scopes automatically; the user may override
+                    # per agent afterwards). Server-side validation: only
+                    # connected, non-draft, PUBLIC agents are eligible and
+                    # ``tools:write`` is never granted. The action is audited
+                    # like every other ui_event (ws.enable_recommended_agents).
+                    requested = msg.payload.get("agent_ids")
+                    if requested is not None and not (
+                        isinstance(requested, list)
+                        and all(isinstance(a, str) for a in requested)
+                    ):
+                        return
+                    enabled_now = self._enable_recommended_agent_scopes(user_id, requested)
+                    if self._ws_welcome.get(id(websocket)):
+                        # Welcome canvas is showing — re-render it so the
+                        # consent card disappears and the examples are live.
+                        from orchestrator.welcome import welcome_components
+                        await self.send_ui_render(websocket, welcome_components(
+                            tools_available=self.compute_tools_available_for_user(user_id)))
+                    else:
+                        await self.send_ui_render(websocket, [Alert(
+                            message=(
+                                f"Enabled {len(enabled_now)} agents for this account "
+                                "(read/search only) — ask your question again to use them."
+                                if enabled_now else
+                                "No public agents were available to enable."
+                            ),
+                            variant="success" if enabled_now else "warning",
+                        ).to_dict()], target="chat")
+                    for client in self.ui_clients:
+                        if self._get_user_id(client) == user_id:
+                            asyncio.create_task(self.send_dashboard(client))
+                            asyncio.create_task(self.send_agent_list(client))
 
                 elif msg.action == "update_device":
                     # ROTE: viewport / capability change from the frontend
@@ -3076,11 +3134,13 @@ COMPONENT UPDATE RULES:
                             task.tool_calls_made.append(tc.function.name)
                         task.transition(TaskState.RUNNING, current_tool=None)
 
-                    # Loop continues to next turn to let LLM analyze results
+                    # Loop continues to next turn to let LLM analyze results.
+                    # (030: name the writing phase — the walkthrough measured
+                    # up to 124 s behind the old static "Analyzing results...")
                     await self._safe_send(websocket, json.dumps({
                         "type": "chat_status",
                         "status": "thinking",
-                        "message": "Analyzing results..."
+                        "message": "Analyzing results and writing the response..."
                     }))
                 
                 else:
@@ -3222,6 +3282,8 @@ COMPONENT UPDATE RULES:
                             # Persisted history matches what the user sees so a
                             # chat reload re-renders the same alert.
                             response_components = list(leak_alerts) + list(parsed_components)
+                            if is_text_only:
+                                response_components += self._text_only_cta_components(user_id)
                             await self.send_ui_render(websocket, response_components, target="chat")
                         else:
                             # Rich UI components -- canvas gets the parsed components,
@@ -3235,6 +3297,12 @@ COMPONENT UPDATE RULES:
                             response_components = list(leak_alerts) + list(parsed_components)
                     else:
                         response_components = list(leak_alerts) + self._chat_narrative(content)
+                        # Feature 030: text-only turns for a never-configured
+                        # account get a deterministic enable affordance — not
+                        # left to the model's prose (which pointed users at a
+                        # panel where the agents were not even visible).
+                        if is_text_only:
+                            response_components += self._text_only_cta_components(user_id)
                         # Pure text response goes to chat panel
                         await self.send_ui_render(websocket, response_components, target="chat")
 
@@ -4086,6 +4154,31 @@ COMPONENT UPDATE RULES:
             delegation_token = await self._get_delegation_token(websocket, agent_id, user_id)
             if delegation_token:
                 args["_delegation_token"] = delegation_token
+            elif self._delegation_required():
+                # Feature 030 / Constitution VII: agents MUST act under RFC
+                # 8693 delegated tokens. The walkthrough found the deployed
+                # realm missing the tools:* client scopes — every exchange
+                # failed invalid_scope and dispatch silently proceeded
+                # UNSCOPED. Production posture now fails closed with an
+                # actionable operator message; development keeps the
+                # fail-open behavior (warned once per agent) so local stacks
+                # without a fully configured realm still work.
+                err_msg = (
+                    "Tool execution is disabled: delegated authorization "
+                    "(RFC 8693 token exchange) is unavailable for agent "
+                    f"'{agent_id}'. An operator must register the tools:* "
+                    "client scopes on the identity provider (see "
+                    "docs/keycloak-realm-settings.md), or set "
+                    "DELEGATION_REQUIRED=false to accept unscoped dispatch."
+                )
+                logger.error(
+                    "Delegation required but unavailable: agent=%s user=%s — refusing dispatch",
+                    agent_id, user_id,
+                )
+                await self.send_ui_render(websocket, [
+                    Alert(message=err_msg, variant="error").to_dict()
+                ], target="chat")
+                return MCPResponse(error={"message": err_msg, "retryable": False})
 
         # Hook: PRE_TOOL_USE — allows handlers to block or modify tool args
         if flags.is_enabled("hook_system"):
@@ -4694,6 +4787,21 @@ COMPONENT UPDATE RULES:
             return MCPResponse(request_id=request_id,
                                error={"message": str(e), "retryable": True})
 
+    def _delegation_required(self) -> bool:
+        """Whether tool dispatch must refuse to proceed without a delegated token.
+
+        Constitution VII mandates RFC 8693 delegated tokens for agents.
+        Default: required in production posture (``ASTRAL_ENV`` unset or not
+        ``development`` — the project's fail-closed convention), optional in
+        development. ``DELEGATION_REQUIRED`` overrides either way.
+        """
+        override = os.getenv("DELEGATION_REQUIRED", "").strip().lower()
+        if override in ("1", "true", "yes"):
+            return True
+        if override in ("0", "false", "no"):
+            return False
+        return os.getenv("ASTRAL_ENV", "").strip().lower() != "development"
+
     async def _get_delegation_token(self, websocket, agent_id: str, user_id: str) -> Optional[str]:
         """Generate an RFC 8693 delegation token scoped to safe, allowed tools.
 
@@ -4729,7 +4837,19 @@ COMPONENT UPDATE RULES:
                 raw_token, agent_id, allowed_tools, user_id, enabled_scopes
             )
             if "error" in result:
-                logger.warning(f"Delegation token exchange failed for agent={agent_id}: {result}")
+                # Feature 030: log loudly ONCE per agent instead of warning on
+                # every call — a misconfigured realm previously produced an
+                # identical warning per tool dispatch (pure noise) while the
+                # dispatch itself proceeded unscoped.
+                if not hasattr(self, "_delegation_failed_agents"):
+                    self._delegation_failed_agents = set()
+                if agent_id not in self._delegation_failed_agents:
+                    self._delegation_failed_agents.add(agent_id)
+                    logger.error(
+                        "RFC 8693 token exchange failing for agent=%s (logged once; "
+                        "see docs/keycloak-realm-settings.md): %s", agent_id, result)
+                else:
+                    logger.debug(f"Delegation token exchange failed for agent={agent_id}: {result}")
                 return None
             return result.get("access_token")
         except Exception as e:
@@ -5279,9 +5399,23 @@ COMPONENT UPDATE RULES:
             turn_marker = str(self.history.get_latest_message_id(chat_id, user_id=user_id) or "")
             layout_key = layout_key_for(chat_id, turn_marker)
 
+            _designer_pass = {"n": 0}
+
             async def _designer_llm(messages):
                 # Same credential resolution as the round itself (feature 006,
                 # websocket-scoped) and the same llm_call auditing (FR-028).
+                # Feature 030: each pass announces itself — the walkthrough
+                # measured an 83 s frame-silent gap while the designer worked
+                # behind a stale status line.
+                _designer_pass["n"] += 1
+                try:
+                    await self._safe_send(websocket, json.dumps({
+                        "type": "chat_status", "status": "thinking",
+                        "message": f"Designing your layout (pass {_designer_pass['n']} of "
+                                   f"{ui_designer.designer_max_rounds()})...",
+                    }))
+                except Exception:
+                    logger.debug("designer progress status send failed", exc_info=True)
                 msg, _usage = await self._call_llm(
                     websocket, messages, tools_desc=None,
                     temperature=0.2, feature="ui_designer",
@@ -5676,10 +5810,24 @@ COMPONENT UPDATE RULES:
         return schema
 
     def _is_draft_agent(self, agent_id: str) -> bool:
-        """Hide any agent whose agent_id maps to a non-live draft record."""
+        """Hide any agent whose agent_id maps to a non-live draft record.
+
+        Feature 030: an explicitly PUBLIC agent is never treated as a draft.
+        Lifecycle drafts are always private, so a public ownership row means
+        the slug-reverse draft match was a stale-row false positive — e.g.
+        the live bundled ``etf-tracker-1-1`` agent, whose directory name
+        collides with an old draft slug and was silently hidden from the
+        agent list and Public tab (verified walkthrough finding).
+        """
         if hasattr(self, 'lifecycle_manager'):
             draft = self.lifecycle_manager._find_draft_by_agent_id(agent_id)
             if draft and draft["status"] != "live":
+                try:
+                    ownership = self.history.db.get_agent_ownership(agent_id) or {}
+                except Exception:
+                    ownership = {}
+                if bool(ownership.get("is_public", False)):
+                    return False
                 return True
         return False
 
@@ -5795,6 +5943,67 @@ COMPONENT UPDATE RULES:
                     continue
                 return True
         return False
+
+    def _enable_recommended_agent_scopes(self, user_id: str,
+                                         requested_agent_ids=None) -> List[str]:
+        """Consent-based bulk enable for the public catalog (feature 030).
+
+        For every connected, non-draft, PUBLIC agent (optionally narrowed to
+        ``requested_agent_ids``), grants the scopes its registered tools
+        actually use — minus ``tools:write``, which is never granted here
+        (Constitution VII: attenuated, system-computed scopes; explicit user
+        click as the grant). Unknown, private, or draft ids are silently
+        ignored. Returns the agent ids that were enabled.
+        """
+        ownership_map = {o["agent_id"]: o for o in self.history.db.get_all_agent_ownership()}
+        enabled: List[str] = []
+        for agent_id in list(self.agent_cards.keys()):
+            if requested_agent_ids is not None and agent_id not in requested_agent_ids:
+                continue
+            if self._is_draft_agent(agent_id):
+                continue
+            if not bool(ownership_map.get(agent_id, {}).get("is_public", False)):
+                continue
+            scopes = self.tool_permissions.scopes_required_by_tools(agent_id)
+            if not scopes:
+                continue
+            self.tool_permissions.set_agent_scopes(
+                user_id, agent_id, {s: True for s in scopes})
+            enabled.append(agent_id)
+        if enabled:
+            logger.info(
+                f"Consent enable (030): user={user_id} agents={enabled} (write excluded)")
+        return enabled
+
+    def _text_only_cta_components(self, user_id: str) -> List[Dict[str, Any]]:
+        """Deterministic enable affordance for text-only replies (feature 030).
+
+        Appended server-side to the chat reply when a turn dispatched with
+        zero tools AND the user has never enabled any agent scope — the
+        never-configured state the walkthrough showed every fresh account
+        lands in. Users who deliberately disabled their agents (rows exist,
+        some enabled elsewhere) are not nagged. Composed of astralprims
+        primitives per Constitution II/VIII; the buttons route through the
+        audited ``enable_recommended_agents`` / ``chrome_open`` actions.
+        """
+        try:
+            if self.tool_permissions.has_any_enabled_scope(user_id):
+                return []
+        except Exception:
+            return []
+        return [
+            Alert(
+                message=("Answered without agents — live search, data and "
+                         "interactive components are currently off for this "
+                         "account."),
+                variant="info",
+            ).to_dict(),
+            Button(label="Enable recommended agents",
+                   action="enable_recommended_agents",
+                   payload={"source": "text_only"}).to_dict(),
+            Button(label="Choose agents individually", action="chrome_open",
+                   payload={"surface": "agents"}, variant="secondary").to_dict(),
+        ]
 
     async def send_agent_list(self, websocket):
         """Send list of connected agents."""
@@ -6077,9 +6286,26 @@ COMPONENT UPDATE RULES:
             version="1.0.0",
             openapi_tags=tags_metadata,
             docs_url="/api/docs",
-            redoc_url=None,
+            redoc_url="/api/redoc",
             openapi_url="/api/openapi.json",
         )
+
+        # Constitution VI: interactive API docs MUST answer at the literal
+        # /docs URL. The canonical pages stay /api-namespaced; these aliases
+        # redirect (no second Swagger mount, no schema duplication).
+        from fastapi.responses import RedirectResponse as _DocsRedirect
+
+        @app.get("/docs", include_in_schema=False)
+        async def _docs_alias():
+            return _DocsRedirect("/api/docs")
+
+        @app.get("/redoc", include_in_schema=False)
+        async def _redoc_alias():
+            return _DocsRedirect("/api/redoc")
+
+        @app.get("/openapi.json", include_in_schema=False)
+        async def _openapi_alias():
+            return _DocsRedirect("/api/openapi.json")
 
         # CORS — the web UI is same-origin since feature 026 (the orchestrator
         # serves it), so cross-origin access is the exception, not the rule.

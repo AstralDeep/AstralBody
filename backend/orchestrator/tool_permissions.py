@@ -123,6 +123,31 @@ class ToolPermissionManager:
         # Fill in defaults for any missing scopes
         return {scope: stored.get(scope, False) for scope in VALID_SCOPES}
 
+    def has_any_enabled_scope(self, user_id: str) -> bool:
+        """Return True when the user has at least one enabled scope on any agent.
+
+        Distinguishes a never-configured account (no rows — feature 030 shows
+        the enable affordance) from one whose user deliberately disabled
+        agents (rows exist, possibly all disabled — affordance still shown)
+        or enabled some (no affordance).
+        """
+        row = self.db.fetch_one(
+            "SELECT 1 AS one FROM agent_scopes WHERE user_id = ? AND enabled LIMIT 1",
+            (user_id,)
+        )
+        return row is not None
+
+    def scopes_required_by_tools(self, agent_id: str, exclude=("tools:write",)) -> List[str]:
+        """Scopes the agent's registered tools actually use, minus ``exclude``.
+
+        Drives the feature-030 consent enable: the grant is attenuated to what
+        the agent's tool→scope map declares (Constitution VII), defaulting to
+        ``tools:read`` for agents that registered no explicit map, and never
+        includes excluded scopes (``tools:write`` by default).
+        """
+        used = set(self._tool_scope_map.get(agent_id, {}).values()) or {"tools:read"}
+        return sorted(s for s in used if s in VALID_SCOPES and s not in exclude)
+
     def is_scope_enabled(self, user_id: str, agent_id: str, scope: str) -> bool:
         """Check if a specific scope is enabled for the user/agent combination.
 

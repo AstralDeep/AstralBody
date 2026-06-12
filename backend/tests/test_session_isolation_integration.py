@@ -19,8 +19,10 @@ def test_user_context_propagation():
     hm = HistoryManager("data")
 
     try:
-        # Simulate user1 creating data
+        # Simulate user1 creating data (feature 030: a chat needs at least
+        # one message to appear in get_recent_chats)
         chat1_id = hm.create_chat(user_id='user1')
+        hm.add_message(chat1_id, 'user', 'hello from user1', user_id='user1')
         hm.update_chat_title(chat1_id, 'User1 Chat', user_id='user1')
         comp1_id = hm.save_component(
             chat_id=chat1_id,
@@ -32,6 +34,7 @@ def test_user_context_propagation():
 
         # Simulate user2 creating data
         chat2_id = hm.create_chat(user_id='user2')
+        hm.add_message(chat2_id, 'user', 'hello from user2', user_id='user2')
         hm.update_chat_title(chat2_id, 'User2 Chat', user_id='user2')
         comp2_id = hm.save_component(
             chat_id=chat2_id,

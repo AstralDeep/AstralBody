@@ -435,10 +435,9 @@ def modify_data(
                 writer.writeheader()
                 writer.writerows(rows)
 
-        # The BFF URL
-        bff_port = int(os.getenv("ORCHESTRATOR_PORT", 8001))
-        bff_url = f"http://localhost:{bff_port}"
-        download_url = f"{bff_url}/api/download/{session_id}/{filename}"
+        # Root-relative download URL — resolved against the serving origin by
+        # the browser (Constitution X: no hard-coded localhost; feature 030).
+        download_url = f"/api/download/{session_id}/{filename}"
 
         # Prepare preview (first 5 rows, first 5 columns)
         preview_headers = fieldnames[:5]

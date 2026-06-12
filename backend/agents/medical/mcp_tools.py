@@ -140,10 +140,9 @@ def generate_synthetic_patients(count: int = 50, session_id: str = "default", us
     headers = ["ID", "Age", "Condition", "Status", "Heart Rate"]
     rows = [[p["id"], str(p["age"]), p["condition"], p["status"], str(p["heart_rate"])] for p in patients[:5]]
 
-    # Use the same BFF URL as the general tools
-    bff_port = int(os.getenv("ORCHESTRATOR_PORT", 8001))
-    bff_url = f"http://localhost:{bff_port}"
-    download_url = f"{bff_url}/api/download/{session_id}/{filename}"
+    # Root-relative download URL — resolved against the serving origin by the
+    # browser (Constitution X: no hard-coded localhost; feature 030).
+    download_url = f"/api/download/{session_id}/{filename}"
 
     components = [
         Card(
