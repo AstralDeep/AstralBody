@@ -78,8 +78,12 @@ def welcome_components(tools_available: bool = True) -> List[Dict[str, Any]]:
     cards = [
         Card(title=title, content=[
             Text(content=caption, variant="caption"),
+            # aria-label disambiguates the six otherwise-identical "Run
+            # example" accessible names (030 a11y finding); rendered via the
+            # webrender attribute whitelist.
             Button(label="Run example", action="chat_message",
-                   payload={"message": query}, variant="secondary"),
+                   payload={"message": query}, variant="secondary",
+                   attributes={"aria-label": f"Run example: {title}"}),
         ])
         for title, caption, query in WELCOME_EXAMPLES
     ]

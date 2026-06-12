@@ -257,12 +257,17 @@ ORIGINAL_SCHEMAS_UNCHANGED_NAMES = {
 # originals (their property descriptions may reference the new prefixed
 # sibling names — "modulo the tool-name field" per the contract).
 PREFIXED_SCHEMA_REQUIRED = {
-    "classify_submit_dataset": ["file_handle"],
+    # 030: the two submit-dataset tools accept file_handle OR inline_data
+    # (pasted-in-chat data), so neither key is schema-required anymore —
+    # the tool validates the either/or at runtime. The inline_data contract
+    # itself is pinned in test_classify_tools / test_forecaster_tools
+    # (test_submit_dataset_schema_offers_inline_data).
+    "classify_submit_dataset": [],
     "classify_start_training_job": ["report_uuid", "class_column"],
     "classify_get_job_status": ["report_uuid"],
     "classify_get_results": ["report_uuid"],
     "classify_delete_dataset": ["report_uuid"],
-    "forecaster_submit_dataset": ["file_handle"],
+    "forecaster_submit_dataset": [],
     "forecaster_start_training_job": ["uuid"],
     "forecaster_get_job_status": ["uuid"],
     "forecaster_get_results": ["uuid"],

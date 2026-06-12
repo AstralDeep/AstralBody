@@ -75,29 +75,81 @@ def render_children(items: List[Any]) -> str:
 
 
 _SAFE_DATA_ATTR = _re.compile(r"^data-[a-z0-9-]+$")
+# Accessibility pass-through (feature 030): every WAI-ARIA attribute is
+# ``aria-`` followed by lowercase letters only (aria-label, aria-hidden,
+# aria-describedby, aria-valuemin, ...), so the key whitelist is exact.
+_SAFE_ARIA_ATTR = _re.compile(r"^aria-[a-z]+$")
+# ``role`` values are restricted to a small allowlist of non-interactive
+# naming/grouping roles — enough to label and structure content, never to
+# retarget widgets (no button/link/checkbox/... that could misrepresent
+# behavior to assistive tech).
+_SAFE_ROLES = frozenset({"img", "list", "listitem", "status", "note", "group", "region"})
 
 
 def _base_attrs(comp: Dict[str, Any]) -> str:
-    """Render id plus whitelisted ``data-*`` entries from ``attributes``.
+    """Render id plus whitelisted entries from ``attributes``.
 
     ``attributes`` is astralprims' documented free-form escape hatch; the web
-    renderer honors only ``data-*`` keys (escaped) so authors cannot inject
-    event handlers or override structural attributes. Feature 029 relies on
-    this for nested morph anchors: the designer's materializer stamps
-    ``attributes["data-component-id"]`` on refs nested inside arrangements so
-    ``ui_upsert`` morphs keep finding them in the DOM.
+    renderer honors only:
+
+    * ``data-*`` keys — feature 029 relies on this for nested morph anchors:
+      the designer's materializer stamps ``attributes["data-component-id"]``
+      on refs nested inside arrangements so ``ui_upsert`` morphs keep finding
+      them in the DOM;
+    * ``aria-*`` keys and ``role`` (feature 030 accessibility) — aria values
+      are attribute-escaped like any other text; ``role`` is value-validated
+      against the non-interactive ``_SAFE_ROLES`` allowlist and silently
+      dropped otherwise.
+
+    Everything else (onclick/style/src/href/class/...) is refused by design
+    so authors cannot inject event handlers or override structural
+    attributes. Escape-by-default is non-negotiable: every emitted value
+    passes through :func:`_attr`.
     """
     parts = []
     cid = comp.get("id")
     if cid:
         parts.append(f' id="{_attr(cid)}"')
-    attrs = comp.get("attributes")
-    if isinstance(attrs, dict):
-        for key, value in attrs.items():
-            key_s = str(key).lower()
-            if _SAFE_DATA_ATTR.match(key_s):
-                parts.append(f' {key_s}="{_attr(value)}"')
+    for key_s, value in _explicit_attrs(comp).items():
+        if key_s == "role":
+            role = str(value).strip().lower()
+            if role in _SAFE_ROLES:
+                parts.append(f' role="{_attr(role)}"')
+        else:
+            parts.append(f' {key_s}="{_attr(value)}"')
     return "".join(parts)
+
+
+def _explicit_attrs(comp: Dict[str, Any]) -> Dict[str, Any]:
+    """Author-supplied whitelisted attributes from BOTH wire shapes.
+
+    astralprims ``to_dict()`` MERGES ``attributes`` at the TOP LEVEL of the
+    serialized dict (base.py ``_serialize``), while hand-built dicts and the
+    029 materializer set a nested ``"attributes"`` dict — so whitelisted
+    keys must be honored wherever they appear (030 finding: the welcome
+    buttons' aria-labels arrived flattened and were silently dropped).
+    Nested entries win on conflict. Only ``data-*``, ``aria-*`` and ``role``
+    are ever collected; everything else stays refused.
+    """
+    found: Dict[str, Any] = {}
+    sources = [comp]
+    nested = comp.get("attributes")
+    if isinstance(nested, dict):
+        sources.append(nested)
+    for source in sources:
+        for key, value in source.items():
+            key_s = str(key).lower()
+            if (_SAFE_DATA_ATTR.match(key_s) or _SAFE_ARIA_ATTR.match(key_s)
+                    or key_s == "role"):
+                found[key_s] = value
+    return found
+
+
+def _has_explicit_attr(comp: Dict[str, Any], name: str) -> bool:
+    """True when the author already supplied ``name`` (either wire shape) —
+    used to suppress a renderer-generated default (e.g. the metric tile's
+    aria-label) so the output never carries a duplicate attribute."""
+    return name in _explicit_attrs(comp)
 
 
 # ---------------------------------------------------------------------------
@@ -143,8 +195,13 @@ def render_button(c):
         "ghost": "astral-btn-ghost bg-transparent hover:bg-white/5 text-astral-muted hover:text-astral-text",
     }.get(variant, "astral-btn-primary bg-astral-primary text-white")
     data = _attr(json.dumps(payload))
+    # Feature 030: buttons honor the attributes whitelist too, so the
+    # orchestrator can supply per-button aria-labels. ``_base_attrs`` comes
+    # AFTER data-action/data-payload — HTML keeps the first occurrence of a
+    # duplicated attribute, so passed-through data-* can never retarget the
+    # client.js dispatch contract.
     return (
-        f'<button type="button" data-action="{_attr(action)}" data-payload="{data}" '
+        f'<button type="button" data-action="{_attr(action)}" data-payload="{data}"{_base_attrs(c)} '
         f'class="astral-action astral-btn px-4 py-2 rounded-lg text-sm font-medium transition-colors {vcls}">'
         f'{esc(label)}</button>'
     )
@@ -277,7 +334,8 @@ def render_table(c):
     rows = c.get("rows") or []
     if not headers and not rows:
         return ""
-    title = c.get("title") or c.get("label") or "Table"
+    explicit_title = c.get("title") or c.get("label")
+    title = explicit_title or "Table"
     total = c.get("total_rows")
     page_size = c.get("page_size")
     offset = c.get("page_offset") or 0
@@ -287,8 +345,11 @@ def render_table(c):
         frm = offset + 1
         to = min(offset + page_size, total)
         showing = f'<div class="text-xs text-astral-muted">{frm}–{to} of {esc(total)}</div>'
+    # a11y (feature 030): this renderer only ever emits column headers (rows
+    # are plain <td>), so every <th> is scope="col"; a future row-header
+    # variant must emit scope="row" on its own cells.
     head = "".join(
-        f'<th class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-astral-muted whitespace-nowrap">{esc(h)}</th>'
+        f'<th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-astral-muted whitespace-nowrap">{esc(h)}</th>'
         for h in headers)
     body = "".join(
         '<tr class="border-b border-white/5 hover:bg-white/5 transition-colors">'
@@ -313,11 +374,15 @@ def render_table(c):
             f'<button class="astral-page-next text-xs px-3 py-1 rounded border border-white/10 text-astral-text hover:bg-white/10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"{next_dis}>Next</button>'
             f'</div></div>'
         )
+    # a11y (feature 030): an explicit title names the table for assistive
+    # tech (aria-label on <table> is announced on entry); the default
+    # "Table" placeholder adds nothing, so it is not emitted.
+    table_aria = f' aria-label="{_attr(explicit_title)}"' if explicit_title else ""
     return (
         f'<div{_base_attrs(c)} class="astral-table-wrap rounded-lg border border-white/10">'
         f'<div class="p-3 border-b border-white/5 bg-astral-primary/5 flex items-center justify-between">'
         f'<div class="text-sm font-medium text-astral-text">{inline_md(title)}</div>{showing}</div>'
-        f'<div class="overflow-x-auto"><table class="w-full text-sm">'
+        f'<div class="overflow-x-auto"><table class="w-full text-sm"{table_aria}>'
         f'<thead><tr class="bg-astral-primary/10 border-b border-white/5">{head}</tr></thead>'
         f'<tbody>{body}</tbody></table></div>{footer}</div>'
     )
@@ -424,10 +489,19 @@ def render_metric(c):
         pw = max(0, min(progress * 100, 100))
         prog_html = (f'<div class="mt-3 h-1.5 bg-white/10 rounded-full overflow-hidden">'
                      f'<div class="h-full rounded-full {color}" style="width:{pw}%"></div></div>')
+    title = c.get("title", "")
+    value = c.get("value", "")
+    # a11y (feature 030): name the whole tile "<label>: <value>" so assistive
+    # tech announces the pairing the visual layout only implies. An author-
+    # supplied attributes["aria-label"] wins (no duplicate attribute emitted).
+    name = f"{title}: {value}" if str(title).strip() else str(value)
+    aria = ""
+    if name.strip() and not _has_explicit_attr(c, "aria-label"):
+        aria = f' aria-label="{_attr(name)}"'
     return (
-        f'<div{_base_attrs(c)} class="astral-metric astral-metric--{vkey} rounded-xl p-4 bg-gradient-to-br {vbg} border border-white/5 relative">'
-        f'<p class="text-xs text-astral-muted font-medium uppercase tracking-wider mb-1">{inline_md(c.get("title",""))}</p>'
-        f'<div class="flex-1"><p class="text-2xl font-bold text-astral-text">{esc(c.get("value",""))}</p>{sub_html}</div>{prog_html}</div>'
+        f'<div{_base_attrs(c)}{aria} class="astral-metric astral-metric--{vkey} rounded-xl p-4 bg-gradient-to-br {vbg} border border-white/5 relative">'
+        f'<p class="text-xs text-astral-muted font-medium uppercase tracking-wider mb-1">{inline_md(title)}</p>'
+        f'<div class="flex-1"><p class="text-2xl font-bold text-astral-text">{esc(value)}</p>{sub_html}</div>{prog_html}</div>'
     )
 
 
@@ -501,12 +575,51 @@ def render_collapsible(c):
     )
 
 
+_CHART_KINDS = {"bar": "Bar chart", "line": "Line chart", "pie": "Pie chart"}
+
+
+def _chart_summary(chart_type: str, payload: Dict[str, Any]) -> str:
+    """Cheap, deterministic text alternative for a chart's data (feature 030).
+
+    Not a full description — just enough for a screen-reader user to gauge
+    what sighted users see: point/series count plus the numeric range."""
+    if chart_type == "plotly":
+        n = len(payload.get("data") or [])
+        return f"{n} data series" if n != 1 else "1 data series"
+    data = payload.get("data") or []
+    n = len(data)
+    summary = f"{n} data points" if n != 1 else "1 data point"
+    nums = []
+    for v in data:
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            try:
+                f = float(v)
+            except OverflowError:
+                continue
+            if math.isfinite(f):
+                nums.append(f)
+    if nums:
+        summary += f", range {min(nums):g} to {max(nums):g}"
+    return summary
+
+
 def _chart_div(c, chart_type, payload):
     title = c.get("title")
     title_html = f'<p class="text-sm font-medium text-astral-text mb-3">{esc(title)}</p>' if title else ""
     data = _attr(json.dumps(payload))
+    # a11y (feature 030): the chart node is an empty div until client-side
+    # Plotly draws into it — name it like an image (type + title, falling
+    # back to the data summary). The sr-only summary sits OUTSIDE the
+    # role="img" element (children of role="img" are presentational to AT)
+    # and therefore also survives Plotly.newPlot() replacing the chart div's
+    # contents in the browser.
+    summary = _chart_summary(chart_type, payload)
+    kind = _CHART_KINDS.get(chart_type, "Chart")
+    name = f"{kind}: {title}" if title else f"{kind}: {summary}"
     return (f'<div{_base_attrs(c)} class="astral-chart-card w-full">{title_html}'
-            f'<div class="astral-chart" data-chart-type="{chart_type}" data-chart="{data}" style="min-height:320px"></div></div>')
+            f'<div class="astral-chart" data-chart-type="{chart_type}" data-chart="{data}" '
+            f'role="img" aria-label="{_attr(name)}" style="min-height:320px"></div>'
+            f'<span class="astral-sr-only">{esc(summary)}</span></div>')
 
 
 def render_bar_chart(c):
@@ -640,7 +753,8 @@ def _badge_span(label, variant, icon=None, extra_attrs=""):
         vkey = variant if variant in _BADGE_VARIANTS else "default"
     except TypeError:  # unhashable variant from raw LLM/agent JSON
         vkey = "default"
-    icon_html = f'<span class="astral-badge-icon">{esc(icon)}</span>' if icon else ""
+    # decorative emoji/symbol — hidden from assistive tech (feature 030)
+    icon_html = f'<span class="astral-badge-icon" aria-hidden="true">{esc(icon)}</span>' if icon else ""
     return (
         f'<span{extra_attrs} class="astral-badge astral-badge--{vkey} inline-flex items-center gap-1 '
         f'px-2 py-0.5 rounded-full border text-xs font-medium {_BADGE_VARIANTS[vkey]}">'
@@ -662,7 +776,8 @@ def render_hero(c):
     badges = [b for b in (c.get("badges") or []) if isinstance(b, str) and b.strip()]
     eyebrow_html = (f'<p class="text-xs font-semibold uppercase tracking-widest text-astral-primary mb-1">'
                     f'{esc(eyebrow)}</p>') if eyebrow else ""
-    icon_html = f'<span class="astral-hero-icon text-3xl mr-3">{esc(icon)}</span>' if icon else ""
+    # decorative emoji next to the h2 — hidden from assistive tech (feature 030)
+    icon_html = f'<span class="astral-hero-icon text-3xl mr-3" aria-hidden="true">{esc(icon)}</span>' if icon else ""
     subtitle_html = f'<p class="text-sm text-astral-muted mt-1">{inline_md(subtitle)}</p>' if subtitle else ""
     badges_html = ""
     if badges:
@@ -732,8 +847,12 @@ def render_timeline(c):
             f'<div class="min-w-0"><p class="text-sm font-medium text-astral-text">{inline_md(str(item.get("title", "")))}</p>'
             f'{desc_html}</div></div></li>'
         )
+    # a11y (feature 030): markup is already a real <ol>/<li> list, but
+    # astral.css sets list-style:none on .astral-tl-list, which strips the
+    # implicit list role in WebKit/VoiceOver — restore it explicitly (the
+    # <li> children keep their implicit listitem role).
     return (f'<div{_base_attrs(c)} class="astral-timeline rounded-lg p-4">{title_html}'
-            f'<ol class="astral-tl-list space-y-3">{"".join(rows)}</ol></div>')
+            f'<ol class="astral-tl-list space-y-3" role="list">{"".join(rows)}</ol></div>')
 
 
 def render_rating(c):

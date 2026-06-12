@@ -151,6 +151,37 @@ class PHIGate:
             return None
         return None if self.contains_phi(value) else value
 
+    def detect_for_notice(self, text: Optional[str]) -> bool:
+        """Notify-only detection: True only on a POSITIVE PHI signal.
+
+        Unlike :meth:`contains_phi` (fail-closed, correct for durable
+        storage), this is for user-facing awareness notices (feature 030
+        chat banner) and FAILS OPEN: an unavailable or erroring analyzer
+        returns False so the notice never fires on every message in a
+        deployment without Presidio. The regex prefilter (MRN/SSN-style
+        identifiers) still fires without the analyzer.
+        """
+        if text is None:
+            return False
+        text = str(text)
+        if not text.strip():
+            return False
+        if _prefilter_hits(text):
+            return True
+        if self._analyzer is None:
+            return False
+        try:
+            results = self._analyzer.analyze(
+                text=text,
+                language="en",
+                entities=PHI_ENTITIES,
+                score_threshold=self._score_threshold,
+            )
+        except Exception as exc:
+            logger.debug("phi_gate.notice_analyze_failed_fail_open", extra={"error": str(exc)})
+            return False
+        return bool(results)
+
 
 # ---------------------------------------------------------------------------
 # Process-wide singleton (analyzer is expensive to build)

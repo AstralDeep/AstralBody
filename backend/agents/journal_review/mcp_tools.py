@@ -15,14 +15,13 @@ import hashlib
 from collections import Counter
 from typing import Dict, Any, List, Optional, Tuple
 
-import requests
-
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from astralprims import (
     Text, Card, Table, Alert, MetricCard, Grids,
     BarChart, PieChart, create_ui_response,
 )
+from shared import external_http
 
 logger = logging.getLogger("JournalReviewTools")
 
@@ -34,6 +33,13 @@ CROSSREF_JOURNALS_URL = "https://api.crossref.org/journals"
 
 OPENALEX_MAILTO = "astralbody@example.com"  # polite pool access
 HEADERS = {"User-Agent": f"AstralBody/1.0 (mailto:{OPENALEX_MAILTO})"}
+
+MAX_RESPONSE_BYTES = 5 * 1024 * 1024  # 5 MB cap per API response
+
+# Display label for OpenAlex's 2-year mean citedness. NEVER label this (or
+# anything else) "Impact Factor" — that is a proprietary Clarivate metric
+# we cannot compute.
+CITEDNESS_LABEL = "2-yr Mean Citedness (OpenAlex)"
 
 # ── Simple In-Memory Cache ──────────────────────────────────────────────
 
@@ -62,14 +68,24 @@ def _set_cached(key: str, val: Any) -> None:
 # ── Helpers ─────────────────────────────────────────────────────────────
 
 def _safe_get(url: str, params: dict = None, timeout: int = 15) -> Optional[dict]:
-    """Make a GET request with error handling and caching."""
+    """Make an egress-gated GET request with error handling and caching.
+
+    All outbound HTTP goes through ``shared.external_http`` (SSRF guard,
+    bounded timeout, response-size cap) per the project egress posture.
+    """
     key = _cache_key(url, params)
     cached = _get_cached(key)
     if cached is not None:
         return cached
     try:
-        resp = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
-        resp.raise_for_status()
+        resp = external_http.request(
+            "GET", url,
+            api_key="",
+            params=params,
+            timeout=timeout,
+            max_response_bytes=MAX_RESPONSE_BYTES,
+            extra_headers=HEADERS,
+        )
         data = resp.json()
         _set_cached(key, data)
         return data
@@ -92,13 +108,20 @@ def _extract_issn(issn_raw) -> str:
     return str(issn_raw) if issn_raw else "N/A"
 
 
+def _fmt_citedness(value: Optional[float]) -> str:
+    """Format the 2-yr mean citedness for display (0.0 is a real value, not N/A)."""
+    return "N/A" if value is None else str(value)
+
+
 def _parse_openalex_source(src: dict) -> dict:
     """Parse an OpenAlex source record into a standardized journal dict."""
     counts = src.get("counts_by_year", [])
     recent_year = counts[0] if counts else {}
-    two_year_cited = sum(c.get("cited_by_count", 0) for c in counts[:2])
-    two_year_works = sum(c.get("works_count", 0) for c in counts[:2])
-    approx_if = round(two_year_cited / two_year_works, 2) if two_year_works > 0 else None
+
+    # OpenAlex's own 2-year mean citedness is the recent-impact metric we
+    # surface; we never compute a home-grown "impact factor" approximation.
+    citedness = (src.get("summary_stats") or {}).get("2yr_mean_citedness")
+    citedness = round(citedness, 2) if isinstance(citedness, (int, float)) else None
 
     topics = src.get("topics", []) or []
     top_topics = [t.get("display_name", "") for t in topics[:8]]
@@ -117,8 +140,7 @@ def _parse_openalex_source(src: dict) -> dict:
         "cited_by_count": src.get("cited_by_count", 0),
         "h_index": src.get("summary_stats", {}).get("h_index"),
         "i10_index": src.get("summary_stats", {}).get("i10_index"),
-        "two_year_mean_citedness": src.get("summary_stats", {}).get("2yr_mean_citedness"),
-        "approx_impact_factor": approx_if,
+        "two_year_mean_citedness": citedness,
         "recent_works": recent_year.get("works_count", 0),
         "recent_cited": recent_year.get("cited_by_count", 0),
         "topics": top_topics,
@@ -321,7 +343,7 @@ def find_matching_journals(
             f"{fit['topic_relevance']}%",
             str(j.get("paper_count", 0)),
             str(j.get("h_index", "N/A")),
-            str(j.get("approx_impact_factor") or "N/A"),
+            _fmt_citedness(j.get("two_year_mean_citedness")),
             oa_label,
             apc,
             j.get("publisher", "N/A"),
@@ -331,7 +353,7 @@ def find_matching_journals(
         Card(title=f"Matching Journals for: {query[:60]}", id="results-card", content=[
             Table(
                 headers=["#", "Journal", "Fit", "Topic Match", "Papers Found",
-                          "H-Index", "~Impact Factor", "OA", "APC", "Publisher"],
+                          "H-Index", CITEDNESS_LABEL, "OA", "APC", "Publisher"],
                 rows=rows,
                 id="journals-table"
             ),
@@ -372,7 +394,7 @@ def find_matching_journals(
                 "name": j["name"],
                 "publisher": j["publisher"],
                 "h_index": j.get("h_index"),
-                "approx_impact_factor": j.get("approx_impact_factor"),
+                "two_year_mean_citedness": j.get("two_year_mean_citedness"),
                 "is_oa": j.get("is_oa"),
                 "apc_usd": j.get("apc_usd"),
                 "fit_score": j["fit"]["overall"],
@@ -466,8 +488,9 @@ def get_journal_profile(
         Grids(columns=4, id="profile-metrics", children=[
             MetricCard(title="H-Index", value=str(j.get("h_index", "N/A")),
                        subtitle="Lifetime", id="h-index"),
-            MetricCard(title="~Impact Factor", value=str(j.get("approx_impact_factor") or "N/A"),
-                       subtitle="2-year approx", id="impact-factor"),
+            MetricCard(title="2-yr Mean Citedness",
+                       value=_fmt_citedness(j.get("two_year_mean_citedness")),
+                       subtitle="OpenAlex", id="two-yr-citedness"),
             MetricCard(title="Total Citations", value=_fmt_number(j["cited_by_count"]),
                        subtitle="All time", id="total-cites"),
             MetricCard(title="Access Model", value=oa_status,
@@ -493,7 +516,7 @@ def get_journal_profile(
         ["Total Works", _fmt_number(j["works_count"])],
         ["Total DOIs (CrossRef)", _fmt_number(crossref_meta.get("total_dois"))],
         ["I10-Index", str(j.get("i10_index", "N/A"))],
-        ["2yr Mean Citedness", str(j.get("two_year_mean_citedness") or "N/A")],
+        [CITEDNESS_LABEL, _fmt_citedness(j.get("two_year_mean_citedness"))],
     ]
 
     components.append(
@@ -529,7 +552,6 @@ def get_journal_profile(
         "publisher": j["publisher"],
         "issn_l": j["issn_l"],
         "h_index": j.get("h_index"),
-        "approx_impact_factor": j.get("approx_impact_factor"),
         "is_oa": j["is_oa"],
         "apc_usd": j.get("apc_usd"),
         "works_count": j["works_count"],
@@ -612,7 +634,7 @@ def compare_journals(
     headers = ["Metric"] + [j["name"][:35] for j in journals]
     metrics = [
         ("H-Index", lambda j: str(j.get("h_index", "N/A"))),
-        ("~Impact Factor", lambda j: str(j.get("approx_impact_factor") or "N/A")),
+        (CITEDNESS_LABEL, lambda j: _fmt_citedness(j.get("two_year_mean_citedness"))),
         ("Total Works", lambda j: _fmt_number(j["works_count"])),
         ("Total Citations", lambda j: _fmt_number(j["cited_by_count"])),
         ("Recent Works/yr", lambda j: _fmt_number(j["recent_works"])),
@@ -621,7 +643,6 @@ def compare_journals(
         ("APC (USD)", lambda j: f"${j['apc_usd']:,}" if j.get("apc_usd") else "N/A"),
         ("Publisher", lambda j: j["publisher"]),
         ("I10-Index", lambda j: str(j.get("i10_index", "N/A"))),
-        ("2yr Mean Citedness", lambda j: str(j.get("two_year_mean_citedness") or "N/A")),
     ]
 
     rows = []
@@ -660,7 +681,7 @@ def compare_journals(
                 "name": j["name"],
                 "publisher": j["publisher"],
                 "h_index": j.get("h_index"),
-                "approx_impact_factor": j.get("approx_impact_factor"),
+                "two_year_mean_citedness": j.get("two_year_mean_citedness"),
                 "is_oa": j["is_oa"],
                 "apc_usd": j.get("apc_usd"),
                 "works_count": j["works_count"],
@@ -959,7 +980,7 @@ def get_field_landscape(
             j["name"],
             j["publisher"],
             str(j.get("h_index", "N/A")),
-            str(j.get("approx_impact_factor") or "N/A"),
+            _fmt_citedness(j.get("two_year_mean_citedness")),
             _fmt_number(j["cited_by_count"]),
             _fmt_number(j["recent_works"]),
             "Yes" if j["is_oa"] else "No",
@@ -968,7 +989,7 @@ def get_field_landscape(
     components.append(
         Card(title=f"Top Journals in {field.title()}", id="landscape-card", content=[
             Table(
-                headers=["#", "Journal", "Publisher", "H-Index", "~IF",
+                headers=["#", "Journal", "Publisher", "H-Index", CITEDNESS_LABEL,
                           "Citations", "Recent/yr", "OA"],
                 rows=rows,
                 id="landscape-table"
@@ -1008,7 +1029,7 @@ def get_field_landscape(
                 "name": j["name"],
                 "publisher": j["publisher"],
                 "h_index": j.get("h_index"),
-                "approx_impact_factor": j.get("approx_impact_factor"),
+                "two_year_mean_citedness": j.get("two_year_mean_citedness"),
                 "cited_by_count": j["cited_by_count"],
                 "is_oa": j["is_oa"],
                 "topics": j["topics"][:5],
@@ -1034,7 +1055,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
             "Search for scientific journals that match a research paper's topic, "
             "abstract, or keywords. Finds papers on the topic and identifies which "
             "journals publish them most frequently. Returns a ranked list with impact "
-            "metrics (h-index, approximate impact factor), topical fit scores, open "
+            "metrics (h-index, OpenAlex 2-yr mean citedness), topical fit scores, open "
             "access status, and APC costs. Use this when a researcher wants to know "
             "which journals publish work similar to theirs."
         ),
@@ -1074,7 +1095,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "scope": "tools:search",
         "description": (
             "Get a comprehensive profile for a specific scientific journal including "
-            "h-index, approximate impact factor, citation counts, publication volume, "
+            "h-index, OpenAlex 2-yr mean citedness, citation counts, publication volume, "
             "open access status, APC costs, publisher, topics/scope, and year-over-year "
             "publication and citation trends. Use this to deep-dive into a single journal."
         ),
@@ -1099,7 +1120,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "scope": "tools:search",
         "description": (
             "Compare 2-5 scientific journals side-by-side on key metrics: h-index, "
-            "impact factor, citation count, publication volume, open access status, "
+            "OpenAlex 2-yr mean citedness, citation count, publication volume, open access status, "
             "APC costs, and publisher. Provide journal names separated by semicolons. "
             "Use this when a researcher is deciding between specific journals."
         ),
@@ -1162,7 +1183,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
             "Get an overview of the top journals in a research field or discipline, "
             "ranked by citation impact. Discovers journals by finding real papers in "
             "the field and identifying where they are published. Shows h-indices, "
-            "approximate impact factors, open access percentages, and publisher "
+            "OpenAlex 2-yr mean citedness, open access percentages, and publisher "
             "distribution. Use this when a researcher wants to understand the journal "
             "ecosystem in their field before deciding where to submit."
         ),

@@ -563,3 +563,18 @@ details > summary::-webkit-details-marker { display: none; }
   box-shadow: 0 0 0 6px rgb(var(--astral-primary) / 0.15);
 }
 #astral-tour-card { transform: translateX(-50%); }
+
+/* Feature 030 — accessibility: visually-hidden text for screen readers
+   (standard clip-rect pattern). Used for chart data fallbacks and any
+   server-rendered sr-only annotations. */
+.astral-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

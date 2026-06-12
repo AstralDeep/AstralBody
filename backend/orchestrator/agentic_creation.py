@@ -39,6 +39,9 @@ CAPABILITY GAPS (create_capability / extend_agent):
 - If NO available tool can serve the user's request, call `create_capability` to build a new
   agent for it (the system generates, security-checks, and self-tests a draft; the user approves
   before anything goes live). Restate the user's request verbatim in `user_request`.
+- This INCLUDES requests for a persistent tool the user wants to UPDATE or maintain over time
+  (e.g. "build me a budget tracker I can update each month") — a one-off static dashboard or
+  sample-data mockup does NOT serve such a request; call `create_capability` instead.
 - To ADD a tool to an agent the user already owns, call `extend_agent` instead.
 - Do NOT call these when a suitable tool exists but is disabled or permission-restricted (you
   will see a "restricted" tool error if you try it) — in that case tell the user to enable it
@@ -57,7 +60,9 @@ def meta_tool_definitions() -> List[Dict[str, Any]]:
                 "name": "create_capability",
                 "description": (
                     "Create a new agent with the tools needed to serve the user's request "
-                    "when NO available tool can. A draft is generated, security-checked and "
+                    "when NO available tool can — including requests for a persistent tool "
+                    "the user wants to update/maintain over time, which a static dashboard "
+                    "cannot serve. A draft is generated, security-checked and "
                     "self-tested; the user approves before it goes live. Do NOT use this for "
                     "capabilities that exist but are disabled/unauthorized."
                 ),

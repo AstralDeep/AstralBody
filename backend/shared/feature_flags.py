@@ -34,6 +34,10 @@ class FeatureFlags:
             # Default ON; gates meta-tool injection only — the settings chrome
             # ships ungated. See specs/027-agentic-creation-settings/.
             "agentic_creation": self._read("FF_AGENTIC_CREATION", True),
+            # 030: injects the schedule_recurring_task meta-tool so recurring
+            # work is reachable from chat (consent card before creation —
+            # the feature-025 scheduler itself ships ungated). Default ON.
+            "scheduling_chat": self._read("FF_SCHEDULING_CHAT", True),
         }
 
     @staticmethod

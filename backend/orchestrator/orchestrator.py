@@ -1804,6 +1804,14 @@ class Orchestrator:
                             asyncio.create_task(self.send_dashboard(client))
                             asyncio.create_task(self.send_agent_list(client))
 
+                elif msg.action == "schedule_decision":
+                    # Feature 030 — the consent click for a chat-proposed
+                    # scheduled job (audited as ws.schedule_decision plus the
+                    # schedule.* events the handler records).
+                    from orchestrator import scheduling_chat
+                    await scheduling_chat.handle_decision(
+                        self, websocket, user_id, msg.payload or {})
+
                 elif msg.action == "update_device":
                     # ROTE: viewport / capability change from the frontend
                     device_info = msg.payload.get("device") or {}
@@ -2551,6 +2559,14 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         msg_to_save = display_message if display_message else message
         self.history.add_message(chat_id, "user", msg_to_save, user_id=user_id)
 
+        # Feature 030 — fire-and-forget PHI awareness notice (notify-only,
+        # fail-open; persistence/audit posture unchanged).
+        try:
+            asyncio.create_task(self._notify_phi_if_detected(
+                websocket, chat_id, user_id, msg_to_save))
+        except Exception:
+            logger.debug("phi notice scheduling failed (non-fatal)", exc_info=True)
+
         # Feature 014: create a per-turn ChatStepRecorder. The recorder's
         # WebSocket emits and persistence are PHI-redacted at the boundary
         # via shared.phi_redactor (FR-009b). Stored on the orchestrator so
@@ -2766,6 +2782,20 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 tool_to_unqualified[_meta_name] = _meta_name
             meta_tools_injected = True
 
+        # Feature 030 — scheduling from chat: the schedule_recurring_task
+        # meta-tool makes the feature-025 scheduler reachable from the
+        # conversation (a consent card gates creation). Same exclusions as
+        # the 027 meta-tools.
+        from orchestrator import scheduling_chat
+        scheduler_tool_injected = False
+        if scheduling_chat.should_inject(draft_agent_id) and not is_text_only:
+            for _sched_def in scheduling_chat.meta_tool_definitions():
+                _sched_name = _sched_def["function"]["name"]
+                tools_desc.append(_sched_def)
+                tool_to_agent[_sched_name] = scheduling_chat.META_AGENT_ID
+                tool_to_unqualified[_sched_name] = _sched_name
+            scheduler_tool_injected = True
+
         if not tools_desc and draft_agent_id:
             await self.send_ui_render(websocket, [
                 Alert(
@@ -2878,6 +2908,11 @@ COMPONENT UPDATE RULES:
             if meta_tools_injected:
                 system_prompt += agentic_creation.SYSTEM_PROMPT_ADDENDUM
 
+            # Feature 030 — recurring-work guidance accompanies the
+            # scheduling meta-tool (stops the model denying the capability).
+            if scheduler_tool_injected:
+                system_prompt += scheduling_chat.SYSTEM_PROMPT_ADDENDUM
+
             # ------------------------------------------------------------------
             # MULTI-TURN LOOP
             # ------------------------------------------------------------------
@@ -2958,9 +2993,39 @@ COMPONENT UPDATE RULES:
                 # operators can distinguish fallback dispatches from
                 # tool-augmented ones (FR-009).
                 call_feature = "chat_dispatch_text_only" if is_text_only else "tool_dispatch"
-                llm_msg, usage = await self._call_llm(
-                    websocket, messages, tools_desc, feature=call_feature
-                )
+                # Feature 030: wrap the (non-streaming, possibly minute-long)
+                # LLM call in a visible chat_step phase — the walkthrough
+                # measured 30-220 s tool-less turns whose ONLY feedback was a
+                # static status line. KIND_PHASE rows persist with the same
+                # PHI redaction as tool steps; failures here never block.
+                _phase_recorder = self._chat_recorders.get(id(websocket))
+                _phase_step_id = None
+                if _phase_recorder is not None:
+                    try:
+                        from orchestrator.chat_steps import KIND_PHASE
+                        _phase_step_id = await _phase_recorder.start(
+                            KIND_PHASE,
+                            "Drafting answer" if is_text_only else
+                            ("Planning next step" if turn_count == 1 else "Analyzing results"),
+                        )
+                    except Exception:
+                        logger.debug("phase step start failed (non-fatal)", exc_info=True)
+                try:
+                    llm_msg, usage = await self._call_llm(
+                        websocket, messages, tools_desc, feature=call_feature
+                    )
+                except Exception:
+                    if _phase_recorder is not None and _phase_step_id:
+                        try:
+                            await _phase_recorder.error(_phase_step_id, "LLM call failed")
+                        except Exception:
+                            pass
+                    raise
+                if _phase_recorder is not None and _phase_step_id:
+                    try:
+                        await _phase_recorder.complete(_phase_step_id)
+                    except Exception:
+                        logger.debug("phase step complete failed (non-fatal)", exc_info=True)
                 self._accumulate_usage(chat_id, usage)
                 if not llm_msg:
                     logger.error("LLM returned None, stopping loop.")
@@ -3292,11 +3357,15 @@ COMPONENT UPDATE RULES:
                             final_ops = await self._send_or_replace_components(
                                 websocket, parsed_components, chat_id, user_id=user_id
                             ) or []
-                            chat_summary = list(leak_alerts) + self._chat_narrative(content)
+                            _tools_ran = bool(task.tool_calls_made) if task else False
+                            chat_summary = (list(leak_alerts) + self._chat_narrative(content)
+                                            + [self._provenance_caption(_tools_ran)])
                             await self.send_ui_render(websocket, chat_summary, target="chat")
                             response_components = list(leak_alerts) + list(parsed_components)
                     else:
-                        response_components = list(leak_alerts) + self._chat_narrative(content)
+                        _tools_ran = bool(task.tool_calls_made) if task else False
+                        response_components = (list(leak_alerts) + self._chat_narrative(content)
+                                               + [self._provenance_caption(_tools_ran)])
                         # Feature 030: text-only turns for a never-configured
                         # account get a deterministic enable affordance — not
                         # left to the model's prose (which pointed users at a
@@ -4059,6 +4128,13 @@ COMPONENT UPDATE RULES:
             return await agentic_creation.handle_meta_tool(
                 self, tool_name, args, user_id=user_id, chat_id=chat_id, websocket=websocket
             )
+        if agent_id == "__scheduler__":
+            # Feature 030 — scheduling meta-tool: validation + consent card
+            # only; creation happens in the schedule_decision ui_event.
+            from orchestrator import scheduling_chat
+            return await scheduling_chat.handle_meta_tool(
+                self, tool_name, args, user_id=user_id, chat_id=chat_id, websocket=websocket
+            )
 
         # System-level security block (proactive security review)
         agent_flags = self.security_flags.get(agent_id, {}) if agent_id else {}
@@ -4286,8 +4362,12 @@ COMPONENT UPDATE RULES:
                 Alert(message=f"Tool '{tool_name}' failed: {err_msg}", variant="error").to_dict()
             ], target="chat")
 
-            # Auto-fix: if this is a draft agent, attempt to fix the tool error automatically
-            if agent_id and hasattr(self, 'lifecycle_manager'):
+            # Auto-fix: if this is a draft agent, attempt to fix the tool
+            # error automatically. 030: the draft check now gates the STATUS
+            # too — previously every errored live tool flashed a misleading
+            # "Auto-fixing..." even though auto_fix only acts on drafts.
+            if (agent_id and hasattr(self, 'lifecycle_manager')
+                    and self.lifecycle_manager._get_draft_by_agent_id(agent_id)):
                 try:
                     await self._safe_send(websocket, json.dumps({
                         "type": "chat_status", "status": "fixing",
@@ -4479,7 +4559,8 @@ COMPONENT UPDATE RULES:
                 if result and result.error:
                     t_name = tool_names[i] if i < len(tool_names) else None
                     a_id = tool_to_agent.get(t_name) if t_name else None
-                    if a_id:
+                    # 030: status only when auto-fix can actually act (drafts).
+                    if a_id and self.lifecycle_manager._get_draft_by_agent_id(a_id):
                         try:
                             await self._safe_send(websocket, json.dumps({
                                 "type": "chat_status", "status": "fixing",
@@ -5974,6 +6055,60 @@ COMPONENT UPDATE RULES:
             logger.info(
                 f"Consent enable (030): user={user_id} agents={enabled} (write excluded)")
         return enabled
+
+    @staticmethod
+    def _provenance_caption(tools_ran: bool) -> Dict[str, Any]:
+        """Deterministic provenance chip for chat replies (feature 030).
+
+        The walkthrough found clinical/grant prose presented authoritatively
+        with no provenance at all. This caption is server-composed (never
+        left to the model) and distinguishes model-memory answers from
+        tool-grounded ones. Renderer-level honesty, model-independent.
+        """
+        if tools_ran:
+            text = "Based on this turn's tool results — sources and steps are shown above."
+        else:
+            text = ("Model knowledge only — no live tools or sources were used in this "
+                    "reply. Verify independently before relying on it.")
+        return Text(content=text, variant="caption").to_dict()
+
+    async def _notify_phi_if_detected(self, websocket, chat_id: str,
+                                      user_id: str, message: str) -> None:
+        """Notify-only PHI awareness for chat input (feature 030).
+
+        Fires a transient chat Alert when a user message LOOKS like it
+        contains PHI. Detection is fail-open (a missing/erroring analyzer
+        never fires the notice) and the persistence posture is unchanged:
+        the message stays in the transcript, cross-session memory keeps its
+        fail-closed Presidio gate, and audit stays content-free. Shown at
+        most once per chat per socket. Never raises into the chat turn.
+        """
+        try:
+            if not message or not chat_id:
+                return
+            if not hasattr(self, "_phi_notified"):
+                self._phi_notified = set()
+            key = (id(websocket), chat_id)
+            if key in self._phi_notified:
+                return
+            from personalization.phi_gate import get_phi_gate
+            gate = get_phi_gate()
+            hit = await asyncio.to_thread(gate.detect_for_notice, message)
+            if not hit:
+                return
+            self._phi_notified.add(key)
+            logger.info(f"phi_notice.shown chat_id={chat_id}")  # content-free
+            await self.send_ui_render(websocket, [Alert(
+                title="Possible PHI in your message",
+                message=("This looks like it may contain protected health information. "
+                         "It stays in this chat's transcript only — it is never added to "
+                         "cross-session memory, and audit logs record message lengths, "
+                         "not content. Prefer synthetic or de-identified data where "
+                         "possible."),
+                variant="warning",
+            ).to_dict()], target="chat")
+        except Exception:
+            logger.debug("phi notice failed (non-fatal)", exc_info=True)
 
     def _text_only_cta_components(self, user_id: str) -> List[Dict[str, Any]]:
         """Deterministic enable affordance for text-only replies (feature 030).
