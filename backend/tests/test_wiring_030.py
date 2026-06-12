@@ -587,6 +587,97 @@ def test_welcome_buttons_have_unique_accessible_names():
     assert len(set(labels)) == 6  # all distinct
 
 
+# ---------------------------------------------------------------------------
+# Draft permission leakage (030 wave 3)
+# ---------------------------------------------------------------------------
+
+
+@needs_db
+def test_orphan_draft_permission_sweep_and_delete_purge(perms, tmp_path):
+    from orchestrator.agent_lifecycle import AgentLifecycleManager
+
+    manager, user_id = perms
+    fake = types.SimpleNamespace(db=manager.db, _agents_dir=str(tmp_path))
+    purge = types.MethodType(
+        AgentLifecycleManager._purge_agent_permission_rows, fake)
+    fake._purge_agent_permission_rows = purge  # the sweep calls it via self
+    sweep = types.MethodType(
+        AgentLifecycleManager.reconcile_orphaned_draft_permissions, fake)
+
+    orphan = f"pytest-orphan-{uuid.uuid4().hex[:6]}-1"     # no dir, no draft row
+    marked = f"pytest-marked-{uuid.uuid4().hex[:6]}-1"     # dir WITH .draft, no row
+    keeper = f"pytest-keeper-{uuid.uuid4().hex[:6]}-1"     # real dir, no marker
+    for agent_id in (orphan, marked, keeper):
+        manager.set_agent_scopes(user_id, agent_id, {"tools:read": True})
+    marked_dir = tmp_path / marked[:-2].replace("-", "_")
+    marked_dir.mkdir()
+    (marked_dir / ".draft").write_text("x")
+    (tmp_path / keeper[:-2].replace("-", "_")).mkdir()
+
+    assert sweep(agent_ids=[orphan, marked, keeper]) == 2
+    assert manager.get_agent_scopes(user_id, orphan)["tools:read"] is False
+    assert manager.get_agent_scopes(user_id, marked)["tools:read"] is False
+    assert manager.get_agent_scopes(user_id, keeper)["tools:read"] is True
+
+    purge(keeper)  # the delete-time purge helper removes rows directly
+    assert manager.get_agent_scopes(user_id, keeper)["tools:read"] is False
+
+
+# ---------------------------------------------------------------------------
+# Chat-vs-canvas narrative split (030 wave 3)
+# ---------------------------------------------------------------------------
+
+
+def test_narrative_is_long_detects_length_headings_tables():
+    assert Orchestrator._narrative_is_long("x" * 800) is True
+    assert Orchestrator._narrative_is_long("## Specific Aims\nshort") is True
+    assert Orchestrator._narrative_is_long("| a | b |\n| 1 | 2 |") is True
+    assert Orchestrator._narrative_is_long("A short plain answer.") is False
+
+
+def test_concise_lead_strips_structure_and_ends_at_sentence():
+    content = ("# Title\nFirst sentence of the lead. Second sentence here. "
+               + "Filler words " * 60 + "\n| t | r |\n# H2\nmore")
+    lead = Orchestrator._concise_lead(content)
+    assert lead.startswith("First sentence of the lead.")
+    assert "#" not in lead and "|" not in lead
+    assert len(lead) <= 321
+
+
+def test_narrative_doc_card_identity_stable_per_title():
+    a1 = Orchestrator._narrative_doc_card("chat-1", "## Specific Aims\nv1 text")
+    a2 = Orchestrator._narrative_doc_card("chat-1", "## Specific Aims\nv2 revised")
+    b = Orchestrator._narrative_doc_card("chat-1", "## Budget Plan\ntext")
+    other_chat = Orchestrator._narrative_doc_card("chat-2", "## Specific Aims\nv1")
+    assert a1["id"] == a2["id"]            # same doc iterates in place
+    assert a1["id"] != b["id"]             # different doc appends
+    assert a1["id"] != other_chat["id"]    # per-chat identity
+    assert a1["title"] == "Specific Aims"
+    assert a1["content"][0]["variant"] == "markdown"
+
+
+# ---------------------------------------------------------------------------
+# Tool dispatch hardening (030 wave 3)
+# ---------------------------------------------------------------------------
+
+
+def test_tool_timeout_overrides_cover_long_running_verbs():
+    from orchestrator.orchestrator import TOOL_TIMEOUT_OVERRIDES
+    assert TOOL_TIMEOUT_OVERRIDES["research_brief"] > 100
+    assert TOOL_TIMEOUT_OVERRIDES.get("fetch_page", 0) > 30
+
+
+def test_draft_decision_cards_carry_stable_author_id():
+    from orchestrator.agentic_creation import _terminal_card, creation_card
+    draft = {"id": "d-123", "agent_name": "Web Researcher", "description": "d"}
+    live = creation_card(draft, {"status": "passed", "summary": "ok"})
+    done = _terminal_card("d-123", "Discarded: Web Researcher", "Removed.")
+    assert live["id"] == "draft-card-d-123" == done["id"]
+    # Terminal card must carry no actionable buttons.
+    assert all(c.get("type") != "button" for c in done["content"])
+    assert any(c.get("type") == "button" for c in live["content"])
+
+
 def test_renderer_honors_flattened_attributes_shape():
     """astralprims to_dict() flattens `attributes` to top-level keys — the
     renderer must honor both that and the nested hand-built shape (030)."""

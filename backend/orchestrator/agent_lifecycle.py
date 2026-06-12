@@ -1184,5 +1184,71 @@ class AgentLifecycleManager:
 
         # Delete DB record
         self.db.delete_draft_agent(draft_id)
+
+        # 030: purge the permission/ownership rows the test flow created for
+        # the draft's runtime agent id. These previously LEAKED after
+        # discard (live incident: a discarded draft's all-scopes-enabled
+        # rows persisted, so its broken generated tools kept dispatching in
+        # normal chats and shadowed first-party tools).
+        runtime_agent_id = slug.replace("_", "-") + "-1"
+        self._purge_agent_permission_rows(runtime_agent_id)
+
         logger.info(f"Deleted draft agent {draft_id} ({draft['agent_name']})")
         return True
+
+    def _purge_agent_permission_rows(self, agent_id: str) -> None:
+        """Remove agent_scopes / tool_overrides / tool_permissions /
+        agent_ownership rows for a retired draft's runtime agent id
+        (best-effort — deletion must not fail the discard)."""
+        for table in ("agent_scopes", "tool_overrides", "tool_permissions",
+                      "agent_ownership"):
+            try:
+                self.db.execute(f"DELETE FROM {table} WHERE agent_id = ?",  # noqa: S608 — fixed table list
+                                (agent_id,))
+            except Exception:
+                logger.debug("draft permission purge failed (%s/%s)",
+                             table, agent_id, exc_info=True)
+
+    def reconcile_orphaned_draft_permissions(self, agent_ids=None) -> int:
+        """Boot-time sweep (030): purge permission rows leaked by drafts
+        discarded BEFORE the delete-time purge existed.
+
+        An agent id is an orphaned draft when (a) no ``draft_agents`` row
+        maps to it (approved-live agents keep their row with status
+        ``live``) AND (b) its slug directory is either gone or still carries
+        a ``.draft`` marker (a real bundled agent's directory exists without
+        one). Live first-party agents are protected by (b); nothing else is
+        touched. Returns the number of agent ids purged.
+
+        Args:
+            agent_ids: optional restriction of the candidate set (tests use
+                this to stay scoped); None sweeps every scoped agent id.
+        """
+        purged = 0
+        try:
+            rows = self.db.fetch_all(
+                "SELECT DISTINCT agent_id FROM agent_scopes WHERE agent_id LIKE '%-1'")
+            if agent_ids is not None:
+                rows = [r for r in rows if r["agent_id"] in set(agent_ids)]
+            known_slugs = {d["agent_slug"] for d in (self.db.list_draft_agents() or [])} \
+                if hasattr(self.db, "list_draft_agents") else None
+            for row in rows:
+                agent_id = row["agent_id"]
+                slug = agent_id[:-2].replace("-", "_")
+                if known_slugs is not None:
+                    has_draft_row = slug in known_slugs
+                else:
+                    has_draft_row = bool(self.db.get_draft_agent_by_slug(slug))
+                if has_draft_row:
+                    continue
+                agent_dir = os.path.join(self._agents_dir, slug)
+                dir_exists = os.path.isdir(agent_dir)
+                if dir_exists and not os.path.exists(os.path.join(agent_dir, ".draft")):
+                    continue  # real (bundled/approved) agent directory
+                self._purge_agent_permission_rows(agent_id)
+                purged += 1
+                logger.info("Purged leaked draft permissions: %s "
+                            "(dir_exists=%s)", agent_id, dir_exists)
+        except Exception:
+            logger.warning("orphaned-draft permission sweep failed", exc_info=True)
+        return purged

@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional, Tuple
@@ -59,6 +60,12 @@ MAX_RESULTS_CAP = 20
 PAGE_TEXT_CAP = 20_000          # chars of extracted text rendered by fetch_page
 BRIEF_SOURCE_CAP = 4_000        # chars of extract per source in the LLM prompt
 BRIEF_FETCHES = {"shallow": 2, "standard": 5}  # <= 5 fetches per brief
+# 030: overall wall-clock budget for one research_brief run. Worst-case
+# search (15 s) + 5 fetches (15 s each) exceeded the orchestrator dispatch
+# ceiling and surfaced as "Tool call timed out" with no partial value; the
+# brief now stops fetching when the budget is spent and builds from what it
+# has (the dispatch ceiling for research_brief is 150 s — keep headroom).
+BRIEF_TIME_BUDGET_S = 110
 MAX_REDIRECT_HOPS = 3
 
 DDG_BACKEND = "DuckDuckGo HTML search"
@@ -597,10 +604,18 @@ def research_brief(topic: str = "", depth: str = "standard", **kwargs) -> Dict[s
                            f"{_CREDENTIAL_REMEDY}")),
         ])
 
-    # Fetch up to `fetch_target` pages, skipping failures (each fetch bounded).
+    # Fetch up to `fetch_target` pages, skipping failures (each fetch
+    # bounded) — and stop when the overall time budget is spent (030) so a
+    # slow network yields a brief from fewer sources instead of a dispatch
+    # timeout with nothing.
+    deadline = time.monotonic() + BRIEF_TIME_BUDGET_S
     sources: List[Dict[str, str]] = []
     for result in results:
         if len(sources) >= fetch_target:
+            break
+        if time.monotonic() > deadline:
+            logger.warning("research_brief: time budget spent after %d source(s) — "
+                           "building brief from what was fetched", len(sources))
             break
         try:
             resp = _fetch_url(result["url"])

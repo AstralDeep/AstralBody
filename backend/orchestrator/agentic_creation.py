@@ -279,6 +279,11 @@ def creation_card(draft: Dict[str, Any], self_test: Dict[str, Any],
         lines.append(Text(content=note, variant="caption").to_dict())
     what = "Draft revision" if revision else "Draft agent"
     return Card(
+        # Stable author identity (030): every state of this draft's card
+        # carries the same id, so decision outcomes REPLACE the actionable
+        # card on the canvas instead of leaving stale Approve/Refine/Discard
+        # buttons clickable after a decision was already made.
+        id=f"draft-card-{draft['id']}",
         title=f"{what}: {draft.get('agent_name', 'unnamed')}",
         content=lines + _decision_buttons(draft["id"], revision=revision),
     ).to_dict()
@@ -642,6 +647,35 @@ async def _send_chat_card(orch, websocket, component: Dict[str, Any]):
     await orch.send_ui_render(websocket, [component], target="chat")
 
 
+async def _replace_card_state(orch, websocket, user_id: str, draft_id: str,
+                              card: Dict[str, Any]) -> None:
+    """Swap the canvas decision card for its post-decision state (030).
+
+    The creation card persists in the chat's workspace under the stable
+    author id ``draft-card-<draft_id>``; upserting a card with the same id
+    morphs it in place on every socket, so a decided draft can no longer be
+    re-actioned from stale buttons. Best-effort: a missing active chat
+    (e.g. decision made from the Drafts surface) is fine — the chat bubble
+    already communicated the outcome.
+    """
+    try:
+        chat_id = orch._ws_active_chat.get(id(websocket)) if websocket is not None else None
+        if not chat_id:
+            return
+        card = dict(card)
+        card["id"] = f"draft-card-{draft_id}"
+        await orch._send_or_replace_components(websocket, [card], chat_id, user_id=user_id)
+    except Exception:
+        logger.debug("decision card replacement failed (non-fatal)", exc_info=True)
+
+
+def _terminal_card(draft_id: str, title: str, message: str) -> Dict[str, Any]:
+    """Button-less end-state card that replaces the decision card."""
+    return Card(id=f"draft-card-{draft_id}", title=title, content=[
+        Text(content=message, variant="caption").to_dict(),
+    ]).to_dict()
+
+
 async def _h_draft_approve(orch, websocket, user_id, roles, payload):
     """Approve a draft: existing security gate → live (US1 scenario 4)."""
     draft = _owned_draft(orch, user_id, payload)
@@ -658,14 +692,19 @@ async def _h_draft_approve(orch, websocket, user_id, roles, payload):
             Text(content="Security checks passed. The agent joined your fleet and is usable "
                          "right now — just ask again.", variant="default").to_dict(),
         ]).to_dict())
+        await _replace_card_state(orch, websocket, user_id, draft["id"], _terminal_card(
+            draft["id"], f"✓ Approved: {draft['agent_name']}",
+            "Approved and live in your fleet — ask again to use it."))
     else:
         detail = (result or {}).get("error_message") or f"status: {status}"
         await _audit(user_id, "lifecycle.rejected", f"Draft {draft['id']} not promoted ({status})",
                      correlation_id=corr, outcome="failure")
-        await _send_chat_card(orch, websocket, Card(title=f"{draft['agent_name']}: not promoted", content=[
+        not_promoted = Card(title=f"{draft['agent_name']}: not promoted", content=[
             Text(content=f"The approval gate did not pass — {detail}. The draft stays "
                          f"editable: Refine it or Discard it.", variant="default").to_dict(),
-        ] + _decision_buttons(draft["id"])).to_dict())
+        ] + _decision_buttons(draft["id"])).to_dict()
+        await _send_chat_card(orch, websocket, not_promoted)
+        await _replace_card_state(orch, websocket, user_id, draft["id"], not_promoted)
     return None
 
 
@@ -692,9 +731,12 @@ async def _h_draft_refine(orch, websocket, user_id, roles, payload):
             if result.get("status") != "error"
             else f"Refine failed: {result.get('error_message', 'unknown error')}")
     self_test = json.loads((orch.history.db.get_draft_agent(draft["id"]) or {}).get("self_test") or "{}")
-    await _send_chat_card(orch, websocket, creation_card(
+    refreshed = creation_card(
         orch.history.db.get_draft_agent(draft["id"]) or draft, self_test,
-        revision=bool(draft.get("revises_agent_id")), note=note))
+        revision=bool(draft.get("revises_agent_id")), note=note)
+    await _send_chat_card(orch, websocket, refreshed)
+    # Same stable id → the canvas card morphs to the refreshed state.
+    await _replace_card_state(orch, websocket, user_id, draft["id"], refreshed)
     return None
 
 
@@ -711,6 +753,9 @@ async def _h_draft_discard(orch, websocket, user_id, roles, payload):
         Text(content=f"'{draft['agent_name']}' was removed. I'll answer with existing "
                      f"capabilities where I can.", variant="default").to_dict(),
     ]).to_dict())
+    await _replace_card_state(orch, websocket, user_id, draft["id"], _terminal_card(
+        draft["id"], f"Discarded: {draft['agent_name']}",
+        "This draft was removed — nothing went live."))
     return None
 
 
@@ -724,10 +769,14 @@ async def _h_revision_apply(orch, websocket, user_id, roles, payload):
     if outcome["applied"]:
         await _send_chat_card(orch, websocket, Card(title="Revision applied", content=[
             Text(content=outcome["detail"], variant="default").to_dict()]).to_dict())
+        await _replace_card_state(orch, websocket, user_id, rev["id"], _terminal_card(
+            rev["id"], "✓ Revision applied", outcome["detail"]))
     else:
-        await _send_chat_card(orch, websocket, Card(title="Revision not applied", content=[
+        not_applied = Card(title="Revision not applied", content=[
             Text(content=outcome["detail"], variant="default").to_dict(),
-        ] + _decision_buttons(rev["id"], revision=True)).to_dict())
+        ] + _decision_buttons(rev["id"], revision=True)).to_dict()
+        await _send_chat_card(orch, websocket, not_applied)
+        await _replace_card_state(orch, websocket, user_id, rev["id"], not_applied)
     return None
 
 
