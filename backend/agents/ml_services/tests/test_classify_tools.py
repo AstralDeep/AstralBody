@@ -236,6 +236,103 @@ def test_submit_dataset_missing_user_id_returns_error(rmock: HttpMock, tmp_path)
 
 
 # ---------------------------------------------------------------------------
+# classify_submit_dataset — inline_data (pasted-in-chat) path
+# ---------------------------------------------------------------------------
+
+
+INLINE_CSV = "Week,Enrollment,Cohort\n1,40,A\n2,42,A\n3,45,B\n"
+
+
+def test_submit_dataset_inline_data_materializes_and_uploads(rmock: HttpMock, tmp_path) -> None:
+    """inline_data is materialized into a real attachment for the
+    AUTHENTICATED user, then the flow proceeds exactly as if that handle
+    had been passed."""
+    materialized = tmp_path / "inline.csv"
+
+    def fake_materialize(text, user_id, *, extension="csv"):
+        assert user_id == "alice"  # orchestrator-injected identity, not model-supplied
+        assert "Week,Enrollment" in text
+        assert extension == "csv"
+        materialized.write_text(text)
+        return str(materialized)  # resolver honors existing absolute paths
+
+    rmock.add("POST", SUBMIT_URL, status=200, json={
+        "report_uuid": "rpt-inline",
+        "column_types": {"data_types": {"Week": "integer", "Enrollment": "integer", "Cohort": "string"}},
+    })
+    with patch.object(mcp_tools, "materialize_text_attachment",
+                      side_effect=fake_materialize) as mock_mat:
+        result = mcp_tools.classify_submit_dataset(
+            inline_data=INLINE_CSV, _credentials=GOOD_CREDS, user_id="alice",
+        )
+    mock_mat.assert_called_once()
+    assert result["_data"]["report_uuid"] == "rpt-inline"
+    assert result["_data"]["column_types"]["Cohort"] == "string"
+    call = rmock.calls[-1]
+    assert call["url"] == SUBMIT_URL
+    assert "file" in (call.get("files") or {})
+    # The materialized path is remembered for set_column_types like any upload.
+    assert mcp_tools._REPORT_PATHS["rpt-inline"] == str(materialized)
+
+
+def test_submit_dataset_inline_data_requires_user_id(rmock: HttpMock) -> None:
+    """No authenticated user → error BEFORE any materialization happens
+    (user_id is never model-suppliable)."""
+    with patch.object(mcp_tools, "materialize_text_attachment") as mock_mat:
+        result = mcp_tools.classify_submit_dataset(
+            inline_data=INLINE_CSV, _credentials=GOOD_CREDS,
+        )
+    mock_mat.assert_not_called()
+    assert result["_ui_components"][0]["variant"] == "error"
+
+
+def test_submit_dataset_requires_handle_or_inline(rmock: HttpMock) -> None:
+    result = mcp_tools.classify_submit_dataset(
+        _credentials=GOOD_CREDS, user_id="alice",
+    )
+    assert result["_ui_components"][0]["variant"] == "error"
+    assert "inline_data" in result["_ui_components"][0]["message"]
+
+
+def test_submit_dataset_file_handle_wins_over_inline(rmock: HttpMock, tmp_path) -> None:
+    """When both are supplied, the real attachment wins and nothing is materialized."""
+    csv = tmp_path / "real.csv"
+    csv.write_text("a,b,target\n1,2,X\n")
+    rmock.add("POST", SUBMIT_URL, status=200, json={
+        "report_uuid": "rpt-1",
+        "column_types": {"data_types": {"a": "integer"}},
+    })
+    with patch.object(mcp_tools, "materialize_text_attachment") as mock_mat:
+        result = mcp_tools.classify_submit_dataset(
+            file_handle=str(csv), inline_data=INLINE_CSV,
+            _credentials=GOOD_CREDS, user_id="alice",
+        )
+    mock_mat.assert_not_called()
+    assert result["_data"]["report_uuid"] == "rpt-1"
+
+
+def test_submit_dataset_inline_validation_error_renders_alert(rmock: HttpMock) -> None:
+    with patch.object(
+        mcp_tools, "materialize_text_attachment",
+        side_effect=ValueError("inline_data is not valid CSV: no header row detected."),
+    ):
+        result = mcp_tools.classify_submit_dataset(
+            inline_data="not a csv", _credentials=GOOD_CREDS, user_id="alice",
+        )
+    assert result["_ui_components"][0]["variant"] == "error"
+    assert "not valid csv" in result["_ui_components"][0]["message"].lower()
+
+
+def test_submit_dataset_schema_offers_inline_data() -> None:
+    entry = mcp_tools.TOOL_REGISTRY["classify_submit_dataset"]
+    props = entry["input_schema"]["properties"]
+    assert "inline_data" in props
+    assert "file_handle" in props
+    assert entry["input_schema"]["required"] == []
+    assert "NEVER invent" in entry["description"]
+
+
+# ---------------------------------------------------------------------------
 # set_column_types
 # ---------------------------------------------------------------------------
 

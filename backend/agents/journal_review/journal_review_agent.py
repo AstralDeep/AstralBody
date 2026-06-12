@@ -31,12 +31,12 @@ class JournalReviewAgent(BaseA2AAgent):
     service_name = "Journal Review Agent"
     description = (
         "Evaluates scientific journals to recommend optimal publication "
-        "venues for research papers. Considers impact factor, topical fit, "
+        "venues for research papers. Considers citation impact, topical fit, "
         "review timelines, acceptance rates, submission requirements, open "
         "access options, and audience relevance to help researchers choose "
         "where to submit their work."
     )
-    skill_tags = ["journals", "publishing", "peer-review", "impact-factor",
+    skill_tags = ["journals", "publishing", "peer-review", "citation-impact",
                   "research", "academic", "science"]
 
     def __init__(self, port: int = None):

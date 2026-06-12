@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional, Set
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
+from shared.attachment_materializer import materialize_text_attachment
 from shared.attachment_resolver import resolve_attachment_path
 from shared.external_http import BadRequestError, ExternalHttpError
 from astralprims import Alert, Card, Table, Text
@@ -162,7 +163,9 @@ def _credentials_check(**kwargs) -> Dict[str, Any]:
         return _wrapper.verdict_for_exception(e)
 
 
-def forecaster_submit_dataset(file_handle: str, **kwargs):
+def forecaster_submit_dataset(file_handle: Optional[str] = None,
+                              inline_data: Optional[str] = None,
+                              **kwargs):
     """Upload a CSV dataset to the Forecaster service.
 
     Returns the upstream ``uuid`` plus the list of column names. The chat
@@ -172,6 +175,11 @@ def forecaster_submit_dataset(file_handle: str, **kwargs):
 
     Args:
         file_handle: Attachment handle of a CSV uploaded via AstralBody.
+        inline_data: Raw CSV text the user pasted in chat. Used only when
+            ``file_handle`` is absent: materialized into a real attachment
+            owned by the authenticated user (the orchestrator-injected
+            ``user_id`` kwarg — never model-supplied), then processed
+            exactly as if that handle had been passed.
         **kwargs: Tool kwargs (``_credentials``, ``user_id``).
 
     Returns:
@@ -182,6 +190,17 @@ def forecaster_submit_dataset(file_handle: str, **kwargs):
         user_id = kwargs.get("user_id")
         if not user_id:
             raise ValueError("user_id is required to resolve attachments.")
+        if not file_handle and inline_data:
+            file_handle = materialize_text_attachment(inline_data, user_id, extension="csv")
+            logger.info(
+                "forecaster_submit_dataset: materialized inline_data into attachment %s for user=%s",
+                file_handle, user_id,
+            )
+        if not file_handle:
+            raise ValueError(
+                "Provide either file_handle (the attachment_id of an uploaded "
+                "CSV) or inline_data (the raw CSV text the user pasted in chat)."
+            )
         local_path = resolve_attachment_path(file_handle, user_id)
         filename = os.path.basename(local_path)
         with open(local_path, "rb") as fh:
@@ -570,6 +589,8 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
             "target, and which (if any) are past/future/static covariates before "
             "calling set_column_roles. file_handle should be the attachment_id from "
             "the AstralBody upload mechanism, NOT the display filename. "
+            "If the user pasted data in chat, pass it via inline_data — NEVER invent "
+            "a file_handle. "
             "DO NOT call read_spreadsheet/read_csv before this — "
             "forecaster_submit_dataset returns the column names directly. This is the "
             "FIRST step of the Forecaster pipeline."
@@ -581,8 +602,16 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
                     "type": "string",
                     "description": "Handle of a CSV uploaded via AstralBody's file mechanism.",
                 },
+                "inline_data": {
+                    "type": "string",
+                    "description": (
+                        "Raw CSV text the user pasted in chat (markdown code fences "
+                        "are stripped automatically; max 1 MB). Use this when no file "
+                        "was uploaded instead of inventing a file_handle."
+                    ),
+                },
             },
-            "required": ["file_handle"],
+            "required": [],
         },
         "scope": "tools:write",
     },

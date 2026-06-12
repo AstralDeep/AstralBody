@@ -103,8 +103,10 @@ def _table_aligns(sep_line: str, n_cols: int):
 def _render_md_table(headers: list[str], aligns: list[str], rows: list[list[str]]) -> str:
     """Emit a styled table; every cell goes through ``inline_md`` (escaped)."""
     align_cls = {"left": "text-left", "center": "text-center", "right": "text-right"}
+    # a11y (feature 030): GFM tables only have a column-header row, so every
+    # <th> carries scope="col".
     ths = "".join(
-        f'<th class="px-3 py-2 {align_cls[a]} text-xs font-semibold uppercase '
+        f'<th scope="col" class="px-3 py-2 {align_cls[a]} text-xs font-semibold uppercase '
         f'tracking-wider text-astral-muted whitespace-nowrap">{inline_md(h)}</th>'
         for h, a in zip(headers, aligns)
     )

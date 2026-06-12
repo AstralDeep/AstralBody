@@ -328,3 +328,277 @@ def test_first_party_catalog_constants_match_post_029_catalog():
     assert {"web-research-1", "summarizer-1"} <= ids
     # Drafts / retired ids must never be listed.
     assert not any(a in ids for a in Database._RETIRED_AGENT_IDS)
+
+
+# ---------------------------------------------------------------------------
+# Provenance caption (030 second wave)
+# ---------------------------------------------------------------------------
+
+
+def test_provenance_caption_model_only_vs_tool_grounded():
+    no_tools = Orchestrator._provenance_caption(False)
+    with_tools = Orchestrator._provenance_caption(True)
+    assert no_tools["type"] == "text" and no_tools["variant"] == "caption"
+    assert "Model knowledge only" in no_tools["content"]
+    assert "tool results" in with_tools["content"]
+    assert no_tools["content"] != with_tools["content"]
+
+
+# ---------------------------------------------------------------------------
+# PHI notice detection — fail-open semantics (030 second wave)
+# ---------------------------------------------------------------------------
+
+
+def _gate(analyzer):
+    from personalization.phi_gate import PHIGate
+    return PHIGate(analyzer=analyzer, build_if_missing=False)
+
+
+class _HitAnalyzer:
+    def analyze(self, text, language, entities, score_threshold):
+        return [object()]
+
+
+class _BoomAnalyzer:
+    def analyze(self, text, language, entities, score_threshold):
+        raise RuntimeError("analyzer down")
+
+
+def test_detect_for_notice_prefilter_fires_without_analyzer():
+    gate = _gate(None)
+    assert gate.detect_for_notice("Patient MRN 000-00-0001 reported dizziness") is True
+
+
+def test_detect_for_notice_fails_open_when_analyzer_missing():
+    gate = _gate(None)
+    # contains_phi fails CLOSED here; the notice path must NOT.
+    text = "metformin dosing considerations for my trial"
+    assert gate.contains_phi(text) is True
+    assert gate.detect_for_notice(text) is False
+
+
+def test_detect_for_notice_fails_open_on_analyzer_error():
+    assert _gate(_BoomAnalyzer()).detect_for_notice("some clinical narrative") is False
+
+
+def test_detect_for_notice_analyzer_hit_fires():
+    assert _gate(_HitAnalyzer()).detect_for_notice("John Testcase visited") is True
+
+
+def test_detect_for_notice_empty_text_clean():
+    assert _gate(_HitAnalyzer()).detect_for_notice("   ") is False
+    assert _gate(_HitAnalyzer()).detect_for_notice(None) is False
+
+
+# ---------------------------------------------------------------------------
+# Scheduling from chat (030 second wave)
+# ---------------------------------------------------------------------------
+
+
+def _sched_fake(manager, history_db, agent_ids=("web-research-1",)):
+    """Fake orchestrator self for scheduling_chat — real DB-backed pieces."""
+    renders = []
+
+    async def send_ui_render(ws, components, target="canvas"):
+        renders.append((components, target))
+
+    fake = types.SimpleNamespace(
+        agent_cards={aid: object() for aid in agent_ids},
+        history=types.SimpleNamespace(db=history_db),
+        tool_permissions=manager,
+        _is_draft_agent=lambda aid: False,
+        send_ui_render=send_ui_render,
+    )
+    fake._renders = renders
+    return fake
+
+
+@pytest.fixture
+def sched_env(perms):
+    """Scheduling fixture: real db + perms manager + job-row cleanup."""
+    manager, user_id = perms
+    db = manager.db
+    yield manager, db, user_id
+    db.execute("DELETE FROM scheduled_job WHERE user_id = ?", (user_id,))
+
+
+@needs_db
+def test_schedule_meta_tool_returns_consent_card_and_creates_nothing(sched_env):
+    import asyncio
+
+    from orchestrator import scheduling_chat
+
+    manager, db, user_id = sched_env
+    fake = _sched_fake(manager, db)
+    resp = asyncio.run(scheduling_chat.handle_meta_tool(
+        fake, "schedule_recurring_task",
+        {"name": "Weekly digest", "instruction": "Compile new publications",
+         "schedule_kind": "interval", "schedule_expr": "1d"},
+        user_id=user_id, chat_id="chat-1", websocket=object()))
+    assert resp.error is None
+    card = resp.ui_components[0]
+    assert card["type"] == "card" and "Schedule proposal" in card["title"]
+    actions = [c.get("payload", {}).get("decision") for c in card["content"]
+               if c.get("type") == "button"]
+    assert actions == ["approve", "discard"]
+    # NOTHING persisted before consent.
+    row = db.fetch_one("SELECT COUNT(*) AS n FROM scheduled_job WHERE user_id = ?",
+                       (user_id,))
+    assert int(row["n"]) == 0
+    assert len(fake._schedule_proposals) == 1
+
+
+@needs_db
+def test_schedule_meta_tool_rejects_bad_proposals(sched_env):
+    import asyncio
+
+    from orchestrator import scheduling_chat
+
+    manager, db, user_id = sched_env
+    fake = _sched_fake(manager, db)
+    for args in (
+        {"name": "", "instruction": "x", "schedule_kind": "interval", "schedule_expr": "1d"},
+        {"name": "n", "instruction": "x", "schedule_kind": "weekly", "schedule_expr": "1d"},
+        {"name": "n", "instruction": "x", "schedule_kind": "interval", "schedule_expr": "5s"},
+        {"name": "n", "instruction": "x", "schedule_kind": "interval", "schedule_expr": "1d",
+         "agent_id": "ghost-9"},
+    ):
+        resp = asyncio.run(scheduling_chat.handle_meta_tool(
+            fake, "schedule_recurring_task", args,
+            user_id=user_id, chat_id="c", websocket=object()))
+        assert resp.error is not None, args
+
+
+@needs_db
+def test_schedule_decision_approve_creates_job_with_bounded_scopes(sched_env):
+    import asyncio
+
+    from orchestrator import scheduling_chat
+
+    manager, db, user_id = sched_env
+    manager.register_tool_scopes("web-research-1", {"web_search": "tools:search"})
+    manager.set_agent_scopes(user_id, "web-research-1", {"tools:search": True})
+    fake = _sched_fake(manager, db)
+    asyncio.run(scheduling_chat.handle_meta_tool(
+        fake, "schedule_recurring_task",
+        {"name": "Weekly digest", "instruction": "Compile new publications",
+         "schedule_kind": "interval", "schedule_expr": "1d",
+         "agent_id": "web-research-1"},
+        user_id=user_id, chat_id="chat-1", websocket=object()))
+    proposal_id = next(iter(fake._schedule_proposals))
+    asyncio.run(scheduling_chat.handle_decision(
+        fake, object(), user_id,
+        {"proposal_id": proposal_id, "decision": "approve"}))
+    row = db.fetch_one(
+        "SELECT name, status, consented_scopes, target_chat_id, offline_grant_id "
+        "FROM scheduled_job WHERE user_id = ?", (user_id,))
+    assert row is not None and row["name"] == "Weekly digest"
+    assert row["status"] == "active"
+    assert row["target_chat_id"] == "chat-1"
+    assert row["offline_grant_id"] is None
+    scopes = row["consented_scopes"]
+    scopes = scopes if isinstance(scopes, list) else __import__("json").loads(scopes)
+    # Bounded to CURRENT grants — only the search scope that was enabled.
+    assert scopes == ["tools:search"]
+    assert fake._schedule_proposals == {}
+    # Success alert + manage button rendered to chat.
+    components, target = fake._renders[-1]
+    assert target == "chat"
+    assert components[0]["variant"] == "success"
+
+
+@needs_db
+def test_schedule_decision_discard_and_foreign_user_refused(sched_env):
+    import asyncio
+
+    from orchestrator import scheduling_chat
+
+    manager, db, user_id = sched_env
+    fake = _sched_fake(manager, db)
+    asyncio.run(scheduling_chat.handle_meta_tool(
+        fake, "schedule_recurring_task",
+        {"name": "n", "instruction": "x", "schedule_kind": "interval",
+         "schedule_expr": "1d"},
+        user_id=user_id, chat_id="c", websocket=object()))
+    proposal_id = next(iter(fake._schedule_proposals))
+    # Another user cannot action this proposal.
+    asyncio.run(scheduling_chat.handle_decision(
+        fake, object(), "someone-else", {"proposal_id": proposal_id,
+                                         "decision": "approve"}))
+    assert proposal_id in fake._schedule_proposals
+    # Discard removes it and creates nothing.
+    asyncio.run(scheduling_chat.handle_decision(
+        fake, object(), user_id, {"proposal_id": proposal_id,
+                                  "decision": "discard"}))
+    assert fake._schedule_proposals == {}
+    row = db.fetch_one("SELECT COUNT(*) AS n FROM scheduled_job WHERE user_id = ?",
+                       (user_id,))
+    assert int(row["n"]) == 0
+
+
+@needs_db
+def test_schedule_decision_expired_proposal_refused(sched_env):
+    import asyncio
+
+    from orchestrator import scheduling_chat
+
+    manager, db, user_id = sched_env
+    fake = _sched_fake(manager, db)
+    asyncio.run(scheduling_chat.handle_meta_tool(
+        fake, "schedule_recurring_task",
+        {"name": "n", "instruction": "x", "schedule_kind": "interval",
+         "schedule_expr": "1d"},
+        user_id=user_id, chat_id="c", websocket=object()))
+    proposal_id = next(iter(fake._schedule_proposals))
+    fake._schedule_proposals[proposal_id]["created_at"] -= (
+        scheduling_chat.PROPOSAL_TTL_S + 1)
+    asyncio.run(scheduling_chat.handle_decision(
+        fake, object(), user_id, {"proposal_id": proposal_id,
+                                  "decision": "approve"}))
+    assert fake._schedule_proposals == {}
+    row = db.fetch_one("SELECT COUNT(*) AS n FROM scheduled_job WHERE user_id = ?",
+                       (user_id,))
+    assert int(row["n"]) == 0
+
+
+def test_schedule_human_cadence_lines():
+    from orchestrator.scheduling_chat import human_cadence
+    assert human_cadence("interval", "1d", "UTC") == "every 1d (UTC)"
+    assert "cron" in human_cadence("cron", "0 9 * * 1", "UTC")
+    assert human_cadence("one_shot", "2026-07-01T09:00:00", "UTC").startswith("once")
+
+
+# ---------------------------------------------------------------------------
+# Welcome button accessible names (030 second wave)
+# ---------------------------------------------------------------------------
+
+
+def test_welcome_buttons_have_unique_accessible_names():
+    components = welcome_components()
+    grid = [c for c in components if c.get("type") == "grid"][0]
+    labels = []
+    for card in grid.get("children", []) or []:
+        for child in card.get("content", []) or []:
+            if child.get("type") == "button" and child.get("action") == "chat_message":
+                # astralprims to_dict() merges `attributes` at the top level.
+                labels.append(child.get("aria-label"))
+    assert len(labels) == 6
+    assert all(label and label.startswith("Run example: ") for label in labels)
+    assert len(set(labels)) == 6  # all distinct
+
+
+def test_renderer_honors_flattened_attributes_shape():
+    """astralprims to_dict() flattens `attributes` to top-level keys — the
+    renderer must honor both that and the nested hand-built shape (030)."""
+    from webrender.renderer import _base_attrs
+
+    flattened = {"type": "button", "label": "x", "aria-label": "Run example: A"}
+    nested = {"type": "button", "label": "x",
+              "attributes": {"aria-label": "Run example: B"}}
+    hostile = {"type": "button", "label": "x", "onclick": "alert(1)",
+               "aria-label": 'x" onmouseover="alert(1)'}
+    assert 'aria-label="Run example: A"' in _base_attrs(flattened)
+    assert 'aria-label="Run example: B"' in _base_attrs(nested)
+    out = _base_attrs(hostile)
+    assert "onclick" not in out
+    assert 'onmouseover="alert' not in out  # escaped, not live
