@@ -51,9 +51,10 @@ def enable_agents_card() -> Dict[str, Any]:
     """
     return Card(title="🔌 Agents are off for this account", content=[
         Text(content=("Replies will be plain text until agents are enabled. "
-                      "Enabling grants read/search permissions for the built-in "
-                      "public agents — never write access — and each agent can "
-                      "be adjusted or turned off any time."),
+                      "Enabling grants read-only permissions for the built-in "
+                      "public agents — search, data, file and system reads, "
+                      "never write access — and each agent can be adjusted or "
+                      "turned off any time."),
              variant="caption"),
         Button(label="Enable recommended agents",
                action="enable_recommended_agents",

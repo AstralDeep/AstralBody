@@ -40,7 +40,7 @@
       <!-- Canvas: server-rendered UI (astralprims primitives). The initial
            welcome examples arrive over the normal ui_render path right after
            register_ui (orchestrator/welcome.py) — never as shell HTML. -->
-      <section id="astral-canvas" class="astral-canvas-panel flex-1 overflow-y-auto p-4 space-y-3"></section>
+      <section id="astral-canvas" data-tour-target="canvas.workspace" class="astral-canvas-panel flex-1 overflow-y-auto p-4 space-y-3"></section>
       <!-- Chat panel: raised glass rail (astral.css owns surface/border) -->
       <aside class="astral-chat-panel w-[380px] max-w-[40%] flex flex-col min-h-0">
         <div id="astral-chat" class="flex-1 overflow-y-auto p-3 space-y-2"></div>
