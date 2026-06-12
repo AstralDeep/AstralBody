@@ -34,6 +34,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
+from shared.attachment_materializer import materialize_text_attachment
 from shared.attachment_resolver import resolve_attachment_path
 from shared.external_http import ExternalHttpError
 from astralprims import Alert, Card, ParamPicker, Table, Text
@@ -241,7 +242,9 @@ def _credentials_check(**kwargs) -> Dict[str, Any]:
         return _wrapper.verdict_for_exception(e)
 
 
-def classify_submit_dataset(file_handle: str, **kwargs):
+def classify_submit_dataset(file_handle: Optional[str] = None,
+                            inline_data: Optional[str] = None,
+                            **kwargs):
     """Upload a CSV dataset to CLASSify.
 
     Returns the upstream ``report_uuid`` plus the inferred column data types.
@@ -251,6 +254,11 @@ def classify_submit_dataset(file_handle: str, **kwargs):
 
     Args:
         file_handle: Attachment handle of a CSV uploaded via AstralBody.
+        inline_data: Raw CSV text the user pasted in chat. Used only when
+            ``file_handle`` is absent: materialized into a real attachment
+            owned by the authenticated user (the orchestrator-injected
+            ``user_id`` kwarg — never model-supplied), then processed
+            exactly as if that handle had been passed.
         **kwargs: Tool kwargs (``_credentials``, ``user_id``, ``session_id``).
 
     Returns:
@@ -261,6 +269,17 @@ def classify_submit_dataset(file_handle: str, **kwargs):
         user_id = kwargs.get("user_id")
         if not user_id:
             raise ValueError("user_id is required to resolve attachments")
+        if not file_handle and inline_data:
+            file_handle = materialize_text_attachment(inline_data, user_id, extension="csv")
+            logger.info(
+                "classify_submit_dataset: materialized inline_data into attachment %s for user=%s",
+                file_handle, user_id,
+            )
+        if not file_handle:
+            raise ValueError(
+                "Provide either file_handle (the attachment_id of an uploaded "
+                "CSV) or inline_data (the raw CSV text the user pasted in chat)."
+            )
         local_path = resolve_attachment_path(file_handle, user_id)
         filename = os.path.basename(local_path)
         # Save a verbatim copy of what we're about to stream upstream so the
@@ -1036,6 +1055,8 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
             "internally via pandas. This is the FIRST step of the CLASSify pipeline; "
             "call it as soon as the user provides a file_handle. file_handle should be "
             "the attachment_id the upload mechanism gave you, NOT the display filename. "
+            "If the user pasted data in chat, pass it via inline_data — NEVER invent "
+            "a file_handle. "
             "After this call, set_column_types only needs the report_uuid — the agent "
             "remembers the file location automatically."
         ),
@@ -1046,8 +1067,16 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
                     "type": "string",
                     "description": "Handle of a CSV uploaded via AstralBody's file mechanism.",
                 },
+                "inline_data": {
+                    "type": "string",
+                    "description": (
+                        "Raw CSV text the user pasted in chat (markdown code fences "
+                        "are stripped automatically; max 1 MB). Use this when no file "
+                        "was uploaded instead of inventing a file_handle."
+                    ),
+                },
             },
-            "required": ["file_handle"],
+            "required": [],
         },
         "scope": "tools:write",
     },

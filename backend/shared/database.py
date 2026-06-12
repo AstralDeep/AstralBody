@@ -844,6 +844,12 @@ class Database:
         # ── Feature 029: agent catalog migrations (data-model.md) ───────────
         self._migrate_agent_catalog_029(cursor)
 
+        # ── Feature 030: first-party agent visibility backfill ──────────────
+        self._migrate_agent_visibility_030(cursor)
+
+        # ── Feature 030: guided-tour content refresh ─────────────────────────
+        self._migrate_tutorial_steps_030(cursor)
+
         conn.commit()
         conn.close()
 
@@ -958,6 +964,86 @@ class Database:
         for table in ('agent_ownership', 'agent_scopes', 'tool_overrides',
                       'tool_permissions', 'user_credentials'):
             cursor.execute(f"DELETE FROM {table} WHERE agent_id IN ({retired_ph})", retired)
+
+    # Feature 030: the operator-bundled catalog (post-029 agent ids). These
+    # are the agents every user should be able to SEE in the Agents surface
+    # (visibility ≠ authorization — scopes stay fail-closed per user).
+    # Drafts and user-created agents are never listed here.
+    _FIRST_PARTY_PUBLIC_AGENT_IDS = (
+        'connectors-1', 'dice-roller-1', 'etf-tracker-1-1', 'general-1',
+        'journal-review-1', 'medical-1', 'ml-services-1', 'summarizer-1',
+        'weather-1', 'web-research-1',
+    )
+
+    def _migrate_agent_visibility_030(self, cursor):
+        """Feature 030 one-time (idempotent) visibility backfill.
+
+        The 029 plug-and-play agents (web_research, summarizer) and bundled
+        dice_roller registered through the ownerless auto-assign path, which
+        hard-coded ``is_public=false`` — leaving them invisible in every tab
+        of the Agents surface, so users could not discover or enable them
+        (verified 030 walkthrough finding). Mark the fixed first-party
+        catalog public; registration now defaults non-draft ownerless agents
+        to public going forward.
+
+        Idempotent: the UPDATE matches nothing once the flags are set.
+        Rollback: ``UPDATE agent_ownership SET is_public = FALSE WHERE
+        agent_id IN (<_FIRST_PARTY_PUBLIC_AGENT_IDS>)``.
+        """
+        ph = ", ".join(["%s"] * len(self._FIRST_PARTY_PUBLIC_AGENT_IDS))
+        cursor.execute(
+            f"UPDATE agent_ownership SET is_public = TRUE "
+            f"WHERE agent_id IN ({ph}) AND is_public = FALSE",
+            self._FIRST_PARTY_PUBLIC_AGENT_IDS,
+        )
+
+    # Feature 030: pre-030 tutorial-step slugs (features 005/008/025/027).
+    # Four targeted UI removed by feature 026 (the React feedback control and
+    # the sdui ParamPicker panels), the admin set described a Quarantine tab
+    # that no longer exists, and the rest predate the 030 consent-enable flow.
+    _LEGACY_TUTORIAL_SLUGS_030 = (
+        'welcome', 'chat-with-agent', 'personalize-profession',
+        'personalize-skills', 'personalize-personality', 'open-agents-panel',
+        'enable-agents', 'open-audit-log', 'give-feedback', 'finish',
+        'admin-feedback-flagged', 'admin-feedback-proposals',
+        'admin-feedback-quarantine', 'admin-tutorial-editor',
+    )
+    # First slug of the rewritten seed (seeds/tutorial_steps_seed.sql): its
+    # presence means the refresh already happened on this database.
+    _TUTORIAL_REWRITE_SENTINEL_030 = 'welcome-tour'
+
+    def _migrate_tutorial_steps_030(self, cursor):
+        """Feature 030 one-time guarded guided-tour content refresh.
+
+        The tutorial seed is ``ON CONFLICT (slug) DO NOTHING`` so admin edits
+        survive reboots — which also means rewritten copy under an existing
+        slug never reaches an already-seeded database. The 030 rewrite uses
+        all-new slugs; this migration archives the legacy rows so they stop
+        appearing in the tour. Archive, not DELETE: rows stay restorable from
+        Tutorial admin and there are no FK side effects
+        (``onboarding_state.last_step_id`` SET NULL, revision CASCADE).
+
+        Guarded on the absence of the rewritten seed's sentinel slug rather
+        than on ``archived_at`` so it runs exactly once per database: an
+        admin who later RESTOREs a legacy step is not re-archived on the
+        next boot. Boot-time SQL bypasses tutorial_step_revision history,
+        same as the 029 catalog remap.
+
+        Rollback: ``UPDATE tutorial_step SET archived_at = NULL WHERE slug
+        IN (<_LEGACY_TUTORIAL_SLUGS_030>)``.
+        """
+        cursor.execute(
+            "SELECT 1 FROM tutorial_step WHERE slug = %s LIMIT 1",
+            (self._TUTORIAL_REWRITE_SENTINEL_030,),
+        )
+        if cursor.fetchone() is not None:
+            return
+        ph = ", ".join(["%s"] * len(self._LEGACY_TUTORIAL_SLUGS_030))
+        cursor.execute(
+            f"UPDATE tutorial_step SET archived_at = NOW(), updated_at = NOW() "
+            f"WHERE slug IN ({ph}) AND archived_at IS NULL",
+            self._LEGACY_TUTORIAL_SLUGS_030,
+        )
 
     def execute(self, query: str, params: Tuple = ()):
         """Execute a write operation (INSERT, UPDATE, DELETE)."""

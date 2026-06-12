@@ -117,6 +117,11 @@ def test_file_upload_download_and_audio():
     assert "astral-file-upload" in r(ap.FileUpload(label="Up"))
     valid = r(ap.FileDownload(label="Get", url="https://f.co/x.csv", filename="x.csv"))
     assert 'href="https://f.co/x.csv"' in valid and "bg-astral-secondary/20" in valid
+    # Root-relative URLs (what connectors emit since 030) must render a live
+    # anchor: the browser resolves them against the serving origin.
+    rel = r(ap.FileDownload(label="Get", url="/api/download/s1/x.csv", filename="x.csv"))
+    assert 'href="/api/download/s1/x.csv"' in rel and 'download="x.csv"' in rel
+    assert "disabled" not in rel
     invalid = r(ap.FileDownload(label="Get", url=""))
     assert "disabled" in invalid and "cursor-not-allowed" in invalid
     aud = r(ap.Audio(src="https://a.co/s.mp3", contentType="audio/mpeg", label="L"))

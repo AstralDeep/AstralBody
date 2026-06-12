@@ -466,7 +466,10 @@
     m.hidden = !open;
     b.setAttribute("aria-expanded", open ? "true" : "false");
     if (open && focusFirst) { var items = menuItems(); if (items.length) items[0].focus(); }
-    if (!open) { try { b.focus(); } catch (e) {} }
+    // Restoring focus to the gear is right for normal open/close, but mid-tour
+    // it would arm the button's Enter/Space/ArrowDown handler — the next key
+    // press would reopen the menu instead of advancing the tour.
+    if (!open && !tourState) { try { b.focus(); } catch (e) {} }
   }
   function menuMove(delta, edge) {
     var items = menuItems(); if (!items.length) return;
@@ -591,10 +594,15 @@
       // A10: target belongs to chrome that isn't built yet — note + no highlight.
       skippedNote = '<div class="text-xs text-astral-muted italic mt-1">(this step’s target isn’t available yet)</div>';
     }
+    // In-menu targets need the popover open (and laid out — scrollIntoView is
+    // a no-op while it is hidden) BEFORE the highlight; any other step closes
+    // it again so it doesn't cover the topbar/canvas highlights (Back
+    // navigation, the no-target intro/outro cards).
+    if (target && (target.id === "astral-settings-menu" || (target.closest && target.closest("#astral-settings-menu")))) setMenu(true, false);
+    else if (menuOpen()) setMenu(false, false);
     if (target) {
       target.classList.add("astral-tour-highlight");
       if (target.scrollIntoView) target.scrollIntoView({ block: "nearest" });
-      if (target.id === "astral-settings-menu" || (target.closest && target.closest("#astral-settings-menu"))) setMenu(true, false);
     }
     var card = document.createElement("div");
     card.id = "astral-tour-card";
@@ -615,19 +623,24 @@
     // server step content is text — set via textContent to stay inert
     card.querySelector("#astral-tour-title").textContent = step.title || "";
     card.querySelector("#astral-tour-body").textContent = step.body || "";
-    card.querySelector(".astral-tour-next").addEventListener("click", function () {
+    var next = card.querySelector(".astral-tour-next");
+    next.addEventListener("click", function () {
       if (last) { endTour("completed"); }
       else { tourState.idx++; showTourStep(); }
     });
     var back = card.querySelector(".astral-tour-back");
     if (back) back.addEventListener("click", function () { tourState.idx--; showTourStep(); });
     card.querySelector(".astral-tour-skip").addEventListener("click", function () { endTour("skipped"); });
+    // Each step rebuilds the card, dropping focus to <body>; put it on Next so
+    // Enter keeps advancing for keyboard users.
+    try { next.focus(); } catch (e) {}
   }
   function endTour(outcome) {
+    var wasRunning = !!tourState;
+    tourState = null; // before setMenu so the gear regains focus at tour end
     clearTourHighlight();
     setMenu(false, false);
-    if (tourState) action("chrome_tour_event", { event: outcome });
-    tourState = null;
+    if (wasRunning) action("chrome_tour_event", { event: outcome });
   }
 
   // ---- connection lifecycle ----

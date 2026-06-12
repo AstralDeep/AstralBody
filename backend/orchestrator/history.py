@@ -12,6 +12,37 @@ from shared.database import Database
 
 logger = logging.getLogger('HistoryManager')
 
+# Maximum length of a chat-list preview snippet before truncation (030).
+PREVIEW_MAX_CHARS = 140
+
+
+def _component_preview_text(components) -> str:
+    """Flatten a component-list message into human-readable preview text.
+
+    Feature 030 bug fix: assistant messages are stored as JSON lists of UI
+    component dicts, and the history list previously previewed them with
+    ``str(...)`` — leaking Python repr like ``[{'type': 'text', ...}]``.
+    Walks the components in order, preferring the ``content`` of
+    ``type == "text"`` components, falling back to a component's ``title``,
+    and skipping anything without human text (charts, raw data payloads).
+    Returns the joined pieces with whitespace collapsed; truncation is the
+    caller's responsibility.
+    """
+    parts = []
+    for item in components:
+        if isinstance(item, str):
+            parts.append(item)
+            continue
+        if not isinstance(item, dict):
+            continue
+        text = item.get("content") if item.get("type") == "text" else None
+        if not isinstance(text, str) or not text.strip():
+            text = item.get("title")
+        if isinstance(text, str) and text.strip():
+            parts.append(text)
+    return " ".join(" ".join(parts).split())
+
+
 class HistoryManager:
     def __init__(self, data_dir: str = "data", database_url: str = None):
         self.data_dir = data_dir
@@ -178,12 +209,23 @@ class HistoryManager:
         }
 
     def get_recent_chats(self, limit: int = 20, user_id: str = 'legacy') -> List[Dict]:
-        """Get list of recent chats (metadata only). Excludes draft-test chats."""
+        """Get list of recent chats (metadata only).
+
+        Excludes draft-test chats and zero-message chats (feature 030):
+        eagerly created "New Chat" husks stay out of the listing until
+        their first message lands, at which point the chat appears
+        automatically — chat creation itself is unchanged. Previews are
+        human text: component-list message content is flattened via
+        _component_preview_text() instead of leaking its Python repr,
+        and every preview is truncated to PREVIEW_MAX_CHARS.
+        """
         rows = self.db.fetch_all(
-            "SELECT * FROM chats WHERE user_id = ? AND id NOT LIKE 'draft-test-%' ORDER BY updated_at DESC LIMIT ?",
+            "SELECT * FROM chats WHERE user_id = ? AND id NOT LIKE 'draft-test-%' "
+            "AND EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = chats.id AND m.user_id = chats.user_id) "
+            "ORDER BY updated_at DESC LIMIT ?",
             (user_id, limit),
         )
-        
+
         results = []
         for row in rows:
             # Get last message for preview
@@ -193,13 +235,19 @@ class HistoryManager:
                 content = last_msg['content']
                 try:
                     content_obj = json.loads(content)
-                    if isinstance(content_obj, str):
-                        preview = content_obj
-                    else:
-                        preview = str(content_obj)
                 except Exception:
-                    preview = str(content)
-            
+                    content_obj = content
+                if isinstance(content_obj, str):
+                    preview = content_obj
+                elif isinstance(content_obj, list):
+                    preview = _component_preview_text(content_obj)
+                elif isinstance(content_obj, dict):
+                    preview = _component_preview_text([content_obj])
+                else:
+                    preview = str(content_obj)
+                if len(preview) > PREVIEW_MAX_CHARS:
+                    preview = preview[:PREVIEW_MAX_CHARS] + "..."
+
             # Check if chat has saved components
             has_saved = self.chat_has_saved_components(row['id'], user_id)
             

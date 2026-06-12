@@ -37,8 +37,13 @@ def _safe_filename(name: str, default: str = "file") -> str:
 
 def _write_download_file(args: Dict[str, Any], filename: str, contents: bytes) -> str:
     """Persist ``contents`` under the orchestrator's per-session tmp dir and
-    return a download URL the frontend can fetch via the existing
+    return a ROOT-RELATIVE download URL served by the existing
     ``/api/download/{session_id}/{filename}`` endpoint.
+
+    The URL is deliberately origin-less (``/api/download/...``) so the browser
+    resolves it against whatever origin served the page — a hard-coded
+    ``http://localhost:<port>`` would break every non-localhost deployment
+    (Constitution X).
 
     ``user_id`` / ``session_id`` come from the orchestrator-injected kwargs;
     we fall back to ``"legacy"`` / ``"default"`` for direct unit-test calls.
@@ -53,8 +58,7 @@ def _write_download_file(args: Dict[str, Any], filename: str, contents: bytes) -
     with open(file_path, "wb") as f:
         f.write(contents)
 
-    bff_port = int(os.getenv("ORCHESTRATOR_PORT", 8001))
-    return f"http://localhost:{bff_port}/api/download/{session_id}/{filename}"
+    return f"/api/download/{session_id}/{filename}"
 
 
 # ---------------------------------------------------------------------------

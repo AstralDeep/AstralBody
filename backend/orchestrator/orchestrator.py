@@ -50,7 +50,7 @@ from shared.protocol import (
     validate_streaming_metadata,
 )
 from astralprims import (
-    Text, Card, Alert, Collapsible
+    Text, Card, Alert, Button, Collapsible
 )
 from rote.rote import ROTE
 from shared.feature_flags import flags
@@ -107,6 +107,11 @@ TEXT-ONLY MODE (no agents currently available):
   agents are enabled — never the raw token form.
 - Do NOT fabricate tool output, pretend to have searched/fetched/created anything,
   or invent file/database/API results. If you don't actually know it, say so.
+- When the user asks about recent literature, current events, news, prices, or
+  anything time-sensitive: state clearly that NO live sources were retrieved and
+  that your answer is general background from training data. Do NOT present
+  specific dated findings, statistics, or "last N years" claims as if they were
+  retrieved results, and do NOT enumerate citations you cannot source.
 - If the user asks for an action that would normally require an agent (reading
   a file, searching a system, creating/modifying anything outside this chat),
   briefly note that no agents are currently enabled and suggest the user enable
@@ -257,6 +262,17 @@ _MERGED_COLLIDING_VERBS = frozenset({
     "submit_dataset", "start_training_job", "get_job_status",
     "get_results", "delete_dataset",
 })
+
+# 030: per-tool dispatch ceilings for long-running verbs (everything else
+# keeps the 30 s default). research_brief legitimately performs one search
+# plus several 15 s-bounded page fetches — the default ceiling guaranteed
+# "Tool call timed out" (live incident).
+TOOL_TIMEOUT_OVERRIDES = {
+    "research_brief": 150.0,
+    "fetch_page": 45.0,
+    "summarize_url": 60.0,
+    "compare_documents": 60.0,
+}
 
 
 def remap_merged_source(agent_id: str, tool_name: str):
@@ -649,7 +665,15 @@ class Orchestrator:
         if not ownership:
             default_owner = os.environ.get("DEFAULT_AGENT_OWNER", "")
             if default_owner:
-                self.history.db.set_agent_ownership(card.agent_id, default_owner, is_public=False)
+                # Feature 030: ownerless registrations are operator-bundled
+                # agents (user-created agents get explicit creator ownership
+                # from agent_lifecycle before they register), so default them
+                # PUBLIC — otherwise they are invisible in every Agents tab
+                # and users cannot discover or enable them. Drafts stay
+                # private.
+                self.history.db.set_agent_ownership(
+                    card.agent_id, default_owner,
+                    is_public=not self._is_draft_agent(card.agent_id))
                 ownership = self.history.db.get_agent_ownership(card.agent_id) or {}
                 logger.info(f"Auto-assigned agent '{card.agent_id}' to {default_owner}")
             else:
@@ -1034,7 +1058,17 @@ class Orchestrator:
                     try:
                         if not self._ws_active_chat.get(id(websocket)):
                             from orchestrator.welcome import welcome_components
-                            await self.send_ui_render(websocket, welcome_components())
+                            # Feature 030: tell the welcome canvas whether any
+                            # tools are dispatchable so it can lead with the
+                            # enable-agents consent card instead of promising
+                            # examples that would silently degrade to text.
+                            _welcome_user = self._get_user_id(websocket)
+                            try:
+                                _tools_avail = self.compute_tools_available_for_user(_welcome_user)
+                            except Exception:
+                                _tools_avail = True
+                            await self.send_ui_render(
+                                websocket, welcome_components(tools_available=_tools_avail))
                             self._ws_welcome[id(websocket)] = True
                     except Exception as _e:  # non-fatal — an empty canvas is fine
                         logger.debug(f"welcome canvas render failed (non-fatal): {_e}")
@@ -1745,6 +1779,49 @@ class Orchestrator:
                             asyncio.create_task(self.send_dashboard(client))
                             asyncio.create_task(self.send_agent_list(client))
 
+                elif msg.action == "enable_recommended_agents":
+                    # Feature 030 — one-click consent enable. The click IS the
+                    # explicit user grant (Constitution VII: the system sets
+                    # attenuated scopes automatically; the user may override
+                    # per agent afterwards). Server-side validation: only
+                    # connected, non-draft, PUBLIC agents are eligible and
+                    # ``tools:write`` is never granted. The action is audited
+                    # like every other ui_event (ws.enable_recommended_agents).
+                    requested = msg.payload.get("agent_ids")
+                    if requested is not None and not (
+                        isinstance(requested, list)
+                        and all(isinstance(a, str) for a in requested)
+                    ):
+                        return
+                    enabled_now = self._enable_recommended_agent_scopes(user_id, requested)
+                    if self._ws_welcome.get(id(websocket)):
+                        # Welcome canvas is showing — re-render it so the
+                        # consent card disappears and the examples are live.
+                        from orchestrator.welcome import welcome_components
+                        await self.send_ui_render(websocket, welcome_components(
+                            tools_available=self.compute_tools_available_for_user(user_id)))
+                    else:
+                        await self.send_ui_render(websocket, [Alert(
+                            message=(
+                                f"Enabled {len(enabled_now)} agents for this account "
+                                "(read-only — never write) — ask your question again to use them."
+                                if enabled_now else
+                                "No public agents were available to enable."
+                            ),
+                            variant="success" if enabled_now else "warning",
+                        ).to_dict()], target="chat")
+                    for client in self.ui_clients:
+                        if self._get_user_id(client) == user_id:
+                            asyncio.create_task(self.send_dashboard(client))
+                            asyncio.create_task(self.send_agent_list(client))
+
+                elif msg.action == "schedule_decision":
+                    # Feature 030 — the consent click for a chat-proposed
+                    # scheduled job (audited as ws.schedule_decision plus the
+                    # schedule.* events the handler records).
+                    from orchestrator import scheduling_chat
+                    await scheduling_chat.handle_decision(
+                        self, websocket, user_id, msg.payload or {})
 
                 elif msg.action == "update_device":
                     # ROTE: viewport / capability change from the frontend
@@ -2493,6 +2570,14 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         msg_to_save = display_message if display_message else message
         self.history.add_message(chat_id, "user", msg_to_save, user_id=user_id)
 
+        # Feature 030 — fire-and-forget PHI awareness notice (notify-only,
+        # fail-open; persistence/audit posture unchanged).
+        try:
+            asyncio.create_task(self._notify_phi_if_detected(
+                websocket, chat_id, user_id, msg_to_save))
+        except Exception:
+            logger.debug("phi notice scheduling failed (non-fatal)", exc_info=True)
+
         # Feature 014: create a per-turn ChatStepRecorder. The recorder's
         # WebSocket emits and persistence are PHI-redacted at the boundary
         # via shared.phi_redactor (FR-009b). Stored on the orchestrator so
@@ -2585,6 +2670,18 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
             # Draft test: only include tools from the draft agent being tested
             if draft_agent_id and agent_id != draft_agent_id:
+                continue
+
+            # 030 follow-up: NON-LIVE drafts never enter normal chats. A
+            # draft under self-test registers with the orchestrator and the
+            # test flow enables its scopes — without this skip its generated
+            # tools leaked into every chat, colliding with (and shadowing)
+            # first-party tools (live incident: a generated Serper-keyed
+            # web_search shadowed the keyless built-in one).
+            if not draft_agent_id and self._is_draft_agent(agent_id):
+                logger.debug(
+                    f"Agent '{agent_id}' excluded user={user_id} reason=draft_not_live"
+                )
                 continue
 
             # Per-user agent disable (Feature 013 follow-up): user has
@@ -2708,6 +2805,20 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 tool_to_unqualified[_meta_name] = _meta_name
             meta_tools_injected = True
 
+        # Feature 030 — scheduling from chat: the schedule_recurring_task
+        # meta-tool makes the feature-025 scheduler reachable from the
+        # conversation (a consent card gates creation). Same exclusions as
+        # the 027 meta-tools.
+        from orchestrator import scheduling_chat
+        scheduler_tool_injected = False
+        if scheduling_chat.should_inject(draft_agent_id) and not is_text_only:
+            for _sched_def in scheduling_chat.meta_tool_definitions():
+                _sched_name = _sched_def["function"]["name"]
+                tools_desc.append(_sched_def)
+                tool_to_agent[_sched_name] = scheduling_chat.META_AGENT_ID
+                tool_to_unqualified[_sched_name] = _sched_name
+            scheduler_tool_injected = True
+
         if not tools_desc and draft_agent_id:
             await self.send_ui_render(websocket, [
                 Alert(
@@ -2777,6 +2888,10 @@ PROCESS (Re-Act Loop):
 CRITICAL RULES:
 - **VERIFY**: Check if tool outputs actually contain the data you expect before stating it exists. If a search returns 0 results, do NOT try to graph them.
 - **FINAL RESPONSE**: When you have finished all actions, provide a natural language summary of what you did and what was found.
+- **CHAT IS CONCISE**: Your final chat reply must be SHORT — 2-4 plain sentences, no headings,
+  no tables, no long documents. Substantial content (drafts, documents, lists, tables,
+  structured data) belongs in UI components / tool outputs, not in the chat text; long text
+  replies are moved to the canvas automatically.
 - **VISUALIZATIONS**: If the user asks for a graph, YOU MUST call the graphing tool. Do not just describe the data.
 {canvas_context}
 COMPONENT UPDATE RULES:
@@ -2819,6 +2934,11 @@ COMPONENT UPDATE RULES:
             # Feature 027 — capability-gap guidance accompanies the meta-tools.
             if meta_tools_injected:
                 system_prompt += agentic_creation.SYSTEM_PROMPT_ADDENDUM
+
+            # Feature 030 — recurring-work guidance accompanies the
+            # scheduling meta-tool (stops the model denying the capability).
+            if scheduler_tool_injected:
+                system_prompt += scheduling_chat.SYSTEM_PROMPT_ADDENDUM
 
             # ------------------------------------------------------------------
             # MULTI-TURN LOOP
@@ -2900,9 +3020,39 @@ COMPONENT UPDATE RULES:
                 # operators can distinguish fallback dispatches from
                 # tool-augmented ones (FR-009).
                 call_feature = "chat_dispatch_text_only" if is_text_only else "tool_dispatch"
-                llm_msg, usage = await self._call_llm(
-                    websocket, messages, tools_desc, feature=call_feature
-                )
+                # Feature 030: wrap the (non-streaming, possibly minute-long)
+                # LLM call in a visible chat_step phase — the walkthrough
+                # measured 30-220 s tool-less turns whose ONLY feedback was a
+                # static status line. KIND_PHASE rows persist with the same
+                # PHI redaction as tool steps; failures here never block.
+                _phase_recorder = self._chat_recorders.get(id(websocket))
+                _phase_step_id = None
+                if _phase_recorder is not None:
+                    try:
+                        from orchestrator.chat_steps import KIND_PHASE
+                        _phase_step_id = await _phase_recorder.start(
+                            KIND_PHASE,
+                            "Drafting answer" if is_text_only else
+                            ("Planning next step" if turn_count == 1 else "Analyzing results"),
+                        )
+                    except Exception:
+                        logger.debug("phase step start failed (non-fatal)", exc_info=True)
+                try:
+                    llm_msg, usage = await self._call_llm(
+                        websocket, messages, tools_desc, feature=call_feature
+                    )
+                except Exception:
+                    if _phase_recorder is not None and _phase_step_id:
+                        try:
+                            await _phase_recorder.error(_phase_step_id, "LLM call failed")
+                        except Exception:
+                            pass
+                    raise
+                if _phase_recorder is not None and _phase_step_id:
+                    try:
+                        await _phase_recorder.complete(_phase_step_id)
+                    except Exception:
+                        logger.debug("phase step complete failed (non-fatal)", exc_info=True)
                 self._accumulate_usage(chat_id, usage)
                 if not llm_msg:
                     logger.error("LLM returned None, stopping loop.")
@@ -3076,11 +3226,13 @@ COMPONENT UPDATE RULES:
                             task.tool_calls_made.append(tc.function.name)
                         task.transition(TaskState.RUNNING, current_tool=None)
 
-                    # Loop continues to next turn to let LLM analyze results
+                    # Loop continues to next turn to let LLM analyze results.
+                    # (030: name the writing phase — the walkthrough measured
+                    # up to 124 s behind the old static "Analyzing results...")
                     await self._safe_send(websocket, json.dumps({
                         "type": "chat_status",
                         "status": "thinking",
-                        "message": "Analyzing results..."
+                        "message": "Analyzing results and writing the response..."
                     }))
                 
                 else:
@@ -3222,21 +3374,63 @@ COMPONENT UPDATE RULES:
                             # Persisted history matches what the user sees so a
                             # chat reload re-renders the same alert.
                             response_components = list(leak_alerts) + list(parsed_components)
+                            if is_text_only:
+                                response_components += self._text_only_cta_components(user_id)
                             await self.send_ui_render(websocket, response_components, target="chat")
                         else:
                             # Rich UI components -- canvas gets the parsed components,
-                            # chat gets the leak alerts + Analysis card. The persisted
-                            # message includes BOTH so reload shows the canvas + alerts.
+                            # chat gets the leak alerts + a CONCISE narrative (030:
+                            # the chat rail is words only; a long/structured
+                            # narrative becomes a durable canvas doc card). The
+                            # persisted message includes BOTH so reload shows
+                            # the canvas + alerts.
+                            _tools_ran = bool(task.tool_calls_made) if task else False
+                            if chat_id and self._narrative_is_long(content):
+                                parsed_components = list(parsed_components) + [
+                                    self._narrative_doc_card(chat_id, content)]
+                                chat_core = [
+                                    Text(content=self._concise_lead(content)).to_dict(),
+                                    Text(content="The full write-up is on the canvas.",
+                                         variant="caption").to_dict()]
+                            else:
+                                chat_core = self._chat_narrative(content)
                             final_ops = await self._send_or_replace_components(
                                 websocket, parsed_components, chat_id, user_id=user_id
                             ) or []
-                            chat_summary = list(leak_alerts) + self._chat_narrative(content)
+                            chat_summary = (list(leak_alerts) + chat_core
+                                            + [self._provenance_caption(_tools_ran)])
                             await self.send_ui_render(websocket, chat_summary, target="chat")
                             response_components = list(leak_alerts) + list(parsed_components)
                     else:
-                        response_components = list(leak_alerts) + self._chat_narrative(content)
-                        # Pure text response goes to chat panel
+                        _tools_ran = bool(task.tool_calls_made) if task else False
+                        # 030: long/structured narrative (drafts, documents,
+                        # anything with headings/tables) is promoted to a
+                        # durable canvas card; the chat rail gets a concise
+                        # plain-words lead. Short answers stay chat-only.
+                        narrative_doc = None
+                        if chat_id and self._narrative_is_long(content):
+                            narrative_doc = self._narrative_doc_card(chat_id, content)
+                            final_ops = await self._send_or_replace_components(
+                                websocket, [narrative_doc], chat_id, user_id=user_id) or []
+                            chat_core = [
+                                Text(content=self._concise_lead(content)).to_dict(),
+                                Text(content="The full write-up is on the canvas.",
+                                     variant="caption").to_dict()]
+                        else:
+                            chat_core = self._chat_narrative(content)
+                        response_components = (list(leak_alerts) + chat_core
+                                               + [self._provenance_caption(_tools_ran)])
+                        # Feature 030: text-only turns for a never-configured
+                        # account get a deterministic enable affordance — not
+                        # left to the model's prose (which pointed users at a
+                        # panel where the agents were not even visible).
+                        if is_text_only:
+                            response_components += self._text_only_cta_components(user_id)
+                        # Concise text response goes to chat panel
                         await self.send_ui_render(websocket, response_components, target="chat")
+                        if narrative_doc is not None:
+                            # Persist the doc with the turn so reload shows it.
+                            response_components = [narrative_doc] + response_components
 
                     # Save complete interaction to history
                     self.history.add_message(chat_id, "assistant", response_components, user_id=user_id)
@@ -3986,9 +4180,32 @@ COMPONENT UPDATE RULES:
         # gates (the pseudo-agent has no scopes/credentials; ownership and
         # approval gates live inside the handler — contracts/agentic-creation.md).
         agent_id = tool_to_agent.get(llm_tool_name)
+        if agent_id is None and tool_to_agent:
+            # 030: weak models routinely mangle hyphen/underscore in
+            # collision-qualified names ("web_research-1__web_search" for
+            # "web-research-1__web_search"), which used to dead-end as
+            # "No agent available" — and then bait the model into creating
+            # a duplicate capability. Recover deterministically when the
+            # normalized form matches exactly ONE offered tool.
+            wanted = llm_tool_name.replace("-", "_").lower()
+            matches = [k for k in tool_to_agent
+                       if k.replace("-", "_").lower() == wanted]
+            if len(matches) == 1:
+                logger.info(
+                    "Tool name normalized: %r -> %r", llm_tool_name, matches[0])
+                llm_tool_name = matches[0]
+                tool_name = (tool_to_unqualified or {}).get(llm_tool_name, tool_name)
+                agent_id = tool_to_agent.get(llm_tool_name)
         if agent_id == "__orchestrator__":
             from orchestrator import agentic_creation
             return await agentic_creation.handle_meta_tool(
+                self, tool_name, args, user_id=user_id, chat_id=chat_id, websocket=websocket
+            )
+        if agent_id == "__scheduler__":
+            # Feature 030 — scheduling meta-tool: validation + consent card
+            # only; creation happens in the schedule_decision ui_event.
+            from orchestrator import scheduling_chat
+            return await scheduling_chat.handle_meta_tool(
                 self, tool_name, args, user_id=user_id, chat_id=chat_id, websocket=websocket
             )
 
@@ -4086,6 +4303,31 @@ COMPONENT UPDATE RULES:
             delegation_token = await self._get_delegation_token(websocket, agent_id, user_id)
             if delegation_token:
                 args["_delegation_token"] = delegation_token
+            elif self._delegation_required():
+                # Feature 030 / Constitution VII: agents MUST act under RFC
+                # 8693 delegated tokens. The walkthrough found the deployed
+                # realm missing the tools:* client scopes — every exchange
+                # failed invalid_scope and dispatch silently proceeded
+                # UNSCOPED. Production posture now fails closed with an
+                # actionable operator message; development keeps the
+                # fail-open behavior (warned once per agent) so local stacks
+                # without a fully configured realm still work.
+                err_msg = (
+                    "Tool execution is disabled: delegated authorization "
+                    "(RFC 8693 token exchange) is unavailable for agent "
+                    f"'{agent_id}'. An operator must register the tools:* "
+                    "client scopes on the identity provider (see "
+                    "docs/keycloak-realm-settings.md), or set "
+                    "DELEGATION_REQUIRED=false to accept unscoped dispatch."
+                )
+                logger.error(
+                    "Delegation required but unavailable: agent=%s user=%s — refusing dispatch",
+                    agent_id, user_id,
+                )
+                await self.send_ui_render(websocket, [
+                    Alert(message=err_msg, variant="error").to_dict()
+                ], target="chat")
+                return MCPResponse(error={"message": err_msg, "retryable": False})
 
         # Hook: PRE_TOOL_USE — allows handlers to block or modify tool args
         if flags.is_enabled("hook_system"):
@@ -4193,8 +4435,12 @@ COMPONENT UPDATE RULES:
                 Alert(message=f"Tool '{tool_name}' failed: {err_msg}", variant="error").to_dict()
             ], target="chat")
 
-            # Auto-fix: if this is a draft agent, attempt to fix the tool error automatically
-            if agent_id and hasattr(self, 'lifecycle_manager'):
+            # Auto-fix: if this is a draft agent, attempt to fix the tool
+            # error automatically. 030: the draft check now gates the STATUS
+            # too — previously every errored live tool flashed a misleading
+            # "Auto-fixing..." even though auto_fix only acts on drafts.
+            if (agent_id and hasattr(self, 'lifecycle_manager')
+                    and self.lifecycle_manager._get_draft_by_agent_id(agent_id)):
                 try:
                     await self._safe_send(websocket, json.dumps({
                         "type": "chat_status", "status": "fixing",
@@ -4386,7 +4632,8 @@ COMPONENT UPDATE RULES:
                 if result and result.error:
                     t_name = tool_names[i] if i < len(tool_names) else None
                     a_id = tool_to_agent.get(t_name) if t_name else None
-                    if a_id:
+                    # 030: status only when auto-fix can actually act (drafts).
+                    if a_id and self.lifecycle_manager._get_draft_by_agent_id(a_id):
                         try:
                             await self._safe_send(websocket, json.dumps({
                                 "type": "chat_status", "status": "fixing",
@@ -4426,7 +4673,10 @@ COMPONENT UPDATE RULES:
         last_result = None
 
         for attempt in range(1, max_retries + 1):
-            result = await self.execute_tool_and_wait(agent_id, tool_name, args, ui_websocket=websocket)
+            result = await self.execute_tool_and_wait(
+                agent_id, tool_name, args,
+                timeout=TOOL_TIMEOUT_OVERRIDES.get(tool_name, 30.0),
+                ui_websocket=websocket)
             last_result = result
 
             # Success: no error at all
@@ -4694,6 +4944,21 @@ COMPONENT UPDATE RULES:
             return MCPResponse(request_id=request_id,
                                error={"message": str(e), "retryable": True})
 
+    def _delegation_required(self) -> bool:
+        """Whether tool dispatch must refuse to proceed without a delegated token.
+
+        Constitution VII mandates RFC 8693 delegated tokens for agents.
+        Default: required in production posture (``ASTRAL_ENV`` unset or not
+        ``development`` — the project's fail-closed convention), optional in
+        development. ``DELEGATION_REQUIRED`` overrides either way.
+        """
+        override = os.getenv("DELEGATION_REQUIRED", "").strip().lower()
+        if override in ("1", "true", "yes"):
+            return True
+        if override in ("0", "false", "no"):
+            return False
+        return os.getenv("ASTRAL_ENV", "").strip().lower() != "development"
+
     async def _get_delegation_token(self, websocket, agent_id: str, user_id: str) -> Optional[str]:
         """Generate an RFC 8693 delegation token scoped to safe, allowed tools.
 
@@ -4729,7 +4994,19 @@ COMPONENT UPDATE RULES:
                 raw_token, agent_id, allowed_tools, user_id, enabled_scopes
             )
             if "error" in result:
-                logger.warning(f"Delegation token exchange failed for agent={agent_id}: {result}")
+                # Feature 030: log loudly ONCE per agent instead of warning on
+                # every call — a misconfigured realm previously produced an
+                # identical warning per tool dispatch (pure noise) while the
+                # dispatch itself proceeded unscoped.
+                if not hasattr(self, "_delegation_failed_agents"):
+                    self._delegation_failed_agents = set()
+                if agent_id not in self._delegation_failed_agents:
+                    self._delegation_failed_agents.add(agent_id)
+                    logger.error(
+                        "RFC 8693 token exchange failing for agent=%s (logged once; "
+                        "see docs/keycloak-realm-settings.md): %s", agent_id, result)
+                else:
+                    logger.debug(f"Delegation token exchange failed for agent={agent_id}: {result}")
                 return None
             return result.get("access_token")
         except Exception as e:
@@ -5279,9 +5556,23 @@ COMPONENT UPDATE RULES:
             turn_marker = str(self.history.get_latest_message_id(chat_id, user_id=user_id) or "")
             layout_key = layout_key_for(chat_id, turn_marker)
 
+            _designer_pass = {"n": 0}
+
             async def _designer_llm(messages):
                 # Same credential resolution as the round itself (feature 006,
                 # websocket-scoped) and the same llm_call auditing (FR-028).
+                # Feature 030: each pass announces itself — the walkthrough
+                # measured an 83 s frame-silent gap while the designer worked
+                # behind a stale status line.
+                _designer_pass["n"] += 1
+                try:
+                    await self._safe_send(websocket, json.dumps({
+                        "type": "chat_status", "status": "thinking",
+                        "message": f"Designing your layout (pass {_designer_pass['n']} of "
+                                   f"{ui_designer.designer_max_rounds()})...",
+                    }))
+                except Exception:
+                    logger.debug("designer progress status send failed", exc_info=True)
                 msg, _usage = await self._call_llm(
                     websocket, messages, tools_desc=None,
                     temperature=0.2, feature="ui_designer",
@@ -5676,10 +5967,24 @@ COMPONENT UPDATE RULES:
         return schema
 
     def _is_draft_agent(self, agent_id: str) -> bool:
-        """Hide any agent whose agent_id maps to a non-live draft record."""
+        """Hide any agent whose agent_id maps to a non-live draft record.
+
+        Feature 030: an explicitly PUBLIC agent is never treated as a draft.
+        Lifecycle drafts are always private, so a public ownership row means
+        the slug-reverse draft match was a stale-row false positive — e.g.
+        the live bundled ``etf-tracker-1-1`` agent, whose directory name
+        collides with an old draft slug and was silently hidden from the
+        agent list and Public tab (verified walkthrough finding).
+        """
         if hasattr(self, 'lifecycle_manager'):
             draft = self.lifecycle_manager._find_draft_by_agent_id(agent_id)
             if draft and draft["status"] != "live":
+                try:
+                    ownership = self.history.db.get_agent_ownership(agent_id) or {}
+                except Exception:
+                    ownership = {}
+                if bool(ownership.get("is_public", False)):
+                    return False
                 return True
         return False
 
@@ -5795,6 +6100,168 @@ COMPONENT UPDATE RULES:
                     continue
                 return True
         return False
+
+    def _enable_recommended_agent_scopes(self, user_id: str,
+                                         requested_agent_ids=None) -> List[str]:
+        """Consent-based bulk enable for the public catalog (feature 030).
+
+        For every connected, non-draft, PUBLIC agent (optionally narrowed to
+        ``requested_agent_ids``), grants the scopes its registered tools
+        actually use — minus ``tools:write``, which is never granted here
+        (Constitution VII: attenuated, system-computed scopes; explicit user
+        click as the grant). Unknown, private, or draft ids are silently
+        ignored. Returns the agent ids that were enabled.
+        """
+        ownership_map = {o["agent_id"]: o for o in self.history.db.get_all_agent_ownership()}
+        enabled: List[str] = []
+        for agent_id in list(self.agent_cards.keys()):
+            if requested_agent_ids is not None and agent_id not in requested_agent_ids:
+                continue
+            if self._is_draft_agent(agent_id):
+                continue
+            if not bool(ownership_map.get(agent_id, {}).get("is_public", False)):
+                continue
+            scopes = self.tool_permissions.scopes_required_by_tools(agent_id)
+            if not scopes:
+                continue
+            self.tool_permissions.set_agent_scopes(
+                user_id, agent_id, {s: True for s in scopes})
+            enabled.append(agent_id)
+        if enabled:
+            logger.info(
+                f"Consent enable (030): user={user_id} agents={enabled} (write excluded)")
+        return enabled
+
+    # 030: chat rail vs canvas split — the chat bubble stays concise words;
+    # long/structured narrative content is promoted to a durable canvas card.
+    _NARRATIVE_PROMOTE_CHARS = 700
+
+    @classmethod
+    def _narrative_is_long(cls, content: str) -> bool:
+        """True when a final narrative is too long/structured for the chat rail."""
+        c = content or ""
+        return (len(c) > cls._NARRATIVE_PROMOTE_CHARS
+                or bool(re.search(r"(?m)^#{1,6}\s", c))
+                or bool(re.search(r"(?m)^\|.+\|\s*$", c)))
+
+    @staticmethod
+    def _concise_lead(content: str, limit: int = 320) -> str:
+        """First plain sentences of a narrative — headings/tables stripped."""
+        lines = [ln for ln in (content or "").splitlines()
+                 if ln.strip() and not ln.lstrip().startswith(("#", "|", ">"))]
+        text = " ".join(" ".join(lines).split())
+        if not text:
+            text = " ".join((content or "").split())
+        if len(text) <= limit:
+            return text
+        cut = text[:limit]
+        for sep in (". ", "! ", "? "):
+            idx = cut.rfind(sep)
+            if idx > 80:
+                return cut[:idx + 1]
+        return cut.rsplit(" ", 1)[0] + "…"
+
+    @staticmethod
+    def _narrative_doc_card(chat_id: str, content: str) -> Dict[str, Any]:
+        """Durable canvas card for a long-form narrative (drafts, documents).
+
+        Identity is derived from the chat and the document's own first
+        heading, so iterating on the same document ("revise the aims")
+        SUPERSEDES it in place while a different document appends — the
+        walkthrough found grant deliverables vanishing into chat scroll with
+        no workspace identity at all.
+        """
+        import hashlib
+        m = re.search(r"(?m)^#{1,6}\s+(.+)$", content or "")
+        title = (m.group(1).strip()[:120] if m else "Document")
+        digest = hashlib.sha1(f"{chat_id}|{title}".encode("utf-8")).hexdigest()[:12]
+        return Card(id=f"doc_{digest}", title=title, content=[
+            Text(content=content, variant="markdown"),
+        ]).to_dict()
+
+    @staticmethod
+    def _provenance_caption(tools_ran: bool) -> Dict[str, Any]:
+        """Deterministic provenance chip for chat replies (feature 030).
+
+        The walkthrough found clinical/grant prose presented authoritatively
+        with no provenance at all. This caption is server-composed (never
+        left to the model) and distinguishes model-memory answers from
+        tool-grounded ones. Renderer-level honesty, model-independent.
+        """
+        if tools_ran:
+            text = "Based on this turn's tool results — sources and steps are shown above."
+        else:
+            text = ("Model knowledge only — no live tools or sources were used in this "
+                    "reply. Verify independently before relying on it.")
+        return Text(content=text, variant="caption").to_dict()
+
+    async def _notify_phi_if_detected(self, websocket, chat_id: str,
+                                      user_id: str, message: str) -> None:
+        """Notify-only PHI awareness for chat input (feature 030).
+
+        Fires a transient chat Alert when a user message LOOKS like it
+        contains PHI. Detection is fail-open (a missing/erroring analyzer
+        never fires the notice) and the persistence posture is unchanged:
+        the message stays in the transcript, cross-session memory keeps its
+        fail-closed Presidio gate, and audit stays content-free. Shown at
+        most once per chat per socket. Never raises into the chat turn.
+        """
+        try:
+            if not message or not chat_id:
+                return
+            if not hasattr(self, "_phi_notified"):
+                self._phi_notified = set()
+            key = (id(websocket), chat_id)
+            if key in self._phi_notified:
+                return
+            from personalization.phi_gate import get_phi_gate
+            gate = get_phi_gate()
+            hit = await asyncio.to_thread(gate.detect_for_notice, message)
+            if not hit:
+                return
+            self._phi_notified.add(key)
+            logger.info(f"phi_notice.shown chat_id={chat_id}")  # content-free
+            await self.send_ui_render(websocket, [Alert(
+                title="Possible PHI in your message",
+                message=("This looks like it may contain protected health information. "
+                         "It stays in this chat's transcript only — it is never added to "
+                         "cross-session memory, and audit logs record message lengths, "
+                         "not content. Prefer synthetic or de-identified data where "
+                         "possible."),
+                variant="warning",
+            ).to_dict()], target="chat")
+        except Exception:
+            logger.debug("phi notice failed (non-fatal)", exc_info=True)
+
+    def _text_only_cta_components(self, user_id: str) -> List[Dict[str, Any]]:
+        """Deterministic enable affordance for text-only replies (feature 030).
+
+        Appended server-side to the chat reply when a turn dispatched with
+        zero tools AND the user has never enabled any agent scope — the
+        never-configured state the walkthrough showed every fresh account
+        lands in. Users who deliberately disabled their agents (rows exist,
+        some enabled elsewhere) are not nagged. Composed of astralprims
+        primitives per Constitution II/VIII; the buttons route through the
+        audited ``enable_recommended_agents`` / ``chrome_open`` actions.
+        """
+        try:
+            if self.tool_permissions.has_any_enabled_scope(user_id):
+                return []
+        except Exception:
+            return []
+        return [
+            Alert(
+                message=("Answered without agents — live search, data and "
+                         "interactive components are currently off for this "
+                         "account."),
+                variant="info",
+            ).to_dict(),
+            Button(label="Enable recommended agents",
+                   action="enable_recommended_agents",
+                   payload={"source": "text_only"}).to_dict(),
+            Button(label="Choose agents individually", action="chrome_open",
+                   payload={"surface": "agents"}, variant="secondary").to_dict(),
+        ]
 
     async def send_agent_list(self, websocket):
         """Send list of connected agents."""
@@ -5978,6 +6445,17 @@ COMPONENT UPDATE RULES:
 
         asyncio.create_task(_revocation_queue_loop())
 
+        # 030: purge permission rows leaked by drafts discarded before the
+        # delete-time purge existed (run in a thread — pure DB/dir checks).
+        try:
+            purged = await asyncio.to_thread(
+                self.lifecycle_manager.reconcile_orphaned_draft_permissions)
+            if purged:
+                logger.info("Startup sweep purged leaked draft permissions "
+                            f"for {purged} agent id(s)")
+        except Exception:
+            logger.debug("draft permission sweep failed (non-fatal)", exc_info=True)
+
         # Auto-discover agents (continuous monitor)
         agent_port = int(os.getenv("AGENT_PORT", 8003))
         max_agents = int(os.getenv("MAX_AGENTS", 10))
@@ -6077,9 +6555,26 @@ COMPONENT UPDATE RULES:
             version="1.0.0",
             openapi_tags=tags_metadata,
             docs_url="/api/docs",
-            redoc_url=None,
+            redoc_url="/api/redoc",
             openapi_url="/api/openapi.json",
         )
+
+        # Constitution VI: interactive API docs MUST answer at the literal
+        # /docs URL. The canonical pages stay /api-namespaced; these aliases
+        # redirect (no second Swagger mount, no schema duplication).
+        from fastapi.responses import RedirectResponse as _DocsRedirect
+
+        @app.get("/docs", include_in_schema=False)
+        async def _docs_alias():
+            return _DocsRedirect("/api/docs")
+
+        @app.get("/redoc", include_in_schema=False)
+        async def _redoc_alias():
+            return _DocsRedirect("/api/redoc")
+
+        @app.get("/openapi.json", include_in_schema=False)
+        async def _openapi_alias():
+            return _DocsRedirect("/api/openapi.json")
 
         # CORS — the web UI is same-origin since feature 026 (the orchestrator
         # serves it), so cross-origin access is the exception, not the rule.
