@@ -33,6 +33,23 @@ class GeneralAgent(BaseA2AAgent):
 
     def __init__(self, port: int = DEFAULT_PORT):
         super().__init__(MCPServer(), port=port)
+        # Feature 002/031: the file-reader tools (read_document, read_spreadsheet,
+        # read_presentation, read_text, read_image, list_attachments, …) resolve
+        # attachments through the shared Database via file_tools.resolve_attachment.
+        # The general agent runs as its OWN process (start.py launches it as a
+        # subprocess), so the orchestrator's register_database() — which runs in a
+        # DIFFERENT process — never reaches it. Without this, every file read
+        # fast-fails with "no Database wired" (the upload parses fine, but the
+        # reader tool errors). Wire it here so file readers work in this process.
+        try:
+            from agents.general.file_tools import register_database
+            from shared.database import Database
+            register_database(Database())
+            logging.getLogger("GeneralAgent").info("file_tools DB wired for read_* tools")
+        except Exception:
+            logging.getLogger("GeneralAgent").warning(
+                "file_tools DB wiring failed; file readers will be unavailable",
+                exc_info=True)
 
 
 if __name__ == "__main__":
