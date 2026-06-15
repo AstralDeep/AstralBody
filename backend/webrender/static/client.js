@@ -281,14 +281,20 @@
         // server-rendered `html` form — no more empty bubbles. The workspace
         // itself re-hydrates via the ui_render the server pushes right after.
         if (data.chat && data.chat.messages) data.chat.messages.forEach(function (m) {
-          // Feature 031: re-hydrated attachment chips on history user messages.
-          var attSuffix = "";
+          // Feature 031: re-hydrated attachment chips LEAD the user's message
+          // (consistent with the live-send rendering above).
+          var attLabel = "";
           if (m.attachments && m.attachments.length) {
-            attSuffix = "\n📎 " + m.attachments.map(function (a) { return a.filename; }).join(", ");
+            attLabel = "📎 " + m.attachments.map(function (a) { return a.filename; }).join(", ");
           }
-          if (typeof m.content === "string") appendChatBubble(m.role, escapeText(m.content + attSuffix));
-          else if (m.html) appendChatBubble(m.role, m.html + (attSuffix ? "<div class=\"text-xs text-astral-muted mt-1\">" + escapeText(attSuffix) + "</div>" : ""));
-          else appendChatBubble(m.role, attSuffix ? escapeText(attSuffix) : "");
+          if (typeof m.content === "string") {
+            var body = attLabel ? (m.content ? attLabel + "\n" + m.content : attLabel) : m.content;
+            appendChatBubble(m.role, escapeText(body));
+          } else if (m.html) {
+            appendChatBubble(m.role, (attLabel ? "<div class=\"text-xs text-astral-muted mb-1\">" + escapeText(attLabel) + "</div>" : "") + m.html);
+          } else {
+            appendChatBubble(m.role, attLabel ? escapeText(attLabel) : "");
+          }
         });
         break;
       case "user_preferences":
@@ -329,7 +335,8 @@
     var bubble = message || "";
     if (ready.length) {
       var names = ready.map(function (a) { return a.filename; }).join(", ");
-      bubble = (bubble ? bubble + "\n" : "") + "📎 " + names;
+      // Lead the request with the attachment(s) rather than trailing them.
+      bubble = "📎 " + names + (bubble ? "\n" + bubble : "");
     }
     appendChatBubble("user", escapeText(bubble));
     var payload = { message: message || "", chat_id: activeChatId };
