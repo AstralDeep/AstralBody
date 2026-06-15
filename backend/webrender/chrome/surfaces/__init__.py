@@ -37,6 +37,8 @@ SURFACE_MODULES = {
     "admin_tools": "webrender.chrome.surfaces.admin_tools",
     # Feature 028 — read-only workspace timeline (research D14).
     "workspace_timeline": "webrender.chrome.surfaces.workspace_timeline",
+    # Feature 031 — attachment library (browse / reuse / delete).
+    "attachments": "webrender.chrome.surfaces.attachments",
 }
 
 

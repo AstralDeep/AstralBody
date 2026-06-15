@@ -215,12 +215,17 @@ def _summarize_outputs(outputs: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 async def _self_test_draft(orch, draft: Dict[str, Any], user_request: str,
-                           user_id: str) -> Dict[str, Any]:
+                           user_id: str, attachments=None) -> Dict[str, Any]:
     """Run the user's originating request as a draft-test chat turn.
 
     Executes on a ``VirtualWebSocket`` (audit-attributable, no real socket)
     in an isolated chat so the user's conversation is not polluted. Bounded
     by ``SELF_TEST_TIMEOUT_S`` (A11).
+
+    Feature 031: ``attachments`` lets an auto-created *parser* draft self-test
+    against the exact uploaded file that triggered its creation — the structured
+    attachment block is injected so the draft's ``parse_<ext>`` tool runs on the
+    real file.
     """
     from orchestrator.async_tasks import BackgroundTask, VirtualWebSocket
 
@@ -233,6 +238,7 @@ async def _self_test_draft(orch, draft: Dict[str, Any], user_request: str,
             orch.handle_chat_message(
                 vws, user_request, test_chat_id,
                 user_id=user_id, draft_agent_id=draft["id"],
+                attachments=attachments,
             ),
             timeout=SELF_TEST_TIMEOUT_S,
         )
@@ -643,6 +649,20 @@ def _owned_draft(orch, user_id: str, payload: Dict[str, Any]) -> Optional[Dict[s
     return draft
 
 
+def _decidable_draft(orch, user_id: str, roles, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Draft the caller may refine/discard: the owner, OR an admin acting on an
+    auto-created attachment parser (origin ``auto_attachment``, feature 031)."""
+    draft_id = str(payload.get("draft_id") or "")
+    draft = orch.history.db.get_draft_agent(draft_id) if draft_id else None
+    if not draft:
+        return None
+    if draft.get("user_id") == user_id:
+        return draft
+    if draft.get("origin") == "auto_attachment" and "admin" in (roles or []):
+        return draft
+    return None
+
+
 async def _send_chat_card(orch, websocket, component: Dict[str, Any]):
     await orch.send_ui_render(websocket, [component], target="chat")
 
@@ -676,25 +696,117 @@ def _terminal_card(draft_id: str, title: str, message: str) -> Dict[str, Any]:
     ]).to_dict()
 
 
+async def _promote_parser_global(orch, draft, agent_id, *, approved_by):
+    """Feature 031 (FR-017): promote an approved attachment parser to a global,
+    public capability and mark the registry live so every user's future uploads
+    of that type resolve to ``covered``. Best-effort; never raises.
+    """
+    try:
+        from orchestrator import attachment_autoparse
+        from orchestrator.attachments.parser_repo import AttachmentParserRepository
+
+        parser_repo = AttachmentParserRepository(orch.history.db)
+        row = parser_repo.get_by_draft(draft["id"]) or {}
+        gap = row.get("gap_fingerprint")
+        extension = row.get("extension")
+        requested_by = row.get("requested_by")
+        tool_name = attachment_autoparse._tool_name_for(extension)
+
+        # Make the agent public (global), then mark the registry live.
+        try:
+            orch.history.db.set_agent_visibility(agent_id, True)
+        except Exception:
+            logger.debug("autoparse: set_agent_visibility failed", exc_info=True)
+        if gap:
+            parser_repo.mark_live(gap, live_agent_id=agent_id, tool_name=tool_name,
+                                  approved_by=approved_by)
+
+        # Enable the (read-only) scopes the parser needs for the originating
+        # user so it's usable immediately; other users pick it up via the
+        # public-catalog consent path (feature 030).
+        try:
+            scopes = orch.tool_permissions.scopes_required_by_tools(agent_id) or []
+            grant = {s: True for s in scopes if s != "tools:write"}
+            if grant and requested_by:
+                orch.tool_permissions.set_agent_scopes(requested_by, agent_id, grant)
+        except Exception:
+            logger.debug("autoparse: scope grant failed", exc_info=True)
+
+        # FR-017 / 031 T031: the parser is live and the uploader is scoped, so
+        # re-run their original request and deliver the parsed result into the
+        # original chat. If the original turn can't be recovered/replayed, fall
+        # back to the notify ("ask again to read your file").
+        if requested_by:
+            replayed = await attachment_autoparse.auto_continue_after_go_live(
+                orch,
+                requested_by=requested_by,
+                source_chat_id=row.get("source_chat_id") or draft.get("source_chat_id"),
+                source_attachment_id=(row.get("source_attachment_id")
+                                      or draft.get("source_attachment_id")),
+                extension=extension,
+                category=row.get("category"),
+            )
+            if replayed:
+                await attachment_autoparse._notify_user(
+                    orch, requested_by,
+                    f"The .{extension} reader is live — I re-read your file; "
+                    "see the new reply in your chat.")
+            else:
+                await attachment_autoparse._notify_user(
+                    orch, requested_by,
+                    f"The .{extension} reader is live — ask again to read your file.")
+    except Exception:
+        logger.exception("autoparse: global promotion failed for draft %s", draft.get("id"))
+
+
 async def _h_draft_approve(orch, websocket, user_id, roles, payload):
-    """Approve a draft: existing security gate → live (US1 scenario 4)."""
-    draft = _owned_draft(orch, user_id, payload)
-    if draft is None:
-        await _send_chat_card(orch, websocket, _error_card("Draft not found (it may have been discarded)."))
-        return None
+    """Approve a draft: existing security gate → live (US1 scenario 4).
+
+    Feature 031: auto-created attachment-parser drafts (origin
+    ``auto_attachment``) require the **admin** role to approve (FR-015) and are
+    promoted **globally** (public, available to all users — FR-017), not into
+    the approver's private fleet. Non-admins are refused and audited.
+    """
+    draft_id = str(payload.get("draft_id") or "")
+    raw_draft = orch.history.db.get_draft_agent(draft_id) if draft_id else None
+    is_autoparse = bool(raw_draft and raw_draft.get("origin") == "auto_attachment")
+
+    if is_autoparse:
+        # Admin-only approval; the uploader (owner) cannot self-approve.
+        if "admin" not in (roles or []):
+            await _audit(user_id, "lifecycle.rejected",
+                         f"Non-admin approval attempt on parser draft {draft_id}",
+                         correlation_id=draft_id, outcome="failure")
+            await _send_chat_card(orch, websocket, _error_card(
+                "Approving an auto-created file parser requires the admin role."))
+            return None
+        draft = raw_draft
+    else:
+        draft = _owned_draft(orch, user_id, payload)
+        if draft is None:
+            await _send_chat_card(orch, websocket, _error_card("Draft not found (it may have been discarded)."))
+            return None
+
     result = await orch.lifecycle_manager.approve_agent(draft["id"], websocket=websocket)
     status = (result or {}).get("status")
     corr = draft["id"]
     if status == "live":
+        agent_id = f"{draft['agent_slug'].replace('_', '-')}-1"
+        if is_autoparse:
+            await _promote_parser_global(orch, draft, agent_id, approved_by=user_id)
         await _audit(user_id, "lifecycle.approved", f"Draft {draft['id']} approved → live",
-                     correlation_id=corr, agent_id=f"{draft['agent_slug'].replace('_', '-')}-1")
+                     correlation_id=corr, agent_id=agent_id)
+        live_msg = ("Security checks passed. The parser is live and available to everyone — "
+                    "re-upload or ask again to read that file type."
+                    if is_autoparse else
+                    "Security checks passed. The agent joined your fleet and is usable "
+                    "right now — just ask again.")
         await _send_chat_card(orch, websocket, Card(title=f"{draft['agent_name']} is live", content=[
-            Text(content="Security checks passed. The agent joined your fleet and is usable "
-                         "right now — just ask again.", variant="default").to_dict(),
+            Text(content=live_msg, variant="default").to_dict(),
         ]).to_dict())
         await _replace_card_state(orch, websocket, user_id, draft["id"], _terminal_card(
             draft["id"], f"✓ Approved: {draft['agent_name']}",
-            "Approved and live in your fleet — ask again to use it."))
+            "Approved and live — ask again to use it."))
     else:
         detail = (result or {}).get("error_message") or f"status: {status}"
         await _audit(user_id, "lifecycle.rejected", f"Draft {draft['id']} not promoted ({status})",
@@ -710,7 +822,7 @@ async def _h_draft_approve(orch, websocket, user_id, roles, payload):
 
 async def _h_draft_refine(orch, websocket, user_id, roles, payload):
     """Refine a draft conversationally (US1 scenario 5)."""
-    draft = _owned_draft(orch, user_id, payload)
+    draft = _decidable_draft(orch, user_id, roles, payload)
     if draft is None:
         await _send_chat_card(orch, websocket, _error_card("Draft not found (it may have been discarded)."))
         return None
@@ -742,10 +854,23 @@ async def _h_draft_refine(orch, websocket, user_id, roles, payload):
 
 async def _h_draft_discard(orch, websocket, user_id, roles, payload):
     """Decline/discard a draft (FR-002: declined drafts are removed)."""
-    draft = _owned_draft(orch, user_id, payload)
+    draft = _decidable_draft(orch, user_id, roles, payload)
     if draft is None:
         await _send_chat_card(orch, websocket, _error_card("Draft not found (already discarded?)."))
         return None
+    # Feature 031: if this is an auto-created parser, mark its registry row
+    # discarded so the format can be re-attempted by a later upload.
+    if draft.get("origin") == "auto_attachment":
+        try:
+            from orchestrator.attachments.parser_repo import (
+                AttachmentParserRepository, STATUS_DISCARDED,
+            )
+            _pr = AttachmentParserRepository(orch.history.db)
+            _row = _pr.get_by_draft(draft["id"])
+            if _row:
+                _pr.mark_status(_row["gap_fingerprint"], STATUS_DISCARDED)
+        except Exception:
+            logger.debug("autoparse: discard registry update failed", exc_info=True)
     await orch.lifecycle_manager.delete_draft(draft["id"])
     await _audit(user_id, "lifecycle.discarded", f"Draft {draft['id']} discarded",
                  correlation_id=draft["id"])

@@ -1260,13 +1260,20 @@ class Orchestrator:
                     display_message = msg.payload.get("display_message")
                     async_mode = msg.payload.get("async_mode", False)
 
+                    # Feature 031: structured attachment references staged on
+                    # this turn. Each entry: {attachment_id, filename, category}.
+                    # Validated for ownership inside handle_chat_message; absent
+                    # / non-list ≡ no attachments (backward compatible).
+                    attachments_raw = msg.payload.get("attachments")
+                    attachments = attachments_raw if isinstance(attachments_raw, list) else None
+
                     # 020-async-queries: if async_mode is True, dispatch as
                     # a background task instead of blocking the WS.
                     if async_mode:
                         await self._dispatch_async_chat(
                             websocket, user_message, chat_id, display_message,
                             user_id=user_id, draft_agent_id=draft_agent_id,
-                            selected_tools=selected_tools,
+                            selected_tools=selected_tools, attachments=attachments,
                         )
                     else:
                         self.cancelled_sessions[id(websocket)] = False
@@ -1275,7 +1282,7 @@ class Orchestrator:
                         await self._serialized_chat(
                             websocket, user_message, chat_id, display_message,
                             user_id=user_id, draft_agent_id=draft_agent_id,
-                            selected_tools=selected_tools,
+                            selected_tools=selected_tools, attachments=attachments,
                         )
 
                 elif msg.action == "cancel_task":
@@ -1452,6 +1459,29 @@ class Orchestrator:
                                         logger.debug("transcript render failed for message %s", m.get("id"), exc_info=True)
                         except Exception:
                             logger.exception("webrender unavailable for transcript rendering")
+
+                        # Feature 031: re-hydrate per-turn attachment references
+                        # so the client re-renders attachment chips on loaded
+                        # user messages (additive `attachments` field).
+                        try:
+                            from orchestrator.attachments.message_attachment_repo import MessageAttachmentRepository
+                            from orchestrator.attachments.repository import AttachmentRepository
+                            _link_repo = MessageAttachmentRepository(self.history.db)
+                            _att_repo = AttachmentRepository(self.history.db)
+                            for m in chat.get("messages", []):
+                                if m.get("role") != "user" or not m.get("id"):
+                                    continue
+                                links = _link_repo.list_for_message(m["id"], user_id)
+                                atts = []
+                                for ln in links:
+                                    a = _att_repo.get_by_id(ln["attachment_id"], user_id)
+                                    if a is not None:
+                                        atts.append({"attachment_id": a.attachment_id,
+                                                     "filename": a.filename, "category": a.category})
+                                if atts:
+                                    m["attachments"] = atts
+                        except Exception:
+                            logger.debug("attachment re-hydration failed (non-fatal)", exc_info=True)
 
                         await self._safe_send(websocket, json.dumps({
                             "type": "chat_loaded",
@@ -2383,7 +2413,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     break
         return asyncio.create_task(_heartbeat_loop())
 
-    async def _serialized_chat(self, websocket, message, chat_id, display_message, *, user_id=None, draft_agent_id=None, selected_tools=None):
+    async def _serialized_chat(self, websocket, message, chat_id, display_message, *, user_id=None, draft_agent_id=None, selected_tools=None, attachments=None):
         """Run handle_chat_message under a per-websocket lock so messages
         are serialized but the WS receive loop is never blocked."""
         ws_id = id(websocket)
@@ -2393,7 +2423,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 await self.handle_chat_message(
                     websocket, message, chat_id, display_message,
                     user_id=user_id, draft_agent_id=draft_agent_id,
-                    selected_tools=selected_tools,
+                    selected_tools=selected_tools, attachments=attachments,
                 )
             except Exception as e:
                 # Full details (including any upstream HTML payload, stack
@@ -2444,7 +2474,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
     async def _dispatch_async_chat(
         self, websocket, message: str, chat_id: str, display_message: str = None,
-        *, user_id=None, draft_agent_id=None, selected_tools=None,
+        *, user_id=None, draft_agent_id=None, selected_tools=None, attachments=None,
     ):
         """020-async-queries: Dispatch a chat message as a background task.
 
@@ -2454,11 +2484,12 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         """
         logger.info("Dispatching async chat for chat_id=%s user_id=%s", chat_id, user_id)
 
-        async def _run_in_background(vws, msg, cid, display, uid, draft, tools):
+        async def _run_in_background(vws, msg, cid, display, uid, draft, tools, atts):
             """Execute handle_chat_message with the virtual WS."""
             await self.handle_chat_message(
                 vws, msg, cid, display,
                 user_id=uid, draft_agent_id=draft, selected_tools=tools,
+                attachments=atts,
             )
 
         bg_task = await self.async_task_manager.submit(
@@ -2471,6 +2502,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             uid=user_id or self._get_user_id(websocket),
             draft=draft_agent_id,
             tools=selected_tools,
+            atts=attachments,
         )
 
         # Register the submitting websocket as a watcher
@@ -2589,13 +2621,112 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             extra={"user_id": user_id, "sockets": sent, "kind": payload.get("type")},
         )
 
-    async def handle_chat_message(self, websocket, message: str, chat_id: str, display_message: str = None, user_id: str = None, draft_agent_id: str = None, selected_tools=None):
+    async def _attach_turn_attachments(self, websocket, message, chat_id, user_id, turn_message_id, attachments):
+        """Feature 031: validate, link, and surface this turn's attachments.
+
+        Each staged attachment is ownership-validated; valid ones are linked to
+        the persisted user message (``message_attachment``) and listed in a
+        structured "Attachments on this turn" block appended to the LLM-facing
+        message (with the reader tool that can parse each, or "pending parser").
+        Foreign/invalid/deleted references are dropped and audited — never
+        parsed. Capped at 10 per turn. Returns the (possibly augmented) message.
+        """
+        try:
+            from orchestrator.attachments.repository import AttachmentRepository
+            from orchestrator.attachments.message_attachment_repo import MessageAttachmentRepository
+            from orchestrator.attachments.parser_repo import AttachmentParserRepository
+            from orchestrator import parser_registry
+        except Exception:
+            logger.warning("attachment wiring imports failed (non-fatal)", exc_info=True)
+            return message
+
+        db = self.history.db
+        att_repo = AttachmentRepository(db)
+        link_repo = MessageAttachmentRepository(db)
+        parser_repo = AttachmentParserRepository(db)
+
+        async def _audit_drop(aid):
+            try:
+                from audit.recorder import get_recorder
+                from audit.schemas import AuditEventCreate
+                rec = get_recorder()
+                if rec is None:
+                    return
+                await rec.record(AuditEventCreate(
+                    actor_user_id=user_id or "legacy",
+                    auth_principal=user_id or "legacy",
+                    event_class="file",
+                    action_type="attachment_reference_denied",
+                    description=f"Dropped unauthorized/invalid attachment reference {aid}",
+                    conversation_id=chat_id,
+                    outcome="failure",
+                ))
+            except Exception:
+                logger.debug("attachment drop audit failed", exc_info=True)
+
+        MAX_PER_TURN = 10
+        accepted = []
+        dropped = 0
+        seen = set()
+        for entry in (attachments or [])[:50]:
+            if len(accepted) >= MAX_PER_TURN:
+                break
+            aid = entry.get("attachment_id") if isinstance(entry, dict) else None
+            if not aid or aid in seen:
+                continue
+            seen.add(aid)
+            att = None
+            try:
+                att = att_repo.get_by_id(aid, user_id)
+            except Exception:
+                logger.debug("attachment lookup failed", exc_info=True)
+            if att is None:
+                dropped += 1
+                await _audit_drop(aid)
+                continue
+            try:
+                link_repo.insert(chat_id=chat_id, attachment_id=aid,
+                                 user_id=user_id, message_id=turn_message_id)
+            except Exception:
+                logger.debug("message_attachment insert failed", exc_info=True)
+            try:
+                cov = parser_registry.coverage(att.extension, att.category, parser_repo=parser_repo)
+                readable = cov["tool"] if cov.get("covered") else "pending parser"
+            except Exception:
+                readable = "unknown"
+            accepted.append((att, readable))
+
+        if accepted:
+            lines = ["[Attachments on this turn]"]
+            for att, readable in accepted:
+                lines.append(
+                    f'- id={att.attachment_id} name="{att.filename}" '
+                    f"category={att.category} (readable: {readable})"
+                )
+            message = message + "\n\n" + "\n".join(lines)
+        if dropped:
+            try:
+                await self._safe_send(websocket, json.dumps({
+                    "type": "chat_status", "status": "info",
+                    "message": f"{dropped} attachment(s) couldn't be used and were skipped.",
+                }))
+            except Exception:
+                pass
+        return message
+
+    async def handle_chat_message(self, websocket, message: str, chat_id: str, display_message: str = None, user_id: str = None, draft_agent_id: str = None, selected_tools=None, attachments=None):
         """Process a chat message: LLM determines which tools to call (Multi-Turn Re-Act Loop).
 
         Feature 013 / FR-018, FR-020, FR-023: ``selected_tools`` is the
         user's in-chat tool-picker subset. When not None, the per-turn
         filter loop excludes any tool not in the subset — narrowing only,
         never widening (scope/per-tool permissions are still enforced).
+
+        Feature 031: ``attachments`` is the list of attachment references the
+        user staged on this turn ({attachment_id, filename, category}). Each is
+        ownership-validated, linked to the persisted message, and surfaced to
+        the LLM as a structured "Attachments on this turn" block so it calls the
+        right reader tool with the real attachment_id.
         """
         logger.info(f"Processing chat message: '{message}' for chat_id {chat_id}")
         if user_id is None:
@@ -2626,6 +2757,10 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                         selected_tools = saved
             except Exception as e:  # pragma: no cover — defensive
                 logger.debug(f"Could not resolve saved tool selection: {e}")
+        # Feature 031: an attachments-only turn (no typed text) still proceeds —
+        # synthesize a minimal instruction so the LLM engages with the files.
+        if (not message) and attachments:
+            message = "Please review the attached file(s)."
         if not message:
             logger.warning("Empty message received")
             return
@@ -2729,6 +2864,16 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             backend_path = upload_match.group(2)
             logger.info(f"Captured file upload mapping: {original_name} -> {backend_path}")
             self.history.add_file_mapping(chat_id, original_name, backend_path, user_id=user_id)
+
+        # Feature 031: validate/link/surface this turn's structured attachments.
+        # Augments the LLM-facing `message` with an "Attachments on this turn"
+        # block; the SAVED history message (msg_to_save) stays the user's text.
+        if attachments:
+            try:
+                message = await self._attach_turn_attachments(
+                    websocket, message, chat_id, user_id, turn_message_id, attachments)
+            except Exception:
+                logger.warning("attachment turn-processing failed (non-fatal)", exc_info=True)
 
         # Async title summarization for new chats
         chat_data = self.history.get_chat(chat_id, user_id=user_id)
@@ -6857,6 +7002,16 @@ COMPONENT UPDATE RULES:
             except Exception:
                 logger.debug("session_resumed_flag failed", exc_info=True)
             shell = shell.replace("%%ASTRAL_RESUMED%%", resumed_flag)
+            # Feature 031: inject the file-input `accept` list from the server's
+            # content_type allow-list so the picker offers exactly the accepted
+            # extensions (single source of truth; server still validates uploads).
+            accept_attr = ""
+            try:
+                from orchestrator.attachments.content_type import ACCEPTED_EXTENSIONS
+                accept_attr = ",".join("." + e for e in sorted(ACCEPTED_EXTENSIONS))
+            except Exception:
+                logger.debug("attachment accept-list injection failed", exc_info=True)
+            shell = shell.replace("%%ASTRAL_ACCEPT%%", accept_attr)
             return _HTMLResponse(shell.replace("%%ASTRAL_TOPBAR%%", topbar))
 
         app.mount("/static", StaticFiles(directory=_os.path.join(_webrender_dir, "static")), name="static")

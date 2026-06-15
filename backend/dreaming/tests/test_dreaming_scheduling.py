@@ -31,7 +31,9 @@ def db():
     user = f"pytest-dreaming-{uuid.uuid4().hex[:8]}"
     yield database, user
     try:
+        # scheduled_job first (FK references user_offline_grant), then grants.
         database.execute("DELETE FROM scheduled_job WHERE user_id = ?", (user,))
+        database.execute("DELETE FROM user_offline_grant WHERE user_id = ?", (user,))
     except Exception:
         pass
 
@@ -75,14 +77,27 @@ def test_remove_then_resume(db):
 
 @needs_db
 def test_set_offline_grant(db):
+    import time
+
     from scheduler.store import ScheduledJobStore
     database, user = db
+    # A real grant must exist — scheduled_job.offline_grant_id is FK-constrained.
+    # Insert a minimal user_offline_grant row directly (avoids crypto/env setup).
+    grant_id = str(uuid.uuid4())
+    now = int(time.time() * 1000)
+    database.execute(
+        """INSERT INTO user_offline_grant
+               (id, user_id, agent_id, refresh_token_enc, issued_at, expires_at,
+                revoked_at, created_at, updated_at)
+           VALUES (?, ?, NULL, ?, ?, ?, NULL, ?, ?)""",
+        (grant_id, user, b"x", now, now + 10_000_000, now, now),
+    )
+
     store = ScheduledJobStore(database)
     job = store.create_job(
         user, name="t", instruction="i", schedule_kind="interval", schedule_expr="1d",
         timezone="UTC", consented_scopes=[], agent_id=None, target_chat_id=None,
         next_run_at=None, offline_grant_id=None)
     assert job["offline_grant_id"] is None
-    grant_id = str(uuid.uuid4())
     assert store.set_offline_grant(user, job["id"], grant_id) is True
     assert str(store.get_job(user, job["id"])["offline_grant_id"]) == grant_id
