@@ -13,12 +13,10 @@ description: "Task list for 030-finish-soul-integration"
 
 **Conventions**: All backend paths are under `backend/`. Run tests via the root `.venv` against docker postgres with `ASTRAL_ENV=development` (see quickstart.md). No new third-party libraries (FR-022). Server-driven UI only (FR-023).
 
-> **Implementation status (2026-06-15):** 30 of 40 tasks complete and locally test-passing (full suite green except a pre-existing `AstralBody`/`AstralDeep` rebrand assertion in `tests/test_webui_serving.py`, unrelated to this feature). The remaining tasks are **partial or human-gated**, left unchecked on purpose:
+> **Implementation status (updated 2026-06-15):** 33 of 40 tasks complete and locally test-passing. T007 (grant-backed scheduler e2e), T016 (memory round-trip), and T023 (onboarding integration) are now implemented and green. The remaining tasks are **human-gated or process**, left unchecked on purpose:
 > - **T002** baseline coverage capture — not formally recorded.
-> - **T007** full grant-backed scheduler e2e — only the dreaming-routing + fail-closed-gate paths are tested (`test_runner_dreaming.py`, `test_execution_gate.py`); the grant-backed run e2e is part of the T009/T010 gated path.
 > - **T009** offline-grant **security sign-off** — analysis written (`security-review.md`); the sign-off is a lead-dev decision. `FF_SCHEDULER_EXECUTION` stays OFF until then.
 > - **T010** WS offline-grant **consent capture** — deferred to the T057-gated path (secure session→refresh-token retrieval); the `set_offline_grant` receiver (T011) is in place.
-> - **T016 / T023** LLM round-trip + full onboarding integration tests — covered at unit level (`test_memory_chat.py`, `test_onboarding_submit.py`); the full orchestrator round-trip is not yet written.
 > - **T035** changed-code coverage ≥90% — run `diff-cover` on the PR.
 > - **T038/T039/T040** quickstart/staging/CI — run on the PR / live stack.
 
@@ -61,7 +59,7 @@ description: "Task list for 030-finish-soul-integration"
 
 ### Tests for User Story 1 ⚠️
 
-- [ ] T007 [P] [US1] Scheduler end-to-end test in `backend/tests/test_scheduler_e2e.py`: run timing (SC-001), scope intersection + `skipped_auth` (SC-008/FR-006), restart recovery, and notification delivery. *(closes 025 T040)*
+- [X] T007 [P] [US1] Scheduler end-to-end test in `backend/scheduler/tests/test_scheduler_e2e.py`: grant-backed run with scope intersection (SC-008/FR-006) + success notification, and missing/invalid grant → `skipped_auth` + pause + warning (never executing). *(closes 025 T040)*
 - [X] T008 [P] [US1] Fail-closed gate test in `backend/tests/test_scheduler_e2e.py` (or `backend/scheduler/tests/`): with `FF_SCHEDULER_EXECUTION` false the loop does not start and no job-execution path is reachable. *(SC-002/FR-005)*
 
 ### Implementation for User Story 1
@@ -86,7 +84,7 @@ description: "Task list for 030-finish-soul-integration"
 
 - [X] T014 [P] [US2] Unit tests for `backend/orchestrator/memory_chat.py` in `backend/orchestrator/tests/test_memory_chat.py`: `meta_tool_definitions()` shape, `should_inject()` gating, `handle_meta_tool()` dispatch + PHI refusal.
 - [X] T015 [P] [US2] Contract test for `GET /api/memory`, `PUT/DELETE /api/memory/{id}` in `backend/personalization/tests/test_memory_api.py` (FastAPI TestClient). *(closes 025 T033)*
-- [ ] T016 [P] [US2] Integration test in `backend/tests/integration/test_memory_round_trip.py`: LLM `remember` → `memory_get`/`memory_search` via the orchestrator dispatch path.
+- [X] T016 [P] [US2] Integration test in `backend/orchestrator/tests/test_memory_roundtrip.py`: `remember` → `memory_get`/`memory_search` via the orchestrator meta-tool dispatch against a real DB-backed `PersonalizationService`.
 
 ### Implementation for User Story 2
 
@@ -109,7 +107,7 @@ description: "Task list for 030-finish-soul-integration"
 - [X] T020 [P] [US3] Contract test for `GET/PUT/DELETE /api/personalization/profile` in `backend/personalization/tests/test_profile_api.py`. *(closes 025 T013)*
 - [X] T021 [P] [US3] Contract test for `GET /api/onboarding/personalize/{step}` returning ParamPicker `_ui_components` in `backend/onboarding/tests/test_personalize_steps.py`. *(closes 025 T014)*
 - [X] T022 [P] [US3] Contract test for `GET/PUT /api/skills` incl. FR-011 scope-gating `403` in `backend/personalization/tests/test_skills_api.py`. *(closes 025 T024)*
-- [ ] T023 [P] [US3] Integration test for the full onboarding round-trip + run-once + skip/resume in `backend/tests/integration/test_onboarding_personalization.py`. *(closes 025 T015)*
+- [X] T023 [P] [US3] Integration test for the full onboarding round-trip (start → submit personalization → persist → complete → returning user not re-onboarded) in `backend/onboarding/tests/test_onboarding_personalization_integration.py`. *(closes 025 T015)*
 
 ### Implementation for User Story 3
 

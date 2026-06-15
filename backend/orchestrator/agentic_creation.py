@@ -732,12 +732,29 @@ async def _promote_parser_global(orch, draft, agent_id, *, approved_by):
         except Exception:
             logger.debug("autoparse: scope grant failed", exc_info=True)
 
-        # FR-017: tell the originating user the reader is ready (the file they
-        # uploaded can now be read — ask again to use it).
+        # FR-017 / 031 T031: the parser is live and the uploader is scoped, so
+        # re-run their original request and deliver the parsed result into the
+        # original chat. If the original turn can't be recovered/replayed, fall
+        # back to the notify ("ask again to read your file").
         if requested_by:
-            await attachment_autoparse._notify_user(
-                orch, requested_by,
-                f"The .{extension} reader is live — ask again to read your file.")
+            replayed = await attachment_autoparse.auto_continue_after_go_live(
+                orch,
+                requested_by=requested_by,
+                source_chat_id=row.get("source_chat_id") or draft.get("source_chat_id"),
+                source_attachment_id=(row.get("source_attachment_id")
+                                      or draft.get("source_attachment_id")),
+                extension=extension,
+                category=row.get("category"),
+            )
+            if replayed:
+                await attachment_autoparse._notify_user(
+                    orch, requested_by,
+                    f"The .{extension} reader is live — I re-read your file; "
+                    "see the new reply in your chat.")
+            else:
+                await attachment_autoparse._notify_user(
+                    orch, requested_by,
+                    f"The .{extension} reader is live — ask again to read your file.")
     except Exception:
         logger.exception("autoparse: global promotion failed for draft %s", draft.get("id"))
 
