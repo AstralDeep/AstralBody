@@ -101,4 +101,5 @@ shell commands, and other important information, read the current plan at
 - [specs/025-agentic-soul-integration/plan.md](specs/025-agentic-soul-integration/plan.md)
 - [specs/026-frontend-removal-astralprims/plan.md](specs/026-frontend-removal-astralprims/plan.md)
 - [specs/027-agentic-creation-settings/plan.md](specs/027-agentic-creation-settings/plan.md)
+- [specs/031-attachment-upload-parsing/plan.md](specs/031-attachment-upload-parsing/plan.md)
 <!-- SPECKIT END -->
