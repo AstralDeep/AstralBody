@@ -26,6 +26,15 @@ from shared.llm_text import strip_reasoning_markup
 
 logger = logging.getLogger("Orchestrator.Knowledge")
 
+# 030-finish-soul-integration (FR-021): knowledge file stems for agents retired
+# or merged in feature 029. The index MUST never surface these, even if a
+# leftover file exists on disk (backend/knowledge/ is git-ignored and re-scanned
+# at runtime). Mirrors orchestrator.RETIRED_AGENT_IDS / the ml_services merge.
+RETIRED_KNOWLEDGE_STEMS = frozenset({
+    "grants", "grant_budgets", "nefarious", "email_tracker", "linkedin", "nocodb",
+    "classify", "forecaster", "llm_factory",
+})
+
 # ─── Defaults ───────────────────────────────────────────────────────────
 
 DEFAULT_KNOWLEDGE_DIR = os.path.join(
@@ -447,6 +456,12 @@ Be concise and data-driven."""
                 continue
             for fname in sorted(os.listdir(cat_dir)):
                 if not fname.endswith(".md"):
+                    continue
+                # 030-finish-soul-integration (FR-021): never index knowledge for
+                # retired/merged agents. backend/knowledge/ is git-ignored and
+                # re-scanned from disk, so a one-time delete is not durable — a
+                # leftover file would otherwise resurrect a retired-agent entry.
+                if fname[:-3] in RETIRED_KNOWLEDGE_STEMS:
                     continue
                 fpath = os.path.join(cat_dir, fname)
                 fm = self._read_frontmatter(fpath)

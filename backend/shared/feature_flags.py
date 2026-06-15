@@ -38,6 +38,18 @@ class FeatureFlags:
             # work is reachable from chat (consent card before creation —
             # the feature-025 scheduler itself ships ungated). Default ON.
             "scheduling_chat": self._read("FF_SCHEDULING_CHAT", True),
+            # 030-finish-soul-integration: FAIL-CLOSED gate for the scheduler
+            # *execution* loop (unattended job runs under the offline-grant
+            # store). Distinct from "scheduling_chat" (which only proposes jobs
+            # via a consent card). Per Constitution VII this MUST stay OFF until
+            # the lead-dev security review of offline_grant.py is recorded
+            # (025 T057 / 030 FR-004/FR-005). Default OFF.
+            "scheduler_execution": self._read("FF_SCHEDULER_EXECUTION", False),
+            # 030-finish-soul-integration: injects the memory meta-tool
+            # (remember / memory_search / memory_get) so the assistant can
+            # actively use cross-session memory on request, mirroring
+            # scheduling_chat. Passive prompt recall is unaffected. Default ON.
+            "memory_chat": self._read("FF_MEMORY_CHAT", True),
         }
 
     @staticmethod

@@ -64,6 +64,18 @@ class ScheduledJobStore:
         )
         return [dict(r) for r in rows]
 
+    def set_offline_grant(self, user_id: str, job_id: str, grant_id: Optional[str]) -> bool:
+        """Attach (or clear) the captured offline-grant id on a job (030 FR-003 / 025 T042).
+
+        Written by the WS consent-capture flow after ``OfflineGrantStore.capture``
+        so the runner can mint a fresh token per run. Until set, ``offline_grant_id``
+        is NULL and the runner refuses to execute (``skipped_auth``)."""
+        cur = self.db.execute(
+            "UPDATE scheduled_job SET offline_grant_id = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+            (grant_id, _now_ms(), job_id, user_id),
+        )
+        return getattr(cur, "rowcount", 0) > 0
+
     def set_status(self, user_id: str, job_id: str, status: str) -> bool:
         cur = self.db.execute(
             "UPDATE scheduled_job SET status = ?, updated_at = ? WHERE id = ? AND user_id = ?",
