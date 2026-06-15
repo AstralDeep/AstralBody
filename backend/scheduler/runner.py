@@ -48,11 +48,55 @@ class JobRunner:
         except Exception:  # pragma: no cover - notification is best-effort
             logger.debug("scheduler notify failed (non-fatal)", exc_info=True)
 
+    async def _run_dreaming(self, job: Dict[str, Any], correlation_id: str) -> str:
+        """Run a per-user dreaming consolidation sweep (025 T053). No grant needed."""
+        user_id = job["user_id"]
+        job_id = job["id"]
+        run_id = self.store.start_run(job_id, user_id, correlation_id)
+        outcome = "success"
+        summary = None
+        try:
+            from personalization.phi_gate import get_phi_gate
+
+            from dreaming.consolidation import run_sweep
+            repo = self.orch.personalization_service.repo
+            # Defense in depth: honor a since-flipped dreaming_enabled flag.
+            profile = repo.get_profile(user_id) or {}
+            if not bool(profile.get("dreaming_enabled", True)):
+                self.store.finish_run(run_id, outcome="skipped", summary="dreaming disabled")
+                self.store.set_status(user_id, job_id, "paused")
+                return "skipped"
+            sweep = run_sweep(repo, get_phi_gate(), user_id, trigger="scheduled")
+            summary = (f"Consolidated {sweep.get('promoted_count', 0)} of "
+                       f"{sweep.get('candidates_considered', 0)} signals.")
+        except Exception as exc:
+            logger.exception("dreaming sweep failed", extra={"job_id": job_id})
+            outcome = "failure"
+            summary = f"error: {exc}"
+
+        self.store.finish_run(run_id, outcome=outcome, summary=summary, auth_ref=correlation_id)
+
+        import time
+        now_ms = int(time.time() * 1000)
+        next_run = compute_next_run_ms(job["schedule_kind"], job["schedule_expr"],
+                                       job.get("timezone", "UTC"), now_ms)
+        completed = next_run is None
+        self.store.update_after_run(job_id, last_run_at=now_ms, next_run_at=next_run,
+                                    completed=completed)
+        return outcome
+
     async def run_job(self, job: Dict[str, Any]) -> str:
         """Execute one due job. Returns the run outcome."""
         user_id = job["user_id"]
         job_id = job["id"]
         correlation_id = str(uuid.uuid4())
+
+        # 030 (025 T053): dreaming/consolidation jobs run a local sweep — no
+        # offline grant or delegated authority needed (in-DB, non-PHI, no
+        # external calls). Routed before the grant gate below.
+        if job.get("agent_id") == "__dreaming__":
+            return await self._run_dreaming(job, correlation_id)
+
         run_id = self.store.start_run(job_id, user_id, correlation_id)
 
         # 1+2. Authorization: must have a valid grant; mint a fresh token.
@@ -119,6 +163,11 @@ class JobRunner:
                                        job.get("timezone", "UTC"), now_ms)
         completed = job["schedule_kind"] == "one_shot" or next_run is None
         self.store.update_after_run(job_id, last_run_at=now_ms, next_run_at=next_run, completed=completed)
+
+        # 030 FR-017: structured observability for scheduled runs.
+        logger.info("scheduler.run_finished",
+                    extra={"job_id": job_id, "user_id": user_id, "outcome": outcome,
+                           "correlation_id": correlation_id, "next_run_at": next_run})
 
         if outcome == "success":
             await self._notify(user_id, level="success",

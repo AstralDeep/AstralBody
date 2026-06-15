@@ -2494,6 +2494,101 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
         return None
 
+    async def run_scheduled_turn(
+        self,
+        *,
+        user_id: str,
+        chat_id: Optional[str],
+        instruction: str,
+        agent_id: Optional[str],
+        access_token: str,
+        allowed_scopes: List[str],
+        correlation_id: str,
+    ) -> str:
+        """Execute a scheduled job's instruction as a background chat turn (025 T040/T046).
+
+        Reached only when ``FF_SCHEDULER_EXECUTION`` is enabled (gated at loop
+        start), which itself requires the recorded offline-grant security review
+        (030 FR-004/FR-005). The instruction runs through the normal chat path
+        with output persisted to ``chat_id`` history, so the user sees it on
+        reconnect (in-app only). Returns a short summary for the completion
+        notification.
+
+        Authority: the runner has already minted ``access_token`` from the
+        offline grant and computed ``allowed_scopes`` = consented ∩ current.
+        Execution runs under the user's current scopes — the security ceiling
+        enforced by ``handle_chat_message``. Deep-threading the minted delegated
+        token and narrowing tool execution end-to-end to ``allowed_scopes`` is
+        the explicit scope of the T057 security review before the flag is enabled
+        in production (see specs/030-finish-soul-integration/security-review.md).
+        """
+        from orchestrator.async_tasks import BackgroundTask, VirtualWebSocket
+
+        target_chat = chat_id or f"scheduled-{user_id}"
+        bg = BackgroundTask(
+            task_id=(correlation_id or "sched")[:8],
+            chat_id=target_chat,
+            user_id=user_id,
+        )
+        vws = VirtualWebSocket(bg)
+        try:
+            await self.handle_chat_message(vws, instruction, target_chat, user_id=user_id)
+        finally:
+            try:
+                await vws.close()
+            except Exception:  # pragma: no cover - close is best-effort
+                pass
+
+        # Summarize the captured assistant text for the notification body.
+        summary = ""
+        for out in bg.outputs:
+            if not isinstance(out, dict):
+                continue
+            txt = out.get("text") or out.get("message")
+            if not txt and isinstance(out.get("payload"), dict):
+                txt = out["payload"].get("text") or out["payload"].get("message")
+            if isinstance(txt, str) and txt.strip():
+                summary = txt.strip()
+        logger.info(
+            "scheduler.run_completed",
+            extra={
+                "correlation_id": correlation_id,
+                "user_id": user_id,
+                "chat_id": target_chat,
+                "agent_id": agent_id,
+                "allowed_scopes": list(allowed_scopes or []),
+                "outputs": len(bg.outputs),
+            },
+        )
+        return summary or "Your scheduled task finished."
+
+    async def notify_user(self, user_id: str, payload: Dict[str, Any]) -> None:
+        """Deliver an in-app notification to all of a user's connected sockets (025 T049).
+
+        Best-effort live fan-out over ``ui_clients``. The durable artifact of a
+        scheduled run is its output, which ``run_scheduled_turn`` persists to chat
+        history (delivered on reconnect via ``load_chat``); this is the transient
+        toast. In-app only — there is no external channel.
+        """
+        try:
+            data = json.dumps(payload)
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("notify_user: unserializable payload", exc_info=True)
+            return
+        sent = 0
+        for ws in list(self.ui_clients):
+            try:
+                if self._get_user_id(ws) != user_id:
+                    continue
+                if await self._safe_send(ws, data):
+                    sent += 1
+            except Exception:  # pragma: no cover - per-socket best-effort
+                logger.debug("notify_user: send failed for one socket", exc_info=True)
+        logger.info(
+            "notify_user.delivered",
+            extra={"user_id": user_id, "sockets": sent, "kind": payload.get("type")},
+        )
+
     async def handle_chat_message(self, websocket, message: str, chat_id: str, display_message: str = None, user_id: str = None, draft_agent_id: str = None, selected_tools=None):
         """Process a chat message: LLM determines which tools to call (Multi-Turn Re-Act Loop).
 
@@ -2534,6 +2629,21 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         if not message:
             logger.warning("Empty message received")
             return
+
+        # 030 FR-009 (025 T021): intercept deterministic onboarding ParamPicker
+        # submits before the LLM/history path and persist them directly. These
+        # are fixed templates ("Save my personalization profile — ...") posted by
+        # the onboarding panels; nothing interpreted them before, so selections
+        # were silently dropped. Handled submits never enter the LLM path.
+        if not draft_agent_id:
+            try:
+                from orchestrator import onboarding_submit
+                if onboarding_submit.is_onboarding_submit(message):
+                    if await onboarding_submit.handle_submit(
+                            self, websocket, user_id, message, chat_id):
+                        return
+            except Exception:  # pragma: no cover - never block a chat turn
+                logger.warning("onboarding submit handling failed (non-fatal)", exc_info=True)
 
         # Feature 006: pre-flight check — surface the FR-004a "LLM
         # unavailable" prompt up-front when neither the user's personal
@@ -2819,6 +2929,20 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 tool_to_unqualified[_sched_name] = _sched_name
             scheduler_tool_injected = True
 
+        # 030-finish-soul-integration — cross-session memory from chat: the
+        # remember/memory_search/memory_get meta-tools make the feature-025
+        # memory store usable on request (passive prompt recall is unchanged).
+        # Same exclusions as the 027/030 meta-tools.
+        from orchestrator import memory_chat
+        memory_tool_injected = False
+        if memory_chat.should_inject(draft_agent_id) and not is_text_only:
+            for _mem_def in memory_chat.meta_tool_definitions():
+                _mem_name = _mem_def["function"]["name"]
+                tools_desc.append(_mem_def)
+                tool_to_agent[_mem_name] = memory_chat.META_AGENT_ID
+                tool_to_unqualified[_mem_name] = _mem_name
+            memory_tool_injected = True
+
         if not tools_desc and draft_agent_id:
             await self.send_ui_render(websocket, [
                 Alert(
@@ -2915,6 +3039,27 @@ COMPONENT UPDATE RULES:
                 if routing_hints:
                     system_prompt += f"\n{routing_hints}\n"
 
+            # 030 FR-010 (025 T028): populate enabled-skill guidance from the
+            # tools actually available to the user this turn. Previously
+            # ``personalization_skill_lines`` was never assigned, so the call
+            # site below always read None and enabling a skill changed nothing.
+            # Meta-tools (orchestrator/scheduler/memory pseudo-agents) are
+            # excluded — they are not user "skills".
+            personalization_skill_lines: List[str] = []
+            _meta_agent_ids = {"__orchestrator__", "__scheduler__", "__memory__"}
+            for _td in tools_desc:
+                try:
+                    _fn = _td.get("function") or {}
+                    _name = _fn.get("name")
+                    if not _name or tool_to_agent.get(_name) in _meta_agent_ids:
+                        continue
+                    _desc = (_fn.get("description") or "").strip().split(". ")[0][:160]
+                    personalization_skill_lines.append(
+                        f"- {_name}: {_desc}" if _desc else f"- {_name}")
+                except Exception:  # pragma: no cover - never block a chat turn
+                    continue
+            personalization_skill_lines = personalization_skill_lines[:40] or None
+
             # Feature 025 — append per-user personalization (memory recall, user
             # context, enabled-skill guidance, and personality/"soul"). This is
             # added AFTER the compliance/safety preamble and tool rules so the
@@ -2939,6 +3084,10 @@ COMPONENT UPDATE RULES:
             # scheduling meta-tool (stops the model denying the capability).
             if scheduler_tool_injected:
                 system_prompt += scheduling_chat.SYSTEM_PROMPT_ADDENDUM
+
+            # 030 — memory guidance accompanies the memory meta-tools.
+            if memory_tool_injected:
+                system_prompt += memory_chat.SYSTEM_PROMPT_ADDENDUM
 
             # ------------------------------------------------------------------
             # MULTI-TURN LOOP
@@ -4206,6 +4355,12 @@ COMPONENT UPDATE RULES:
             # only; creation happens in the schedule_decision ui_event.
             from orchestrator import scheduling_chat
             return await scheduling_chat.handle_meta_tool(
+                self, tool_name, args, user_id=user_id, chat_id=chat_id, websocket=websocket
+            )
+        if agent_id == "__memory__":
+            # 030 — memory meta-tools: execute immediately (PHI-gated), no card.
+            from orchestrator import memory_chat
+            return await memory_chat.handle_meta_tool(
                 self, tool_name, args, user_id=user_id, chat_id=chat_id, websocket=websocket
             )
 
@@ -6488,18 +6643,36 @@ COMPONENT UPDATE RULES:
 
         # Feature 025 wiring (027 click-through finding): the scheduler loop
         # was never instantiated anywhere, so cron jobs and "Run now" silently
-        # never dispatched. Start it here with the same stores the REST API uses.
-        try:
-            from orchestrator.offline_grant import OfflineGrantStore
-            from scheduler.loop import SchedulerLoop
-            from scheduler.runner import JobRunner
-            from scheduler.store import ScheduledJobStore
-            _job_store = ScheduledJobStore(self.history.db)
-            _job_runner = JobRunner(self, _job_store, OfflineGrantStore(self.history.db))
-            self._scheduler_loop = SchedulerLoop(_job_store, _job_runner, self.async_task_manager)
-            self._scheduler_loop.start()
-        except Exception:
-            logger.exception("scheduler loop failed to start (jobs will not dispatch)")
+        # never dispatched.
+        #
+        # 030-finish-soul-integration (FR-005, Constitution VII): the EXECUTION
+        # loop runs unattended jobs under the offline-grant store, so it is now
+        # FAIL-CLOSED — it starts only when FF_SCHEDULER_EXECUTION is enabled,
+        # which MUST NOT be turned on until the lead-dev security review of
+        # offline_grant.py is recorded (030 FR-004 / 025 T057). When the gate is
+        # off, no job-execution code path is reachable; chat-side scheduling
+        # (proposals/consent cards) is unaffected and the surface reports
+        # unattended execution as unavailable.
+        if flags.is_enabled("scheduler_execution"):
+            try:
+                from orchestrator.offline_grant import OfflineGrantStore
+                from scheduler.loop import SchedulerLoop
+                from scheduler.runner import JobRunner
+                from scheduler.store import ScheduledJobStore
+                _job_store = ScheduledJobStore(self.history.db)
+                _job_runner = JobRunner(self, _job_store, OfflineGrantStore(self.history.db))
+                self._scheduler_loop = SchedulerLoop(_job_store, _job_runner, self.async_task_manager)
+                self._scheduler_loop.start()
+                logger.info("scheduler.execution_loop_started (FF_SCHEDULER_EXECUTION=on)")
+            except Exception:
+                logger.exception("scheduler loop failed to start (jobs will not dispatch)")
+        else:
+            self._scheduler_loop = None
+            logger.info(
+                "scheduler.execution_loop_disabled (FF_SCHEDULER_EXECUTION=off) — "
+                "unattended job execution is gated off pending the offline-grant "
+                "security review (030 FR-004/FR-005; 025 T057)"
+            )
 
         # Feature 027 (click-through finding): user-created agents that went
         # live do not survive a restart — nothing relaunched them, leaving

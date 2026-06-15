@@ -41,9 +41,14 @@ def unique_user(request):
     return f"pytest-{request.node.name}-{uuid.uuid4().hex[:8]}"
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _final_pytest_cleanup(database):
-    yield
+def _purge_pytest_rows(database):
+    """Delete any pytest-namespaced rows from the tutorial tables (best-effort).
+
+    Runs at BOTH session start and end so a previously *interrupted* session
+    (whose teardown never ran) cannot leave orphaned ``pytest-%`` tutorial steps
+    polluting the shared dev database / live tour. Tests MUST namespace every
+    tutorial_step slug with the ``pytest-`` prefix for this to catch them.
+    """
     try:
         conn = database._get_connection()
         cur = conn.cursor()
@@ -58,6 +63,15 @@ def _final_pytest_cleanup(database):
             conn.close()
         except Exception:
             pass
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _final_pytest_cleanup(database):
+    # Self-heal: purge leftovers from any prior interrupted session first…
+    _purge_pytest_rows(database)
+    yield
+    # …and again on normal completion.
+    _purge_pytest_rows(database)
 
 
 @pytest.fixture(autouse=True)

@@ -144,4 +144,7 @@ class OfflineGrantStore:
         access_token = payload.get("access_token")
         if not access_token:
             raise OfflineGrantError("refresh exchange returned no access_token")
+        # 030 FR-017: structured observability for grant mints (success path).
+        logger.info("offline_grant.minted",
+                    extra={"grant_id": grant_id, "user_id": row.get("user_id")})
         return access_token
