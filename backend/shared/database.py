@@ -320,6 +320,54 @@ class Database:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_attachments_user ON user_attachments(user_id, created_at DESC)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_attachments_live ON user_attachments(user_id) WHERE deleted_at IS NULL')
 
+        # --- Feature 031-attachment-upload-parsing -------------------------------
+        # message_attachment: links a sent chat turn to the attachments the user
+        # included, so the orchestrator can deliver structured references to the
+        # handling agent and re-hydrate them on load_chat. App-enforced FKs.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS message_attachment (
+                id TEXT PRIMARY KEY,
+                chat_id TEXT NOT NULL,
+                message_id TEXT,
+                attachment_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                created_at BIGINT NOT NULL
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_message_attachment_chat ON message_attachment(chat_id, created_at)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_message_attachment_att ON message_attachment(attachment_id)')
+
+        # attachment_parser: registry of globally-available parsers keyed by file
+        # type, plus the dedup/provenance for the auto-creation flow. One row per
+        # file-type gap (unique gap_fingerprint). status: pending|live|failed|discarded.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS attachment_parser (
+                id TEXT PRIMARY KEY,
+                extension TEXT,
+                category TEXT NOT NULL,
+                gap_fingerprint TEXT NOT NULL,
+                status TEXT NOT NULL,
+                draft_agent_id TEXT,
+                live_agent_id TEXT,
+                tool_name TEXT,
+                source_attachment_id TEXT,
+                source_chat_id TEXT,
+                requested_by TEXT,
+                approved_by TEXT,
+                created_at BIGINT NOT NULL,
+                updated_at BIGINT NOT NULL
+            )
+        ''')
+        cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS uq_attachment_parser_gap ON attachment_parser(gap_fingerprint)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_attachment_parser_status ON attachment_parser(status)')
+
+        # Guarded column add: lets an approved auto-created parser re-parse the
+        # exact file that triggered its creation (FR-017). draft_agents is created
+        # above, so the column add is safe here.
+        if not self._column_exists(cursor, 'draft_agents', 'source_attachment_id'):
+            cursor.execute("ALTER TABLE draft_agents ADD COLUMN source_attachment_id TEXT")
+        # --- end Feature 031 ------------------------------------------------------
+
         # Interaction log — captures tool call outcomes for knowledge synthesis
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS interaction_log (
