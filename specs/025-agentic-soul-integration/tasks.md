@@ -69,11 +69,11 @@ Web app: backend modules under `backend/`, frontend under `frontend/src/`. New m
 
 - [X] T016 [P] [US1] Define personalization schemas (profile, personality) in `backend/personalization/schemas.py` — **validated** (pydantic tests pass)
 - [X] T017 [US1] Implement profile endpoints `GET/PUT/DELETE /api/personalization/profile` in `backend/personalization/api.py` (PHI-gate string values via T007 → 422 on PHI; emit `personalization.profile_update`/`personalization.personality_update`) — authored, compiles; HTTP behavior needs live stack
-- [X] T018 [P] [US1] Seed personalization tutorial steps (`personalize-profession`, `personalize-skills`, `personalize-personality`, `target_kind='sdui'`) appended to `backend/seeds/tutorial_steps_seed.sql` (`ON CONFLICT (slug) DO NOTHING`)
+- [X] T018 [P] [US1] Seed personalization tutorial steps (`personalize-profession`, `personalize-skills`, `personalize-personality`, `target_kind='sdui'`) appended to `backend/seeds/tutorial_steps_seed.sql` (`ON CONFLICT (slug) DO NOTHING`) — **030 reconciliation:** these slugs were intentionally archived by the 030-wiring tutorial rewrite (`_LEGACY_TUTORIAL_SLUGS_030` in `shared/database.py`); onboarding personalization is now delivered through the ParamPicker panel/submit flow (030 FR-009), not the legacy seed.
 - [X] T019 [US1] Panel builders (`panels.py`) **+** the `GET /api/onboarding/personalize/{step}` endpoint in `onboarding/api.py` (serves profession/skills/personality ParamPickers; skills step ranks live agent tools via `recommend_skills`) — **live-validated** (`200` with `_ui_components`)
 - [X] T020 [US1] Implement profession→skill recommendation ranking in `backend/personalization/skills_reco.py` (pure function; ranks agent tools by relevance, prefers authorized on ties) — **validated** (FR-003, FR-007)
-- [ ] T021 [US1] Handle onboarding ParamPicker submits in the orchestrator (interpret `submit_message_template` → save profile / enable skills) — PENDING: needs orchestrator tool-dispatch internals + live LLM to validate
-- [X] T022 [US1] Frontend editing UI — `frontend/src/components/personalization/PersonalizationPanel.tsx` (a React modal with tabs: Profile & Soul / Skills / Schedule / Memory & Dreaming) + `frontend/src/api/personalization.ts` REST client, wired into `SettingsMenu` ("Personalization" item) and `DashboardLayout`. Lets users edit all params without manual web requests. **`tsc -b` clean; built into the image; "Personalization" present in the served bundle.** (Exceeds the original minimal-sdui scope; serves US1–US6 management.)
+- [X] T021 [US1] Handle onboarding ParamPicker submits in the orchestrator (interpret `submit_message_template` → save profile / enable skills) — **DONE in 030** (`backend/orchestrator/onboarding_submit.py`, intercepted in `handle_chat_message`; deterministic parse of the three submit templates → PHI-gated profile + scope-gated skills; 030 FR-009/FR-011).
+- [X] T022 [US1] Frontend editing UI — **030 reconciliation:** the React `PersonalizationPanel.tsx` referenced here was removed with the whole client frontend in feature 026 and was reimplemented as the server-rendered chrome surface `backend/webrender/chrome/surfaces/personalization.py` (tabs: soul / memory / skills / schedule / dreaming) in feature 027. Functionally complete via the settings menu; this task's original React artifact no longer exists by design.
 - [X] T023 [US1] No-agents-available edge case handled in `build_skills_panel` (explanatory Alert, no dead-end) — **validated** (spec Edge Cases)
 
 **Checkpoint**: US1 fully functional — onboarding personalizes the assistant end-to-end. **This is the MVP.**
@@ -95,7 +95,7 @@ Web app: backend modules under `backend/`, frontend under `frontend/src/`. New m
 - [X] T025 [P] [US2] Skills catalog read-view implemented inline in `skills_router.list_skills` (enumerates `ToolPermissionManager` tool→scope map per agent with `enabled`/`authorized`) — **live-validated** (`GET /api/skills` → 200)
 - [X] T026 [US2] Skills catalog + enable/disable endpoints in `backend/personalization/api.py` (`GET/PUT /api/skills`; maps to `tool_overrides` via `set_tool_overrides`; FR-011 guard = 403 if scope ungranted; emits `skill.enable`/`disable`) — **live-validated**
 - [X] T027 [US2] Skills panel rendered server-side (`build_skills_panel`, ParamPicker checklist + Alert for no-agents) — **tested**
-- [~] T028 [US2] FR-011 enforced (enable refused without scope). Disabled-skill no-leakage relies on the existing tool-assembly gate; skill-guidance line in the prompt fragment is wired via `service.build_prompt_fragment(skill_lines=...)` (population from live tool set pending T021/T050).
+- [X] T028 [US2] FR-011 enforced (enable refused without scope). Disabled-skill no-leakage relies on the existing tool-assembly gate; skill-guidance line in the prompt fragment is wired via `service.build_prompt_fragment(skill_lines=...)`. **DONE in 030:** `personalization_skill_lines` is now populated from the live tool set in `handle_chat_message` (030 FR-010), so enabled-skill guidance reaches the prompt.
 
 **Checkpoint**: US1 + US2 work independently.
 
@@ -167,7 +167,7 @@ Web app: backend modules under `backend/`, frontend under `frontend/src/`. New m
 - [~] T047 [US5] Asyncio scheduler loop + restart reconciliation authored in `backend/scheduler/loop.py` (FR-025). PENDING: start it from the app lifespan.
 - [X] T048 [US5] Schedule REST endpoints in `backend/scheduler/api.py` (`POST/GET /api/schedule`, `GET /{id}`, pause/resume/delete; consent required, scope-bounded, governance + cron validated; audited) — **live-validated** (30s→400, cron→201, list/delete OK). Server-generated manager panel: deferred with frontend.
 - [ ] T049 [US5] In-app `notification` WS emit + output persistence — PENDING (runner calls `orch.notify_user` seam; needs orchestrator method)
-- [ ] T050 [US5] Orchestrator interpretation of "schedule this…" → consented job create — PENDING (needs LLM + T048)
+- [X] T050 [US5] Orchestrator interpretation of "schedule this…" → consented job create — **DONE** (`backend/orchestrator/scheduling_chat.py`: `schedule_recurring_task` meta-tool → consent card → `handle_decision` creates the job; wired in `handle_chat_message` + dispatch; flag `FF_SCHEDULING_CHAT` default on; covered by `tests/test_wiring_030.py`).
 
 **Checkpoint**: US1–US5 independently functional; unattended work is bounded, audited, in-app, and restart-safe.
 
@@ -196,7 +196,7 @@ Web app: backend modules under `backend/`, frontend under `frontend/src/`. New m
 ## Phase 9: Polish & Cross-Cutting Concerns
 
 - [ ] T055 [P] Add structured logs + metrics for new user-visible operations (schedule runs, sweeps, memory writes, grant mints) per Constitution X
-- [ ] T056 [P] Documentation: update `backend` README/API docs; ensure new endpoints render at `/docs`; add operator note that the Keycloak realm must request `offline_access` and set Offline Session Max ≥ 365 days (link `docs/keycloak-persistent-login-realm-settings.md`)
+- [X] T056 [P] Documentation: new endpoints render at `/docs` (routers tagged + registered); operator note that the Keycloak realm must request `offline_access` and set Offline Session Max ≥ 365 days lives in `docs/keycloak-realm-settings.md` (the stale `keycloak-persistent-login-realm-settings.md` reference fixed in 030 T032).
 - [ ] T057 Lead-dev **security review** of the offline-grant store (encryption at rest, revocation, 365-day cap, no token egress) — sign-off recorded in PR (Constitution VII)
 - [ ] T058 [P] Verify SC-009 (0 new frontend primitive types) and SC-010 (only the approved PHI dependency added); run `ruff check .` and frontend ESLint
 - [ ] T059 Run [quickstart.md](quickstart.md) end-to-end in staging (scheduler + offline-grant + onboarding) per Constitution X; confirm ≥90% coverage on changed code

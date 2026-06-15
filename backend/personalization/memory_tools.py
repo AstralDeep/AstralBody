@@ -8,11 +8,14 @@ is unit-testable without Presidio.
 """
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, Dict, List, Optional
 
 from .phi_gate import PHIGate, get_phi_gate
 from .repository import MEMORY_CATEGORIES
+
+logger = logging.getLogger("personalization.memory")
 
 
 def _tokens(text: str) -> set:
@@ -32,12 +35,17 @@ class MemoryTools:
         if not value:
             return {"stored": False, "reason": "nothing to remember"}
         if self.gate.contains_phi(value):
+            logger.info("memory.write_refused_phi",
+                        extra={"user_id": user_id, "category": category})
             return {
                 "stored": False,
                 "reason": "That looked like protected health information, so I did not "
                           "save it to long-term memory. I can still use it for this task.",
             }
         item = self.repo.create_memory(user_id, category, value, source="explicit")
+        # 030 FR-017: structured observability for memory writes.
+        logger.info("memory.remembered",
+                    extra={"user_id": user_id, "category": category, "memory_id": item["id"]})
         return {"stored": True, "id": item["id"], "category": category}
 
     def capture_signal(self, user_id: str, category: str, value: str) -> bool:
@@ -48,6 +56,9 @@ class MemoryTools:
         if not value or self.gate.contains_phi(value):
             return False
         self.repo.add_signal(user_id, category, value)
+        # 030 FR-017: structured observability for short-term signal capture.
+        logger.info("memory.signal_captured",
+                    extra={"user_id": user_id, "category": category})
         return True
 
     def memory_get(self, user_id: str) -> List[Dict[str, Any]]:

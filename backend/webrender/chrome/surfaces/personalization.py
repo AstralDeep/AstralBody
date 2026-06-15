@@ -383,8 +383,22 @@ def _render_schedule(orch, user_id: str) -> str:
         '<p class="text-xs text-astral-muted">New jobs are created in chat — ask the '
         "assistant to schedule a task and it will walk you through consent.</p>"
     )
-    # 'disabled' is the soft-deleted state the REST delete endpoint sets.
-    jobs = [j for j in store.list_jobs(user_id) if (j.get("status") or "") != "disabled"]
+    # 030 FR-005: when unattended execution is gated off (pending the
+    # offline-grant security review), say so plainly — jobs can be created but
+    # will not fire until an operator enables FF_SCHEDULER_EXECUTION.
+    from shared.feature_flags import flags
+    if not flags.is_enabled("scheduler_execution"):
+        hint = (
+            f'<div class="{_CARD_CLS} text-sm">⚠️ Unattended execution is currently '
+            "<strong>unavailable</strong>: scheduled jobs will not run until an "
+            "administrator enables it (pending a security review). You can still create "
+            "and manage jobs.</div>" + hint
+        )
+    # 'disabled' is the soft-deleted state the REST delete endpoint sets;
+    # '__dreaming__' jobs are internal consolidation, not user-facing.
+    jobs = [j for j in store.list_jobs(user_id)
+            if (j.get("status") or "") != "disabled"
+            and j.get("agent_id") != "__dreaming__"]
     if not jobs:
         return hint + (
             f'<div class="{_CARD_CLS} text-sm text-astral-muted">No scheduled jobs '

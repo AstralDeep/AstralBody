@@ -7,10 +7,13 @@ human-readable sweep summary (FR-029).
 """
 from __future__ import annotations
 
+import logging
 import math
 import time
 import uuid
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger("Dreaming.Consolidation")
 
 _RECENCY_HALF_LIFE_DAYS = 7.0
 
@@ -97,4 +100,8 @@ def run_sweep(
     # Persist the sweep record (best-effort; caller audits).
     if hasattr(repo, "record_sweep"):
         repo.record_sweep(sweep)
+    # 030 FR-017: structured observability for consolidation sweeps.
+    logger.info("dreaming.sweep_ran",
+                extra={"user_id": user_id, "trigger": trigger,
+                       "considered": len(signals), "promoted": promoted})
     return sweep

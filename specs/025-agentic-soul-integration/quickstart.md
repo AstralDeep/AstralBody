@@ -4,7 +4,7 @@ How to bring up the feature locally and exercise each user story. Assumes the ex
 
 ## Prerequisites
 - Existing dev stack runs (`docker compose up` or the project Makefile target).
-- **Keycloak realm**: the frontend client requests the `offline_access` scope, and the realm's **Offline Session Idle/Max ≥ 365 days** (same operator setting feature 016 documents in `docs/keycloak-persistent-login-realm-settings.md`). Required so scheduled jobs can re-derive authority (R2).
+- **Keycloak realm**: the web client requests the `offline_access` scope, and the realm's **Offline Session Idle/Max ≥ 365 days** (operator settings documented in `docs/keycloak-realm-settings.md`). Required so scheduled jobs can re-derive authority (R2).
 - A new env var for offline-token encryption (e.g., `OFFLINE_GRANT_ENC_KEY`) — generated secret, **not committed**.
 - **PHI detector**: install the lead-dev-approved `presidio-analyzer` + `presidio-anonymizer` and the spaCy model (e.g., `python -m spacy download en_core_web_lg`) — bundled into the backend image at build time, runs locally (no PHI egress). This is the only new dependency; scheduling and cron parsing remain pure-Python.
 
