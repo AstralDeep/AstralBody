@@ -281,19 +281,18 @@
         // server-rendered `html` form — no more empty bubbles. The workspace
         // itself re-hydrates via the ui_render the server pushes right after.
         if (data.chat && data.chat.messages) data.chat.messages.forEach(function (m) {
-          // Feature 031: re-hydrated attachment chips LEAD the user's message
-          // (consistent with the live-send rendering above).
-          var attLabel = "";
+          // Feature 031: re-hydrated attachment chip leads the user's message
+          // on its own line (consistent with the live-send rendering above).
+          var attChip = "";
           if (m.attachments && m.attachments.length) {
-            attLabel = "📎 " + m.attachments.map(function (a) { return a.filename; }).join(", ");
+            attChip = attachChipHtml(m.attachments.map(function (a) { return a.filename; }).join(", "));
           }
           if (typeof m.content === "string") {
-            var body = attLabel ? (m.content ? attLabel + "\n" + m.content : attLabel) : m.content;
-            appendChatBubble(m.role, escapeText(body));
+            appendChatBubble(m.role, attChip + (m.content ? "<div>" + escapeText(m.content) + "</div>" : ""));
           } else if (m.html) {
-            appendChatBubble(m.role, (attLabel ? "<div class=\"text-xs text-astral-muted mb-1\">" + escapeText(attLabel) + "</div>" : "") + m.html);
+            appendChatBubble(m.role, attChip + m.html);
           } else {
-            appendChatBubble(m.role, attLabel ? escapeText(attLabel) : "");
+            appendChatBubble(m.role, attChip);
           }
         });
         break;
@@ -308,6 +307,15 @@
   }
 
   function escapeText(s) { var d = document.createElement("div"); d.textContent = s == null ? "" : String(s); return d.innerHTML; }
+
+  // Feature 031: render attachment(s) as a pill on its own line above the
+  // request text (a plain "📎 name" prefix collapses onto the query line
+  // because chat bubbles don't preserve newlines).
+  function attachChipHtml(names) {
+    return "<div class=\"mb-1\"><span class=\"inline-flex items-center gap-1 rounded "
+      + "bg-white/10 border border-white/10 px-2 py-0.5 text-xs\">📎 "
+      + escapeText(names) + "</span></div>";
+  }
 
   var stepEls = {};
   function renderStep(step) {
@@ -332,13 +340,13 @@
   function sendChat(message) {
     var ready = (typeof readyAttachments === "function") ? readyAttachments() : [];
     if (!message && !ready.length) return;
-    var bubble = message || "";
+    var html = "";
     if (ready.length) {
       var names = ready.map(function (a) { return a.filename; }).join(", ");
-      // Lead the request with the attachment(s) rather than trailing them.
-      bubble = "📎 " + names + (bubble ? "\n" + bubble : "");
+      html += attachChipHtml(names);  // pill on its own line above the request
     }
-    appendChatBubble("user", escapeText(bubble));
+    if (message) html += "<div>" + escapeText(message) + "</div>";
+    appendChatBubble("user", html);
     var payload = { message: message || "", chat_id: activeChatId };
     if (ready.length) {
       payload.attachments = ready.map(function (a) {
