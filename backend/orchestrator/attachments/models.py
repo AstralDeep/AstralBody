@@ -12,6 +12,9 @@ from pydantic import BaseModel, Field
 
 AttachmentCategory = Literal[
     "document", "spreadsheet", "presentation", "text", "image", "medical",
+    # Feature 031: broadened categories. "data"/"archive" are accepted but have
+    # no built-in reader — they drive the safe auto-parser-creation flow (US2).
+    "data", "archive",
 ]
 
 

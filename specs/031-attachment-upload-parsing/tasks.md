@@ -63,24 +63,24 @@ Repo root `c:\Users\sear234\Desktop\Containers\MCP\AstralBody`. Backend under `b
 
 ### Implementation — server-rendered affordance
 
-- [ ] T013 [US1] Add paperclip `<button class="astral-attach-btn">`, hidden `<input type="file" class="astral-file-upload" multiple>` (with broadened `accept`), and a `#astral-attachments` chips row inside `#astral-form` in `backend/webrender/templates/shell.html`.
-- [ ] T014 [P] [US1] Add chip + paperclip styles (uploading/ready/failed states, remove control) in `backend/webrender/static/astral.css`.
-- [ ] T015 [US1] In `backend/webrender/static/client.js`: on file pick → `POST /api/upload` per file (≤10), render a chip per file with state transitions and a remove control, track ready `attachment_id`s, show server rejection reasons inline; clear chips after send.
-- [ ] T016 [US1] In `client.js` `sendChat`: include `payload.attachments = [{attachment_id, filename, category}]` on the `chat_message` event when chips are ready (per contracts/attachments-protocol.md §2); stop using the `"[Attachment: …]"` text hack for new sends.
+- [X] T013 [US1] Add paperclip button, hidden multi-file `astral-file-upload` input (server-injected `accept` list via `%%ASTRAL_ACCEPT%%` from `ACCEPTED_EXTENSIONS`), and a `#astral-attachments` chips row inside `#astral-form` in `backend/webrender/templates/shell.html`; injection wired in `serve_shell`.
+- [X] T014 [P] [US1] Add chip + paperclip styles (uploading/ready/failed states, remove control) in `backend/webrender/static/astral.css`.
+- [X] T015 [US1] In `backend/webrender/static/client.js`: paperclip → file pick → `POST /api/upload` per file (≤10), chip per file with state transitions + remove control, server rejection reasons inline, parser_status hint on chip; clear chips after send.
+- [X] T016 [US1] In `client.js` `sendChat`/submit: include `payload.attachments = [{attachment_id, filename, category}]` when chips are ready (and allow attachment-only sends); legacy `"[Attachment: …]"` text hack no longer emitted by new sends.
 
 ### Implementation — server wiring & delivery to agent
 
-- [ ] T017 [US1] In `backend/orchestrator/orchestrator.py` chat_message handling: parse `payload.attachments`, validate each `attachment_id` is live & owned by sender (drop foreign/invalid with a `file`-class audit + user-visible note), cap at 10.
-- [ ] T018 [US1] In `orchestrator.py`: persist accepted attachments as `message_attachment` rows (via T009 repo) keyed to the chat/user message.
-- [ ] T019 [US1] In `orchestrator.py` user-message assembly (~the messages-list build before `_call_llm`): inject the structured **"Attachments on this turn"** block (id/name/category/readable-tool) per contracts §2, replacing the legacy regex hack path for new turns (keep legacy regex tolerant for old transcripts).
-- [ ] T020 [US1] In `orchestrator.py` `load_chat`/`chat_loaded`: re-hydrate `message_attachment` references so chips render in transcript history.
+- [X] T017 [US1] In `orchestrator.py`: parse `payload.attachments`, thread through `_serialized_chat`/`_dispatch_async_chat`/`handle_chat_message`; new `_attach_turn_attachments` validates each id is live & owned (drops foreign/invalid with a `file`-class audit + user note), caps at 10, collapses dupes.
+- [X] T018 [US1] `_attach_turn_attachments` persists accepted attachments as `message_attachment` rows keyed to the persisted user message (`turn_message_id`).
+- [X] T019 [US1] `_attach_turn_attachments` injects the structured **"Attachments on this turn"** block (id/name/category/readable-tool via `parser_registry.coverage`) into the LLM-facing message; saved history text stays clean; attachments-only turns synthesize a minimal prompt.
+- [X] T020 [US1] In `orchestrator.py` `load_chat`: re-hydrate `message_attachment` refs onto loaded user messages; `client.js` `chat_loaded` renders a 📎 chip line in history.
 
 ### Tests for User Story 1
 
-- [ ] T021 [P] [US1] Integration test: `chat_message` with `attachments[]` → `message_attachment` rows inserted, structured block injected, a stub agent's `read_document`/`read_spreadsheet` receives the real `attachment_id` in `backend/tests/test_chat_attachments_wiring.py`.
-- [ ] T022 [P] [US1] Test ownership: a foreign/deleted `attachment_id` is dropped + audited and never reaches a tool, in `backend/tests/test_chat_attachments_ownership.py`.
-- [ ] T023 [P] [US1] Test per-message cap (>10 attachments rejected with a clear note) and `load_chat` re-hydration in `backend/tests/attachments/test_message_attachment_repo.py`.
-- [ ] T023a [P] [US1] Test FR-010/FR-011: a supported-but-corrupt/protected file surfaces a clear, specific error and the turn continues (no silent empty result); a no-extractable-text PDF routes to the vision path (`read_document` `vision_required=true` returns page images) — in `backend/tests/test_chat_attachments_parse_failure.py`.
+- [X] T021 [P] [US1] Wiring test: `_attach_turn_attachments` links rows + injects the block naming the reader tool (read_document / pending parser), cap-of-10, dupe-collapse — `backend/tests/test_chat_attachments_wiring.py` (**green locally**).
+- [X] T022 [P] [US1] Ownership test: a foreign/unknown `attachment_id` is dropped + user notified, never linked — `backend/tests/test_chat_attachments_ownership.py` (**green locally**).
+- [X] T023 [P] [US1] Repo tests: `message_attachment` insert/list (ownership-scoped) + `attachment_parser` dedup-safe create/mark — `backend/tests/attachments/test_message_attachment_repo.py` (**green locally**).
+- [X] T023a [P] [US1] FR-010/FR-011: corrupt/foreign file → structured error (no crash); no-text PDF → vision path — `backend/tests/agents/general/file_tools/test_parse_failure_031.py` (**green locally**). (Also discovered+fixed: `Attachment.category` Literal needed `data`/`archive` or uploads of new types would 500.)
 
 **Checkpoint**: US1 fully functional — attach + parse via existing tools, independently testable. **MVP deliverable.**
 

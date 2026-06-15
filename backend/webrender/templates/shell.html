@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>AstralBody</title>
+  <title>AstralDeep</title>
   <link rel="icon" type="image/png" href="/static/img/astra-fav.png">
   <link rel="apple-touch-icon" href="/static/img/astra-fav.png">
   <link rel="stylesheet" href="/static/astral.css">
@@ -44,10 +44,22 @@
       <!-- Chat panel: raised glass rail (astral.css owns surface/border) -->
       <aside class="astral-chat-panel w-[380px] max-w-[40%] flex flex-col min-h-0">
         <div id="astral-chat" class="flex-1 overflow-y-auto p-3 space-y-2"></div>
-        <form id="astral-form" class="astral-chat-form p-3 flex gap-2">
-          <input id="astral-input" type="text" autocomplete="off" placeholder="Message an agent…" data-tour-target="chat.input"
-                 class="astral-field flex-1 rounded-lg bg-white/5 border border-white/10 px-3 py-2 text-sm text-astral-text">
-          <button type="submit" class="astral-btn astral-btn-primary px-4 py-2 rounded-lg text-sm font-medium bg-astral-primary text-white">Send</button>
+        <form id="astral-form" class="astral-chat-form p-3 flex flex-col gap-2">
+          <!-- Feature 031: attachment chips for files staged on the next turn -->
+          <div id="astral-attachments" class="astral-attachments hidden flex flex-wrap gap-1.5"></div>
+          <div class="flex gap-2 items-center">
+            <!-- Feature 031: attachment (paperclip) control. The hidden input
+                 carries class astral-file-upload so the existing client.js
+                 change-listener handles selection; accept list is injected
+                 server-side from the content_type allow-list (single source). -->
+            <button type="button" id="astral-attach-btn" class="astral-attach-btn shrink-0" title="Attach files" aria-label="Attach files" data-tour-target="chat.attach">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
+            </button>
+            <input id="astral-attach-input" type="file" multiple class="astral-file-upload hidden" accept="%%ASTRAL_ACCEPT%%" aria-hidden="true" tabindex="-1">
+            <input id="astral-input" type="text" autocomplete="off" placeholder="Message an agent…" data-tour-target="chat.input"
+                   class="astral-field flex-1 rounded-lg bg-white/5 border border-white/10 px-3 py-2 text-sm text-astral-text">
+            <button type="submit" class="astral-btn astral-btn-primary px-4 py-2 rounded-lg text-sm font-medium bg-astral-primary text-white">Send</button>
+          </div>
         </form>
       </aside>
     </main>
