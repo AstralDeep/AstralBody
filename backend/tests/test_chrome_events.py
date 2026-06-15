@@ -257,7 +257,8 @@ def test_chat_created_draft_appears_in_drafts_surface_and_discards(monkeypatch):
     orch.send_ui_render = send_ui_render
 
     async def handle_chat_message(websocket, message, chat_id, display_message=None,
-                                  user_id=None, draft_agent_id=None, selected_tools=None):
+                                  user_id=None, draft_agent_id=None, selected_tools=None,
+                                  attachments=None):
         await websocket.send_json({"type": "ui_render", "components": [
             {"type": "card", "title": "ok", "content": [{"type": "text", "content": "fine"}]}]})
     orch.handle_chat_message = handle_chat_message

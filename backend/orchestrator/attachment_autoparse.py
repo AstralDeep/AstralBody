@@ -9,15 +9,13 @@ entry point — it does NOT rely on the LLM deciding to call ``create_capability
 during a chat turn.
 
 Lifecycle contract: specs/031-attachment-upload-parsing/contracts/parser-autocreate.md
-
-NOTE: the deep lifecycle wiring (create_draft/generate_code/self-test/promote)
-is implemented in the US2 phase; this module defines the public surface the
-upload endpoint and approval handlers call.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from typing import Optional, TypedDict
 
 logger = logging.getLogger("attachment_autoparse")
@@ -28,21 +26,198 @@ class CoverageStatus(TypedDict):
     gap_fingerprint: Optional[str]
 
 
-async def start(orch, attachment, *, user_id: str, chat_id: Optional[str]) -> CoverageStatus:
-    """Eagerly begin drafting a parser for an uncovered uploaded *attachment*.
-
-    Returns the ``parser_status`` to surface in the upload response. Implemented
-    in the US2 phase (T024–T032).
-    """
-    raise NotImplementedError("attachment_autoparse.start — implemented in US2 (T025/T026)")
+def _tool_name_for(extension: Optional[str]) -> str:
+    """Deterministic, identifier-safe parser tool name for *extension*."""
+    ext = re.sub(r"[^a-z0-9]+", "_", (extension or "file").lower()).strip("_") or "file"
+    return f"parse_{ext}"
 
 
 def coverage_status(orch, *, extension: Optional[str], category: str) -> CoverageStatus:
-    """Resolve the current parser-coverage status for a type without side effects.
+    """Resolve the parser-coverage status for a type without side effects.
 
-    Implemented in the US2 phase (T024).
+    Used by the upload endpoint to decide the ``parser_status`` it returns and
+    whether to enqueue a background ``start``. Honors the feature flag and the
+    existing registry (dedup): a ``live`` row ⇒ covered, a ``pending`` row ⇒
+    awaiting admin (no new draft).
     """
-    raise NotImplementedError("attachment_autoparse.coverage_status — implemented in US2 (T024)")
+    from orchestrator import parser_registry
+    from orchestrator.attachments.parser_repo import AttachmentParserRepository
+    from shared.feature_flags import flags
+
+    parser_repo = AttachmentParserRepository(orch.history.db)
+    fp = parser_registry.gap_fingerprint(category, extension)
+    if parser_registry.coverage(extension, category, parser_repo=parser_repo)["covered"]:
+        return {"status": "covered", "gap_fingerprint": fp}
+    if not flags.is_enabled("attachment_autoparse"):
+        return {"status": "unavailable", "gap_fingerprint": fp}
+    existing = parser_repo.get_by_gap(fp)
+    if existing:
+        if existing["status"] == "live":
+            return {"status": "covered", "gap_fingerprint": fp}
+        if existing["status"] == "pending":
+            return {"status": "pending_admin_approval", "gap_fingerprint": fp}
+        # failed / discarded → a later upload may re-attempt.
+    return {"status": "preparing", "gap_fingerprint": fp}
 
 
-__all__ = ["CoverageStatus", "start", "coverage_status"]
+async def _notify_user(orch, user_id: str, message: str, chat_id: Optional[str] = None) -> None:
+    """Best-effort status toast to all of *user_id*'s connected UI sockets.
+
+    The upload is chat-agnostic, so absent a chat_id we notify every socket the
+    user has open. Never raises.
+    """
+    try:
+        clients = list(getattr(orch, "ui_clients", []) or [])
+    except Exception:
+        clients = []
+    payload = json.dumps({"type": "chat_status", "status": "info", "message": message})
+    for client in clients:
+        try:
+            if orch._get_user_id(client) != user_id:
+                continue
+            if chat_id is not None:
+                active = orch._ws_active_chat.get(id(client)) if hasattr(orch, "_ws_active_chat") else None
+                if active and active != chat_id:
+                    continue
+            await orch._safe_send(client, payload)
+        except Exception:
+            logger.debug("autoparse notify failed for one socket", exc_info=True)
+
+
+async def start(orch, attachment, *, user_id: str, chat_id: Optional[str] = None) -> CoverageStatus:
+    """Eagerly draft a parser for an uncovered uploaded *attachment*.
+
+    Reuses the 027 lifecycle primitives directly (no LLM "should I" decision):
+    register intent (dedup-safe), create+generate+self-test a draft parser
+    against the uploaded file, leave it ``pending`` for ADMIN approval. Returns
+    the resulting ``parser_status``. Never raises into the caller.
+    """
+    from orchestrator import agentic_creation, parser_registry
+    from orchestrator.attachments.parser_repo import (
+        AttachmentParserRepository, STATUS_FAILED,
+    )
+
+    extension = getattr(attachment, "extension", None)
+    category = getattr(attachment, "category", "") or ""
+    attachment_id = getattr(attachment, "attachment_id", None)
+    filename = getattr(attachment, "filename", "") or ""
+    fp = parser_registry.gap_fingerprint(category, extension)
+    parser_repo = AttachmentParserRepository(orch.history.db)
+
+    # Dedup (FR-018): a pending/live row for this gap means no new draft.
+    existing = parser_repo.get_by_gap(fp)
+    if existing and existing["status"] in ("pending", "live"):
+        return {"status": "pending_admin_approval" if existing["status"] == "pending" else "covered",
+                "gap_fingerprint": fp}
+
+    tool_name = _tool_name_for(extension)
+    agent_name = f"{(extension or 'file').upper()} Parser"
+    description = (
+        f"Reads .{extension} ({category}) file attachments the user has uploaded and "
+        f"extracts their text/structured content. Use only the Python standard library "
+        f"and already-installed packages; if the format needs an unavailable library, do a "
+        f"best-effort structural extraction (e.g. zip/XML, tarfile) and state the limitation."
+    )
+    tool_desc = (
+        f"Read a .{extension} file attachment by attachment_id and return its extracted "
+        f"text/structured content (best-effort, standard-library only)."
+    )
+
+    lifecycle = orch.lifecycle_manager
+    try:
+        draft = await lifecycle.create_draft(
+            user_id=user_id, agent_name=agent_name, description=description,
+            tools_spec=[{"name": tool_name, "description": tool_desc}],
+        )
+    except Exception:
+        logger.exception("autoparse: create_draft failed for .%s", extension)
+        return {"status": "unavailable", "gap_fingerprint": fp}
+    draft_id = draft["id"]
+
+    # Record provenance + register the (dedup-keyed) registry row.
+    try:
+        orch.history.db.update_draft_agent(
+            draft_id, origin="auto_attachment", source_chat_id=chat_id or "",
+            gap_fingerprint=fp, source_attachment_id=attachment_id,
+        )
+    except Exception:
+        logger.debug("autoparse: update_draft_agent provenance failed", exc_info=True)
+    try:
+        parser_repo.create_pending(
+            gap_fingerprint=fp, category=category, extension=extension,
+            draft_agent_id=draft_id, source_attachment_id=attachment_id,
+            source_chat_id=chat_id, requested_by=user_id,
+        )
+    except Exception:
+        logger.debug("autoparse: registry create_pending failed", exc_info=True)
+
+    await agentic_creation._audit(
+        user_id, "lifecycle.gap_detected",
+        f"Unparseable upload .{extension} — auto-creating parser draft",
+        correlation_id=draft_id, outcome="in_progress", chat_id=chat_id,
+        inputs_meta={"extension": extension, "category": category,
+                     "attachment_id": attachment_id, "gap_fingerprint": fp,
+                     "trigger": "upload", "draft_id": draft_id},
+    )
+
+    # Generate → start → self-test against THE UPLOADED FILE (≤1 auto-refine).
+    user_request = (
+        f"Use the {tool_name} tool to read the attached .{extension} file and "
+        f"summarize what it contains."
+    )
+    test_attachments = [{"attachment_id": attachment_id, "filename": filename, "category": category}]
+    try:
+        draft = await lifecycle.generate_code(draft_id)
+        if (draft or {}).get("status") in ("error", "rejected"):
+            parser_repo.mark_status(fp, STATUS_FAILED)
+            await agentic_creation._audit(
+                user_id, "lifecycle.auto_created", "Parser generation failed",
+                correlation_id=draft_id, outcome="failure", chat_id=chat_id,
+                inputs_meta={"draft_id": draft_id})
+            await _notify_user(orch, user_id,
+                               f"Couldn't prepare a reader for .{extension} files.", chat_id)
+            return {"status": "unavailable", "gap_fingerprint": fp}
+
+        draft = await lifecycle.start_draft_agent(draft_id)
+        self_test = await agentic_creation._self_test_draft(
+            orch, draft, user_request, user_id, attachments=test_attachments)
+        refines = 0
+        while self_test.get("status") != "passed" and refines < agentic_creation.SELF_TEST_MAX_AUTO_REFINES:
+            refines += 1
+            failure = "; ".join(self_test.get("errors") or [self_test.get("summary", "failed")])
+            draft = await lifecycle.refine_agent(
+                draft_id,
+                f"The self-test failed: {failure}. Fix {tool_name} so it reads the "
+                f".{extension} file and returns its content (standard library only).")
+            if (draft or {}).get("status") == "error":
+                break
+            draft = await lifecycle.start_draft_agent(draft_id)
+            self_test = await agentic_creation._self_test_draft(
+                orch, draft, user_request, user_id, attachments=test_attachments)
+        self_test["auto_refines"] = refines
+        orch.history.db.update_draft_agent(draft_id, self_test=json.dumps(self_test))
+        await agentic_creation._audit(
+            user_id, "lifecycle.auto_created",
+            f"Auto-created parser draft '{agent_name}' ({draft_id})",
+            correlation_id=draft_id, chat_id=chat_id,
+            inputs_meta={"draft_id": draft_id, "gap_fingerprint": fp})
+        await agentic_creation._audit(
+            user_id, "lifecycle.self_test",
+            f"Parser self-test {self_test.get('status')}: {self_test.get('summary', '')}",
+            correlation_id=draft_id,
+            outcome="success" if self_test.get("status") == "passed" else "failure",
+            chat_id=chat_id, inputs_meta={"draft_id": draft_id})
+    except Exception:
+        logger.exception("autoparse: draft pipeline failed for .%s", extension)
+        await _notify_user(orch, user_id,
+                           f"Couldn't prepare a reader for .{extension} files.", chat_id)
+        return {"status": "unavailable", "gap_fingerprint": fp}
+
+    await _notify_user(
+        orch, user_id,
+        f"No reader exists for .{extension} files yet — a parser is being prepared "
+        f"and is pending admin approval.", chat_id)
+    return {"status": "pending_admin_approval", "gap_fingerprint": fp}
+
+
+__all__ = ["CoverageStatus", "coverage_status", "start"]
