@@ -365,6 +365,13 @@ Do NOT hardcode secrets. Do NOT use os.environ for secrets.
 - Do NOT use `pickle`, `marshal`, or `yaml.load` (unsafe deserialization)
 - Do NOT write/read files outside of returning data
 - Do NOT use `ctypes`, `cffi`, or native code execution
+- Import ONLY the Python standard library and packages already installed in this
+  image. Do NOT assume any `pip install` is available — there is no network or
+  package-install step. If a format truly needs an unavailable library, do a
+  best-effort structural extraction with the standard library (e.g. treat
+  zip/OOXML/epub as `zipfile` + XML, archives via `tarfile`/`zipfile`, columnar
+  or binary data via a documented partial read) and clearly state the limitation
+  in the returned output rather than failing.
 
 Output ONLY the Python code. No markdown fences, no explanations."""
 

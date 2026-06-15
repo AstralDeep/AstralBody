@@ -129,7 +129,8 @@ class FakeOrch:
         self.sent.append((target, components))
 
     async def handle_chat_message(self, websocket, message, chat_id, display_message=None,
-                                  user_id=None, draft_agent_id=None, selected_tools=None):
+                                  user_id=None, draft_agent_id=None, selected_tools=None,
+                                  attachments=None):
         self.chat_calls.append((message, chat_id, draft_agent_id))
         # Simulate a successful draft-test turn: one tool step + one card.
         await websocket.send_json({"type": "chat_step",
