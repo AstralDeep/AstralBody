@@ -17,32 +17,6 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # ollama:
-  #   image: ollama/ollama:latest
-  #   container_name: astralbody-ollama
-  #   volumes:
-  #     - ollama_models:/root/.ollama
-  #   ports:
-  #     - "127.0.0.1:11434:11434"
-  #   healthcheck:
-  #     test: ["CMD", "ollama", "list"]
-  #     interval: 10s
-  #     timeout: 5s
-  #     retries: 12
-  #     start_period: 15s
-  #   restart: unless-stopped
-  #
-  # ollama-pull:
-  #   image: ollama/ollama:latest
-  #   container_name: astralbody-ollama-pull
-  #   depends_on:
-  #     ollama:
-  #       condition: service_healthy
-  #   entrypoint: ["ollama", "pull", "${KNOWLEDGE_LLM_MODEL:-qwen2.5:0.5b}"]
-  #   environment:
-  #     OLLAMA_HOST: http://ollama:11434
-  #   restart: "no"
-
   astralbody:
     build:
       context: .
@@ -50,8 +24,6 @@ services:
     image: astralbody:latest
     container_name: astralbody
     ports:
-      # Feature 026: single port — orchestrator serves WS, REST API, and the
-      # server-driven web UI. The former :5173 static frontend server is removed.
       - "127.0.0.1:8001:8001"
     env_file:
       - .env
@@ -64,23 +36,14 @@ services:
       - ./backend/data:/app/backend/data
       - ./backend/tmp:/app/backend/tmp
       - ./backend/knowledge:/app/backend/knowledge
-      # Feature 027: user-created (generated) agents are written into
-      # backend/agents/<slug>/ at runtime — without this mount their code is
-      # wiped on every image rebuild, orphaning live DB rows. The host dir is
-      # the same content the image COPYs, so static agents are unaffected.
       - ./backend/agents:/app/backend/agents
-      # Mount host procfs/sysfs/rootfs so psutil reports real host metrics
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
       - /:/hostfs:ro
     depends_on:
       postgres:
         condition: service_healthy
-      # ollama:
-      #   condition: service_healthy
     healthcheck:
-      # /readyz = process serving AND database answering (the slim image has
-      # no curl; python ships with it). start_period covers agent auto-start.
       test: ["CMD", "python3", "-c", "import urllib.request; r = urllib.request.urlopen('http://localhost:8001/readyz', timeout=5); exit(0 if r.status == 200 else 1)"]
       interval: 30s
       timeout: 10s
@@ -90,4 +53,3 @@ services:
 
 volumes:
   pgdata:
-  # ollama_models:

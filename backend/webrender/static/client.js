@@ -281,9 +281,14 @@
         // server-rendered `html` form — no more empty bubbles. The workspace
         // itself re-hydrates via the ui_render the server pushes right after.
         if (data.chat && data.chat.messages) data.chat.messages.forEach(function (m) {
-          if (typeof m.content === "string") appendChatBubble(m.role, escapeText(m.content));
-          else if (m.html) appendChatBubble(m.role, m.html);
-          else appendChatBubble(m.role, "");
+          // Feature 031: re-hydrated attachment chips on history user messages.
+          var attSuffix = "";
+          if (m.attachments && m.attachments.length) {
+            attSuffix = "\n📎 " + m.attachments.map(function (a) { return a.filename; }).join(", ");
+          }
+          if (typeof m.content === "string") appendChatBubble(m.role, escapeText(m.content + attSuffix));
+          else if (m.html) appendChatBubble(m.role, m.html + (attSuffix ? "<div class=\"text-xs text-astral-muted mt-1\">" + escapeText(attSuffix) + "</div>" : ""));
+          else appendChatBubble(m.role, attSuffix ? escapeText(attSuffix) : "");
         });
         break;
       case "user_preferences":
@@ -315,15 +320,35 @@
   }
 
   // ---- outgoing: chat + delegated component actions ----
+  // Feature 031: a message may carry staged attachments (see the attachment
+  // block lower down). readyAttachments()/clearStagedAttachments() are declared
+  // there; function/var hoisting makes them available here at call time.
   function sendChat(message) {
-    if (!message) return;
-    appendChatBubble("user", escapeText(message));
-    send({ type: "ui_event", action: "chat_message", session_id: activeChatId || undefined,
-           payload: { message: message, chat_id: activeChatId } });
+    var ready = (typeof readyAttachments === "function") ? readyAttachments() : [];
+    if (!message && !ready.length) return;
+    var bubble = message || "";
+    if (ready.length) {
+      var names = ready.map(function (a) { return a.filename; }).join(", ");
+      bubble = (bubble ? bubble + "\n" : "") + "📎 " + names;
+    }
+    appendChatBubble("user", escapeText(bubble));
+    var payload = { message: message || "", chat_id: activeChatId };
+    if (ready.length) {
+      payload.attachments = ready.map(function (a) {
+        return { attachment_id: a.attachment_id, filename: a.filename, category: a.category };
+      });
+    }
+    send({ type: "ui_event", action: "chat_message", session_id: activeChatId || undefined, payload: payload });
+    if (typeof clearStagedAttachments === "function") clearStagedAttachments();
   }
 
   if (form) form.addEventListener("submit", function (e) {
-    e.preventDefault(); var v = input.value.trim(); if (!v) return; input.value = ""; sendChat(v);
+    e.preventDefault();
+    var v = input.value.trim();
+    var hasReady = (typeof readyAttachments === "function") && readyAttachments().length;
+    if (!v && !hasReady) return;
+    input.value = "";
+    sendChat(v);
   });
 
   // Delegated handlers for server-rendered interactive primitives (FR-012)
@@ -416,15 +441,118 @@
       params: Object.assign({}, ctx.source_params, { limit: size, offset: 0 }) });
   }
 
-  // file upload (REST) then attach reference line to a chat message
-  document.addEventListener("change", function (e) {
-    if (!(e.target.classList && e.target.classList.contains("astral-file-upload"))) return;
-    var file = e.target.files && e.target.files[0]; if (!file) return;
+  // =========================================================================
+  // Feature 031 — attachment staging: paperclip → pick → upload → chip → send
+  // as structured attachments[] on the next chat_message. Replaces the legacy
+  // "[Attachment: …]" text hack.
+  // =========================================================================
+  var stagedAttachments = [];   // {uid, attachment_id|null, filename, category, state, note}
+  var attachSeq = 0;
+  var MAX_ATTACHMENTS = 10;
+  var attachEl = document.getElementById("astral-attachments");
+  var attachBtn = document.getElementById("astral-attach-btn");
+  var attachInput = document.getElementById("astral-attach-input");
+
+  function readyAttachments() {
+    return stagedAttachments.filter(function (a) { return a.state === "ready" && a.attachment_id; });
+  }
+  function clearStagedAttachments() {
+    stagedAttachments = [];
+    renderAttachments();
+  }
+  function removeStaged(uid) {
+    stagedAttachments = stagedAttachments.filter(function (a) { return a.uid !== uid; });
+    renderAttachments();
+  }
+  function renderAttachments() {
+    if (!attachEl) return;
+    attachEl.innerHTML = "";
+    if (!stagedAttachments.length) { attachEl.classList.add("hidden"); return; }
+    attachEl.classList.remove("hidden");
+    stagedAttachments.forEach(function (a) {
+      var chip = document.createElement("span");
+      chip.className = "astral-chip is-" + a.state;
+      chip.setAttribute("data-uid", String(a.uid));
+      var name = document.createElement("span");
+      name.className = "astral-chip-name";
+      name.textContent = a.filename;
+      name.title = a.note || a.filename;
+      chip.appendChild(name);
+      var state = document.createElement("span");
+      state.className = "astral-chip-state";
+      state.textContent = a.state === "uploading" ? "…" :
+                          a.state === "failed" ? "failed" :
+                          (a.note ? a.note : "");
+      chip.appendChild(state);
+      var x = document.createElement("button");
+      x.type = "button";
+      x.className = "astral-chip-remove";
+      x.setAttribute("aria-label", "Remove " + a.filename);
+      x.setAttribute("data-remove-uid", String(a.uid));
+      x.textContent = "×";
+      chip.appendChild(x);
+      attachEl.appendChild(chip);
+    });
+  }
+
+  function uploadStagedFile(file) {
+    var entry = { uid: ++attachSeq, attachment_id: null, filename: file.name,
+                  category: "file", state: "uploading", note: "" };
+    stagedAttachments.push(entry);
+    renderAttachments();
     var fd = new FormData(); fd.append("file", file);
     fetch(API_URL + "/api/upload", { method: "POST", headers: { Authorization: "Bearer " + token }, body: fd })
-      .then(function (r) { return r.json(); })
-      .then(function (j) { sendChat("[Attachment: " + (j.filename || file.name) + " (" + (j.category || "file") + ") — id=" + (j.attachment_id || "") + "]"); })
-      .catch(function () { sendChat("[Attachment upload failed: " + file.name + "]"); });
+      .then(function (r) {
+        return r.json().then(function (j) { return { ok: r.ok, status: r.status, body: j }; });
+      })
+      .then(function (res) {
+        if (!res.ok) {
+          entry.state = "failed";
+          entry.note = (res.body && (res.body.detail || res.body.message)) || ("error " + res.status);
+          setStatus("Couldn't attach " + file.name + ": " + entry.note);
+          renderAttachments();
+          return;
+        }
+        var j = res.body || {};
+        entry.attachment_id = j.attachment_id || null;
+        entry.category = j.category || "file";
+        entry.state = entry.attachment_id ? "ready" : "failed";
+        // Surface the eager auto-parser status (US2) on the chip.
+        var ps = j.parser_status;
+        if (ps === "preparing") entry.note = "preparing reader…";
+        else if (ps === "pending_admin_approval") entry.note = "reader pending admin";
+        else if (ps === "unavailable") entry.note = "no reader yet";
+        else entry.note = "";
+        if (!entry.attachment_id) entry.note = "upload failed";
+        renderAttachments();
+      })
+      .catch(function () {
+        entry.state = "failed"; entry.note = "network error";
+        setStatus("Couldn't attach " + file.name);
+        renderAttachments();
+      });
+  }
+
+  if (attachBtn && attachInput) {
+    attachBtn.addEventListener("click", function () { attachInput.click(); });
+  }
+  // Remove-chip delegation.
+  if (attachEl) {
+    attachEl.addEventListener("click", function (e) {
+      var rm = e.target.closest && e.target.closest("[data-remove-uid]");
+      if (rm) { removeStaged(parseInt(rm.getAttribute("data-remove-uid"), 10)); }
+    });
+  }
+  // File selection (the hidden input carries class astral-file-upload).
+  document.addEventListener("change", function (e) {
+    if (!(e.target.classList && e.target.classList.contains("astral-file-upload"))) return;
+    var files = e.target.files ? Array.prototype.slice.call(e.target.files) : [];
+    if (!files.length) return;
+    var room = MAX_ATTACHMENTS - stagedAttachments.length;
+    if (room <= 0) { setStatus("You can attach up to " + MAX_ATTACHMENTS + " files per message."); e.target.value = ""; return; }
+    if (files.length > room) { setStatus("Only " + room + " more file(s) can be attached to this message."); files = files.slice(0, room); }
+    files.forEach(uploadStagedFile);
+    e.target.value = "";  // allow re-selecting the same file later
   });
 
   // =========================================================================
