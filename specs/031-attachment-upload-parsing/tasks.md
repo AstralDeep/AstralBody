@@ -105,7 +105,7 @@ Repo root `c:\Users\sear234\Desktop\Containers\MCP\AstralBody`. Backend under `b
 - [X] T029 [US2] Admin-gated `_h_draft_approve` for `auto_attachment` drafts (`"admin" in roles` required, non-admin audited + refused; uploader cannot self-approve); `_h_draft_refine`/`_h_draft_discard` use `_decidable_draft` (owner OR admin-on-autoparse). Discard marks the registry row `discarded` (re-attemptable).
 - [X] T030 [US2] `_promote_parser_global` on admin go-live: `set_agent_visibility(agent_id, True)` (public/global), enable the parser's read scopes for the originating user, `attachment_parser.mark_live(live_agent_id, tool_name, approved_by)`; emit `agent_lifecycle/approved`. Fleet-wide availability rides the existing public-catalog consent path (030).
 - [X] T030a [US2] Constitution VII posture: promotion goes through the existing `approve_agent` path, which already only promotes when the agent subprocess actually starts (registered agent-auth posture preserved) — a parser that can't come up is NOT promoted. Admin-gate covered in `tests/chrome/test_autoparse_admin_approval.py`.
-- [~] T031 [US2] On go-live the originating user is notified the reader is live ("ask again to read your file"), their read scope enabled so it works immediately. NOTE: full *automatic* re-parse-and-deliver is simplified to a notify (admin approves out of the uploader's chat context); the parser is live + scoped so the next ask parses the file. **Follow-up: auto-continue the original turn.**
+- [X] T031 [US2] On go-live the originating user's turn is **auto-continued**: `attachment_autoparse.auto_continue_after_go_live` recovers the uploader's original (un-augmented) request for the turn that carried the file and replays it in-process via a `VirtualWebSocket` (the parser is now live + scoped, so the attachment resolves to `covered` and the reader tool runs), persisting the parsed result into the original chat; the user is notified "I re-read your file; see the new reply." Falls back to the prior notify ("ask again") if the original turn can't be recovered. Covered by `backend/tests/attachments/test_autoparse_continue.py`.
 - [X] T032 [US2] Dedup: `start(...)` and `coverage_status(...)` consult `attachment_parser` (unique `gap_fingerprint`); a pending/live row returns `pending_admin_approval`/`covered` and creates no new draft (FR-018, SC-007).
 
 ### Tests for User Story 2
@@ -117,7 +117,7 @@ Repo root `c:\Users\sear234\Desktop\Containers\MCP\AstralBody`. Backend under `b
 - [X] T037 [P] [US2] Global reuse: a `live` registry row makes `coverage_status` return `covered` for any user — `test_autoparse_coverage.py::test_live_registry_row_reports_covered` (**green**).
 - [X] T038 [P] [US2] Codegen constraint present in `agent_generator` + the gate is the enforcement — `backend/tests/attachments/test_autoparse_security_gate.py` (**green**).
 
-**Checkpoint**: US1 + US2 both work. Auto-creation is eager, safe, admin-gated, global-by-registry, deduped. (T031 re-parse simplified to notify — tracked follow-up.)
+**Checkpoint**: US1 + US2 both work. Auto-creation is eager, safe, admin-gated, global-by-registry, deduped. On approval the uploader's original turn is auto-continued (T031) — the file is re-read and the result delivered into their chat.
 
 ---
 

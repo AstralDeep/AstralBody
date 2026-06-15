@@ -84,6 +84,71 @@ async def _notify_user(orch, user_id: str, message: str, chat_id: Optional[str] 
             logger.debug("autoparse notify failed for one socket", exc_info=True)
 
 
+async def auto_continue_after_go_live(orch, *, requested_by: Optional[str],
+                                      source_chat_id: Optional[str],
+                                      source_attachment_id: Optional[str],
+                                      extension: Optional[str],
+                                      category: Optional[str]) -> bool:
+    """031 T031 — auto-continue the originating turn once the parser is live.
+
+    Recovers the uploader's ORIGINAL request (history stores the un-augmented
+    user text) for the turn that carried ``source_attachment_id`` and replays it
+    in-process via a ``VirtualWebSocket`` so the parsed result persists into the
+    original chat (seen on next open). Best-effort; returns True if a replay was
+    dispatched, False otherwise. Never raises.
+    """
+    if not (requested_by and source_chat_id and source_attachment_id):
+        return False
+    try:
+        db = orch.history.db
+        link = db.fetch_one(
+            "SELECT message_id FROM message_attachment "
+            "WHERE attachment_id = ? AND chat_id = ? AND user_id = ? "
+            "ORDER BY created_at ASC",
+            (source_attachment_id, source_chat_id, requested_by),
+        )
+        message_id = (dict(link).get("message_id") if link else None)
+        if not message_id:
+            return False
+        msg = db.fetch_one(
+            "SELECT content FROM messages WHERE id = ? AND chat_id = ?",
+            (message_id, source_chat_id),
+        )
+        original = (dict(msg).get("content") if msg else None)
+        if not original or not str(original).strip():
+            return False
+
+        from orchestrator.attachments.repository import AttachmentRepository
+        att = AttachmentRepository(db).get_by_id(source_attachment_id, requested_by)
+        if att is None:
+            return False
+
+        # Replay the original turn in-process; the parser is now live so the
+        # attachment block resolves to ``covered`` and the reader tool runs.
+        from orchestrator.async_tasks import BackgroundTask, VirtualWebSocket
+        bg = BackgroundTask(task_id=f"autocont-{source_attachment_id[:8]}",
+                            chat_id=source_chat_id, user_id=requested_by)
+        vws = VirtualWebSocket(bg)
+        try:
+            await orch.handle_chat_message(
+                vws, str(original), source_chat_id, user_id=requested_by,
+                attachments=[{"attachment_id": source_attachment_id,
+                              "filename": att.filename, "category": att.category}],
+            )
+        finally:
+            try:
+                await vws.close()
+            except Exception:  # pragma: no cover - close is best-effort
+                pass
+        logger.info("autoparse.auto_continued",
+                    extra={"user_id": requested_by, "chat_id": source_chat_id,
+                           "attachment_id": source_attachment_id, "extension": extension})
+        return True
+    except Exception:
+        logger.debug("autoparse: auto-continue failed (non-fatal)", exc_info=True)
+        return False
+
+
 async def start(orch, attachment, *, user_id: str, chat_id: Optional[str] = None) -> CoverageStatus:
     """Eagerly draft a parser for an uncovered uploaded *attachment*.
 
