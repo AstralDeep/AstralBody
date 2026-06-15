@@ -47,12 +47,18 @@ def _format_cap_mb(cap_bytes: int) -> str:
 attachments_router = APIRouter(tags=["Files"])
 
 
-def _get_repository(request: Request) -> AttachmentRepository:
-    """Resolve the AttachmentRepository from the orchestrator on app state."""
+def _get_orchestrator(request: Request):
+    """Resolve the orchestrator instance from app state (or its root app)."""
     orch = getattr(request.app.state, "orchestrator", None)
     if orch is None:
         root_app = getattr(request.app, "_root_app", None) or request.app
         orch = getattr(root_app.state, "orchestrator", None)
+    return orch
+
+
+def _get_repository(request: Request) -> AttachmentRepository:
+    """Resolve the AttachmentRepository from the orchestrator on app state."""
+    orch = _get_orchestrator(request)
     if orch is None or not getattr(orch, "history", None):
         raise HTTPException(status_code=500, detail="Database not initialised")
     return AttachmentRepository(orch.history.db)
@@ -175,9 +181,29 @@ async def upload_file(
         f"Uploaded attachment {attachment_id} ({size_bytes} bytes, {category}) "
         f"for user={user_id}"
     )
+
+    # Feature 031: eager parser-coverage check. If no built-in or globally
+    # promoted parser can read this type, kick off the safe auto-creation flow
+    # in the background (off the request path) and report the status.
+    response_body = _attachment_to_response(attachment)
+    response_body["parser_status"] = "covered"
+    try:
+        import asyncio
+
+        from orchestrator import attachment_autoparse
+        orch = _get_orchestrator(request)
+        if orch is not None:
+            cov = attachment_autoparse.coverage_status(orch, extension=extension, category=category)
+            response_body["parser_status"] = cov["status"]
+            if cov["status"] == "preparing":
+                asyncio.create_task(
+                    attachment_autoparse.start(orch, attachment, user_id=user_id))
+    except Exception:
+        logger.debug("parser coverage check failed (non-fatal)", exc_info=True)
+
     return JSONResponse(
         status_code=status.HTTP_201_CREATED,
-        content=_attachment_to_response(attachment),
+        content=response_body,
     )
 
 
