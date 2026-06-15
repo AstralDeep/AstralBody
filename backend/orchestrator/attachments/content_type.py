@@ -25,7 +25,7 @@ except Exception:  # pragma: no cover
     _HAS_MAGIC = False
 
 
-AttachmentCategory = str  # one of: document, spreadsheet, presentation, text, image, medical
+AttachmentCategory = str  # one of: document, spreadsheet, presentation, text, image, medical, data, archive
 
 
 # Compound suffixes we recognize as a single logical extension. Order matters
@@ -186,7 +186,83 @@ MAX_BYTES_BY_CATEGORY: Dict[AttachmentCategory, int] = {
     "text": 30 * _MB,
     "image": 30 * _MB,
     "medical": 2 * _GB,
+    # Feature 031: broadened categories. "data" and "archive" have no built-in
+    # reader — they drive the safe auto-parser-creation flow (US2).
+    "data": 100 * _MB,
+    "archive": 100 * _MB,
 }
+
+
+# --- Feature 031-attachment-upload-parsing: broadened curated allow-list ------
+# The allow-list stays CURATED (not "any binary"). Additions in the "text"
+# group are served by the existing ``read_text`` tool at zero cost. The "data"
+# and "archive" groups are accepted but have NO existing parser, so uploading
+# one eagerly triggers the safe auto-parser-creation lifecycle (see
+# specs/031-attachment-upload-parsing/). Defined as a post-merge so the base
+# feature-002 maps above stay readable.
+_TEXT_EXTS_031: Tuple[str, ...] = (
+    # prose / markup
+    "markdown", "rst", "tex", "org", "adoc",
+    # config / structured text
+    "toml", "ini", "cfg", "conf", "properties", "ndjson", "jsonl", "geojson",
+    # code
+    "java", "c", "h", "cpp", "hpp", "cc", "cxx", "cs", "go", "rs", "rb",
+    "php", "swift", "kt", "kts", "scala", "r", "lua", "dart", "vue", "svelte",
+    "bat", "cmd", "groovy", "gradle", "clj", "cljs", "ex", "exs", "erl", "hs",
+    "fs", "vb", "asm", "proto", "graphql", "gql", "pl", "pm",
+    # notebooks are JSON — read_text returns them verbatim
+    "ipynb",
+)
+_DATA_EXTS_031: Tuple[str, ...] = (
+    "parquet", "avro", "feather", "orc", "arrow",
+    "h5", "hdf5", "npy", "npz", "mat",
+    "sav", "dta", "sas7bdat",
+    "db", "sqlite", "sqlite3",
+)
+_ARCHIVE_EXTS_031: Tuple[str, ...] = (
+    "zip", "tar", "gz", "tgz", "bz2", "tbz2", "xz", "txz", "7z", "rar", "epub",
+)
+
+# Per-extension MIME hints for the binary additions; everything else falls back
+# to octet-stream (the consistency gate is deliberately permissive).
+_ARCHIVE_MIME_031: Dict[str, Tuple[str, ...]] = {
+    "zip": ("application/zip",),
+    "tar": ("application/x-tar",),
+    "gz": ("application/gzip", "application/x-gzip"),
+    "tgz": ("application/gzip", "application/x-gzip"),
+    "bz2": ("application/x-bzip2",),
+    "tbz2": ("application/x-bzip2",),
+    "xz": ("application/x-xz",),
+    "txz": ("application/x-xz",),
+    "7z": ("application/x-7z-compressed",),
+    "rar": ("application/x-rar", "application/vnd.rar"),
+    "epub": ("application/epub+zip", "application/zip"),
+}
+_DATA_MIME_031: Dict[str, Tuple[str, ...]] = {
+    "sqlite": ("application/x-sqlite3", "application/vnd.sqlite3"),
+    "sqlite3": ("application/x-sqlite3", "application/vnd.sqlite3"),
+    "db": ("application/x-sqlite3", "application/vnd.sqlite3"),
+}
+
+# Types accepted-but-uncovered: uploading one drives auto-parser creation (US2).
+AUTO_PARSE_CATEGORIES: Tuple[str, ...] = ("data", "archive")
+
+for _ext in _TEXT_EXTS_031:
+    ACCEPTED_EXTENSIONS.setdefault(_ext, "text")
+    _EXTENSION_TO_MIME_PREFIXES.setdefault(
+        _ext, ("text/", "application/json", "application/xml", "application/octet-stream")
+    )
+for _ext in _DATA_EXTS_031:
+    ACCEPTED_EXTENSIONS.setdefault(_ext, "data")
+    _EXTENSION_TO_MIME_PREFIXES.setdefault(
+        _ext, _DATA_MIME_031.get(_ext, ()) + ("application/octet-stream",)
+    )
+for _ext in _ARCHIVE_EXTS_031:
+    ACCEPTED_EXTENSIONS.setdefault(_ext, "archive")
+    _EXTENSION_TO_MIME_PREFIXES.setdefault(
+        _ext, _ARCHIVE_MIME_031.get(_ext, ()) + ("application/octet-stream",)
+    )
+# --- end Feature 031 ---------------------------------------------------------
 
 
 def normalise_extension(filename: str) -> str:
@@ -259,6 +335,7 @@ def is_consistent(extension: str, sniffed_mime: str) -> bool:
 
 __all__ = [
     "ACCEPTED_EXTENSIONS",
+    "AUTO_PARSE_CATEGORIES",
     "AttachmentCategory",
     "LEGACY_BINARY_FORMATS",
     "MAX_BYTES_BY_CATEGORY",

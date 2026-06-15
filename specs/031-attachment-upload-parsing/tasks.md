@@ -26,9 +26,9 @@ Repo root `c:\Users\sear234\Desktop\Containers\MCP\AstralBody`. Backend under `b
 
 **Purpose**: Flag + scaffolding that later phases build on.
 
-- [ ] T001 Add feature flag `FF_ATTACHMENT_AUTOPARSE` (default `True`) to the `FeatureFlags` registry in `backend/shared/feature_flags.py`, following the existing `_read("FF_…", default)` idiom.
-- [ ] T002 [P] Add the broadened-allowlist + new-category plan as code comments/constants placeholders in `backend/orchestrator/attachments/content_type.py` (no behavior yet) so T010/T011 have a single edit site; document the curated additions from data-model.md §"Coverage map".
-- [ ] T003 [P] Create empty module `backend/orchestrator/attachment_autoparse.py` with module docstring + public function stubs (`start`, `coverage_status`) referencing contracts/parser-autocreate.md (no logic yet; filled in US2).
+- [X] T001 Add feature flag `FF_ATTACHMENT_AUTOPARSE` (default `True`) to the `FeatureFlags` registry in `backend/shared/feature_flags.py`, following the existing `_read("FF_…", default)` idiom.
+- [X] T002 [P] (Subsumed by T007) Broadened-allowlist additions implemented directly in `backend/orchestrator/attachments/content_type.py` as a localized Feature-031 block.
+- [X] T003 [P] Create module `backend/orchestrator/attachment_autoparse.py` with module docstring + public function surface (`start`, `coverage_status`) referencing contracts/parser-autocreate.md (US2 fills the lifecycle wiring).
 
 **Checkpoint**: Flag readable; edit sites exist.
 
@@ -38,18 +38,18 @@ Repo root `c:\Users\sear234\Desktop\Containers\MCP\AstralBody`. Backend under `b
 
 **⚠️ CRITICAL**: Blocks ALL user stories. Migrations + coverage map + broadened allowlist are prerequisites for both attaching (US1) and gap detection (US2).
 
-- [ ] T004 Add idempotent guarded migrations to `backend/shared/database.py::_init_db()`: `CREATE TABLE IF NOT EXISTS message_attachment (...)` with its two indexes, per data-model.md.
-- [ ] T005 Add idempotent guarded migration to `_init_db()`: `CREATE TABLE IF NOT EXISTS attachment_parser (...)` with `uq_attachment_parser_gap` unique index + `idx_attachment_parser_status`, per data-model.md.
-- [ ] T006 Add guarded column migration to `_init_db()`: `draft_agents.source_attachment_id` via the existing `_column_exists()` guard, per data-model.md.
-- [ ] T007 [P] Broaden `ACCEPTED_EXTENSIONS`, add `data` and `archive` categories, and add their `MAX_BYTES_BY_CATEGORY` caps (100 MB each) in `backend/orchestrator/attachments/content_type.py`; map newly-added textual types to existing categories (text/document/spreadsheet) and reserve `data`/`archive` for genuinely no-parser types (data-model.md §"Coverage map").
-- [ ] T008 [P] Create `backend/orchestrator/parser_registry.py`: a coverage map `coverage(extension, category) -> {"covered": bool, "tool": str|None, "source": "builtin"|"global"|None}` that consults the built-in category→tool map AND a `live` row in `attachment_parser`; export `is_covered()` / `covering_tool()` helpers (data-model.md, research.md R3/R6).
-- [ ] T009 [P] Add a `message_attachment` repository in `backend/orchestrator/attachments/repository.py` (or a new `message_attachment_repo.py`): `insert(chat_id, message_id, attachment_id, user_id)`, `list_for_chat(chat_id, user_id)`, all ownership-scoped.
+- [X] T004 Add idempotent guarded migrations to `backend/shared/database.py::_init_db()`: `CREATE TABLE IF NOT EXISTS message_attachment (...)` with its two indexes, per data-model.md.
+- [X] T005 Add idempotent guarded migration to `_init_db()`: `CREATE TABLE IF NOT EXISTS attachment_parser (...)` with `uq_attachment_parser_gap` unique index + `idx_attachment_parser_status`, per data-model.md.
+- [X] T006 Add guarded column migration to `_init_db()`: `draft_agents.source_attachment_id` via the existing `_column_exists()` guard, per data-model.md.
+- [X] T007 [P] Broaden `ACCEPTED_EXTENSIONS`, add `data` and `archive` categories, and add their `MAX_BYTES_BY_CATEGORY` caps (100 MB each) in `backend/orchestrator/attachments/content_type.py`; map newly-added textual types to existing categories (text) and reserve `data`/`archive` for genuinely no-parser types. Also exports `AUTO_PARSE_CATEGORIES` and keeps every accepted ext in the sniff-consistency map.
+- [X] T008 [P] Create `backend/orchestrator/parser_registry.py`: coverage map consulting the built-in category→tool map AND a `live` row in `attachment_parser`; exports `coverage()`/`is_covered()`/`covering_tool()`/`gap_fingerprint()`.
+- [X] T009 [P] Add repositories: `backend/orchestrator/attachments/message_attachment_repo.py` (`insert`/`list_for_chat`/`list_for_message`) and `backend/orchestrator/attachments/parser_repo.py` (`AttachmentParserRepository` — dedup-safe `create_pending`, `mark_live`, `mark_status`, `get_by_gap`/`get_by_draft`, `list_by_status`), all ownership/format-scoped.
 
 ### Foundational tests
 
-- [ ] T010 [P] Test migration idempotency (run `_init_db` twice; assert tables/column exist, no error) in `backend/tests/attachments/test_migrations_031.py`.
-- [ ] T011 [P] Test broadened allowlist + new-category caps + extension normalization in `backend/tests/attachments/test_content_type_broadened.py`.
-- [ ] T012 [P] Test `parser_registry.coverage()` for builtin-covered, globally-covered (seeded `attachment_parser` live row), and uncovered types in `backend/tests/attachments/test_parser_registry.py`.
+- [X] T010 [P] Test migration idempotency (run `_init_db` twice; assert tables/column exist, no error) in `backend/tests/attachments/test_migrations_031.py` (runs against the container Postgres; skips where DB unreachable).
+- [X] T011 [P] Test broadened allowlist + new-category caps + sniff-map completeness in `backend/tests/attachments/test_content_type_broadened.py` — **47 assertions green locally**.
+- [X] T012 [P] Test `parser_registry.coverage()` for builtin-covered, globally-covered (seeded `attachment_parser` live row), and uncovered types + `gap_fingerprint` stability in `backend/tests/attachments/test_parser_registry.py` — **green locally**.
 
 **Checkpoint**: Schema + coverage map + broadened allowlist ready. User stories can begin.
 

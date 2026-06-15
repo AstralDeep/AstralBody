@@ -50,6 +50,15 @@ class FeatureFlags:
             # actively use cross-session memory on request, mirroring
             # scheduling_chat. Passive prompt recall is unaffected. Default ON.
             "memory_chat": self._read("FF_MEMORY_CHAT", True),
+            # 031-attachment-upload-parsing: when an accepted-but-unparseable
+            # file type is uploaded, eagerly draft a safe backend parser by
+            # reusing the 027 agentic-creation lifecycle (security gate +
+            # isolated self-test + ADMIN approval + global promotion). Gates the
+            # auto-creation trigger only — uploading/parsing of already-covered
+            # types is unaffected. When OFF, an uncovered upload reports
+            # "no reader available" instead of drafting a parser. Default ON.
+            # See specs/031-attachment-upload-parsing/.
+            "attachment_autoparse": self._read("FF_ATTACHMENT_AUTOPARSE", True),
         }
 
     @staticmethod
