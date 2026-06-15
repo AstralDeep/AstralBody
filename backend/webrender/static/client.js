@@ -533,9 +533,52 @@
       });
   }
 
-  if (attachBtn && attachInput) {
-    attachBtn.addEventListener("click", function () { attachInput.click(); });
+  // Paperclip → small menu: upload a new file, or choose an existing one (US3).
+  var attachMenu = null;
+  function closeAttachMenu() { if (attachMenu) { attachMenu.remove(); attachMenu = null; } }
+  function openAttachMenu() {
+    closeAttachMenu();
+    attachMenu = document.createElement("div");
+    attachMenu.className = "astral-attach-menu";
+    [["Upload a file", function () { attachInput.click(); }],
+     ["Choose from your files", function () { action("chrome_open", { surface: "attachments" }); }]
+    ].forEach(function (pair) {
+      var b = document.createElement("button");
+      b.type = "button"; b.className = "astral-attach-menu-item"; b.textContent = pair[0];
+      b.addEventListener("click", function () { closeAttachMenu(); pair[1](); });
+      attachMenu.appendChild(b);
+    });
+    (attachBtn.parentNode || document.body).appendChild(attachMenu);
   }
+  if (attachBtn && attachInput) {
+    attachBtn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      if (attachMenu) closeAttachMenu(); else openAttachMenu();
+    });
+    document.addEventListener("click", function (e) {
+      if (attachMenu && !attachMenu.contains(e.target) && e.target !== attachBtn) closeAttachMenu();
+    });
+  }
+  // Attach an EXISTING file from the library modal — stage a ready chip with no
+  // re-upload, then close the modal (US3).
+  document.addEventListener("click", function (e) {
+    var btn = e.target.closest && e.target.closest(".astral-attach-existing");
+    if (!btn) return;
+    var aid = btn.getAttribute("data-attachment-id");
+    if (!aid) return;
+    if (stagedAttachments.length >= MAX_ATTACHMENTS) {
+      setStatus("You can attach up to " + MAX_ATTACHMENTS + " files per message."); return;
+    }
+    var dup = stagedAttachments.some(function (a) { return a.attachment_id === aid; });
+    if (!dup) {
+      stagedAttachments.push({ uid: ++attachSeq, attachment_id: aid,
+        filename: btn.getAttribute("data-filename") || "file",
+        category: btn.getAttribute("data-category") || "file",
+        state: "ready", note: "" });
+      renderAttachments();
+    }
+    if (typeof setModal === "function") setModal("");
+  });
   // Remove-chip delegation.
   if (attachEl) {
     attachEl.addEventListener("click", function (e) {

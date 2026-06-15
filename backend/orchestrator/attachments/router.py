@@ -86,11 +86,15 @@ def _attachment_to_response(att) -> dict:
     "/api/upload",
     summary="Upload a file",
     description=(
-        "Upload a single file. Returns the new attachment's metadata. "
+        "Upload a single file. Returns the new attachment's metadata plus a "
+        "`parser_status` (covered | preparing | pending_admin_approval | "
+        "unavailable) describing whether a reader exists for this type. "
         "Size caps are per-category: 30 MB for documents / spreadsheets / "
-        "presentations / text / images; 2 GB for medical imaging formats "
-        "(DICOM, NIfTI, CZI, NRRD/MHA/MHD, OME-TIFF, SVS, NDPI). "
-        "Files are user-scoped and visible across the user's chats."
+        "presentations / text / images; 100 MB for data / archive; 2 GB for "
+        "medical imaging formats (DICOM, NIfTI, CZI, NRRD/MHA/MHD, OME-TIFF, "
+        "SVS, NDPI). The accepted-type list is broad (feature 031); an accepted "
+        "type with no reader eagerly triggers safe, admin-approved auto-creation "
+        "of one. Files are user-scoped and visible across the user's chats."
     ),
     status_code=status.HTTP_201_CREATED,
 )
