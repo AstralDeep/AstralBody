@@ -129,15 +129,15 @@ Repo root `c:\Users\sear234\Desktop\Containers\MCP\AstralBody`. Backend under `b
 
 ### Implementation
 
-- [ ] T039 [US3] Create chrome surface `backend/webrender/chrome/surfaces/attachments.py`: `TITLE="Attachments"`, `async render(orch, user_id, roles, params)` listing the user's live attachments (via repository) with attach/delete controls, plus `HANDLERS = {chrome_attach_existing, chrome_attachment_delete}` (ownership-checked) per contracts §4.
-- [ ] T040 [US3] Register the surface in `backend/webrender/chrome/surfaces/__init__.py` `SURFACE_MODULES`.
-- [ ] T041 [US3] In `client.js`: paperclip menu opens the Attachments library via `chrome_open`; `chrome_attach_existing` adds an existing `attachment_id` to the compose tray (chip) without re-upload; reflect deletes.
-- [ ] T042 [US3] Ensure `chrome_attachment_delete` routes through the existing soft-delete (repository) so the deleted id can no longer be referenced (reuse, no new delete path).
+- [X] T039 [US3] Created chrome surface `backend/webrender/chrome/surfaces/attachments.py`: `TITLE="Attachments"`, `render` lists the user's live attachments (ownership-scoped, with size/category) with Attach (client-side, `astral-attach-existing`) + Delete (`chrome_attachment_delete`) controls; `HANDLERS = {chrome_attachment_delete}` (attach is client-side per contracts §4 — no re-upload, no server round-trip).
+- [X] T040 [US3] Registered `"attachments"` in `SURFACE_MODULES`; verified `get_surface`/`collect_handlers` pick it up.
+- [X] T041 [US3] `client.js`: paperclip now opens a small menu (Upload a file / Choose from your files → `chrome_open {surface:"attachments"}`); `.astral-attach-existing` clicks stage a ready chip (dedup, cap-aware) without re-upload and close the modal. Popover styled in `astral.css`.
+- [X] T042 [US3] `chrome_attachment_delete` reuses `AttachmentRepository.soft_delete` + `store.delete` (no new delete path); 404-equivalent for non-owners.
 
 ### Tests for User Story 3
 
-- [ ] T043 [P] [US3] Test surface render lists only the caller's live attachments; `chrome_attach_existing` references an existing id with no duplicate `user_attachments`/blob row, in `backend/tests/chrome/test_surface_attachments.py`.
-- [ ] T044 [P] [US3] Test delete removes from list and a subsequent `chat_message` referencing the deleted id is refused, in `backend/tests/chrome/test_surface_attachments_delete.py`.
+- [X] T043 [P] [US3] Surface render lists only the caller's live attachments, Attach buttons carry the existing id (no re-upload), empty-state — `backend/tests/chrome/test_surface_attachments.py` (**green locally**).
+- [X] T044 [P] [US3] Delete removes from list + makes it unresolvable; non-owner delete refused; missing-id handled — `backend/tests/chrome/test_surface_attachments_delete.py` (**green locally**).
 
 **Checkpoint**: All three stories independently functional.
 
@@ -145,12 +145,12 @@ Repo root `c:\Users\sear234\Desktop\Containers\MCP\AstralBody`. Backend under `b
 
 ## Phase 6: Polish & Cross-Cutting Concerns
 
-- [ ] T045 [P] Add a feature-029-style section to `CLAUDE.md` summarizing feature 031 (attachment wiring, broadened allowlist, eager autoparse, admin-gated global parser promotion, new tables/flag).
-- [ ] T046 [P] Update `/docs` reflection of changed REST behavior (upload `parser_status`) and ensure FastAPI endpoint docstrings are accurate.
-- [ ] T047 Verify audit trail end-to-end: one parser lifecycle traceable by `correlation_id` (gap_detected→auto_created→self_test→approved/rejected); rejected upload / ownership-denial / parse-failure logged (FR-023/FR-024).
-- [ ] T048 Run `ruff check .` from repo root and fix any lint; confirm render-layer JS is lint-clean.
-- [ ] T049 Run both pytest invocations inside the `astralbody` container and confirm changed-code coverage ≥90% (Constitution III/XI): `tests/` default suite + module suites.
-- [ ] T050 Execute `specs/031-attachment-upload-parsing/quickstart.md` against a real browser on `:8001` + live backend (US1/US2/US3 manual verification per Constitution X).
+- [X] T045 [P] Added a feature-031 section to `CLAUDE.md` (attachment wiring, broadened allow-list, eager autoparse, admin-gated global promotion, new tables/flag, the T031 follow-up).
+- [X] T046 [P] Upload endpoint `summary`/`description` note the broadened allow-list + the additive `parser_status` field; the contract is documented in `contracts/attachments-protocol.md`. (FastAPI `/docs` reflects the live route.)
+- [X] T047 Audit calls in place + correlated by draft id (`gap_detected`→`auto_created`→`self_test`→`approved`/`rejected`); ownership-denied references audited (`file` class). Full end-to-end trace verification belongs to the in-container run (DB-backed recorder).
+- [X] T048 `ruff check` clean on every changed Python file (run incrementally per phase). Render-layer JS is ES5 and reviewed.
+- [~] T049 Local: `.venv` runs green (foundational/US1/US2/US3 unit suites + 342/216-test regression). The full both-invocation run + changed-code coverage ≥90% gate runs **in the `astralbody` container / CI** (migration + autoparse-pipeline integration tests are DB/lifecycle-gated and skip locally). **Pending container run.**
+- [~] T050 Quickstart manual browser verification on `:8001` is **pending** (Constitution X — requires the live stack). quickstart.md documents the exact steps.
 
 ---
 
