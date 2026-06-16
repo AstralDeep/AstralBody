@@ -380,6 +380,11 @@ class ComponentAdapter:
             # Feature 037 — voice surfaces speak the loading state.
             parts.append(str(comp.get("label") or "Loading"))
 
+        elif comp_type == "button":
+            # Feature 037 — speak actionable labels (e.g. chat-history items)
+            # so voice users hear what they can open.
+            parts.append(comp.get("label", ""))
+
         # Recurse into children/content/tabs
         for key in ("children", "content"):
             for child in comp.get(key, []):
