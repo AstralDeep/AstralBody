@@ -1387,11 +1387,15 @@ class Orchestrator:
                             }))
 
                 elif msg.action == "get_history":
+                    # Feature 037: show the server-driven skeleton while the
+                    # recent-chats query runs, then push the rendered list.
+                    await self._push_history_surface(websocket, loading=True)
                     chats = self.history.get_recent_chats(user_id=user_id)
                     await self._safe_send(websocket, json.dumps({
                         "type": "history_list",
                         "chats": chats
                     }))
+                    await self._push_history_surface(websocket, chats=chats)
 
                 elif msg.action == "load_chat":
                     chat_id = msg.payload.get("chat_id")
@@ -5735,9 +5739,27 @@ COMPONENT UPDATE RULES:
             msg = json.dumps({"type": "history_list", "chats": history_list})
             for c in clients:
                 tasks.append(self._safe_send(c, msg))
+                # Feature 037: refresh the server-driven, ROTE-adapted surface.
+                tasks.append(self._push_history_surface(c, chats=history_list))
 
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _push_history_surface(self, websocket, *, chats=None, loading: bool = False) -> None:
+        """Feature 037: render the chat-history surface (skeleton while loading,
+        else the recent-chats list) and push it ROTE-adapted to the client's
+        history region via send_ui_render(target="history"). Fail-soft — a
+        surface error never breaks history delivery."""
+        try:
+            from orchestrator.history_surface import (
+                history_skeleton_components,
+                history_surface_components,
+            )
+            comps = (history_skeleton_components() if loading
+                     else history_surface_components(chats or []))
+            await self.send_ui_render(websocket, comps, target="history")
+        except Exception:
+            logger.debug("history surface push failed", exc_info=True)
 
     @staticmethod
     def _derive_chat_title(content: str, default: str = "Response") -> str:
