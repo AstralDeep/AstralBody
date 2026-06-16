@@ -20,7 +20,8 @@ This branch delivers the capabilities incrementally; each is independently testa
 | C-N1 | **Task-model-first generation** — derive a typed task/data model (entities, typed attributes, dependency edges) first; map attributes → primitives by deterministic rules; persist alongside the `workspace_layout` overlay | ⏳ planned | The flagship novelty move. |
 | C-U2 | **Conservative adaptation** — penalize redesign by edit-distance from the user's current persisted layout; re-arrange only when the score beats it by a disruption-cost margin | ⏳ planned | Builds on C-U1's score; cheap, high-UX. |
 | C-U3 | **Interaction-archetype selection** — classify the turn {compare, monitor, explore, summarize, decide, form} and seed a layout prior + scorer weights | ⏳ planned | |
-| C-U6 / C-U7 | **Provenance/uncertainty surfacing + dark-pattern lint** — entity facts trace to a tool/search result; deterministic lint strips manipulative garnish | ⏳ planned | Trust-as-UX; also a security win. |
+| **C-U7** | **Dark-pattern / persuasion-safety lint** — deterministic strip of manipulative garnish (false urgency, forced scarcity, confirmshaming); never touches `ref` tool output | ✅ **done** | `lint_arrangement` in `ui_designer.py`; flag `FF_UI_DESIGNER_LINT` (default on), fail-open. Tests: `test_ui_designer_lint.py` (11 cases). |
+| C-U6 | **Provenance/uncertainty surfacing** — entity facts trace to a tool/search result; confidence/provenance badge | ⏳ planned | Trust-as-UX; also a security win. |
 | C-N2 | **Gated generative primitives** — grammar-constrained structure + post-validator + escape-by-default sanitizer; genuinely new primitives ride the draft→self-test→admin-approval rail | ⏳ planned | Highest novelty; largest effort. |
 
 Full acceptance scenarios for the initiative are in `specs/033-frontier-techniques-research/spec.md` (User Story 2). FR mapping: FR-013…FR-018.
