@@ -62,6 +62,48 @@ async def test_foreign_attachment_is_dropped_and_user_notified():
 
 
 @pytest.mark.asyncio
+async def test_foreign_attachment_denial_is_audited(monkeypatch):
+    """Regression: a dropped cross-user reference MUST be recorded in the audit
+    trail. ``_audit_drop`` previously built an AuditEventCreate without the
+    required ``correlation_id``/``started_at`` fields, so construction raised and
+    the bare except swallowed it — the denial was never audited.
+    """
+    from audit import recorder as recorder_mod
+
+    captured = []
+
+    class _CapturingRecorder:
+        async def record(self, event):
+            captured.append(event)
+
+    old = recorder_mod.get_recorder()
+    recorder_mod.set_recorder(_CapturingRecorder())
+    try:
+        db = FakeDB()
+        _seed(db, user_id="u1", attachment_id="mine")
+        _seed(db, user_id="u2", attachment_id="theirs")  # owned by someone else
+        me = _fake_self(db)
+        payload = [
+            {"attachment_id": "mine", "filename": "mine.pdf", "category": "document"},
+            {"attachment_id": "theirs", "filename": "theirs.pdf", "category": "document"},
+        ]
+        await Orchestrator._attach_turn_attachments(
+            me, object(), "read these", "c1", "u1", "m1", payload
+        )
+    finally:
+        recorder_mod.set_recorder(old)
+
+    denials = [e for e in captured if getattr(e, "action_type", None) == "attachment_reference_denied"]
+    assert len(denials) == 1, "the foreign reference must produce exactly one audit denial"
+    ev = denials[0]
+    assert ev.outcome == "failure"
+    assert ev.event_class == "file"
+    assert ev.actor_user_id == "u1"
+    assert ev.correlation_id, "correlation_id must be populated (required field)"
+    assert ev.started_at is not None, "started_at must be populated (required field)"
+
+
+@pytest.mark.asyncio
 async def test_unknown_attachment_id_is_dropped():
     db = FakeDB()
     _seed(db, user_id="u1", attachment_id="real")
