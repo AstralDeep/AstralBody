@@ -90,6 +90,18 @@ def designer_max_rounds() -> int:
         return DEFAULT_MAX_ROUNDS
 
 
+def scorer_enabled() -> bool:
+    """FF_UI_DESIGNER_SCORER feature flag (default ON; feature 033 C-U1).
+
+    When on, :func:`design_round` returns the highest-`score_arrangement`
+    arrangement among the LLM's draft + refinements ("LLM proposes, code
+    decides") instead of merely the last one the conversation settled on.
+    Strictly fail-open: any scoring error reverts to the legacy last-wins
+    selection, so the flag never reduces reliability.
+    """
+    return os.getenv("FF_UI_DESIGNER_SCORER", "true").strip().lower() not in ("0", "false", "no", "off")
+
+
 def should_design(round_components: Sequence[Dict[str, Any]], *, timeline_mode: bool = False) -> bool:
     """Invocation predicate: flag ∧ ≥2 rich components ∧ not viewing history."""
     if timeline_mode or not designer_enabled():
@@ -490,6 +502,125 @@ def stamp_garnish_ids(layout: List[Dict[str, Any]], chat_id: str, layout_key: st
     return stamped
 
 
+# ───────────────────────────── score ─────────────────────────────────────────
+# Feature 033 (capability C-U1): the designer's DESIGN RULES (see
+# _LAYOUT_GUIDANCE) were enforced ONLY by the LLM's own free-text self-critique,
+# which the generative-UI literature (Draco / DracoGPT; Stanford Generative
+# Interfaces) shows is unreliable and unmeasurable. This deterministic scorer
+# turns those rules into a numeric objective so the LLM PROPOSES arrangements
+# and pure-Python code DECIDES which to keep. Higher is better. The function is
+# pure and must never raise (callers still wrap it fail-open).
+
+_ANCHOR_TYPES = frozenset({"hero", "metric"})
+_HEADLINE_TYPES = frozenset({"metric", "rating", "badge"})
+_SCORE_CONTAINERS = frozenset({"grid", "card", "tabs", "collapsible", "container"})
+_TITLED_CONTAINERS = frozenset({"card", "tabs", "collapsible"})
+
+#: Scoring weights — tunable; chosen to mirror the numbered DESIGN RULES.
+W_ANCHOR = 2.0              # rule 2: lead with a hero/headline anchor
+W_HEADLINE_NEAR_TOP = 1.0   # rule 3: headline takeaway high in the hierarchy
+W_GRID_GROUPED = 0.5        # rule 3: grids that actually group ≥2 things
+W_GRID_LONELY = -1.0        # rule 3: a grid wrapping a single cell is noise
+W_TITLED_CONTAINER = 0.25   # rule 4: meaningful titles everywhere
+W_UNTITLED_CONTAINER = -0.75
+W_SAME_TYPE_ADJACENT = -0.5  # rule 6: don't stack runs of identical types
+W_WALL_OF_COMPONENTS = -1.5  # rule 3: many ungrouped top-level nodes = a wall
+W_GROUPING_PRESENT = 0.5     # rule 3: at least one grouping container present
+WALL_THRESHOLD = 6
+
+
+def _texture_key(node: Dict[str, Any], ref_types: Optional[Dict[str, str]]) -> str:
+    """Identity used for run-of-same-type detection. A ``ref`` resolves to the
+    referenced component's real type when known (so a table+chart pair is not
+    mistaken for a same-type run); an unknown ref gets a unique key (no penalty)."""
+    t = str(node.get("type", "")).strip().lower()
+    if t == REF_TYPE:
+        cid = str(node.get("component_id") or "")
+        rt = (ref_types or {}).get(cid)
+        return f"ref:{rt}" if rt else f"ref:{cid or id(node)}"
+    return t
+
+
+def _score_siblings(
+    siblings: Sequence[Any],
+    ref_types: Optional[Dict[str, str]],
+    acc: List[float],
+) -> None:
+    """Accumulate texture + container scores over one sibling list, recursing
+    into structural children (mirrors the validator's traversal)."""
+    prev_key: Optional[str] = None
+    for node in siblings:
+        if not isinstance(node, dict):
+            prev_key = None
+            continue
+        ntype = str(node.get("type", "")).strip().lower()
+        key = _texture_key(node, ref_types)
+        if prev_key is not None and key == prev_key:
+            acc[0] += W_SAME_TYPE_ADJACENT
+        prev_key = key
+
+        if ntype == "grid":
+            children = [c for c in (node.get("children") or []) if isinstance(c, dict)]
+            acc[0] += W_GRID_GROUPED if len(children) >= 2 else W_GRID_LONELY
+        if ntype in _TITLED_CONTAINERS:
+            title = node.get("title")
+            acc[0] += W_TITLED_CONTAINER if (isinstance(title, str) and title.strip()) else W_UNTITLED_CONTAINER
+
+        for ckey in _CHILD_KEYS:
+            nested = node.get(ckey)
+            if isinstance(nested, list):
+                _score_siblings(nested, ref_types, acc)
+        tabs = node.get("tabs")
+        if isinstance(tabs, list):
+            for tab in tabs:
+                if isinstance(tab, dict) and isinstance(tab.get("content"), list):
+                    _score_siblings(tab["content"], ref_types, acc)
+
+
+def score_arrangement(
+    layout: Sequence[Any],
+    *,
+    ref_types: Optional[Dict[str, str]] = None,
+    allowed_types: Optional[Set[str]] = None,
+) -> float:
+    """Deterministically score a (validated, pre-materialize) arrangement.
+
+    Args:
+        layout: the layout node list (``ref`` leaves + garnish nodes).
+        ref_types: optional ``component_id -> component type`` map so ``ref``
+            leaves can be scored by the real type they place (texture rule).
+        allowed_types: accepted for forward-compatibility; unused today.
+
+    Returns:
+        A float; higher means a better arrangement by the designer's own rules.
+        Never raises — returns ``0.0`` for empty/degenerate input.
+    """
+    if not isinstance(layout, list) or not layout:
+        return 0.0
+    top = [n for n in layout if isinstance(n, dict)]
+    if not top:
+        return 0.0
+    acc: List[float] = [0.0]
+
+    first_type = str(top[0].get("type", "")).strip().lower()
+    if first_type in _ANCHOR_TYPES:
+        acc[0] += W_ANCHOR
+    for node in top[:2]:
+        if str(node.get("type", "")).strip().lower() in _HEADLINE_TYPES:
+            acc[0] += W_HEADLINE_NEAR_TOP
+            break
+    if any(str(n.get("type", "")).strip().lower() in ("grid", "card") for n in top):
+        acc[0] += W_GROUPING_PRESENT
+    has_structural_top = any(
+        str(n.get("type", "")).strip().lower() in _SCORE_CONTAINERS for n in top
+    )
+    if len(top) > WALL_THRESHOLD and not has_structural_top:
+        acc[0] += W_WALL_OF_COMPONENTS
+
+    _score_siblings(top, ref_types, acc)
+    return round(acc[0], 4)
+
+
 # ───────────────────────────── materialize ───────────────────────────────────
 
 def materialize(
@@ -588,6 +719,33 @@ async def design_round(
         logger.warning("ui_designer.fallback chat=%s reason=%s latency_ms=%d %s",
                        chat_id, reason, latency_ms, detail)
 
+    # Feature 033 (C-U1): LLM proposes, deterministic scorer decides. Track the
+    # highest-scoring arrangement across the draft + refinements and return it
+    # instead of merely the last one the conversation settled on. Fail-open: any
+    # scoring error (or the flag off) leaves best_* unset → final == current.
+    use_scorer = scorer_enabled()
+    ref_types: Dict[str, str] = {}
+    for _c in round_components:
+        if isinstance(_c, dict) and _c.get("component_id"):
+            ref_types[str(_c["component_id"])] = str(_c.get("type") or "")
+    for _r in (canvas_rows or []):
+        if isinstance(_r, dict) and _r.get("component_id"):
+            ref_types.setdefault(str(_r["component_id"]), str(_r.get("component_type") or ""))
+    best_layout: Optional[List[Dict[str, Any]]] = None
+    best_score: Optional[float] = None
+
+    def _consider(candidate: List[Dict[str, Any]]) -> None:
+        nonlocal best_layout, best_score
+        if not use_scorer:
+            return
+        try:
+            s = score_arrangement(candidate, ref_types=ref_types, allowed_types=allowed_types)
+        except Exception:
+            logger.debug("ui_designer: score_arrangement failed — keeping last-wins", exc_info=True)
+            return
+        if best_score is None or s > best_score:
+            best_layout, best_score = candidate, s
+
     current: Optional[List[Dict[str, Any]]] = None
     passes_used = 0
     messages = build_design_messages(user_request, round_components, canvas_rows, allowed_types)
@@ -675,6 +833,7 @@ async def design_round(
             break
         improved = current is not None
         current = layout
+        _consider(current)
         if improved:
             logger.info("ui_designer.refine chat=%s round=%d outcome=improved", chat_id, attempt)
         if attempt < rounds:
@@ -685,12 +844,19 @@ async def design_round(
         _fallback("invalid", "no usable arrangement produced")
         return None
 
-    layout = stamp_garnish_ids(current, chat_id, layout_key)
+    # Feature 033 (C-U1): return the highest-scoring arrangement, not just the
+    # last. Scorer off (or any scoring error) → best_layout is None → final=current.
+    final = best_layout if (use_scorer and best_layout is not None) else current
+    layout = stamp_garnish_ids(final, chat_id, layout_key)
 
     garnish_count = sum(1 for n in layout if n.get("type") != REF_TYPE)
     latency_ms = int((time.monotonic() - started) * 1000)
-    logger.info("ui_designer.designed chat=%s layout_key=%s refs=%d garnish=%d rounds=%d latency_ms=%d",
-                chat_id, layout_key, len(set(iter_refs(layout))), garnish_count, passes_used, latency_ms)
+    logger.info(
+        "ui_designer.designed chat=%s layout_key=%s refs=%d garnish=%d rounds=%d "
+        "score=%s latency_ms=%d",
+        chat_id, layout_key, len(set(iter_refs(layout))), garnish_count, passes_used,
+        ("%.3f" % best_score) if best_score is not None else "off", latency_ms,
+    )
     return layout
 
 
