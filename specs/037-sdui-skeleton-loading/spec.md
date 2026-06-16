@@ -45,9 +45,20 @@ skeleton_component(variant="chat-history", count=6, label="Loading your chats…
 - **Safe by construction**: fixed class-name whitelist, escaped label, bounded count; `render_one` already wraps every renderer fail-safe.
 - **Tests**: ≥90% changed-code coverage; renderer + ROTE + a11y + XSS + every device target covered. Existing ROTE/webrender suites green (136 passed).
 
+## Wired in: server-driven chat-history surface ✅
+
+The skeleton is now used end-to-end by a real server-driven history surface:
+- `backend/orchestrator/history_surface.py` — pure builders: `history_skeleton_components()` (heading + chat-history skeleton) and `history_surface_components(chats)` (heading + one clickable `load_chat` button per recent chat; empty/id-less → empty-state line).
+- `orchestrator.py` — `_push_history_surface(ws, loading=…/chats=…)` renders these via `send_ui_render(target="history")` so they are **ROTE-adapted per socket** (cross-device). `get_history` shows the skeleton, runs the query, then pushes the list; `_broadcast_user_history` refreshes the surface on change.
+- `shell.html` — a new `#astral-history` region in the chat panel; `client.js` routes `ui_render target="history"` into it (the thin client only injects server HTML).
+- ROTE: browser/tablet/TV show the full list; mobile/watch condense; **voice now speaks the loading state *and* the chat titles** (added a `button` branch to ROTE voice extraction so actionable labels are spoken — a general cross-device improvement).
+- Tests: `backend/tests/test_history_surface.py` (6 cases) + the skeleton suite; full ROTE/webrender suites green (142 passed).
+
+Clicking a history item dispatches the existing `load_chat {chat_id}` action — no new server action needed.
+
 ## Out of scope (follow-on)
 
-Wiring the skeleton into a *server-driven chat-history list surface* (so the history list itself is SDUI, then the skeleton shows while it loads) is a larger follow-on: the history list is currently sent as raw `history_list` data and not server-rendered. This increment ships the reusable primitive that surface will use; building the SDUI history surface + emitting/replacing the skeleton is the next step.
+A dedicated initial skeleton-on-connect (before `get_history`), pagination of very long histories, and a left-rail layout variant are future polish; this increment delivers the working, cross-device, server-driven surface.
 
 ## Assumptions
 
