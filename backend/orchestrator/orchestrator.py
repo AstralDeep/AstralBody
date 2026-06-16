@@ -307,6 +307,11 @@ class Orchestrator:
         self.concurrency_cap = ConcurrencyCap(max_per_user_agent=3)
         # Maps cap_job_id -> (user_id, agent_id) so terminal ToolProgress can release the right slot.
         self._pending_cap_entries: Dict[str, tuple] = {}
+        # Maps cap_job_id -> {user_id, agent_id, chat_id, tool_name} for long-running
+        # jobs, so a job's progress + terminal result can be routed to (and
+        # persisted in) the originating CHAT — not a single ephemeral socket —
+        # which keeps auto-progress working across refresh / device changes.
+        self._job_context: Dict[str, Dict[str, Any]] = {}
         self.cancelled_sessions: Dict[str, bool] = {}  # websocket id -> cancelled flag
         self._chat_locks: Dict[int, asyncio.Lock] = {}  # per-websocket lock for chat serialization
         self._registered_events: Dict[int, asyncio.Event] = {}  # gate non-register messages until auth completes
@@ -869,40 +874,12 @@ class Orchestrator:
                 else:
                     logger.warning(f"Received response for unknown request: {req_id}")
 
-            elif isinstance(msg, ToolProgress) and flags.is_enabled("progress_streaming"):
-                # Forward tool progress to the UI client that initiated the request
-                # The agent includes a request_id in metadata so we can route it
-                req_id = msg.metadata.get("request_id", "")
-                ui_ws = self.pending_ui_sockets.get(req_id)
-                if ui_ws:
-                    forward_payload = {
-                        "type": "tool_progress",
-                        "tool_name": msg.tool_name,
-                        "agent_id": msg.agent_id,
-                        "message": msg.message,
-                        "percentage": msg.percentage,
-                    }
-                    # 015: surface phase + terminal flag + result so the UI can render the
-                    # final outcome of long-running jobs without an extra round-trip.
-                    phase = msg.metadata.get("phase")
-                    if phase:
-                        forward_payload["phase"] = phase
-                    if msg.metadata.get("terminal"):
-                        forward_payload["terminal"] = True
-                    result_md = msg.metadata.get("result")
-                    if result_md is not None:
-                        forward_payload["result"] = result_md
-                    await self._safe_send(ui_ws, json.dumps(forward_payload))
-
-                # 015-external-ai-agents: release the concurrency-cap slot when the
-                # upstream job reaches a terminal state (FR-026 / FR-027 / FR-017).
-                cap_job_id = msg.metadata.get("cap_job_id", "")
-                phase = msg.metadata.get("phase", "")
-                if cap_job_id and phase in ("completed", "failed", "status_unknown"):
-                    entry = self._pending_cap_entries.pop(cap_job_id, None)
-                    if entry:
-                        u_id, a_id = entry
-                        await self.concurrency_cap.release(u_id, a_id, cap_job_id)
+            elif isinstance(msg, ToolProgress):
+                # Long-running job progress. Handled UNCONDITIONALLY — this branch
+                # was previously gated behind the off-by-default progress_streaming
+                # flag, which silently dropped both the auto-progress the agent
+                # promised AND the concurrency-cap release.
+                await self._handle_tool_progress(msg)
 
             # 001-tool-stream-ui: forward streaming tool chunks to subscribers
             # via StreamManager. Gated on the feature flag — when off, agents
@@ -4681,6 +4658,15 @@ COMPONENT UPDATE RULES:
                 )
             args["_cap_job_id"] = cap_job_id
             self._pending_cap_entries[cap_job_id] = (user_id, agent_id)
+            # Remember the chat this long-running job belongs to so its progress
+            # and final result are delivered to (and persisted in) that chat for
+            # any client that returns to it later (014/015 + 028).
+            self._job_context[cap_job_id] = {
+                "user_id": user_id,
+                "agent_id": agent_id,
+                "chat_id": chat_id,
+                "tool_name": tool_name,
+            }
 
         # Audit: record the tool dispatch (in_progress → success/failure)
         from audit.hooks import ToolDispatchAudit
@@ -6194,6 +6180,208 @@ COMPONENT UPDATE RULES:
                 wire_ops.append({"op": "upsert", "component_id": cid,
                                  "component": adapted, "html": html})
             await self._safe_send(ws, UIUpsert(chat_id=chat_id, ops=wire_ops).to_json())
+
+    async def _handle_tool_progress(self, msg) -> None:
+        """Route a long-running job's ToolProgress to the job's CHAT.
+
+        Live updates fan out to every socket the user currently has open on that
+        chat (so progress survives a refresh or a move to another device), plus
+        the legacy originating socket. On a terminal update the result is
+        PERSISTED into the chat workspace so a client returning later
+        re-hydrates the completed UI (014/015 + 028). The concurrency-cap slot is
+        released on terminal regardless of who is connected.
+        """
+        md = msg.metadata or {}
+        cap_job_id = md.get("cap_job_id", "")
+        req_id = md.get("request_id", "")
+        phase = md.get("phase", "")
+        terminal = bool(md.get("terminal")) or phase in ("completed", "failed", "status_unknown")
+        ctx = self._job_context.get(cap_job_id) if cap_job_id else None
+
+        payload: Dict[str, Any] = {
+            "type": "tool_progress",
+            "tool_name": msg.tool_name,
+            "agent_id": msg.agent_id,
+            "message": msg.message,
+            "percentage": msg.percentage,
+        }
+        if phase:
+            payload["phase"] = phase
+        if terminal:
+            payload["terminal"] = True
+        if md.get("result") is not None:
+            payload["result"] = md["result"]
+
+        # Fan out to the job-user's CURRENT sockets on the job's chat, plus the
+        # legacy request-scoped socket if one is still registered.
+        targets: List[Any] = []
+        if ctx:
+            targets = self._sockets_on_chat(ctx.get("user_id"), ctx.get("chat_id"))
+        legacy = self.pending_ui_sockets.get(req_id)
+        if legacy is not None and legacy not in targets:
+            targets.append(legacy)
+        for ws in targets:
+            try:
+                await self._safe_send(ws, json.dumps(payload))
+            except Exception:
+                logger.debug("tool_progress forward failed", exc_info=True)
+
+        # Terminal: persist the outcome into the chat (so a returning client
+        # re-generates the completed UI), then release the concurrency-cap slot.
+        if terminal and ctx:
+            try:
+                await self._finalize_long_running_job(ctx, msg)
+            except Exception:
+                logger.exception("finalizing long-running job failed (cap=%s)", cap_job_id)
+            self._job_context.pop(cap_job_id, None)
+        if cap_job_id and phase in ("completed", "failed", "status_unknown"):
+            entry = self._pending_cap_entries.pop(cap_job_id, None)
+            if entry:
+                u_id, a_id = entry
+                try:
+                    await self.concurrency_cap.release(u_id, a_id, cap_job_id)
+                except Exception:
+                    logger.debug("cap release failed", exc_info=True)
+
+    def _sockets_on_chat(self, user_id: str, chat_id: str) -> List[Any]:
+        """Every socket ``user_id`` currently has open on ``chat_id`` (for
+        fanning a job update out to a refreshed / multi-device session)."""
+        return [
+            ws for ws in self.ui_clients
+            if self._get_user_id(ws) == user_id and self._ws_active_chat.get(id(ws)) == chat_id
+        ]
+
+    async def _narrate_job_result(self, ctx: Dict[str, Any], result: Dict[str, Any]):
+        """Ask the model to narrate a completed job's results (a concise,
+        plain-language comparison naming the best performer). Server-initiated
+        (operator-default LLM, websocket=None). Returns chat-rail components, or
+        None when no LLM is available / the call fails — callers fall back to a
+        deterministic note."""
+        try:
+            tool = ctx.get("tool_name", "the job")
+            messages = [
+                {"role": "system", "content": (
+                    "You summarize a COMPLETED machine-learning training job for the "
+                    "user in the chat. Write a concise, plain-language summary (2-4 "
+                    "sentences) comparing the models/metrics and naming the best "
+                    "performer, using the actual numbers from the results. No preamble, "
+                    "no markdown headings, no code fences."
+                )},
+                {"role": "user", "content": (
+                    f"Tool: {tool}\nResults JSON:\n{json.dumps(result, default=str)[:4000]}"
+                )},
+            ]
+            message, _usage = await self._call_llm(
+                None, messages, feature="job_summary", temperature=0.3
+            )
+            text = getattr(message, "content", None) if message is not None else None
+            if text and text.strip():
+                return self._chat_narrative(text.strip())
+        except Exception:
+            logger.debug("job result narration failed", exc_info=True)
+        return None
+
+    async def _finalize_long_running_job(self, ctx: Dict[str, Any], msg) -> None:
+        """Persist + deliver a long-running job's terminal outcome to its chat:
+
+        1. the result COMPONENT into the persistent per-chat workspace (028), so
+           ``load_chat`` re-hydrates it for a client that refreshed or returned on
+           another device, and ``send_ui_upsert`` delivers it live; and
+        2. a NARRATION in the chat rail — for a completed job the model compares
+           the metrics and names the winner (falling back to a deterministic note
+           when no LLM is available) — persisted as an assistant transcript
+           message and fanned out live to every socket currently on the chat.
+        """
+        uid = ctx.get("user_id")
+        cid = ctx.get("chat_id")
+        if not uid or not cid:
+            return
+        md = msg.metadata or {}
+        phase = md.get("phase", "")
+        component = self._build_job_result_component(ctx, msg)
+
+        # 1) The result component → persistent workspace (canvas) + live upsert.
+        component_id = None
+        try:
+            ops = self.workspace.upsert(cid, uid, [component])
+            component_id = component.get("component_id")
+            await self.send_ui_upsert(None, cid, uid, ops)
+        except Exception:
+            logger.exception("persisting job result component failed (chat=%s)", cid)
+
+        # 2) The narration → chat rail. Model-written comparison for a completed
+        #    job with results; a short deterministic note otherwise.
+        chat_core = None
+        if phase == "completed" and isinstance(md.get("result"), dict):
+            chat_core = await self._narrate_job_result(ctx, md["result"])
+        if not chat_core:
+            title = component.get("title") or "Job complete"
+            note = title if phase == "completed" else (msg.message or "Job ended.")
+            chat_core = [Text(content=f"✓ {note}").to_dict()]
+
+        try:
+            self.history.add_message(cid, "assistant", chat_core, user_id=uid)
+        except Exception:
+            logger.debug("job narration persist failed", exc_info=True)
+        for ws in self._sockets_on_chat(uid, cid):
+            try:
+                await self.send_ui_render(ws, chat_core, target="chat")
+            except Exception:
+                logger.debug("job narration live delivery failed", exc_info=True)
+
+        try:
+            from audit.hooks import record_workspace_event
+            await record_workspace_event(
+                user_id=uid, action="component_added", chat_id=cid,
+                component_id=component_id, outcome="success",
+                description=f"Long-running job result delivered: {ctx.get('tool_name')}",
+            )
+        except Exception:
+            logger.debug("job finalize audit failed", exc_info=True)
+
+    def _build_job_result_component(self, ctx: Dict[str, Any], msg) -> Dict[str, Any]:
+        """Build a deterministic result component from a terminal ToolProgress.
+
+        A completed job renders its metrics as a Table; a failed / unknown
+        outcome renders a status Alert. The component is source-tagged so the
+        workspace assigns it a stable identity (028) and it survives reload."""
+        md = msg.metadata or {}
+        phase = md.get("phase", "")
+        tool = ctx.get("tool_name", "job")
+        source = {
+            "_source_agent": ctx.get("agent_id"),
+            "_source_tool": ctx.get("tool_name"),
+            "_source_params": {"_job_result": ctx.get("chat_id", "")},
+        }
+        if phase == "completed":
+            rows: List[List[str]] = []
+
+            def _flatten(d: Dict[str, Any], prefix: str = "") -> None:
+                for k, v in d.items():
+                    key = f"{prefix}{k}"
+                    if isinstance(v, (str, int, float, bool)) or v is None:
+                        rows.append([key, "" if v is None else str(v)])
+                    elif isinstance(v, dict) and len(rows) < 40:
+                        _flatten(v, f"{key}.")
+
+            result = md.get("result")
+            if isinstance(result, dict):
+                _flatten(result)
+            comp: Dict[str, Any] = {
+                "type": "table",
+                "title": f"Training complete — {tool}",
+                "headers": ["Metric", "Value"],
+                "rows": rows[:40] or [["status", "complete"]],
+            }
+        else:
+            note = msg.message or ("Job failed." if phase == "failed" else "Job status unknown.")
+            comp = {
+                "type": "alert",
+                "message": f"{tool}: {note}",
+                "variant": "error" if phase == "failed" else "warning",
+            }
+        comp.update(source)
+        return comp
 
     async def send_ui_render(self, websocket, components: List, target: str = "canvas"):
         """Send a UIRender message to a UI client, adapted via ROTE."""
