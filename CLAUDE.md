@@ -113,4 +113,5 @@ shell commands, and other important information, read the current plan at
 - [specs/026-frontend-removal-astralprims/plan.md](specs/026-frontend-removal-astralprims/plan.md)
 - [specs/027-agentic-creation-settings/plan.md](specs/027-agentic-creation-settings/plan.md)
 - [specs/031-attachment-upload-parsing/plan.md](specs/031-attachment-upload-parsing/plan.md)
+- [specs/033-frontier-techniques-research/plan.md](specs/033-frontier-techniques-research/plan.md)
 <!-- SPECKIT END -->
