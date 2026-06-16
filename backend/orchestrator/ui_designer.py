@@ -102,6 +102,17 @@ def scorer_enabled() -> bool:
     return os.getenv("FF_UI_DESIGNER_SCORER", "true").strip().lower() not in ("0", "false", "no", "off")
 
 
+def lint_enabled() -> bool:
+    """FF_UI_DESIGNER_LINT feature flag (default ON; feature 033 C-U7).
+
+    When on, :func:`design_round` strips manipulative dark-pattern language the
+    LLM may inject into its own garnish (false urgency, confirmshaming, forced
+    scarcity) before the arrangement is rendered. Tool-produced component data
+    is never touched. Fail-open: any lint error leaves the arrangement intact.
+    """
+    return os.getenv("FF_UI_DESIGNER_LINT", "true").strip().lower() not in ("0", "false", "no", "off")
+
+
 def should_design(round_components: Sequence[Dict[str, Any]], *, timeline_mode: bool = False) -> bool:
     """Invocation predicate: flag ∧ ≥2 rich components ∧ not viewing history."""
     if timeline_mode or not designer_enabled():
@@ -621,6 +632,79 @@ def score_arrangement(
     return round(acc[0], 4)
 
 
+# ───────────────────────────── lint ──────────────────────────────────────────
+# Feature 033 (capability C-U7): LLM-generated UI injects deceptive patterns
+# unprompted (Deception at Scale, CHI'26; 1K generated components). The
+# designer may add its own garnish (hero/badge/text), so this deterministic
+# linter strips manipulative language from GARNISH text only — never from a
+# ``ref`` (tool output) — before the arrangement renders. Pure; never raises.
+
+#: (rule name, compiled pattern). Patterns match manipulative copy; the matched
+#: span is redacted from garnish text fields and the rule recorded for audit.
+_DARK_PATTERN_RULES: List[Tuple[str, "re.Pattern[str]"]] = [
+    ("false_urgency", re.compile(
+        r"\b(?:act now|act fast|hurry|limited[- ]time(?:\s+offer)?|last chance|"
+        r"ends?\s+(?:in|today|soon)|ending soon|don'?t miss(?:\s+out)?|"
+        r"while supplies last|today only|buy now before|countdown)\b", re.I)),
+    ("forced_scarcity", re.compile(
+        r"\bonly\s+\d+\s+(?:left|remaining|in stock|spots?\s+left)\b", re.I)),
+    ("confirmshaming", re.compile(
+        r"\bno,?\s*(?:thanks,?\s*)?i\s+(?:don'?t|do not)\s+(?:want|need|care)\b", re.I)),
+]
+
+#: Garnish text fields the linter scrubs (string-valued only).
+_GARNISH_TEXT_KEYS = ("title", "subtitle", "eyebrow", "content", "label",
+                      "value", "hint", "description")
+
+
+def lint_arrangement(layout: Sequence[Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
+    """Strip dark-pattern language from garnish; return ``(cleaned, flags)``.
+
+    ``ref`` nodes (tool output) are returned untouched. ``flags`` is a list of
+    ``{"rule": ..., "where": <field>}`` for audit/logging. Never raises.
+    """
+    flags: List[Dict[str, str]] = []
+
+    def _scrub(text: str, where: str) -> str:
+        out = text
+        for name, rx in _DARK_PATTERN_RULES:
+            if rx.search(out):
+                flags.append({"rule": name, "where": where})
+                out = rx.sub("", out)
+        return re.sub(r"\s{2,}", " ", out).strip()
+
+    def walk(node: Any) -> Any:
+        if not isinstance(node, dict):
+            return node
+        if node.get("type") == REF_TYPE:
+            return node
+        node = dict(node)
+        for key in _GARNISH_TEXT_KEYS:
+            if isinstance(node.get(key), str):
+                node[key] = _scrub(node[key], key)
+        if isinstance(node.get("badges"), list):
+            node["badges"] = [
+                _scrub(b, "badges") if isinstance(b, str) else b for b in node["badges"]
+            ]
+        for ckey in _CHILD_KEYS:
+            nested = node.get(ckey)
+            if isinstance(nested, list):
+                node[ckey] = [walk(c) for c in nested]
+        tabs = node.get("tabs")
+        if isinstance(tabs, list):
+            new_tabs = []
+            for tab in tabs:
+                if isinstance(tab, dict) and isinstance(tab.get("content"), list):
+                    tab = dict(tab)
+                    tab["content"] = [walk(c) for c in tab["content"]]
+                new_tabs.append(tab)
+            node["tabs"] = new_tabs
+        return node
+
+    cleaned = [walk(n) for n in (layout or [])]
+    return cleaned, flags
+
+
 # ───────────────────────────── materialize ───────────────────────────────────
 
 def materialize(
@@ -847,6 +931,18 @@ async def design_round(
     # Feature 033 (C-U1): return the highest-scoring arrangement, not just the
     # last. Scorer off (or any scoring error) → best_layout is None → final=current.
     final = best_layout if (use_scorer and best_layout is not None) else current
+
+    # Feature 033 (C-U7): strip manipulative dark-pattern garnish before render.
+    if lint_enabled():
+        try:
+            linted, dp_flags = lint_arrangement(final)
+            if dp_flags:
+                logger.warning("ui_designer.dark_pattern_blocked chat=%s rules=%s",
+                               chat_id, sorted({f["rule"] for f in dp_flags}))
+                final = linted
+        except Exception:
+            logger.debug("ui_designer: lint_arrangement failed — keeping unlinted", exc_info=True)
+
     layout = stamp_garnish_ids(final, chat_id, layout_key)
 
     garnish_count = sum(1 for n in layout if n.get("type") != REF_TYPE)
