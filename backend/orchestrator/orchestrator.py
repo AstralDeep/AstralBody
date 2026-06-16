@@ -2647,11 +2647,16 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
         async def _audit_drop(aid):
             try:
+                from datetime import datetime, timezone
+
                 from audit.recorder import get_recorder
                 from audit.schemas import AuditEventCreate
                 rec = get_recorder()
                 if rec is None:
                     return
+                # correlation_id and started_at are REQUIRED by AuditEventCreate;
+                # omitting them raised a ValidationError that the except below
+                # silently swallowed, so cross-user denials were never recorded.
                 await rec.record(AuditEventCreate(
                     actor_user_id=user_id or "legacy",
                     auth_principal=user_id or "legacy",
@@ -2659,10 +2664,12 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     action_type="attachment_reference_denied",
                     description=f"Dropped unauthorized/invalid attachment reference {aid}",
                     conversation_id=chat_id,
+                    correlation_id=str(_uuid.uuid4()),
                     outcome="failure",
+                    started_at=datetime.now(timezone.utc),
                 ))
             except Exception:
-                logger.debug("attachment drop audit failed", exc_info=True)
+                logger.warning("attachment drop audit failed", exc_info=True)
 
         MAX_PER_TURN = 10
         accepted = []
