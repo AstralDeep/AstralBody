@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from .phi_gate import PHIGate, get_phi_gate
 from .repository import MEMORY_CATEGORIES
+from .retrieval_scoring import multisignal_enabled, score_memory_row
 
 logger = logging.getLogger("personalization.memory")
 
@@ -66,15 +67,30 @@ class MemoryTools:
         return self.repo.list_memory(user_id)
 
     def memory_search(self, user_id: str, query: str, *, limit: int = 10) -> List[Dict[str, Any]]:
-        """Lightweight token-overlap search over durable memory items."""
+        """Token-overlap search over durable memory, ranked by a multi-signal
+        recency × importance × relevance composite (feature 036 C-M4) when
+        FF_MEMORY_MULTISIGNAL is on; fail-open to the legacy overlap-only rank."""
         q = _tokens(query)
-        items = self.repo.list_memory(user_id)
+        items = self.repo.list_memory(user_id)  # recency DESC (created_at)
         if not q:
             return items[:limit]
+        use_ms = multisignal_enabled()
+        total = len(items)
         scored = []
-        for it in items:
+        for idx, it in enumerate(items):
             overlap = len(q & _tokens(f"{it.get('category','')} {it.get('value','')}"))
-            if overlap:
-                scored.append((overlap, it))
-        scored.sort(key=lambda t: t[0], reverse=True)
-        return [it for _, it in scored[:limit]]
+            if not overlap:
+                continue
+            score = float(overlap)
+            if use_ms:
+                try:
+                    score = score_memory_row(it, index=idx, total=total,
+                                             overlap=overlap, query_size=len(q))
+                except Exception:
+                    logger.debug("memory_search: multi-signal scoring failed — overlap only",
+                                 exc_info=True)
+                    score = float(overlap)
+            scored.append((score, idx, it))
+        # higher score first; ties keep recency order (idx asc)
+        scored.sort(key=lambda t: (-t[0], t[1]))
+        return [it for _, _, it in scored[:limit]]
