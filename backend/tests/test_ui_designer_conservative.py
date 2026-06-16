@@ -150,3 +150,33 @@ async def test_driver_no_current_layout_adopts(monkeypatch):
         llm_call=_stub_llm([_DRAFT, "DONE"]), current_layout=None,
         timeout_s=5, max_rounds=2)
     assert any(n.get("type") == "hero" for n in out)
+
+
+# ───────────────────────── fail-open guarantees ──────────────────────────────
+
+def _raise(*_a, **_k):
+    raise RuntimeError("boom")
+
+
+def test_should_adopt_fail_open_on_ref_error(monkeypatch):
+    # an error comparing component sets must fall open to adopting the new one
+    monkeypatch.setattr(ui_designer, "iter_refs", _raise)
+    assert should_adopt(_GOOD, _FLAT_LAYOUT, ref_types=RT) is True
+
+
+def test_should_adopt_fail_open_on_score_error(monkeypatch):
+    # same component set so it reaches scoring; a scoring error → adopt (True)
+    monkeypatch.setattr(ui_designer, "score_arrangement", _raise)
+    assert should_adopt(_GOOD, _GOOD, ref_types=RT) is True
+
+
+async def test_driver_conservative_fail_open(monkeypatch):
+    # a should_adopt error inside design_round must never crash — adopt the new
+    monkeypatch.setenv("FF_UI_DESIGNER_CONSERVATIVE", "true")
+    monkeypatch.setenv("FF_UI_DESIGNER_SCORER", "true")
+    monkeypatch.setattr(ui_designer, "should_adopt", _raise)
+    out = await design_round(
+        user_request="x", round_components=_COMPS, canvas_rows=[],
+        chat_id="cc5", layout_key="lk5", allowed_types=ALLOWED,
+        llm_call=_stub_llm([_FLAT]), current_layout=_GOOD, timeout_s=5, max_rounds=2)
+    assert out is not None  # conservative error → adopted new, no crash
