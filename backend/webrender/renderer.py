@@ -888,6 +888,61 @@ def render_rating(c):
             f'{value_html}</div>{sub_html}</div>')
 
 
+_SKELETON_WIDTHS = ("w-3/4", "w-1/2", "w-2/3", "w-5/6", "w-1/3")
+_SKELETON_MAX_ROWS = 12
+
+
+def render_skeleton(c: Dict[str, Any]) -> str:
+    """Render a loading-skeleton placeholder (feature 037).
+
+    A server-driven, content-free shimmer placeholder shown while a surface
+    (e.g. the chat-history list) loads. Carries NO user data. ``role=status`` +
+    an ``sr-only`` label expose it to assistive tech; the shimmer lives in
+    ``.astral-skeleton-line`` CSS, which honours ``prefers-reduced-motion``.
+    ``variant`` ∈ {``list``/``chat-history``, ``card``, ``lines``}; ``count`` is
+    the number of placeholder rows (bounded). All class names come from a fixed
+    whitelist, and ``label`` is escaped — safe by construction.
+    """
+    variant = str(c.get("variant", "list"))
+    try:
+        count = int(c.get("count", 4))
+    except (TypeError, ValueError):
+        count = 4
+    count = max(1, min(count, _SKELETON_MAX_ROWS))
+    label = esc(c.get("label") or "Loading…")
+    rows: List[str] = []
+    for i in range(count):
+        w = _SKELETON_WIDTHS[i % len(_SKELETON_WIDTHS)]
+        if variant in ("list", "chat-history"):
+            rows.append(
+                '<div class="flex items-center gap-3 py-2">'
+                '<div class="astral-skeleton-line h-8 w-8 rounded-full shrink-0"></div>'
+                '<div class="flex-1 space-y-2">'
+                f'<div class="astral-skeleton-line h-3 {w}"></div>'
+                '<div class="astral-skeleton-line h-2 w-1/3"></div>'
+                '</div></div>'
+            )
+        elif variant == "card":
+            rows.append('<div class="astral-skeleton-line h-20 w-full mb-3"></div>')
+        else:  # "lines"
+            rows.append(f'<div class="astral-skeleton-line h-3 {w} mb-2"></div>')
+    return (
+        '<div class="astral-skeleton" role="status" aria-busy="true" aria-live="polite">'
+        f'<span class="sr-only">{label}</span>{"".join(rows)}</div>'
+    )
+
+
+def skeleton_component(variant: str = "list", count: int = 4, label: str = "Loading…") -> Dict[str, Any]:
+    """Build a skeleton primitive dict. Use ``variant='chat-history'`` for the
+    chat-list loading state. Callers emit this like any astralprims primitive;
+    ROTE adapts it per device and the orchestrator renders it."""
+    try:
+        n = int(count)
+    except (TypeError, ValueError):
+        n = 4
+    return {"type": "skeleton", "variant": str(variant), "count": n, "label": str(label)}
+
+
 PRIMITIVE_RENDERERS.update({
     "container": render_container, "text": render_text, "button": render_button, "input": render_input,
     "param_picker": render_param_picker, "card": render_card, "table": render_table, "list": render_list,
@@ -899,6 +954,7 @@ PRIMITIVE_RENDERERS.update({
     "audio": render_audio,
     "badge": render_badge, "hero": render_hero, "keyvalue": render_keyvalue,
     "timeline": render_timeline, "rating": render_rating,
+    "skeleton": render_skeleton,
 })
 
 
