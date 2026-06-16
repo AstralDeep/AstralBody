@@ -5895,6 +5895,17 @@ COMPONENT UPDATE RULES:
                 return (msg.content or "") if msg else None
 
             from webrender import allowed_primitive_types
+            # Feature 039 (C-U2): the current persisted arrangement for this
+            # layout_key (if any) lets the designer avoid re-arranging it for a
+            # marginal gain.
+            _current_layout = None
+            try:
+                for _lay in self.workspace.live_layouts(chat_id, user_id):
+                    if _lay.get("layout_key") == layout_key:
+                        _current_layout = _lay.get("layout")
+                        break
+            except Exception:
+                _current_layout = None
             layout = await ui_designer.design_round(
                 user_request=user_request,
                 round_components=components,
@@ -5903,6 +5914,7 @@ COMPONENT UPDATE RULES:
                 layout_key=layout_key,
                 allowed_types=set(allowed_primitive_types()),
                 llm_call=_designer_llm,
+                current_layout=_current_layout,
             )
         except Exception:
             logger.exception("ui_designer crashed — falling back to flat append")
