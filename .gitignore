@@ -9,6 +9,7 @@ Qualifying_Exam/
 backend/knowledge/*
 backend/knowledge/_index.md
 tasks.xlsx
+CLAUDE-FABLE-5.md
 
 bikerides_day.csv
 dataset_soft.csv
