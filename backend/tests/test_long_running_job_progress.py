@@ -1,14 +1,15 @@
 """Long-running job progress auto-posts to the chat and survives refresh /
-cross-device.
+cross-device, and a completed job is narrated (model-written comparison) in the
+chat rail.
 
 Regression for the bug where a training job said "progress will post here
 automatically" but nothing posted until the user manually asked for status: the
 orchestrator's ToolProgress handler was gated behind the off-by-default
 ``progress_streaming`` flag (so progress + the cap release were dropped), and
 delivery keyed on an ephemeral per-request socket (so a refreshed / other-device
-client never saw it). The fix routes progress to the job's CHAT and persists the
+client never saw it). The fix routes progress to the job's CHAT, persists the
 terminal result into the per-chat workspace (028) so returning clients re-hydrate
-the completed UI.
+the completed UI, AND narrates the comparison via the model into the chat rail.
 
 Uses the established "real unbound Orchestrator methods bound onto a fake self
 over a real Postgres-backed WorkspaceManager" pattern.
@@ -31,6 +32,9 @@ if str(BACKEND_DIR) not in sys.path:
 from orchestrator.orchestrator import Orchestrator  # noqa: E402
 from orchestrator.workspace import WorkspaceManager  # noqa: E402
 from shared.protocol import ToolProgress  # noqa: E402
+
+NARRATION = ("Random Forest performed best at 71.8% accuracy (AUC 0.739), "
+             "beating Gradient Boosting's 61.5% (AUC 0.655).")
 
 
 def _can_connect_to_db() -> bool:
@@ -84,13 +88,22 @@ def _run(coro):
     return asyncio.run(_wrapper())
 
 
-def _make_fake(history, user_id):
+def _make_fake(history, user_id, llm_content=NARRATION):
+    """Fake orchestrator self with the real job-progress methods bound on. The
+    LLM and chat-narrative seams are stubbed so the test is deterministic; pass
+    ``llm_content=None`` to simulate no LLM available (fallback path)."""
     from rote.rote import ROTE
 
     sent = []
 
     async def _safe_send(ws, payload):
         sent.append((ws, json.loads(payload) if isinstance(payload, str) else payload))
+
+    async def _call_llm(websocket, messages, tools_desc=None, temperature=None,
+                        feature="tool_dispatch"):
+        if llm_content is None:
+            return None, None
+        return types.SimpleNamespace(content=llm_content), {}
 
     ui_sessions = {}
     fake = types.SimpleNamespace(
@@ -105,10 +118,13 @@ def _make_fake(history, user_id):
         _pending_cap_entries={},
         concurrency_cap=_FakeCap(),
         _safe_send=_safe_send,
+        _call_llm=_call_llm,
+        _chat_narrative=lambda content: [{"type": "text", "content": content}],
         _get_user_id=lambda ws: (ui_sessions.get(ws) or {}).get("sub"),
     )
     for name in ("_handle_tool_progress", "_finalize_long_running_job",
-                 "_build_job_result_component", "send_ui_upsert"):
+                 "_build_job_result_component", "_narrate_job_result",
+                 "_sockets_on_chat", "send_ui_upsert", "send_ui_render"):
         setattr(fake, name, types.MethodType(getattr(Orchestrator, name), fake))
     fake._sent = sent
     return fake
@@ -136,7 +152,7 @@ def _terminal(cap, result=None, phase="completed", message="Training complete.")
                         message=message, percentage=100, metadata=md)
 
 
-def test_terminal_result_persists_and_fans_out(chat_env):
+def test_terminal_result_persists_fans_out_and_narrates(chat_env):
     history, user_id, chat_id = chat_env
     fake = _make_fake(history, user_id)
     cap = "cap_classify_x"
@@ -147,22 +163,27 @@ def test_terminal_result_persists_and_fans_out(chat_env):
               "gradient_boosting": {"accuracy": 0.615, "auc": 0.655}}
     _run(fake._handle_tool_progress(_terminal(cap, result)))
 
-    # Persisted into the workspace (this is exactly what load_chat re-hydrates).
+    # Result Table persisted into the workspace (what load_chat re-hydrates).
     comps = fake.workspace.live_components(chat_id, user_id)
     blob = json.dumps(comps)
     assert "0.718" in blob and "random_forest.accuracy" in blob
-    # Delivered live to the connected socket as a ui_upsert.
+    # Table delivered live as a ui_upsert.
     assert any(m.get("type") == "ui_upsert" for _, m in fake._sent)
+    # Model-written comparison narrated into the chat rail (live)...
+    assert any(m.get("type") == "ui_render" and m.get("target") == "chat"
+               and NARRATION in json.dumps(m) for _, m in fake._sent)
+    # ...and persisted in the transcript (so reload shows it).
+    chat = history.get_chat(chat_id, user_id)
+    assert NARRATION in json.dumps(chat.get("messages", []))
     # Cap released + job context cleaned up.
     assert fake.concurrency_cap.released == [(user_id, "ml-services-1", cap)]
-    assert cap not in fake._job_context
-    assert cap not in fake._pending_cap_entries
+    assert cap not in fake._job_context and cap not in fake._pending_cap_entries
 
 
-def test_completed_result_available_after_refresh_or_other_device(chat_env):
+def test_completed_result_and_narration_available_after_refresh(chat_env):
     """No socket connected when the job finishes (user navigated away / switched
-    device). The result must still be persisted so a returning client
-    re-hydrates the completed UI."""
+    device). Both the result component AND the narration must still be persisted
+    so a returning client re-hydrates the completed UI + comparison."""
     history, user_id, chat_id = chat_env
     fake = _make_fake(history, user_id)
     cap = "cap_classify_y"
@@ -174,7 +195,26 @@ def test_completed_result_available_after_refresh_or_other_device(chat_env):
     comps = fake.workspace.live_components(chat_id, user_id)
     assert any("0.9" in json.dumps(c) for c in comps), \
         "result must persist even when nobody is connected"
+    chat = history.get_chat(chat_id, user_id)
+    assert NARRATION in json.dumps(chat.get("messages", [])), \
+        "narration must persist for a returning client"
     assert fake.concurrency_cap.released == [(user_id, "ml-services-1", cap)]
+
+
+def test_narration_falls_back_to_note_when_no_llm(chat_env):
+    history, user_id, chat_id = chat_env
+    fake = _make_fake(history, user_id, llm_content=None)  # LLM unavailable
+    cap = "cap_fallback"
+    _seed_job(fake, user_id, chat_id, cap)
+    _register_socket(fake, user_id, chat_id)
+
+    _run(fake._handle_tool_progress(_terminal(cap, {"accuracy": 0.7})))
+
+    chat = history.get_chat(chat_id, user_id)
+    blob = json.dumps(chat.get("messages", []))
+    assert "Training complete" in blob, "a deterministic completion note must still post"
+    # A chat-rail render still went out live.
+    assert any(m.get("type") == "ui_render" and m.get("target") == "chat" for _, m in fake._sent)
 
 
 def test_works_with_progress_streaming_flag_off(chat_env, monkeypatch):

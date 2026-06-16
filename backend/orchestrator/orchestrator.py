@@ -6216,12 +6216,7 @@ COMPONENT UPDATE RULES:
         # legacy request-scoped socket if one is still registered.
         targets: List[Any] = []
         if ctx:
-            cid = ctx.get("chat_id")
-            uid = ctx.get("user_id")
-            targets = [
-                ws for ws in self.ui_clients
-                if self._get_user_id(ws) == uid and self._ws_active_chat.get(id(ws)) == cid
-            ]
+            targets = self._sockets_on_chat(ctx.get("user_id"), ctx.get("chat_id"))
         legacy = self.pending_ui_sockets.get(req_id)
         if legacy is not None and legacy not in targets:
             targets.append(legacy)
@@ -6248,37 +6243,97 @@ COMPONENT UPDATE RULES:
                 except Exception:
                     logger.debug("cap release failed", exc_info=True)
 
+    def _sockets_on_chat(self, user_id: str, chat_id: str) -> List[Any]:
+        """Every socket ``user_id`` currently has open on ``chat_id`` (for
+        fanning a job update out to a refreshed / multi-device session)."""
+        return [
+            ws for ws in self.ui_clients
+            if self._get_user_id(ws) == user_id and self._ws_active_chat.get(id(ws)) == chat_id
+        ]
+
+    async def _narrate_job_result(self, ctx: Dict[str, Any], result: Dict[str, Any]):
+        """Ask the model to narrate a completed job's results (a concise,
+        plain-language comparison naming the best performer). Server-initiated
+        (operator-default LLM, websocket=None). Returns chat-rail components, or
+        None when no LLM is available / the call fails — callers fall back to a
+        deterministic note."""
+        try:
+            tool = ctx.get("tool_name", "the job")
+            messages = [
+                {"role": "system", "content": (
+                    "You summarize a COMPLETED machine-learning training job for the "
+                    "user in the chat. Write a concise, plain-language summary (2-4 "
+                    "sentences) comparing the models/metrics and naming the best "
+                    "performer, using the actual numbers from the results. No preamble, "
+                    "no markdown headings, no code fences."
+                )},
+                {"role": "user", "content": (
+                    f"Tool: {tool}\nResults JSON:\n{json.dumps(result, default=str)[:4000]}"
+                )},
+            ]
+            message, _usage = await self._call_llm(
+                None, messages, feature="job_summary", temperature=0.3
+            )
+            text = getattr(message, "content", None) if message is not None else None
+            if text and text.strip():
+                return self._chat_narrative(text.strip())
+        except Exception:
+            logger.debug("job result narration failed", exc_info=True)
+        return None
+
     async def _finalize_long_running_job(self, ctx: Dict[str, Any], msg) -> None:
-        """Persist a long-running job's terminal result into its chat: a short
-        assistant transcript note plus a workspace component. Because the
-        component lands in the persistent per-chat workspace (028), ``load_chat``
-        re-hydrates it for a client that refreshed or returned on another device,
-        and ``send_ui_upsert`` delivers it live to any socket currently on the
-        chat."""
+        """Persist + deliver a long-running job's terminal outcome to its chat:
+
+        1. the result COMPONENT into the persistent per-chat workspace (028), so
+           ``load_chat`` re-hydrates it for a client that refreshed or returned on
+           another device, and ``send_ui_upsert`` delivers it live; and
+        2. a NARRATION in the chat rail — for a completed job the model compares
+           the metrics and names the winner (falling back to a deterministic note
+           when no LLM is available) — persisted as an assistant transcript
+           message and fanned out live to every socket currently on the chat.
+        """
         uid = ctx.get("user_id")
         cid = ctx.get("chat_id")
         if not uid or not cid:
             return
+        md = msg.metadata or {}
+        phase = md.get("phase", "")
         component = self._build_job_result_component(ctx, msg)
-        title = component.get("title") or "Job complete"
 
-        try:
-            self.history.add_message(cid, "assistant", f"✓ {title}", user_id=uid)
-        except Exception:
-            logger.debug("job completion transcript note failed", exc_info=True)
-
+        # 1) The result component → persistent workspace (canvas) + live upsert.
+        component_id = None
         try:
             ops = self.workspace.upsert(cid, uid, [component])
+            component_id = component.get("component_id")
             await self.send_ui_upsert(None, cid, uid, ops)
         except Exception:
             logger.exception("persisting job result component failed (chat=%s)", cid)
-            return
+
+        # 2) The narration → chat rail. Model-written comparison for a completed
+        #    job with results; a short deterministic note otherwise.
+        chat_core = None
+        if phase == "completed" and isinstance(md.get("result"), dict):
+            chat_core = await self._narrate_job_result(ctx, md["result"])
+        if not chat_core:
+            title = component.get("title") or "Job complete"
+            note = title if phase == "completed" else (msg.message or "Job ended.")
+            chat_core = [Text(content=f"✓ {note}").to_dict()]
+
+        try:
+            self.history.add_message(cid, "assistant", chat_core, user_id=uid)
+        except Exception:
+            logger.debug("job narration persist failed", exc_info=True)
+        for ws in self._sockets_on_chat(uid, cid):
+            try:
+                await self.send_ui_render(ws, chat_core, target="chat")
+            except Exception:
+                logger.debug("job narration live delivery failed", exc_info=True)
 
         try:
             from audit.hooks import record_workspace_event
             await record_workspace_event(
                 user_id=uid, action="component_added", chat_id=cid,
-                component_id=component.get("component_id"), outcome="success",
+                component_id=component_id, outcome="success",
                 description=f"Long-running job result delivered: {ctx.get('tool_name')}",
             )
         except Exception:
