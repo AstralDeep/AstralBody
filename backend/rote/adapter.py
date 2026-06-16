@@ -70,6 +70,9 @@ class ComponentAdapter:
         if comp_type == "button":
             return cls._adapt_button(comp, profile)
 
+        if comp_type == "skeleton":
+            return cls._adapt_skeleton(comp, profile)
+
         # Recurse into known container types
         if comp_type in ("container", "card"):
             return cls._adapt_container(comp, profile)
@@ -254,6 +257,21 @@ class ComponentAdapter:
         return comp
 
     @classmethod
+    def _adapt_skeleton(cls, comp: Dict, profile: DeviceProfile) -> Optional[Dict]:
+        """Feature 037 — cap the loading-skeleton's placeholder row count on
+        small surfaces so it fits a watch/phone (VOICE is handled earlier by
+        text collapse). Other targets pass through unchanged."""
+        try:
+            count = int(comp.get("count", 4))
+        except (TypeError, ValueError):
+            count = 4
+        caps = {DeviceType.WATCH: 3, DeviceType.MOBILE: 5}
+        cap = caps.get(profile.device_type)
+        if cap is not None and count > cap:
+            return {**comp, "count": cap}
+        return comp
+
+    @classmethod
     def _adapt_container(cls, comp: Dict, profile: DeviceProfile) -> Dict:
         """Recurse into card.content or container.children."""
         if comp.get("type") == "card":
@@ -357,6 +375,15 @@ class ComponentAdapter:
             value = comp.get("value", 0)
             max_value = comp.get("max_value", 5)
             parts.append(f"{label}: {value} out of {max_value} stars")
+
+        elif comp_type == "skeleton":
+            # Feature 037 — voice surfaces speak the loading state.
+            parts.append(str(comp.get("label") or "Loading"))
+
+        elif comp_type == "button":
+            # Feature 037 — speak actionable labels (e.g. chat-history items)
+            # so voice users hear what they can open.
+            parts.append(comp.get("label", ""))
 
         # Recurse into children/content/tabs
         for key in ("children", "content"):

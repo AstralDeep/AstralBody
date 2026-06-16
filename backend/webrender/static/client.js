@@ -227,6 +227,7 @@
     switch (data.type) {
       case "ui_render":
         if (data.target === "chat") appendChatBubble("assistant", data.html);
+        else if (data.target === "history") { var hr = document.getElementById("astral-history"); if (hr) setHTML(hr, data.html); } // Feature 037
         else setHTML(canvas, data.html);
         break;
       case "ui_upsert": applyUpsert(data); break; // Feature 028 — in-place workspace updates
