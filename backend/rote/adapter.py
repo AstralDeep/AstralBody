@@ -21,7 +21,50 @@ class ComponentAdapter:
             adapted = cls._adapt_component(comp, profile)
             if adapted is not None:
                 result.append(adapted)
-        return result
+        # 033 Wave-0 (C-D2): apply declarative host bounds last — strip
+        # interactivity on read-only surfaces and cap action-buttons. No-op
+        # under the default host-config (interactive, unlimited actions).
+        return cls._enforce_host_limits(result, profile)
+
+    @classmethod
+    def _enforce_host_limits(cls, components: List[Dict], profile: DeviceProfile) -> List[Dict]:
+        """Bound what a surface renders, per the declarative host-config
+        (C-D2). On a non-interactive (read-only) surface every action-button is
+        dropped; otherwise, when ``max_actions`` is set, action-buttons past the
+        budget are dropped (deepest-tree order preserved). This is a security
+        bound: a compromised agent cannot exceed the host's action budget on a
+        given surface. Returns the components unchanged when nothing applies."""
+        read_only = not getattr(profile, "supports_interactivity", True)
+        max_actions = getattr(profile, "max_actions", 0) or 0
+        if not read_only and max_actions <= 0:
+            return components
+        budget = [max_actions if max_actions > 0 else None]
+
+        def walk(node):
+            if not isinstance(node, dict):
+                return node
+            if node.get("type") == "button" and node.get("action"):
+                if read_only:
+                    return None
+                if budget[0] is not None:
+                    if budget[0] <= 0:
+                        return None
+                    budget[0] -= 1
+                return node
+            out = dict(node)
+            for key in ("children", "content"):
+                if isinstance(out.get(key), list):
+                    out[key] = [w for w in (walk(c) for c in out[key]) if w is not None]
+            if isinstance(out.get("tabs"), list):
+                new_tabs = []
+                for tab in out["tabs"]:
+                    if isinstance(tab, dict) and isinstance(tab.get("content"), list):
+                        tab = {**tab, "content": [w for w in (walk(c) for c in tab["content"]) if w is not None]}
+                    new_tabs.append(tab)
+                out["tabs"] = new_tabs
+            return out
+
+        return [w for w in (walk(c) for c in components) if w is not None]
 
     # ------------------------------------------------------------------
     # Internal helpers
