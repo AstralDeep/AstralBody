@@ -4753,6 +4753,19 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         md = getattr(card, "metadata", {}) or {}
         return tool_name in (md.get("long_running_tools") or [])
 
+    def _policy_roles(self, websocket) -> List[str]:
+        """Best-effort session roles for the C-S3 policy engine. Handles a flat
+        ``roles`` claim or the Keycloak ``realm_access.roles`` shape; returns
+        ``[]`` when unavailable (role-predicated rules simply won't match)."""
+        claims = self.ui_sessions.get(websocket) if websocket is not None else None
+        if not isinstance(claims, dict):
+            return []
+        roles = claims.get("roles")
+        if not roles:
+            ra = claims.get("realm_access")
+            roles = ra.get("roles") if isinstance(ra, dict) else None
+        return list(roles) if isinstance(roles, (list, tuple)) else []
+
     async def execute_single_tool(self, websocket, tool_call, tool_to_agent: Dict, chat_id: str = None, user_id: str = None, tool_to_unqualified: Optional[Dict[str, str]] = None) -> Optional[MCPResponse]:
         """Execute a single tool call and render its UI components. Returns the Result object."""
         # The LLM may have emitted a qualified name (e.g. "forecaster-1__submit_dataset")
@@ -4830,6 +4843,35 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 error={"message": err_msg, "retryable": False},
                 ui_components=[alert.to_dict()]
             )
+
+        # 033 Wave-4 (C-S3): deterministic pre-action policy engine — an ordered,
+        # fail-closed rule chain (data, admin-extensible via POLICY_RULES) on top
+        # of the permission gate. Default OFF + no seed rules ⇒ purely additive.
+        # deny/confirm block the call; rewrite redacts args before execution.
+        if user_id:
+            from orchestrator import policy
+            if policy.policy_enabled():
+                try:
+                    decision = policy.evaluate_policy(
+                        policy.load_rules(),
+                        {"tool": tool_name, "agent": agent_id, "user_id": user_id,
+                         "roles": self._policy_roles(websocket), "args": args})
+                except Exception:
+                    logger.debug("policy: evaluation failed — allowing", exc_info=True)
+                    decision = policy.PolicyDecision()
+                if decision.effect in (policy.DENY, policy.CONFIRM):
+                    msg = decision.reason or (
+                        f"'{tool_name}' needs confirmation before it can run."
+                        if decision.effect == policy.CONFIRM
+                        else f"'{tool_name}' was blocked by an access policy.")
+                    logger.warning("policy.%s user=%s tool=%s rule=%s",
+                                   decision.effect, user_id, tool_name, decision.rule_id)
+                    alert = Alert(message=msg, variant="warning")
+                    await self.send_ui_render(websocket, [alert.to_dict()])
+                    return MCPResponse(error={"message": msg, "retryable": False},
+                                       ui_components=[alert.to_dict()])
+                if decision.args is not None:
+                    args = decision.args  # rewritten (e.g. a secret arg redacted)
 
         # Map file paths if chat_id provided
         if chat_id:
