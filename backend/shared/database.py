@@ -407,7 +407,7 @@ class Database:
                 artifact_pointers JSONB NOT NULL DEFAULT '[]'::jsonb,
                 started_at TIMESTAMPTZ NOT NULL,
                 completed_at TIMESTAMPTZ,
-                recorded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                recorded_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
                 prev_hash BYTEA NOT NULL,
                 entry_hash BYTEA NOT NULL,
                 key_id TEXT NOT NULL,
@@ -415,6 +415,15 @@ class Database:
                 CONSTRAINT audit_events_outcome_check CHECK (outcome IN ('in_progress','success','failure','interrupted'))
             )
         ''')
+        # Chain-ordering fix: recorded_at must be the INSERT instant, not the
+        # transaction-start time. Two near-simultaneous chained inserts serialize
+        # via pg_advisory_xact_lock (one inserts only after the other commits),
+        # but both transactions START at ~the same instant while contending for
+        # the lock, so `now()` (txn-start) TIES — and verify_chain's
+        # recorded_at/event_id ordering then mis-orders by the random event_id,
+        # falsely flagging the chain. `clock_timestamp()` is evaluated at INSERT
+        # execution, which the lock guarantees is strictly ordered. Idempotent.
+        cursor.execute('ALTER TABLE audit_events ALTER COLUMN recorded_at SET DEFAULT clock_timestamp()')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_user_recorded ON audit_events(actor_user_id, recorded_at DESC, event_id DESC)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_correlation ON audit_events(correlation_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_user_class_recorded ON audit_events(actor_user_id, event_class, recorded_at DESC)')
