@@ -29,6 +29,20 @@ _GEAR_SVG = (
     '2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>'
 )
 
+# Feature 045 — "history" glyph (clock + counter-clockwise arrow) for the
+# top-bar Workspace-timeline button: a recognizable "go back to an earlier
+# version" affordance sitting right next to Settings.
+_HISTORY_SVG = (
+    '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>'
+    '<path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg>'
+)
+
+# chrome_open payload for the top-bar timeline button (the client injects the
+# active chat id into params at click time — see client.js).
+_TIMELINE_PAYLOAD = json.dumps({"surface": "workspace_timeline", "params": {}})
+
 
 def _menu_entries(roles):
     """Grouped (label, entries) menu inventory, role/availability filtered.
@@ -44,9 +58,9 @@ def _menu_entries(roles):
             ("personalization", "Personalization", "personalization", {}),
             ("audit", "Audit log", "audit", {}),
             ("theme", "Theme", "theme", {}),
-            # Feature 028 — read-only workspace timeline; the client injects
-            # the active chat id into params at click time.
-            ("timeline", "Workspace timeline", "workspace_timeline", {}),
+            # Feature 028's workspace timeline used to live here; feature 045
+            # promoted it to a dedicated top-bar icon (see render_topbar) so
+            # returning to an earlier canvas is one click, not buried in a menu.
         ]),
         ("Help", [
             ("tour", "Take the tour", "tour", {}),
@@ -102,6 +116,15 @@ def render_topbar(roles=None) -> str:
         'class="h-8 w-auto select-none" draggable="false"></div>'
         '<div class="flex items-center gap-3">'
         '<span id="astral-status" class="text-xs text-astral-muted" role="status"></span>'
+        # Feature 045 — Workspace-timeline icon next to Settings. Reuses the
+        # generic `chrome_open` delegation (client.js injects the active chat
+        # id into params at click time), so no new client wiring is needed.
+        '<button type="button" id="astral-timeline-btn" data-tour-target="topbar.timeline" '
+        'class="flex items-center justify-center p-1.5 rounded-lg text-astral-muted '
+        'hover:text-astral-text hover:bg-white/5" aria-label="Workspace timeline" '
+        'title="Workspace timeline — revisit an earlier version of this canvas" '
+        'data-ui-action="chrome_open" '
+        f"data-ui-payload='{esc(_TIMELINE_PAYLOAD)}'>{_HISTORY_SVG}</button>"
         '<div class="relative" id="astral-settings">'
         '<button type="button" id="astral-settings-btn" data-tour-target="topbar.settings" '
         'class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm text-astral-muted '

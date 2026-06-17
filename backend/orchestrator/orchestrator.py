@@ -1488,18 +1488,19 @@ class Orchestrator:
                                 "active": False,
                             }))
 
-                        # Feature 028 (FR-028): component-bearing transcript
-                        # messages get a server-rendered html form so the
-                        # client renders meaningful bubbles instead of empty
-                        # ones (additive field on chat_loaded messages).
+                        # Feature 028 (FR-028) + 045: component-bearing transcript
+                        # messages get a server-rendered html form, but the chat
+                        # rail is TEXT ONLY — only text primitives render; rich
+                        # components (tables/charts/metrics) are dropped here and
+                        # shown on the canvas, which re-hydrates from the
+                        # workspace below. A message with no text-only content
+                        # gets no html (the client renders no bubble for it).
                         try:
-                            from webrender import render as _render_web
                             for m in chat.get("messages", []):
                                 if not isinstance(m.get("content"), str) and isinstance(m.get("content"), list):
-                                    try:
-                                        m["html"] = _render_web(m["content"])
-                                    except Exception:
-                                        logger.debug("transcript render failed for message %s", m.get("id"), exc_info=True)
+                                    _t_html = self._transcript_html(m["content"])
+                                    if _t_html:
+                                        m["html"] = _t_html
                         except Exception:
                             logger.exception("webrender unavailable for transcript rendering")
 
@@ -2382,7 +2383,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
     # Component types that carry no rich visual content (just text wrappers)
     _TEXT_ONLY_TYPES = {"text", "card", "container", "collapsible", "divider", "list", "alert"}
 
-    def _is_text_only_components(self, components: list) -> bool:
+    @classmethod
+    def _is_text_only_components(cls, components: list) -> bool:
         """Return True if all components in the tree contain only text-based content.
 
         Used to decide whether parsed UI JSON should go to the canvas (rich content)
@@ -2392,15 +2394,41 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             if not isinstance(comp, dict):
                 continue
             comp_type = comp.get("type", "").strip().lower()
-            if comp_type not in self._TEXT_ONLY_TYPES:
+            if comp_type not in cls._TEXT_ONLY_TYPES:
                 return False
             for key in ("children", "content"):
                 children = comp.get(key, [])
                 if isinstance(children, list):
                     child_dicts = [c for c in children if isinstance(c, dict) and "type" in c]
-                    if child_dicts and not self._is_text_only_components(child_dicts):
+                    if child_dicts and not cls._is_text_only_components(child_dicts):
                         return False
         return True
+
+    @classmethod
+    def _transcript_html(cls, content) -> str:
+        """Feature 045 — server-rendered HTML for a component-bearing transcript
+        message, restricted to TEXT ONLY.
+
+        The chat rail is words only: rich components (tables, charts, metrics,
+        dashboards, …) live on the canvas and re-hydrate from the persistent
+        workspace (``_canvas_components``), NOT from the transcript. So a loaded
+        transcript message renders only its text-only primitives (Text/Alert/
+        List and text-only containers); any rich component is dropped. Returns
+        ``''`` when the message carries nothing text-like — the client then
+        renders no bubble for it (the content is on the canvas).
+        """
+        if not isinstance(content, list):
+            return ""
+        text_only = [c for c in content
+                     if isinstance(c, dict) and cls._is_text_only_components([c])]
+        if not text_only:
+            return ""
+        try:
+            from webrender import render as _render_web
+            return _render_web(text_only)
+        except Exception:
+            logger.debug("transcript text-only render failed", exc_info=True)
+            return ""
 
     def _map_file_paths(self, chat_id: str, args: Dict, user_id: str = 'legacy') -> Dict:
         """Replace original filenames in tool arguments with backend paths.
@@ -3748,7 +3776,12 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                             chat_summary = (list(leak_alerts) + chat_core
                                             + [self._provenance_caption(_tools_ran)])
                             await self.send_ui_render(websocket, chat_summary, target="chat")
-                            response_components = list(leak_alerts) + list(parsed_components)
+                            # Feature 045: the chat transcript stores the TEXT the
+                            # user saw (chat_summary), NOT the rich components —
+                            # those persist in the workspace and re-hydrate to the
+                            # canvas on reload. Keeps the chat rail words-only and
+                            # makes a reloaded transcript match the live one.
+                            response_components = list(chat_summary)
                     else:
                         _tools_ran = bool(task.tool_calls_made) if task else False
                         # 030: long/structured narrative (drafts, documents,
