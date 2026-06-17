@@ -3458,25 +3458,17 @@ COMPONENT UPDATE RULES:
                                 except Exception:
                                     logger.debug("workspace snapshot failed (tool turn)", exc_info=True)
 
-                    # Append tool outputs to LLM conversation history
+                    # Append tool outputs to LLM conversation history. C-N15:
+                    # the LLM-visible text is the two-tier digest (a tool's
+                    # `_model_digest` wins; else the existing `_data`/full-result
+                    # serialization) — see _tool_result_to_llm_content.
                     for i, tc in enumerate(llm_msg.tool_calls):
                         res = tool_results[i] if i < len(tool_results) else None
-                        
-                        content_str = "No output"
-                        if res:
-                            if res.error:
-                                content_str = f"Error: {res.error.get('message')}"
-                            elif res.result:
-                                if isinstance(res.result, dict) and "_data" in res.result:
-                                    content_str = json.dumps(res.result["_data"])
-                                else:
-                                    content_str = json.dumps(res.result)
-                        
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tc.id,
                             "name": tc.function.name,
-                            "content": content_str
+                            "content": self._tool_result_to_llm_content(res),
                         })
 
                     # Denial loop detection: track permission-denied tool results
@@ -4072,6 +4064,39 @@ COMPONENT UPDATE RULES:
                 await asyncio.sleep(backoff)
         # Defensive: should be unreachable since the MAX_RETRIES branch raises.
         return None, None
+
+    @staticmethod
+    def _tool_result_to_llm_content(res) -> str:
+        """033 Wave-0 (C-N15 — two-tier tool output): the text a tool result
+        contributes to the LLM conversation.
+
+        A tool may split its result into a short model-facing tier and a larger
+        renderer-only tier. Precedence:
+
+        1. ``_model_digest`` — the explicit model-facing digest. When present it
+           is the ONLY thing the LLM sees; the render-only payload
+           (``_ui_components`` / ``_data`` / raw fetched text) never enters the
+           model. This both cuts tokens and closes a prompt-injection channel
+           (untrusted fetched/parsed content stops reaching the reasoning loop).
+        2. ``_data`` — the existing convention; serialized as today.
+        3. otherwise the whole result is serialized — unchanged behavior.
+
+        Defaulting to (2)/(3) keeps every current tool byte-identical; the
+        digest tier is purely opt-in for a tool that sets ``_model_digest``.
+        """
+        if res is None:
+            return "No output"
+        if getattr(res, "error", None):
+            return f"Error: {res.error.get('message')}"
+        result = getattr(res, "result", None)
+        if not result:
+            return "No output"
+        if isinstance(result, dict) and result.get("_model_digest") is not None:
+            digest = result["_model_digest"]
+            return digest if isinstance(digest, str) else json.dumps(digest)
+        if isinstance(result, dict) and "_data" in result:
+            return json.dumps(result["_data"])
+        return json.dumps(result)
 
     async def _emit_llm_usage_report(self, websocket, *, feature, model, usage, outcome):
         """Send an ``llm_usage_report`` message to ``websocket`` carrying the
