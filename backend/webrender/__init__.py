@@ -10,6 +10,8 @@ from .renderer import (  # noqa: F401
     render_one,
     render_component_fragment,
     render_workspace,
+    provenance_enabled,
+    provenance_of,
     esc,
     safe_url,
 )
