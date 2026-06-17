@@ -124,6 +124,18 @@ def conservative_enabled() -> bool:
     return os.getenv("FF_UI_DESIGNER_CONSERVATIVE", "true").strip().lower() not in ("0", "false", "no", "off")
 
 
+def archetype_enabled() -> bool:
+    """FF_UI_DESIGNER_ARCHETYPE feature flag (default ON; feature 033 C-U3).
+
+    Classifies the turn's interaction archetype (compare / monitor / explore /
+    summarize / decide / form) and seeds BOTH a layout-prior hint into the
+    designer prompt AND an additive bias into the deterministic scorer, so the
+    arrangement fits the *shape of the task*. Fail-open: a turn with no clear
+    signal classifies as None and the designer behaves exactly as before, and
+    any classification/scoring error is swallowed."""
+    return os.getenv("FF_UI_DESIGNER_ARCHETYPE", "true").strip().lower() not in ("0", "false", "no", "off")
+
+
 def adopt_margin() -> float:
     """Score margin a re-design must beat the current layout by to be adopted
     (operator override ``UI_DESIGNER_ADOPT_MARGIN``; default 0.5)."""
@@ -203,8 +215,13 @@ def build_design_messages(
     round_components: Sequence[Dict[str, Any]],
     canvas_rows: Sequence[Dict[str, Any]],
     allowed_types: Set[str],
+    archetype: Optional[str] = None,
 ) -> List[Dict[str, str]]:
-    """Build the chat-completion messages for one design pass."""
+    """Build the chat-completion messages for one design pass.
+
+    ``archetype`` (C-U3), when set, appends a one-line layout-prior hint so the
+    LLM's draft starts from a task-appropriate arrangement. ``None`` reproduces
+    the legacy prompt verbatim."""
     request = (user_request or "").strip()
     if len(request) > _MAX_REQUEST_CHARS:
         request = request[:_MAX_REQUEST_CHARS] + "…"
@@ -226,6 +243,8 @@ def build_design_messages(
     ) if canvas_lines else ""
 
     palette = ", ".join(sorted(allowed_types))
+    prior = archetype_prior(archetype)
+    prior_block = f"\nTASK SHAPE: {prior}\n" if prior else ""
     user_prompt = f"""USER REQUEST FOR THIS ROUND:
 {request or '(not provided)'}
 
@@ -233,7 +252,7 @@ THIS ROUND'S COMPONENTS (place each exactly once via a ref node):
 {digests}
 {canvas_block}
 FULL ALLOWED TYPE PALETTE: {palette}
-
+{prior_block}
 {_LAYOUT_GUIDANCE}"""
 
     return [
@@ -297,8 +316,12 @@ def build_refine_messages(
     round_components: Sequence[Dict[str, Any]],
     canvas_rows: Sequence[Dict[str, Any]],
     allowed_types: Set[str],
+    archetype: Optional[str] = None,
 ) -> List[Dict[str, str]]:
-    """Build the critique/improve messages for one refinement pass."""
+    """Build the critique/improve messages for one refinement pass.
+
+    ``archetype`` (C-U3) appends the same task-shape prior as the draft pass so
+    refinements keep steering toward the task-appropriate arrangement."""
     request = (user_request or "").strip()
     if len(request) > _MAX_REQUEST_CHARS:
         request = request[:_MAX_REQUEST_CHARS] + "…"
@@ -326,6 +349,8 @@ def build_refine_messages(
         layout_json = layout_json[:_MAX_LAYOUT_JSON_CHARS] + "…(truncated)"
 
     palette = ", ".join(sorted(allowed_types))
+    prior = archetype_prior(archetype)
+    prior_block = f"\nTASK SHAPE: {prior}\n" if prior else ""
     user_prompt = f"""USER REQUEST FOR THIS ROUND:
 {request or '(not provided)'}
 
@@ -339,7 +364,7 @@ CURRENT ARRANGEMENT (JSON):
 {layout_json}
 
 FULL ALLOWED TYPE PALETTE: {palette}
-
+{prior_block}
 {_LAYOUT_GUIDANCE}
 
 {_REFINE_GUIDANCE}"""
@@ -562,6 +587,149 @@ W_GROUPING_PRESENT = 0.5     # rule 3: at least one grouping container present
 WALL_THRESHOLD = 6
 
 
+# ───────────────────── interaction archetypes (C-U3) ─────────────────────────
+# Feature 033 (C-U3): classify the turn's interaction archetype, then seed a
+# layout-prior hint into the designer prompt AND an additive bias into the
+# scorer so the arrangement fits the shape of the task.
+
+ARCHETYPES = ("compare", "monitor", "explore", "summarize", "decide", "form")
+
+#: Lowercased request-text signals per archetype (substring match — kept
+#: phrase-like so single common words ("show") don't over-trigger).
+_ARCHETYPE_KEYWORDS: Dict[str, Tuple[str, ...]] = {
+    "compare": ("compare", "comparison", "versus", " vs ", " vs.", "difference",
+                "differ", "side by side", "side-by-side", "against", "benchmark",
+                "head to head", "head-to-head", "which is better", "better than"),
+    "monitor": ("monitor", "status", "dashboard", "health", "uptime", "live",
+                "real-time", "real time", "realtime", "track", "metrics", "kpi",
+                "current state", "at a glance"),
+    "explore": ("explore", "browse", "list all", "show all", "all the", "find ",
+                "look through", "what are", "which ", "discover", "catalog"),
+    "summarize": ("summarize", "summary", "overview", "tl;dr", "tldr", "brief",
+                  "recap", "key points", "key takeaways", "in short", "gist",
+                  "high level", "high-level"),
+    "decide": ("should i", "recommend", "recommendation", "decide", "decision",
+               "choose", "which should", "best option", "pros and cons",
+               "trade-off", "tradeoff", "worth it", "or should"),
+    "form": ("create a", "add a", "edit ", "fill ", "a form", "input ",
+             "configure", "set up", "setup", "enter ", "register", "sign up",
+             "sign-up", "update my", "change my"),
+}
+
+#: Additive archetype scorer biases (on TOP of the base structural score) —
+#: modest, so they tilt near-ties toward task-fit without overriding quality.
+W_ARCH_COMPARE_GRID = 1.0      # compare: a ≥2-cell grid puts items side by side
+W_ARCH_MONITOR_ANCHOR = 1.0    # monitor: a metric/hero anchor leads, dashboard-style
+W_ARCH_EXPLORE_CONTAINER = 0.75  # explore: titled containers/tabs to browse
+W_ARCH_SUMMARIZE_LEAD = 1.0    # summarize: a text/headline lead first
+W_ARCH_SUMMARIZE_SPRAWL = -0.75  # summarize: penalize many top-level nodes
+W_ARCH_DECIDE_ANCHOR = 1.0     # decide: lead with the recommendation
+W_ARCH_FORM_SINGLE_COL = 1.0   # form: a single vertical column
+W_ARCH_FORM_MULTICOL = -1.0    # form: penalize multi-column grids
+
+#: Metric/headline component types that read as a dashboard anchor.
+_DASHBOARDISH = frozenset({"metric", "hero", "gauge", "keyvalue", "badge"})
+#: Data-view component types that invite comparison.
+_DATAVIEWISH = frozenset({"table", "bar_chart", "line_chart", "pie_chart", "plotly_chart"})
+
+_ARCHETYPE_PRIORS = {
+    "compare": "This looks like a COMPARE task: place the key items side by side "
+               "(e.g. a 2-column grid) so they can be scanned against each other.",
+    "monitor": "This looks like a MONITOR task: lead with the headline metric(s) as "
+               "an anchor row at the top, dashboard-style, with detail beneath.",
+    "explore": "This looks like an EXPLORE task: group related items into titled "
+               "containers or tabs so the user can browse them without a wall of cards.",
+    "summarize": "This looks like a SUMMARIZE task: lead with the single takeaway and "
+                 "keep the arrangement tight and scannable.",
+    "decide": "This looks like a DECIDE task: surface the recommendation up top, with "
+              "the supporting options or trade-offs grouped beneath it.",
+    "form": "This looks like a FORM/INPUT task: use a single vertical column with "
+            "clearly titled sections; avoid multi-column grids.",
+}
+
+
+def classify_archetype(
+    user_request: Optional[str],
+    components: Optional[Sequence[Dict[str, Any]]] = None,
+) -> Optional[str]:
+    """Feature 033 (C-U3): classify a turn's interaction archetype.
+
+    Deterministic keyword (request text) + shape (component types) heuristic.
+    Returns one of :data:`ARCHETYPES`, or ``None`` when no signal is strong
+    enough — in which case the designer behaves exactly as before (fail-open).
+    Ties resolve in :data:`ARCHETYPES` order for determinism.
+    """
+    text = f" {(user_request or '').lower()} "
+    scores: Dict[str, int] = {a: 0 for a in ARCHETYPES}
+    for arch, kws in _ARCHETYPE_KEYWORDS.items():
+        for kw in kws:
+            if kw in text:
+                scores[arch] += 1
+    # Shape signals only NUDGE (weight 1) — text intent dominates.
+    types = [str(c.get("type", "")).strip().lower()
+             for c in (components or []) if isinstance(c, dict)]
+    if sum(1 for t in types if t in _DASHBOARDISH) >= 2:
+        scores["monitor"] += 1
+    if sum(1 for t in types if t in _DATAVIEWISH) >= 2:
+        scores["compare"] += 1
+    if 0 < len(types) <= 1:
+        scores["summarize"] += 1
+    best = max(ARCHETYPES, key=lambda a: scores[a])
+    return best if scores[best] > 0 else None
+
+
+def archetype_prior(archetype: Optional[str]) -> str:
+    """One-line layout-prior hint for the designer prompt (''
+    when there's no archetype)."""
+    return _ARCHETYPE_PRIORS.get(archetype or "", "")
+
+
+def archetype_bonus(
+    layout: Sequence[Any],
+    archetype: Optional[str],
+    ref_types: Optional[Dict[str, str]] = None,
+) -> float:
+    """Additive, archetype-specific score layered on top of the base structural
+    score. Pure; ``0.0`` for no archetype / degenerate input."""
+    if not archetype or not isinstance(layout, list) or not layout:
+        return 0.0
+    top = [n for n in layout if isinstance(n, dict)]
+    if not top:
+        return 0.0
+    top_types = [str(n.get("type", "")).strip().lower() for n in top]
+    first = top_types[0] if top_types else ""
+    bonus = 0.0
+    if archetype == "compare":
+        for n in top:
+            if str(n.get("type", "")).strip().lower() == "grid":
+                kids = [c for c in (n.get("children") or []) if isinstance(c, dict)]
+                if len(kids) >= 2:
+                    bonus += W_ARCH_COMPARE_GRID
+                    break
+    elif archetype == "monitor":
+        if first in _ANCHOR_TYPES:
+            bonus += W_ARCH_MONITOR_ANCHOR
+    elif archetype == "explore":
+        if any(t in _TITLED_CONTAINERS for t in top_types):
+            bonus += W_ARCH_EXPLORE_CONTAINER
+    elif archetype == "summarize":
+        if first in ("text", "hero", "alert"):
+            bonus += W_ARCH_SUMMARIZE_LEAD
+        if len(top) > 3:
+            bonus += W_ARCH_SUMMARIZE_SPRAWL
+    elif archetype == "decide":
+        if first in (_ANCHOR_TYPES | {"alert", "text"}):
+            bonus += W_ARCH_DECIDE_ANCHOR
+    elif archetype == "form":
+        multicol = any(
+            str(n.get("type", "")).strip().lower() == "grid"
+            and int(n.get("columns", 2) or 2) >= 2
+            for n in top
+        )
+        bonus += W_ARCH_FORM_MULTICOL if multicol else W_ARCH_FORM_SINGLE_COL
+    return round(bonus, 4)
+
+
 def _texture_key(node: Dict[str, Any], ref_types: Optional[Dict[str, str]]) -> str:
     """Identity used for run-of-same-type detection. A ``ref`` resolves to the
     referenced component's real type when known (so a table+chart pair is not
@@ -615,6 +783,7 @@ def score_arrangement(
     *,
     ref_types: Optional[Dict[str, str]] = None,
     allowed_types: Optional[Set[str]] = None,
+    archetype: Optional[str] = None,
 ) -> float:
     """Deterministically score a (validated, pre-materialize) arrangement.
 
@@ -623,6 +792,10 @@ def score_arrangement(
         ref_types: optional ``component_id -> component type`` map so ``ref``
             leaves can be scored by the real type they place (texture rule).
         allowed_types: accepted for forward-compatibility; unused today.
+        archetype: optional interaction archetype (C-U3). When set, an additive
+            :func:`archetype_bonus` is layered on top of the base structural
+            score so the arrangement is judged for task-fit too. ``None`` (the
+            default) reproduces the base score exactly.
 
     Returns:
         A float; higher means a better arrangement by the designer's own rules.
@@ -651,6 +824,8 @@ def score_arrangement(
         acc[0] += W_WALL_OF_COMPONENTS
 
     _score_siblings(top, ref_types, acc)
+    if archetype:
+        acc[0] += archetype_bonus(layout, archetype, ref_types=ref_types)
     return round(acc[0], 4)
 
 
@@ -863,6 +1038,17 @@ async def design_round(
     # instead of merely the last one the conversation settled on. Fail-open: any
     # scoring error (or the flag off) leaves best_* unset → final == current.
     use_scorer = scorer_enabled()
+    # Feature 033 (C-U3): classify the turn's interaction archetype once and
+    # seed BOTH the prompt prior and the scorer bias from it. Fail-open: any
+    # error (or the flag off) leaves archetype None → base designer behavior.
+    archetype: Optional[str] = None
+    if archetype_enabled():
+        try:
+            archetype = classify_archetype(user_request, round_components)
+        except Exception:
+            logger.debug("ui_designer: classify_archetype failed — no archetype", exc_info=True)
+        if archetype:
+            logger.info("ui_designer.archetype chat=%s archetype=%s", chat_id, archetype)
     ref_types: Dict[str, str] = {}
     for _c in round_components:
         if isinstance(_c, dict) and _c.get("component_id"):
@@ -878,7 +1064,8 @@ async def design_round(
         if not use_scorer:
             return
         try:
-            s = score_arrangement(candidate, ref_types=ref_types, allowed_types=allowed_types)
+            s = score_arrangement(candidate, ref_types=ref_types,
+                                  allowed_types=allowed_types, archetype=archetype)
         except Exception:
             logger.debug("ui_designer: score_arrangement failed — keeping last-wins", exc_info=True)
             return
@@ -887,7 +1074,8 @@ async def design_round(
 
     current: Optional[List[Dict[str, Any]]] = None
     passes_used = 0
-    messages = build_design_messages(user_request, round_components, canvas_rows, allowed_types)
+    messages = build_design_messages(user_request, round_components, canvas_rows,
+                                     allowed_types, archetype=archetype)
 
     for attempt in range(1, rounds + 1):
         passes_used = attempt
@@ -977,7 +1165,7 @@ async def design_round(
             logger.info("ui_designer.refine chat=%s round=%d outcome=improved", chat_id, attempt)
         if attempt < rounds:
             messages = build_refine_messages(user_request, current, round_components,
-                                             canvas_rows, allowed_types)
+                                             canvas_rows, allowed_types, archetype=archetype)
 
     if current is None:
         _fallback("invalid", "no usable arrangement produced")
@@ -1015,9 +1203,10 @@ async def design_round(
     latency_ms = int((time.monotonic() - started) * 1000)
     logger.info(
         "ui_designer.designed chat=%s layout_key=%s refs=%d garnish=%d rounds=%d "
-        "score=%s latency_ms=%d",
+        "score=%s archetype=%s latency_ms=%d",
         chat_id, layout_key, len(set(iter_refs(layout))), garnish_count, passes_used,
-        ("%.3f" % best_score) if best_score is not None else "off", latency_ms,
+        ("%.3f" % best_score) if best_score is not None else "off",
+        archetype or "none", latency_ms,
     )
     return layout
 
