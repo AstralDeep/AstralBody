@@ -29,7 +29,7 @@ USER_FLOW = {
     "agents-and-permissions": (60, "static", "sidebar.agents"),
     "personalize-your-assistant": (70, "static", "sidebar.personalization"),
     "review-your-audit-log": (80, "static", "sidebar.audit"),
-    "workspace-timeline": (90, "static", "sidebar.timeline"),
+    "workspace-timeline": (90, "static", "topbar.timeline"),
     "help-anytime": (100, "static", "sidebar.guide"),
     "tour-complete": (110, "none", None),
 }

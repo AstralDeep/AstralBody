@@ -56,9 +56,9 @@ VALUES
      'Your private audit log',
      'Every sign-in, agent action, and tool call on your account is recorded in an append-only, signed log that only you can see. Open it any time to verify exactly what happened — filter by event class or outcome, and drill into any entry for the full details.'),
 
-    ('workspace-timeline', 'user', 90, 'static', 'sidebar.timeline',
+    ('workspace-timeline', 'user', 90, 'static', 'topbar.timeline',
      'Step back through your workspace',
-     'The Workspace timeline shows a read-only snapshot of your canvas after each turn of the conversation, so you can see how a result took shape. Browsing the past never changes the present — your live workspace stays exactly as you left it.'),
+     'The history icon up here opens your Workspace timeline — a read-only snapshot of your canvas after each turn of the conversation, so you can see how a result took shape. Browsing the past never changes the present — your live workspace stays exactly as you left it.'),
 
     ('help-anytime', 'user', 100, 'static', 'sidebar.guide',
      'Help, whenever you need it',

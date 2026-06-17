@@ -898,6 +898,9 @@ class Database:
         # ── Feature 030: guided-tour content refresh ─────────────────────────
         self._migrate_tutorial_steps_030(cursor)
 
+        # ── Feature 045: workspace-timeline tour step moved to the top bar ───
+        self._migrate_tutorial_timeline_target_045(cursor)
+
         conn.commit()
         conn.close()
 
@@ -1091,6 +1094,26 @@ class Database:
             f"UPDATE tutorial_step SET archived_at = NOW(), updated_at = NOW() "
             f"WHERE slug IN ({ph}) AND archived_at IS NULL",
             self._LEGACY_TUTORIAL_SLUGS_030,
+        )
+
+    def _migrate_tutorial_timeline_target_045(self, cursor):
+        """Feature 045: the workspace-timeline tour step moved from the Settings
+        menu (anchor ``sidebar.timeline``) to a dedicated top-bar icon (anchor
+        ``topbar.timeline``). The seed is ``ON CONFLICT (slug) DO NOTHING``, so
+        an already-seeded database keeps the stale anchor and its tour step would
+        point at a control that no longer exists. Repoint it in place.
+
+        Guarded on the OLD anchor value so it runs effectively once and never
+        clobbers an admin who later re-targets the step; body copy is left
+        untouched so admin edits survive. Boot-time SQL bypasses
+        tutorial_step_revision history (same as the 030 refresh).
+
+        Rollback: ``UPDATE tutorial_step SET target_key = 'sidebar.timeline'
+        WHERE slug = 'workspace-timeline'``.
+        """
+        cursor.execute(
+            "UPDATE tutorial_step SET target_key = 'topbar.timeline', updated_at = NOW() "
+            "WHERE slug = 'workspace-timeline' AND target_key = 'sidebar.timeline'"
         )
 
     def execute(self, query: str, params: Tuple = ()):
