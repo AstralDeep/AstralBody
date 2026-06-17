@@ -18,7 +18,7 @@ import logging
 import os
 from enum import Enum
 from dataclasses import dataclass, asdict
-from typing import Dict, Any
+from typing import Any, Dict, FrozenSet, Optional
 
 logger = logging.getLogger("rote.capabilities")
 
@@ -130,13 +130,26 @@ class DeviceProfile:
     # 033 Wave-0 (C-D2) host bounds — default to today's behavior:
     max_actions: int = 0            # Max action-buttons per surface; 0 = unlimited
     supports_interactivity: bool = True  # False = read-only surface (buttons stripped)
+    # 033 Wave-3 (C-D1) capability negotiation — the primitive types this target
+    # can render. None = render everything (no substitution, today's behavior);
+    # a set engages the fallback ladder for any type outside it.
+    supported_types: Optional[FrozenSet[str]] = None
 
     @staticmethod
     def from_dict(data: Dict[str, Any]) -> "DeviceProfile":
-        """Build a DeviceProfile from a raw dict (from the frontend)."""
+        """Build a DeviceProfile from a raw dict (from the frontend).
+
+        C-D1: an optional ``supported_types`` list (the client's
+        capability-negotiated renderable set) is carried onto the profile."""
         valid_keys = DeviceCapabilities.__dataclass_fields__.keys()
         caps = DeviceCapabilities(**{k: v for k, v in data.items() if k in valid_keys})
-        return DeviceProfile._derive(caps)
+        profile = DeviceProfile._derive(caps)
+        st = data.get("supported_types")
+        if isinstance(st, (list, tuple, set, frozenset)):
+            cleaned = frozenset(str(t).strip().lower() for t in st if str(t).strip())
+            if cleaned:
+                profile.supported_types = cleaned
+        return profile
 
     @staticmethod
     def default() -> "DeviceProfile":

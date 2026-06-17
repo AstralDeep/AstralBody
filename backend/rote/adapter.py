@@ -7,6 +7,7 @@ All transformation is rule-based and synchronous.
 """
 from typing import Any, Dict, List, Optional
 
+from rote import fallback
 from rote.capabilities import DeviceProfile, DeviceType
 
 
@@ -21,10 +22,128 @@ class ComponentAdapter:
             adapted = cls._adapt_component(comp, profile)
             if adapted is not None:
                 result.append(adapted)
+        # 033 Wave-3 (C-D1): substitute any primitive the target can't render
+        # down the fallback ladder (timeline→list, chart→table→text, …). No-op
+        # when supported_types is None (today's behavior — full support).
+        supported = getattr(profile, "supported_types", None)
+        if supported:
+            result = [cls._degrade_unsupported(c, supported) for c in result]
         # 033 Wave-0 (C-D2): apply declarative host bounds last — strip
         # interactivity on read-only surfaces and cap action-buttons. No-op
         # under the default host-config (interactive, unlimited actions).
         return cls._enforce_host_limits(result, profile)
+
+    # ------------------------------------------------------------------
+    # C-D1 — capability fallback ladder
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _degrade_unsupported(cls, comp: Dict, supported) -> Dict:
+        """Render ``comp`` as a type the target supports, substituting down the
+        fallback ladder when its own type is unsupported. Recurses so a
+        supported container with an unsupported child still degrades. Pure."""
+        if not isinstance(comp, dict):
+            return comp
+        ctype = str(comp.get("type", "")).strip().lower()
+        target = fallback.first_supported(ctype, supported)
+        if target == ctype:
+            return cls._degrade_children(comp, supported)
+        if target == "text":
+            return {"type": "text",
+                    "content": cls._extract_text(comp) or str(comp.get("title") or ""),
+                    "variant": "body"}
+        if target == "list":
+            return cls._to_list(comp)
+        if target == "table":
+            return cls._to_table(comp, supported)
+        if target in ("container", "card"):
+            wrapped = {"type": target,
+                       "content": comp.get("content") or comp.get("children") or []}
+            if comp.get("title"):
+                wrapped["title"] = comp["title"]
+            return cls._degrade_children(wrapped, supported)
+        return {"type": "text", "content": cls._extract_text(comp) or "", "variant": "body"}
+
+    @classmethod
+    def _degrade_children(cls, comp: Dict, supported) -> Dict:
+        out = dict(comp)
+        for key in ("content", "children"):
+            kids = comp.get(key)
+            if isinstance(kids, list):
+                out[key] = [cls._degrade_unsupported(c, supported)
+                            for c in kids if isinstance(c, dict)]
+        tabs = comp.get("tabs")
+        if isinstance(tabs, list):
+            out["tabs"] = [
+                ({**t, "content": [cls._degrade_unsupported(c, supported)
+                                   for c in t["content"] if isinstance(c, dict)]}
+                 if isinstance(t, dict) and isinstance(t.get("content"), list) else t)
+                for t in tabs
+            ]
+        return out
+
+    @classmethod
+    def _to_list(cls, comp: Dict) -> Dict:
+        ctype = str(comp.get("type", "")).strip().lower()
+        items: List[str] = []
+        if ctype == "timeline":
+            for it in (comp.get("items") or []):
+                if isinstance(it, dict):
+                    parts = [str(it[k]) for k in ("time", "title", "description") if it.get(k)]
+                    if parts:
+                        items.append(" — ".join(parts))
+        elif ctype == "table":
+            headers = comp.get("headers") or []
+            for row in (comp.get("rows") or []):
+                if isinstance(row, list):
+                    cells = [f"{headers[i]}: {c}" if i < len(headers) else str(c)
+                             for i, c in enumerate(row)]
+                    items.append(" | ".join(cells))
+        elif ctype == "keyvalue":
+            for it in (comp.get("items") or []):
+                if isinstance(it, dict):
+                    items.append(f"{it.get('label', '')}: {it.get('value', '')}".strip(": "))
+        if not items:
+            t = cls._extract_text(comp)
+            if t:
+                items = [t]
+        out: Dict[str, Any] = {"type": "list", "ordered": False, "items": items}
+        if comp.get("title"):
+            out["title"] = comp["title"]
+        return out
+
+    @classmethod
+    def _to_table(cls, comp: Dict, supported) -> Dict:
+        ctype = str(comp.get("type", "")).strip().lower()
+        if ctype == "keyvalue":
+            rows = [[it.get("label", ""), it.get("value", "")]
+                    for it in (comp.get("items") or []) if isinstance(it, dict)]
+            out: Dict[str, Any] = {"type": "table", "headers": ["", ""], "rows": rows}
+            if comp.get("title"):
+                out["title"] = comp["title"]
+            return out
+        # Charts: only a recognizably-shaped {labels, series} degrades cleanly to
+        # a table; otherwise drop to the next rung (list/text).
+        data = comp.get("data") if isinstance(comp.get("data"), dict) else comp
+        labels = data.get("labels")
+        series = data.get("series") or data.get("datasets")
+        if isinstance(labels, list) and isinstance(series, list) and series:
+            names = [s.get("name") or s.get("label") or f"series {i}" if isinstance(s, dict)
+                     else f"series {i}" for i, s in enumerate(series)]
+            rows = []
+            for ri, lab in enumerate(labels):
+                row = [lab]
+                for s in series:
+                    vals = s.get("data") if isinstance(s, dict) else s
+                    row.append(vals[ri] if isinstance(vals, list) and ri < len(vals) else "")
+                rows.append(row)
+            out = {"type": "table", "headers": ["label", *names], "rows": rows}
+            if comp.get("title"):
+                out["title"] = comp["title"]
+            return out
+        if "list" in supported:
+            return cls._to_list(comp)
+        return {"type": "text", "content": cls._extract_text(comp) or "", "variant": "body"}
 
     @classmethod
     def _enforce_host_limits(cls, components: List[Dict], profile: DeviceProfile) -> List[Dict]:
