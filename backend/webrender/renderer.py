@@ -888,6 +888,63 @@ def render_rating(c):
             f'{value_html}</div>{sub_html}</div>')
 
 
+def render_chat_history(c: Dict[str, Any]) -> str:
+    """Render the recent-chats surface (feature 040 redesign).
+
+    A scannable list of conversation rows. Each row is a real ``<button>`` that
+    carries the ``astral-action`` dispatch contract (``data-action=load_chat`` +
+    ``data-payload``) so the existing client.js delegation opens it — no client
+    change. Per item the builder may supply ``title`` (required for the label),
+    ``preview`` (last-message snippet), ``time`` (pre-formatted relative time),
+    ``icon`` (decorative agent glyph, hidden from assistive tech) and ``saved``
+    (truthy → a saved-components marker). Everything is escaped by construction;
+    an item with no ``chat_id`` is skipped (it cannot be opened). With no
+    openable items the surface shows a friendly empty state.
+    """
+    title = c.get("title") or "Recent chats"
+    raw_items = c.get("items") or []
+    rows: List[str] = []
+    for it in raw_items:
+        if not isinstance(it, dict):
+            continue
+        cid = it.get("chat_id") or it.get("id")
+        if not cid:
+            continue
+        name = str(it.get("title") or "Untitled chat").strip() or "Untitled chat"
+        payload = _attr(json.dumps({"chat_id": str(cid)}))
+        icon = it.get("icon")
+        icon_html = (f'<span class="astral-history-avatar" aria-hidden="true">{esc(icon)}</span>'
+                     if icon else '<span class="astral-history-avatar astral-history-avatar--blank" aria-hidden="true"></span>')
+        time_html = (f'<span class="astral-history-time">{esc(it.get("time"))}</span>'
+                     if it.get("time") else "")
+        preview = str(it.get("preview") or "").strip()
+        preview_html = (f'<span class="astral-history-preview">{esc(preview)}</span>'
+                        if preview else "")
+        saved_html = ('<span class="astral-history-saved" title="Has saved components" '
+                      'aria-hidden="true">★</span>') if it.get("saved") else ""
+        aria = esc(f"Open chat: {name}" + (f", {it.get('time')}" if it.get("time") else ""))
+        rows.append(
+            f'<button type="button" class="astral-action astral-history-item" '
+            f'data-action="load_chat" data-payload="{payload}" aria-label="{aria}">'
+            f'{icon_html}'
+            f'<span class="astral-history-body">'
+            f'<span class="astral-history-row1">'
+            f'<span class="astral-history-name">{esc(name)}</span>{time_html}</span>'
+            f'{preview_html}</span>{saved_html}</button>'
+        )
+    if not rows:
+        body = ('<div class="astral-history-empty">'
+                '<span class="astral-history-empty-icon" aria-hidden="true">\U0001F4AC</span>'
+                '<span class="astral-history-empty-text">No conversations yet.</span>'
+                '<span class="astral-history-empty-hint">Start one below.</span></div>')
+        return f'<div{_base_attrs(c)} class="astral-history">{body}</div>'
+    count_html = f'<span class="astral-history-count">{len(rows)}</span>'
+    head = (f'<div class="astral-history-head">'
+            f'<span class="astral-history-title">{esc(title)}</span>{count_html}</div>')
+    return (f'<div{_base_attrs(c)} class="astral-history">{head}'
+            f'<div class="astral-history-list">{"".join(rows)}</div></div>')
+
+
 _SKELETON_WIDTHS = ("w-3/4", "w-1/2", "w-2/3", "w-5/6", "w-1/3")
 _SKELETON_MAX_ROWS = 12
 
@@ -954,7 +1011,7 @@ PRIMITIVE_RENDERERS.update({
     "audio": render_audio,
     "badge": render_badge, "hero": render_hero, "keyvalue": render_keyvalue,
     "timeline": render_timeline, "rating": render_rating,
-    "skeleton": render_skeleton,
+    "skeleton": render_skeleton, "chat_history": render_chat_history,
 })
 
 

@@ -688,3 +688,101 @@ details > summary::-webkit-details-marker { display: none; }
 @media (prefers-reduced-motion: reduce) {
   .astral-skeleton-line { animation: none; }
 }
+
+/* =========================================================================
+   Feature 040 — recent-chats surface (chat_history primitive)
+   Scannable conversation rows: agent glyph + title + preview + relative time
+   + saved marker. Styles only; the row's .astral-action contract is untouched.
+   ========================================================================= */
+.astral-history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 6px 6px;
+}
+.astral-history-title {
+  font-size: 11px;
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.astral-history-count {
+  font-size: 11px;
+  font-weight: var(--weight-semibold);
+  color: var(--text-secondary);
+  background: rgb(var(--astral-text) / 0.06);
+  border-radius: 999px;
+  padding: 1px 8px;
+  line-height: 1.5;
+}
+.astral-history-list { display: flex; flex-direction: column; gap: 2px; }
+.astral-history-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  padding: 7px 8px;
+  border-radius: var(--radius-md);
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background var(--motion-fast) var(--ease-out),
+              border-color var(--motion-fast) var(--ease-out);
+}
+.astral-history-item:hover {
+  background: rgb(var(--astral-text) / 0.04);
+  border-color: rgb(var(--astral-primary) / 0.28);
+}
+.astral-history-item:focus-visible {
+  outline: 2px solid rgb(var(--astral-primary) / 0.75);
+  outline-offset: 1px;
+}
+.astral-history-avatar {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  line-height: 1;
+  background: linear-gradient(135deg, rgb(var(--astral-primary) / 0.22), rgb(var(--astral-secondary) / 0.14));
+  border: 1px solid rgb(var(--astral-primary) / 0.20);
+}
+.astral-history-avatar--blank { background: rgb(var(--astral-text) / 0.05); border-color: rgb(var(--astral-text) / 0.08); }
+.astral-history-body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.astral-history-row1 { display: flex; align-items: baseline; gap: 8px; }
+.astral-history-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.astral-history-time { flex: 0 0 auto; font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.astral-history-preview {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.astral-history-saved { flex: 0 0 auto; color: rgb(var(--astral-accent)); font-size: 11px; line-height: 1; }
+.astral-history-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 20px 8px;
+  text-align: center;
+}
+.astral-history-empty-icon { font-size: 22px; opacity: 0.7; }
+.astral-history-empty-text { font-size: 13px; font-weight: var(--weight-medium); color: var(--text-secondary); }
+.astral-history-empty-hint { font-size: 11px; color: var(--text-muted); }
