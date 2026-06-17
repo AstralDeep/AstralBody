@@ -10,12 +10,15 @@ import logging
 from typing import Any, Callable, Dict, List, Optional
 
 from .renderer import PRIMITIVE_RENDERERS, render as render_web
+from .voice import render_voice
 
 logger = logging.getLogger("webrender")
 
 # Client target -> renderer callable(components, profile) -> target output.
+# 033 Wave-3 (C-D4): the `voice` target renders structured SSML for TTS.
 TARGET_RENDERERS: Dict[str, Callable[[List[Dict[str, Any]], Any], Any]] = {
     "web": render_web,
+    "voice": render_voice,
 }
 
 DEFAULT_TARGET = "web"
