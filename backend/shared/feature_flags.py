@@ -59,6 +59,19 @@ class FeatureFlags:
             # "no reader available" instead of drafting a parser. Default ON.
             # See specs/031-attachment-upload-parsing/.
             "attachment_autoparse": self._read("FF_ATTACHMENT_AUTOPARSE", True),
+            # 033 Wave-0 (C-N16 — context engineering): keep the chat system
+            # prompt's stable instruction prefix cache-friendly (volatile
+            # file/canvas context moved last) AND tombstone stale tool outputs
+            # mid-loop so a long tool-calling turn doesn't pin volatile/untrusted
+            # text in the window. Byte-identical to today when OFF. Default OFF.
+            "context_engineering": self._read("FF_CONTEXT_ENGINEERING", False),
+            # 033 Wave-0 (C-S4 — spotlighting/datamarking): wrap untrusted
+            # (non-digest) tool output in unforgeable per-turn sentinel markers
+            # and instruct the model to treat their contents as data, never
+            # instructions — closing a prompt-injection channel. Composes with
+            # C-N15 (a tool's _model_digest is trusted and left unmarked).
+            # No-op when OFF. Default OFF.
+            "datamarking": self._read("FF_DATAMARKING", False),
         }
 
     @staticmethod
