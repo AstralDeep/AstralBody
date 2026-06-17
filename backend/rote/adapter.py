@@ -73,6 +73,9 @@ class ComponentAdapter:
         if comp_type == "skeleton":
             return cls._adapt_skeleton(comp, profile)
 
+        if comp_type == "chat_history":
+            return cls._adapt_chat_history(comp, profile)
+
         # Recurse into known container types
         if comp_type in ("container", "card"):
             return cls._adapt_container(comp, profile)
@@ -272,6 +275,27 @@ class ComponentAdapter:
         return comp
 
     @classmethod
+    def _adapt_chat_history(cls, comp: Dict, profile: DeviceProfile) -> Optional[Dict]:
+        """Feature 040 — condense the recent-chats surface on small screens.
+
+        The full row (avatar + title + preview + time) is right for
+        browser/tablet/TV; a watch has no room for previews and few rows, and a
+        phone's history rail is short — so trim the item count and, on a watch,
+        drop the preview snippet. The web renderer already treats ``preview`` as
+        optional, so stripping it just yields a tighter row. VOICE is handled
+        earlier by text collapse; other targets pass through unchanged.
+        """
+        items = [i for i in (comp.get("items") or []) if isinstance(i, dict)]
+        caps = {DeviceType.WATCH: 4, DeviceType.MOBILE: 10}
+        cap = caps.get(profile.device_type)
+        if cap is None:
+            return comp
+        trimmed = items[:cap]
+        if profile.device_type == DeviceType.WATCH:
+            trimmed = [{k: v for k, v in it.items() if k != "preview"} for it in trimmed]
+        return {**comp, "items": trimmed}
+
+    @classmethod
     def _adapt_container(cls, comp: Dict, profile: DeviceProfile) -> Dict:
         """Recurse into card.content or container.children."""
         if comp.get("type") == "card":
@@ -375,6 +399,18 @@ class ComponentAdapter:
             value = comp.get("value", 0)
             max_value = comp.get("max_value", 5)
             parts.append(f"{label}: {value} out of {max_value} stars")
+
+        elif comp_type == "chat_history":
+            # Feature 040 — voice surfaces speak the recent-chats list so the
+            # user hears which conversations they can reopen.
+            parts.append(str(comp.get("title") or "Recent chats"))
+            titles = [str(it.get("title")).strip()
+                      for it in (comp.get("items") or [])
+                      if isinstance(it, dict) and it.get("title")]
+            if titles:
+                parts.append(": " + "; ".join(titles))
+            else:
+                parts.append(": no conversations yet")
 
         elif comp_type == "skeleton":
             # Feature 037 — voice surfaces speak the loading state.
