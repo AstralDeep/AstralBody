@@ -35,6 +35,22 @@ def test_menu_entries_carry_chrome_open_actions():
         assert f'&quot;surface&quot;: &quot;{surface}&quot;' in html, f"missing surface payload: {surface}"
 
 
+def test_workspace_timeline_promoted_to_topbar_icon():
+    """Feature 045: the workspace timeline is a dedicated icon button next to
+    Settings (one click back to an earlier canvas), not a Settings-menu entry."""
+    html = render_topbar(roles=["user"])
+    # The icon button is present, labelled, and tour-targetable.
+    assert 'id="astral-timeline-btn"' in html
+    assert 'aria-label="Workspace timeline"' in html
+    assert 'data-tour-target="topbar.timeline"' in html
+    # It fires the same chrome_open surface the menu entry used to.
+    assert '&quot;surface&quot;: &quot;workspace_timeline&quot;' in html
+    # It sits OUTSIDE (before) the Settings dropdown…
+    assert html.index('id="astral-timeline-btn"') < html.index('id="astral-settings"')
+    # …and is no longer an item inside the Settings menu.
+    assert 'data-menu-key="timeline"' not in html
+
+
 def test_sign_out_is_plain_link_outside_js():
     html = render_topbar(roles=["user"])
     assert 'href="/auth/logout"' in html and 'role="menuitem"' in html

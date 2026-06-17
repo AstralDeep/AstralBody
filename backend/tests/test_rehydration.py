@@ -93,10 +93,12 @@ def test_workspace_round_trips_through_fresh_manager(chat_env, tmp_path):
 # FR-028 — component-bearing transcript messages render meaningfully
 # ---------------------------------------------------------------------------
 
-def test_transcript_component_messages_get_server_rendered_html(chat_env):
-    """028 FR-028: component-array message content in a loaded transcript
-    produces a non-empty server-rendered html field containing the component
-    markup, while plain-string messages are untouched by that path."""
+def test_transcript_renders_only_text_not_rich_components(chat_env):
+    """045 (was 028 FR-028): a component-bearing transcript message renders
+    ONLY its text primitives — rich components (tables/charts/metrics) are
+    dropped from the chat rail and shown on the canvas instead. Plain-string
+    messages are untouched by that path."""
+    from orchestrator.orchestrator import Orchestrator
     history, user_id, chat_id = chat_env
     history.add_message(chat_id, "user", "show me my labs", user_id=user_id)
     history.add_message(chat_id, "assistant", [
@@ -107,25 +109,40 @@ def test_transcript_component_messages_get_server_rendered_html(chat_env):
     chat = history.get_chat(chat_id, user_id=user_id)
     assert chat is not None
 
-    # Replicate the orchestrator's load_chat FR-028 block verbatim.
-    from webrender import render as _render_web
+    # Replicate the orchestrator's load_chat 045 block: text-only transcript html.
     for m in chat.get("messages", []):
         if not isinstance(m.get("content"), str) and isinstance(m.get("content"), list):
-            m["html"] = _render_web(m["content"])
+            _h = Orchestrator._transcript_html(m["content"])
+            if _h:
+                m["html"] = _h
 
     messages = chat["messages"]
     text_msg = next(m for m in messages if isinstance(m["content"], str))
     comp_msg = next(m for m in messages if isinstance(m["content"], list))
 
-    # Component message: non-empty html carrying the actual component markup.
+    # Component message: the text primitive renders; the rich table does NOT.
     html = comp_msg.get("html")
-    assert html and html.startswith('<div class="dynamic-renderer')
-    assert "Lab results ready" in html
-    assert "A1C" in html and "<table" in html
+    assert html and "Lab results ready" in html
+    assert "A1C" not in html and "<table" not in html
 
     # Plain-string message: untouched — no html field, content as written.
     assert "html" not in text_msg
     assert text_msg["content"] == "show me my labs"
+
+
+def test_transcript_pure_rich_message_gets_no_html(chat_env):
+    """045: a message whose content is only rich components yields no
+    transcript html at all — the client renders no chat bubble for it (the
+    components live on the canvas, re-hydrated from the workspace)."""
+    from orchestrator.orchestrator import Orchestrator
+    history, user_id, chat_id = chat_env
+    history.add_message(chat_id, "assistant", [
+        {"type": "table", "title": "Labs", "headers": ["Test"], "rows": [["A1C"]]},
+        {"type": "metric", "title": "A1C", "value": "5.4"},
+    ], user_id=user_id)
+    chat = history.get_chat(chat_id, user_id=user_id)
+    comp_msg = next(m for m in chat["messages"] if isinstance(m["content"], list))
+    assert Orchestrator._transcript_html(comp_msg["content"]) == ""
 
 
 # ---------------------------------------------------------------------------
