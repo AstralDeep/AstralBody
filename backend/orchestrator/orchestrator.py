@@ -37,6 +37,8 @@ from orchestrator.credential_manager import CredentialManager
 from orchestrator.delegation import DelegationService
 from orchestrator.tool_security import ToolSecurityAnalyzer
 from orchestrator.compaction import compact_messages
+from orchestrator import context_engineering
+from orchestrator import datamarking
 from orchestrator.hooks import HookManager, HookEvent, HookContext
 from orchestrator.task_state import TaskManager, TaskState
 from orchestrator.concurrency_cap import ConcurrencyCap
@@ -118,6 +120,46 @@ TEXT-ONLY MODE (no agents currently available):
   one from the Agents panel. Then offer the best help you can with text alone.
 - For conversational questions, reasoning, summarization, drafting, or general
   knowledge — answer normally as a text-only chat assistant.
+"""
+
+
+# Chat system-prompt template. The two opaque marks are where the per-turn
+# volatile sections (the file-mapping list, the live-canvas listing) are
+# substituted. ``context_engineering.compose_system_prompt`` fills them in
+# place by default (byte-identical to the legacy f-string), or — when
+# FF_CONTEXT_ENGINEERING is on (033 Wave-0 C-N16) — blanks them here and
+# appends them last so the stable instruction prefix stays cache-friendly.
+CHAT_SYSTEM_TEMPLATE = """You are an AI orchestrator. Your goal is to simplify complex tasks for the user by intelligently using available tools.
+
+%%ASTRAL_FILE_CONTEXT%%
+
+AVAILABLE TOOLS: sent in the `tools` parameter.
+
+PROCESS (Re-Act Loop):
+1. **Analyze**: Break down the user's request into logical steps.
+2. **Plan & Execute**:
+   - If you need data, call the appropriate tool.
+   - You can call multiple tools in parallel if they are independent.
+   - If a step depends on previous output (e.g., "search patients" -> "graph their age"), wait for the first tool's result before calling the next.
+3. **Observe**: You will receive the tool's output in the next turn.
+4. **Iterate**:
+   - IF the task is not complete or you need more data (e.g., now you have the patients, need to graph them), call the next tool.
+   - IF you have all necessary information, provide a final answer.
+
+CRITICAL RULES:
+- **VERIFY**: Check if tool outputs actually contain the data you expect before stating it exists. If a search returns 0 results, do NOT try to graph them.
+- **FINAL RESPONSE**: When you have finished all actions, provide a natural language summary of what you did and what was found.
+- **CHAT IS CONCISE**: Your final chat reply must be SHORT — 2-4 plain sentences, no headings,
+  no tables, no long documents. Substantial content (drafts, documents, lists, tables,
+  structured data) belongs in UI components / tool outputs, not in the chat text; long text
+  replies are moved to the canvas automatically.
+- **VISUALIZATIONS**: If the user asks for a graph, YOU MUST call the graphing tool. Do not just describe the data.
+%%ASTRAL_CANVAS_CONTEXT%%
+COMPONENT UPDATE RULES:
+- The user's canvas is PERSISTENT: every component listed above under COMPONENTS CURRENTLY ON CANVAS stays visible until removed, and updates replace it in place.
+- When the user asks to MODIFY, UPDATE, REMOVE items from, or CHANGE existing displayed data, re-call the SAME tool that originally created it with the corrected/updated parameters. Do NOT create duplicates.
+- When you author UI components directly and intend to UPDATE one listed above, set its "id" field to that component's component_id so it updates in place; omit "id" for genuinely new components.
+- When the user asks for something completely NEW and unrelated, call the appropriate tool normally — the new output is added alongside the existing components.
 """
 
 
@@ -395,6 +437,26 @@ class Orchestrator:
         self.llm_model = self._operator_creds.model or os.getenv(
             "LLM_MODEL", "meta-llama/Llama-3.2-90B-Vision-Instruct"
         )
+
+        # Feature 040 / 033 Wave-0 (C-U12): default reasoning-effort knob
+        # threaded through _call_llm. Unset → nothing is sent (zero behavior
+        # change on endpoints that predate reasoning models). Callers may
+        # override per-call; this is only the global default.
+        self.llm_reasoning_effort = self._valid_reasoning_effort(
+            os.getenv("LLM_REASONING_EFFORT")
+        )
+        # 033 Wave-0 (C-N14/C-U12): per-(base_url, model) capability cache of
+        # optional request params the endpoint rejected, so we probe once and
+        # then stop sending them. {(base_url, model): {"response_format", …}}.
+        self._llm_unsupported_params: Dict[tuple, set] = {}
+
+        # 033 Wave-0 (C-S4): when datamarking is engaged, also surgically remove
+        # well-known instruction-override spans from untrusted tool output
+        # (FR: "optional span-level removal"). Off by default — the default
+        # defense is delimiting only, which never mutates content.
+        self._datamark_sanitize_spans = os.getenv(
+            "DATAMARK_SANITIZE_SPANS", "false"
+        ).lower() in ("true", "1", "yes")
 
         # Pre-built default OpenAI client. Used directly only for the
         # legacy `_combine_components_llm` call site that does not
@@ -3125,38 +3187,16 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                         f"| Type: {sc['component_type']} | Tool: {source_tool} | Agent: {source_agent}\n"
                     )
 
-            system_prompt = f"""You are an AI orchestrator. Your goal is to simplify complex tasks for the user by intelligently using available tools.
-
-{file_context}
-
-AVAILABLE TOOLS: sent in the `tools` parameter.
-
-PROCESS (Re-Act Loop):
-1. **Analyze**: Break down the user's request into logical steps.
-2. **Plan & Execute**:
-   - If you need data, call the appropriate tool.
-   - You can call multiple tools in parallel if they are independent.
-   - If a step depends on previous output (e.g., "search patients" -> "graph their age"), wait for the first tool's result before calling the next.
-3. **Observe**: You will receive the tool's output in the next turn.
-4. **Iterate**:
-   - IF the task is not complete or you need more data (e.g., now you have the patients, need to graph them), call the next tool.
-   - IF you have all necessary information, provide a final answer.
-
-CRITICAL RULES:
-- **VERIFY**: Check if tool outputs actually contain the data you expect before stating it exists. If a search returns 0 results, do NOT try to graph them.
-- **FINAL RESPONSE**: When you have finished all actions, provide a natural language summary of what you did and what was found.
-- **CHAT IS CONCISE**: Your final chat reply must be SHORT — 2-4 plain sentences, no headings,
-  no tables, no long documents. Substantial content (drafts, documents, lists, tables,
-  structured data) belongs in UI components / tool outputs, not in the chat text; long text
-  replies are moved to the canvas automatically.
-- **VISUALIZATIONS**: If the user asks for a graph, YOU MUST call the graphing tool. Do not just describe the data.
-{canvas_context}
-COMPONENT UPDATE RULES:
-- The user's canvas is PERSISTENT: every component listed above under COMPONENTS CURRENTLY ON CANVAS stays visible until removed, and updates replace it in place.
-- When the user asks to MODIFY, UPDATE, REMOVE items from, or CHANGE existing displayed data, re-call the SAME tool that originally created it with the corrected/updated parameters. Do NOT create duplicates.
-- When you author UI components directly and intend to UPDATE one listed above, set its "id" field to that component's component_id so it updates in place; omit "id" for genuinely new components.
-- When the user asks for something completely NEW and unrelated, call the appropriate tool normally — the new output is added alongside the existing components.
-"""
+            # 033 Wave-0 (C-N16 — context engineering): with the flag on, the
+            # volatile file/canvas sections are appended LAST so the stable
+            # instruction prefix stays KV-cache-friendly; off → byte-identical
+            # in-place substitution of the legacy f-string.
+            system_prompt = context_engineering.compose_system_prompt(
+                CHAT_SYSTEM_TEMPLATE,
+                file_context=file_context,
+                canvas_context=canvas_context,
+                cache_stable=flags.is_enabled("context_engineering"),
+            )
 
             # Feature 008-llm-text-only-chat (FR-006a). When this turn
             # is dispatching with no tools, append the text-only
@@ -3221,6 +3261,16 @@ COMPONENT UPDATE RULES:
             # 030 — memory guidance accompanies the memory meta-tools.
             if memory_tool_injected:
                 system_prompt += memory_chat.SYSTEM_PROMPT_ADDENDUM
+
+            # 033 Wave-0 (C-S4 — spotlighting/datamarking): mint one unguessable
+            # sentinel for this turn and tell the model that anything wrapped in
+            # its markers is untrusted DATA, never instructions. Untrusted
+            # (non-digest) tool outputs are wrapped at append time below. No-op
+            # when the flag is off.
+            datamark_on = flags.is_enabled("datamarking")
+            turn_sentinel = datamarking.make_turn_sentinel() if datamark_on else None
+            if datamark_on:
+                system_prompt += "\n\n" + datamarking.spotlight_system_addendum(turn_sentinel)
 
             # ------------------------------------------------------------------
             # MULTI-TURN LOOP
@@ -3296,6 +3346,20 @@ COMPONENT UPDATE RULES:
                     )
                     if was_compacted:
                         logger.info("Context compacted before LLM call")
+
+                # 033 Wave-0 (C-N16): in-loop context editing — tombstone stale
+                # tool outputs so a long tool-calling loop doesn't pin volatile
+                # (often untrusted) text in the window. Fail-open; off by default.
+                if flags.is_enabled("context_engineering"):
+                    try:
+                        messages, _n_edited = context_engineering.edit_context(messages)
+                        if _n_edited:
+                            logger.info(
+                                "Context editing: tombstoned %d stale tool output(s)",
+                                _n_edited,
+                            )
+                    except Exception:  # pragma: no cover - never block a turn
+                        logger.debug("context editing failed (non-fatal)", exc_info=True)
 
                 # Call LLM. Feature 008: text-only turns tag the audit
                 # event with feature="chat_dispatch_text_only" so
@@ -3458,25 +3522,27 @@ COMPONENT UPDATE RULES:
                                 except Exception:
                                     logger.debug("workspace snapshot failed (tool turn)", exc_info=True)
 
-                    # Append tool outputs to LLM conversation history
+                    # Append tool outputs to LLM conversation history. C-N15:
+                    # the LLM-visible text is the two-tier digest (a tool's
+                    # `_model_digest` wins; else the existing `_data`/full-result
+                    # serialization) — see _tool_result_to_llm_content.
                     for i, tc in enumerate(llm_msg.tool_calls):
                         res = tool_results[i] if i < len(tool_results) else None
-                        
-                        content_str = "No output"
-                        if res:
-                            if res.error:
-                                content_str = f"Error: {res.error.get('message')}"
-                            elif res.result:
-                                if isinstance(res.result, dict) and "_data" in res.result:
-                                    content_str = json.dumps(res.result["_data"])
-                                else:
-                                    content_str = json.dumps(res.result)
-                        
+                        tool_content = self._tool_result_to_llm_content(res)
+                        # 033 Wave-0 (C-S4): spotlight untrusted tool output.
+                        # A tool's own `_model_digest` (C-N15) is tool-authored
+                        # and trusted; only raw, non-digest output is wrapped as
+                        # untrusted data the model must not obey.
+                        if datamark_on and not self._result_has_model_digest(res):
+                            tool_content = datamarking.spotlight(
+                                tool_content, turn_sentinel,
+                                sanitize=self._datamark_sanitize_spans,
+                            )
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tc.id,
                             "name": tc.function.name,
-                            "content": content_str
+                            "content": tool_content,
                         })
 
                     # Denial loop detection: track permission-denied tool results
@@ -3916,11 +3982,28 @@ COMPONENT UPDATE RULES:
         return "other"
 
     async def _call_llm(self, websocket, messages, tools_desc=None, temperature=None,
-                        feature: str = "tool_dispatch"):
+                        feature: str = "tool_dispatch", response_format=None,
+                        reasoning_effort=None):
         """Helper to call LLM with retries and exponential backoff.
 
         Only retries on transient errors (502, 503, 504). Fails fast on
         non-transient errors like 424 (model not found) or 401 (auth).
+
+        033 Wave-0 optional enhancement params, both probe-and-fallback so a
+        plainer OpenAI-compatible endpoint is never broken by them:
+
+        * ``response_format`` (C-N14 — enforced structured output): a
+          ``response_format`` value (e.g. ``{"type": "json_object"}`` or a
+          ``json_schema`` block) passed straight through to the endpoint.
+        * ``reasoning_effort`` (C-U12 — reasoning-budget knob): ``"minimal"`` /
+          ``"low"`` / ``"medium"`` / ``"high"``; falls back to the
+          ``LLM_REASONING_EFFORT`` global default when the caller passes None.
+
+        If the endpoint rejects either param (400 / unsupported / unknown
+        keyword), it is recorded as unsupported for this (base_url, model) and
+        the call is retried without it — the request still succeeds, just
+        without the enhancement. Subsequent calls skip the rejected param
+        entirely.
 
         Feature 006: credential resolution happens here. The caller's
         credentials (or operator default) are picked up from the
@@ -3948,7 +4031,22 @@ COMPONENT UPDATE RULES:
         # The resolved.model is the user's chosen model when source=USER,
         # else the operator default model (== self.llm_model).
         call_model = resolved.model
-        for attempt in range(1, self.MAX_RETRIES + 1):
+        # 033 Wave-0: assemble the optional enhancement params, minus any this
+        # endpoint already told us it doesn't support (probe cache). The
+        # in-loop except strips any that draw a fresh rejection.
+        cap_key = (getattr(resolved, "base_url", None), call_model)
+        unsupported = getattr(self, "_llm_unsupported_params", {}).get(cap_key, set())
+        effort = reasoning_effort if reasoning_effort is not None else getattr(
+            self, "llm_reasoning_effort", None)
+        effort = self._valid_reasoning_effort(effort)
+        extra_kwargs: Dict[str, Any] = {}
+        if response_format is not None and "response_format" not in unsupported:
+            extra_kwargs["response_format"] = response_format
+        if effort is not None and "reasoning_effort" not in unsupported:
+            extra_kwargs["reasoning_effort"] = effort
+        attempt = 0
+        while attempt < self.MAX_RETRIES:
+            attempt += 1
             try:
                 kwargs = {
                     "model": call_model,
@@ -3959,6 +4057,7 @@ COMPONENT UPDATE RULES:
                     kwargs["tool_choice"] = "auto"
                 if temperature is not None:
                     kwargs["temperature"] = temperature
+                kwargs.update(extra_kwargs)
 
                 response = await asyncio.to_thread(
                     client.chat.completions.create,
@@ -4014,6 +4113,26 @@ COMPONENT UPDATE RULES:
                 return response.choices[0].message, usage
             except Exception as e:
                 error_str = str(e)
+
+                # 033 Wave-0: did the endpoint reject one of our optional
+                # enhancement params? If so, remember it for this
+                # (base_url, model), strip it, and retry immediately — the
+                # request itself is fine, just without the enhancement.
+                drop = self._llm_unsupported_extras(error_str, extra_kwargs)
+                if drop:
+                    cache = getattr(self, "_llm_unsupported_params", None)
+                    if cache is not None:
+                        cache.setdefault(cap_key, set()).update(drop)
+                    for p in drop:
+                        extra_kwargs.pop(p, None)
+                    logger.info(
+                        "LLM endpoint rejected %s; retrying without it", sorted(drop)
+                    )
+                    # A capability-probe rejection is not a real failure —
+                    # don't spend a retry attempt on it.
+                    attempt -= 1
+                    continue
+
                 is_transient = any(code in error_str for code in ["502", "503", "504", "Bad Gateway", "Service Unavailable", "Connection", "timeout"])
                 is_fatal = any(code in error_str for code in ["424", "401", "403", "Repository Not Found", "Invalid username"])
 
@@ -4072,6 +4191,164 @@ COMPONENT UPDATE RULES:
                 await asyncio.sleep(backoff)
         # Defensive: should be unreachable since the MAX_RETRIES branch raises.
         return None, None
+
+    _REASONING_EFFORTS = ("minimal", "low", "medium", "high")
+
+    @classmethod
+    def _valid_reasoning_effort(cls, value):
+        """Normalize a reasoning-effort value (C-U12). Returns the lowercased
+        value if it is one of the recognized levels, else None (so an unset or
+        garbage env/arg is simply not sent)."""
+        if value is None:
+            return None
+        v = str(value).strip().lower()
+        return v if v in cls._REASONING_EFFORTS else None
+
+    @staticmethod
+    def _llm_unsupported_extras(error_str: str, extra_kwargs: Dict[str, Any]) -> set:
+        """033 Wave-0 capability probe: given a failed completion's error text
+        and the optional enhancement params we sent, return the subset the
+        endpoint appears to reject (so the caller can drop + remember them).
+
+        Conservative: only fires on signals that look like an unsupported /
+        malformed *parameter* (not a transient 5xx or an auth error). When the
+        message names a specific param, only that one is dropped; when it is a
+        generic "unsupported parameter" 400 that names none of ours, all active
+        enhancement params are dropped (they are optional, so dropping them to
+        keep the call working is always safe).
+        """
+        if not extra_kwargs:
+            return set()
+        low = (error_str or "").lower()
+        # Never treat transient/auth failures as a param-capability problem.
+        if any(code in low for code in ("502", "503", "504", "bad gateway",
+                                        "service unavailable", "connection",
+                                        "timeout", "401", "403")):
+            return set()
+        named = {p for p in extra_kwargs if p in low}
+        if named:
+            return named
+        generic = any(sig in low for sig in (
+            "unsupported", "unrecognized", "unexpected keyword", "unknown parameter",
+            "unknown field", "not supported", "invalid parameter", "extra inputs",
+            "no longer supported", "is not permitted", "unknown argument",
+        ))
+        if generic and ("400" in low or "param" in low or "argument" in low
+                        or "field" in low or "input" in low):
+            return set(extra_kwargs)
+        return set()
+
+    async def _call_llm_json(self, websocket, messages, *, schema=None,
+                             schema_name: str = "result", temperature=None,
+                             feature: str = "structured", reasoning_effort=None):
+        """C-N14 — request enforced structured (JSON) output and parse it.
+
+        Passes a ``response_format`` (a strict ``json_schema`` block when
+        ``schema`` is given, else plain ``json_object``) through
+        :meth:`_call_llm`, which probe-and-falls-back if the endpoint can't do
+        it. Returns the parsed object, or ``None`` when the call failed or the
+        content was not valid JSON — callers keep their existing best-effort
+        JSON-repair path as the fallback, so this is always safe to adopt.
+        """
+        if schema is not None:
+            response_format = {
+                "type": "json_schema",
+                "json_schema": {"name": schema_name, "schema": schema, "strict": True},
+            }
+        else:
+            response_format = {"type": "json_object"}
+        msg, _usage = await self._call_llm(
+            websocket, messages, tools_desc=None, temperature=temperature,
+            feature=feature, response_format=response_format,
+            reasoning_effort=reasoning_effort,
+        )
+        content = getattr(msg, "content", None) if msg is not None else None
+        if not content:
+            return None
+        try:
+            return json.loads(content)
+        except (ValueError, TypeError):
+            # Tolerate a fenced ```json block or surrounding prose.
+            extracted = self._extract_json_block(content)
+            if extracted is not None:
+                try:
+                    return json.loads(extracted)
+                except (ValueError, TypeError):
+                    return None
+            return None
+
+    @staticmethod
+    def _extract_json_block(text: str):
+        """Best-effort: pull the first balanced JSON object/array out of a
+        string that may be wrapped in a ```json fence or prose. Returns the
+        substring or None."""
+        if not isinstance(text, str):
+            return None
+        s = text.strip()
+        if s.startswith("```"):
+            # strip a leading fence line and a trailing fence
+            nl = s.find("\n")
+            if nl != -1:
+                s = s[nl + 1:]
+            if s.rstrip().endswith("```"):
+                s = s.rstrip()[:-3]
+            s = s.strip()
+        starts = [i for i in (s.find("{"), s.find("[")) if i != -1]
+        if not starts:
+            return None
+        start = min(starts)
+        open_ch = s[start]
+        close_ch = "}" if open_ch == "{" else "]"
+        depth = 0
+        for i in range(start, len(s)):
+            if s[i] == open_ch:
+                depth += 1
+            elif s[i] == close_ch:
+                depth -= 1
+                if depth == 0:
+                    return s[start:i + 1]
+        return None
+
+    @staticmethod
+    def _tool_result_to_llm_content(res) -> str:
+        """033 Wave-0 (C-N15 — two-tier tool output): the text a tool result
+        contributes to the LLM conversation.
+
+        A tool may split its result into a short model-facing tier and a larger
+        renderer-only tier. Precedence:
+
+        1. ``_model_digest`` — the explicit model-facing digest. When present it
+           is the ONLY thing the LLM sees; the render-only payload
+           (``_ui_components`` / ``_data`` / raw fetched text) never enters the
+           model. This both cuts tokens and closes a prompt-injection channel
+           (untrusted fetched/parsed content stops reaching the reasoning loop).
+        2. ``_data`` — the existing convention; serialized as today.
+        3. otherwise the whole result is serialized — unchanged behavior.
+
+        Defaulting to (2)/(3) keeps every current tool byte-identical; the
+        digest tier is purely opt-in for a tool that sets ``_model_digest``.
+        """
+        if res is None:
+            return "No output"
+        if getattr(res, "error", None):
+            return f"Error: {res.error.get('message')}"
+        result = getattr(res, "result", None)
+        if not result:
+            return "No output"
+        if isinstance(result, dict) and result.get("_model_digest") is not None:
+            digest = result["_model_digest"]
+            return digest if isinstance(digest, str) else json.dumps(digest)
+        if isinstance(result, dict) and "_data" in result:
+            return json.dumps(result["_data"])
+        return json.dumps(result)
+
+    @staticmethod
+    def _result_has_model_digest(res) -> bool:
+        """True when a tool result carries a C-N15 ``_model_digest`` — i.e. the
+        LLM-visible text is tool-authored (trusted) and should NOT be wrapped as
+        untrusted by C-S4 datamarking."""
+        result = getattr(res, "result", None)
+        return isinstance(result, dict) and result.get("_model_digest") is not None
 
     async def _emit_llm_usage_report(self, websocket, *, feature, model, usage, outcome):
         """Send an ``llm_usage_report`` message to ``websocket`` carrying the
