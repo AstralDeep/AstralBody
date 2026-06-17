@@ -141,13 +141,33 @@ async def handle_meta_tool(orch, tool_name: str, args: Dict[str, Any], *,
     if tool_name == "remember":
         value = str(args.get("value") or "").strip()
         category = str(args.get("category") or "context").strip()
-        res = tools.remember(user_id, category, value)
+
+        # 033 C-M1: reconcile the write (ADD/UPDATE/DELETE/NOOP + supersession)
+        # via the user's LLM. Fail-open inside remember_reconciled → plain append.
+        async def _reconcile_llm(messages):
+            msg, _ = await orch._call_llm(websocket, messages, feature="memory_reconcile")
+            return getattr(msg, "content", None) if msg else None
+
+        res = await tools.remember_reconciled(user_id, category, value, llm_call=_reconcile_llm)
+        action = res.get("action", "add")
         if res.get("stored"):
+            verb = "Updated" if action == "update" else "Remembered"
             await _audit(user_id, "memory.remember",
-                         f"Remembered a {res.get('category')} fact", chat_id=chat_id,
-                         inputs_meta={"category": res.get("category"), "memory_id": res.get("id")})
-            comp = Alert(message="Got it — I'll remember that.", variant="success").to_dict()
+                         f"{verb} a {res.get('category')} fact", chat_id=chat_id,
+                         inputs_meta={"category": res.get("category"), "memory_id": res.get("id"),
+                                      "action": action, "superseded": res.get("superseded")})
+            msg_text = ("Got it — I've updated what I remember."
+                        if action == "update" else "Got it — I'll remember that.")
+            comp = Alert(message=msg_text, variant="success").to_dict()
             return MCPResponse(result={"status": "stored", **res}, ui_components=[comp])
+        if action in ("noop", "delete"):
+            await _audit(user_id, f"memory.reconcile_{action}",
+                         f"Memory {action} via reconciliation", chat_id=chat_id,
+                         inputs_meta={"superseded": res.get("superseded")})
+            msg_text = ("I already had that noted." if action == "noop"
+                        else "Got it — I've removed that from memory.")
+            comp = Alert(message=msg_text, variant="info").to_dict()
+            return MCPResponse(result={"status": action, **res}, ui_components=[comp])
         # Refused (PHI or empty) — surface the reason without persisting.
         await _audit(user_id, "memory.remember_refused", "Memory write refused",
                      outcome="denied", chat_id=chat_id)
