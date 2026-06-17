@@ -37,6 +37,8 @@ from orchestrator.credential_manager import CredentialManager
 from orchestrator.delegation import DelegationService
 from orchestrator.tool_security import ToolSecurityAnalyzer
 from orchestrator.compaction import compact_messages
+from orchestrator import context_engineering
+from orchestrator import datamarking
 from orchestrator.hooks import HookManager, HookEvent, HookContext
 from orchestrator.task_state import TaskManager, TaskState
 from orchestrator.concurrency_cap import ConcurrencyCap
@@ -118,6 +120,46 @@ TEXT-ONLY MODE (no agents currently available):
   one from the Agents panel. Then offer the best help you can with text alone.
 - For conversational questions, reasoning, summarization, drafting, or general
   knowledge — answer normally as a text-only chat assistant.
+"""
+
+
+# Chat system-prompt template. The two opaque marks are where the per-turn
+# volatile sections (the file-mapping list, the live-canvas listing) are
+# substituted. ``context_engineering.compose_system_prompt`` fills them in
+# place by default (byte-identical to the legacy f-string), or — when
+# FF_CONTEXT_ENGINEERING is on (033 Wave-0 C-N16) — blanks them here and
+# appends them last so the stable instruction prefix stays cache-friendly.
+CHAT_SYSTEM_TEMPLATE = """You are an AI orchestrator. Your goal is to simplify complex tasks for the user by intelligently using available tools.
+
+%%ASTRAL_FILE_CONTEXT%%
+
+AVAILABLE TOOLS: sent in the `tools` parameter.
+
+PROCESS (Re-Act Loop):
+1. **Analyze**: Break down the user's request into logical steps.
+2. **Plan & Execute**:
+   - If you need data, call the appropriate tool.
+   - You can call multiple tools in parallel if they are independent.
+   - If a step depends on previous output (e.g., "search patients" -> "graph their age"), wait for the first tool's result before calling the next.
+3. **Observe**: You will receive the tool's output in the next turn.
+4. **Iterate**:
+   - IF the task is not complete or you need more data (e.g., now you have the patients, need to graph them), call the next tool.
+   - IF you have all necessary information, provide a final answer.
+
+CRITICAL RULES:
+- **VERIFY**: Check if tool outputs actually contain the data you expect before stating it exists. If a search returns 0 results, do NOT try to graph them.
+- **FINAL RESPONSE**: When you have finished all actions, provide a natural language summary of what you did and what was found.
+- **CHAT IS CONCISE**: Your final chat reply must be SHORT — 2-4 plain sentences, no headings,
+  no tables, no long documents. Substantial content (drafts, documents, lists, tables,
+  structured data) belongs in UI components / tool outputs, not in the chat text; long text
+  replies are moved to the canvas automatically.
+- **VISUALIZATIONS**: If the user asks for a graph, YOU MUST call the graphing tool. Do not just describe the data.
+%%ASTRAL_CANVAS_CONTEXT%%
+COMPONENT UPDATE RULES:
+- The user's canvas is PERSISTENT: every component listed above under COMPONENTS CURRENTLY ON CANVAS stays visible until removed, and updates replace it in place.
+- When the user asks to MODIFY, UPDATE, REMOVE items from, or CHANGE existing displayed data, re-call the SAME tool that originally created it with the corrected/updated parameters. Do NOT create duplicates.
+- When you author UI components directly and intend to UPDATE one listed above, set its "id" field to that component's component_id so it updates in place; omit "id" for genuinely new components.
+- When the user asks for something completely NEW and unrelated, call the appropriate tool normally — the new output is added alongside the existing components.
 """
 
 
@@ -407,6 +449,14 @@ class Orchestrator:
         # optional request params the endpoint rejected, so we probe once and
         # then stop sending them. {(base_url, model): {"response_format", …}}.
         self._llm_unsupported_params: Dict[tuple, set] = {}
+
+        # 033 Wave-0 (C-S4): when datamarking is engaged, also surgically remove
+        # well-known instruction-override spans from untrusted tool output
+        # (FR: "optional span-level removal"). Off by default — the default
+        # defense is delimiting only, which never mutates content.
+        self._datamark_sanitize_spans = os.getenv(
+            "DATAMARK_SANITIZE_SPANS", "false"
+        ).lower() in ("true", "1", "yes")
 
         # Pre-built default OpenAI client. Used directly only for the
         # legacy `_combine_components_llm` call site that does not
@@ -3137,38 +3187,16 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                         f"| Type: {sc['component_type']} | Tool: {source_tool} | Agent: {source_agent}\n"
                     )
 
-            system_prompt = f"""You are an AI orchestrator. Your goal is to simplify complex tasks for the user by intelligently using available tools.
-
-{file_context}
-
-AVAILABLE TOOLS: sent in the `tools` parameter.
-
-PROCESS (Re-Act Loop):
-1. **Analyze**: Break down the user's request into logical steps.
-2. **Plan & Execute**:
-   - If you need data, call the appropriate tool.
-   - You can call multiple tools in parallel if they are independent.
-   - If a step depends on previous output (e.g., "search patients" -> "graph their age"), wait for the first tool's result before calling the next.
-3. **Observe**: You will receive the tool's output in the next turn.
-4. **Iterate**:
-   - IF the task is not complete or you need more data (e.g., now you have the patients, need to graph them), call the next tool.
-   - IF you have all necessary information, provide a final answer.
-
-CRITICAL RULES:
-- **VERIFY**: Check if tool outputs actually contain the data you expect before stating it exists. If a search returns 0 results, do NOT try to graph them.
-- **FINAL RESPONSE**: When you have finished all actions, provide a natural language summary of what you did and what was found.
-- **CHAT IS CONCISE**: Your final chat reply must be SHORT — 2-4 plain sentences, no headings,
-  no tables, no long documents. Substantial content (drafts, documents, lists, tables,
-  structured data) belongs in UI components / tool outputs, not in the chat text; long text
-  replies are moved to the canvas automatically.
-- **VISUALIZATIONS**: If the user asks for a graph, YOU MUST call the graphing tool. Do not just describe the data.
-{canvas_context}
-COMPONENT UPDATE RULES:
-- The user's canvas is PERSISTENT: every component listed above under COMPONENTS CURRENTLY ON CANVAS stays visible until removed, and updates replace it in place.
-- When the user asks to MODIFY, UPDATE, REMOVE items from, or CHANGE existing displayed data, re-call the SAME tool that originally created it with the corrected/updated parameters. Do NOT create duplicates.
-- When you author UI components directly and intend to UPDATE one listed above, set its "id" field to that component's component_id so it updates in place; omit "id" for genuinely new components.
-- When the user asks for something completely NEW and unrelated, call the appropriate tool normally — the new output is added alongside the existing components.
-"""
+            # 033 Wave-0 (C-N16 — context engineering): with the flag on, the
+            # volatile file/canvas sections are appended LAST so the stable
+            # instruction prefix stays KV-cache-friendly; off → byte-identical
+            # in-place substitution of the legacy f-string.
+            system_prompt = context_engineering.compose_system_prompt(
+                CHAT_SYSTEM_TEMPLATE,
+                file_context=file_context,
+                canvas_context=canvas_context,
+                cache_stable=flags.is_enabled("context_engineering"),
+            )
 
             # Feature 008-llm-text-only-chat (FR-006a). When this turn
             # is dispatching with no tools, append the text-only
@@ -3233,6 +3261,16 @@ COMPONENT UPDATE RULES:
             # 030 — memory guidance accompanies the memory meta-tools.
             if memory_tool_injected:
                 system_prompt += memory_chat.SYSTEM_PROMPT_ADDENDUM
+
+            # 033 Wave-0 (C-S4 — spotlighting/datamarking): mint one unguessable
+            # sentinel for this turn and tell the model that anything wrapped in
+            # its markers is untrusted DATA, never instructions. Untrusted
+            # (non-digest) tool outputs are wrapped at append time below. No-op
+            # when the flag is off.
+            datamark_on = flags.is_enabled("datamarking")
+            turn_sentinel = datamarking.make_turn_sentinel() if datamark_on else None
+            if datamark_on:
+                system_prompt += "\n\n" + datamarking.spotlight_system_addendum(turn_sentinel)
 
             # ------------------------------------------------------------------
             # MULTI-TURN LOOP
@@ -3308,6 +3346,20 @@ COMPONENT UPDATE RULES:
                     )
                     if was_compacted:
                         logger.info("Context compacted before LLM call")
+
+                # 033 Wave-0 (C-N16): in-loop context editing — tombstone stale
+                # tool outputs so a long tool-calling loop doesn't pin volatile
+                # (often untrusted) text in the window. Fail-open; off by default.
+                if flags.is_enabled("context_engineering"):
+                    try:
+                        messages, _n_edited = context_engineering.edit_context(messages)
+                        if _n_edited:
+                            logger.info(
+                                "Context editing: tombstoned %d stale tool output(s)",
+                                _n_edited,
+                            )
+                    except Exception:  # pragma: no cover - never block a turn
+                        logger.debug("context editing failed (non-fatal)", exc_info=True)
 
                 # Call LLM. Feature 008: text-only turns tag the audit
                 # event with feature="chat_dispatch_text_only" so
@@ -3476,11 +3528,21 @@ COMPONENT UPDATE RULES:
                     # serialization) — see _tool_result_to_llm_content.
                     for i, tc in enumerate(llm_msg.tool_calls):
                         res = tool_results[i] if i < len(tool_results) else None
+                        tool_content = self._tool_result_to_llm_content(res)
+                        # 033 Wave-0 (C-S4): spotlight untrusted tool output.
+                        # A tool's own `_model_digest` (C-N15) is tool-authored
+                        # and trusted; only raw, non-digest output is wrapped as
+                        # untrusted data the model must not obey.
+                        if datamark_on and not self._result_has_model_digest(res):
+                            tool_content = datamarking.spotlight(
+                                tool_content, turn_sentinel,
+                                sanitize=self._datamark_sanitize_spans,
+                            )
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tc.id,
                             "name": tc.function.name,
-                            "content": self._tool_result_to_llm_content(res),
+                            "content": tool_content,
                         })
 
                     # Denial loop detection: track permission-denied tool results
@@ -4279,6 +4341,14 @@ COMPONENT UPDATE RULES:
         if isinstance(result, dict) and "_data" in result:
             return json.dumps(result["_data"])
         return json.dumps(result)
+
+    @staticmethod
+    def _result_has_model_digest(res) -> bool:
+        """True when a tool result carries a C-N15 ``_model_digest`` — i.e. the
+        LLM-visible text is tool-authored (trusted) and should NOT be wrapped as
+        untrusted by C-S4 datamarking."""
+        result = getattr(res, "result", None)
+        return isinstance(result, dict) and result.get("_model_digest") is not None
 
     async def _emit_llm_usage_report(self, websocket, *, feature, model, usage, outcome):
         """Send an ``llm_usage_report`` message to ``websocket`` carrying the
