@@ -20,6 +20,7 @@ import os
 import re
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+from . import memory_guard
 from .phi_gate import PHIGate, get_phi_gate
 from .repository import MEMORY_CATEGORIES
 from .retrieval_scoring import multisignal_enabled, score_memory_row
@@ -209,8 +210,8 @@ class MemoryTools:
     # ── shared write helpers ────────────────────────────────────────────────
 
     def _gate_value(self, category: str, value: str):
-        """Normalize category, strip value, and PHI-gate. Returns
-        ``(category, value, refusal_dict_or_None)``."""
+        """Normalize category, strip value, and gate (PHI + C-S9 poisoning).
+        Returns ``(category, value, refusal_dict_or_None)``."""
         if category not in MEMORY_CATEGORIES:
             category = "context"
         value = (value or "").strip()
@@ -223,6 +224,17 @@ class MemoryTools:
                 "stored": False,
                 "reason": "That looked like protected health information, so I did not "
                           "save it to long-term memory. I can still use it for this task.",
+            }
+        # C-S9: never persist assistant-directed instructions as a durable "fact"
+        # — the AgentPoison/MINJA vector. Used live, never written.
+        if memory_guard.guard_enabled() and memory_guard.is_poisoning_attempt(value):
+            logger.warning("memory.write_refused_poison",
+                           extra={"user_id": "?", "category": category})
+            return category, value, {
+                "stored": False,
+                "refused": "poisoning",
+                "reason": "That reads like an instruction rather than a fact about you, "
+                          "so I didn't save it to long-term memory.",
             }
         return category, value, None
 
@@ -355,16 +367,31 @@ class MemoryTools:
                     extra={"user_id": user_id, "category": category})
         return True
 
+    def _live_memory(self, user_id: str) -> List[Dict[str, Any]]:
+        """Live memories with C-S9 tamper-filtering: a row whose HMAC signature
+        no longer matches its fields is dropped from recall (and logged)."""
+        items = self.repo.list_memory(user_id)
+        if not memory_guard.guard_enabled():
+            return items
+        kept = []
+        for it in items:
+            if memory_guard.trust_of(it) == "tampered":
+                logger.warning("memory.tampered_excluded",
+                               extra={"user_id": user_id, "memory_id": it.get("id")})
+                continue
+            kept.append(it)
+        return kept
+
     def memory_get(self, user_id: str) -> List[Dict[str, Any]]:
-        """Return all durable memory items (for prompt recall)."""
-        return self.repo.list_memory(user_id)
+        """Return all durable memory items (for prompt recall), tamper-filtered."""
+        return self._live_memory(user_id)
 
     def memory_search(self, user_id: str, query: str, *, limit: int = 10) -> List[Dict[str, Any]]:
         """Token-overlap search over durable memory, ranked by a multi-signal
         recency × importance × relevance composite (feature 036 C-M4) when
         FF_MEMORY_MULTISIGNAL is on; fail-open to the legacy overlap-only rank."""
         q = _tokens(query)
-        items = self.repo.list_memory(user_id)  # recency DESC (created_at)
+        items = self._live_memory(user_id)  # recency DESC, C-S9 tamper-filtered
         if not q:
             return items[:limit]
         use_ms = multisignal_enabled()
