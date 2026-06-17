@@ -206,6 +206,20 @@ class PersonalizationRepository:
         )
         return [str(r["linked_id"]) for r in rows]
 
+    def list_links(self, user_id: str) -> List[Dict[str, str]]:
+        """All live directed link edges for a user (both directions of each
+        undirected link), filtered to live endpoints. Powers the C-M3
+        Personalized-PageRank graph in one query."""
+        rows = self.db.fetch_all(
+            """SELECT l.memory_id, l.linked_id FROM memory_link l
+               JOIN memory_item a ON a.id = l.memory_id AND a.user_id = l.user_id
+               JOIN memory_item b ON b.id = l.linked_id AND b.user_id = l.user_id
+               WHERE l.user_id = ? AND a.superseded_at IS NULL AND b.superseded_at IS NULL""",
+            (user_id,),
+        )
+        return [{"memory_id": str(r["memory_id"]), "linked_id": str(r["linked_id"])}
+                for r in rows]
+
     # ── Short-term signals ───────────────────────────────────────────────
 
     def add_signal(self, user_id: str, category: str, value: str) -> Dict[str, Any]:
