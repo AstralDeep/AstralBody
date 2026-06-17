@@ -489,11 +489,32 @@ class AgentLifecycleManager:
                                    f"Starting agent on port {port}...", TESTING)
         self._append_log(draft_id, f"Starting agent on port {port}...")
 
+        # 033 Wave-4 (C-S6): when enabled, wrap the generated-code child in an
+        # OS-level sandbox — resource limits (fork-time preexec), a temp-scoped
+        # filesystem, and a secret-scrubbed env. Flag-gated + fail-open: off /
+        # non-POSIX / any setup error launches exactly as before.
+        sandbox_kwargs: Dict[str, Any] = {}
+        try:
+            from orchestrator import sandbox as _sandbox
+            if _sandbox.sandbox_enabled():
+                tmpdir = os.path.join(agent_dir, "_sandbox_tmp")
+                os.makedirs(tmpdir, exist_ok=True)
+                limits = _sandbox.build_limits()
+                preexec = _sandbox.make_preexec(limits)
+                if preexec is not None:
+                    sandbox_kwargs["preexec_fn"] = preexec
+                sandbox_kwargs["env"] = _sandbox.sandbox_env(None, tmpdir)
+                logger.info("C-S6 sandbox: launching draft %s with %s", draft_id, limits)
+        except Exception:
+            logger.exception("C-S6 sandbox setup failed; launching unsandboxed")
+            sandbox_kwargs = {}
+
         proc = subprocess.Popen(
             [python_exe, agent_script, "--port", str(port)],
             cwd=agent_dir,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            **sandbox_kwargs,
         )
         self._draft_processes[draft_id] = proc
 
