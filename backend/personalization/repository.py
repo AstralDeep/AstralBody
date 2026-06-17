@@ -109,12 +109,57 @@ class PersonalizationRepository:
         # all recall — reconciliation keeps the live set clean.
         rows = self.db.fetch_all(
             """SELECT id, user_id, category, value, source, salience, created_at,
-                      updated_at, keywords, signature
+                      updated_at, keywords, signature, valid_from, valid_to,
+                      ingested_at, recall_count, last_recalled_at
                FROM memory_item WHERE user_id = ? AND superseded_at IS NULL
                ORDER BY created_at DESC""",
             (user_id,),
         )
         return [dict(r) for r in rows]
+
+    # ── Living memory seams (C-M6 temporal / C-M7 recall / C-M8 persona) ──
+
+    def set_validity(self, user_id: str, mem_id: str, *, valid_from=None,
+                     valid_to=None, ingested_at=None) -> bool:
+        """C-M6: set a memory's temporal-validity bounds (epoch-ms; NULL = open)."""
+        cur = self.db.execute(
+            """UPDATE memory_item SET valid_from = ?, valid_to = ?,
+                      ingested_at = COALESCE(?, ingested_at), updated_at = ?
+               WHERE id = ? AND user_id = ?""",
+            (valid_from, valid_to, ingested_at, _now_ms(), mem_id, user_id),
+        )
+        return getattr(cur, "rowcount", 0) > 0
+
+    def record_recall(self, user_id: str, mem_id: str, now: Optional[int] = None) -> bool:
+        """C-M7: reinforcement-on-recall — bump recall_count and reset the decay
+        clock (last_recalled_at). Idempotent per call."""
+        ts = now if now is not None else _now_ms()
+        cur = self.db.execute(
+            """UPDATE memory_item
+               SET recall_count = COALESCE(recall_count, 0) + 1, last_recalled_at = ?
+               WHERE id = ? AND user_id = ?""",
+            (ts, mem_id, user_id),
+        )
+        return getattr(cur, "rowcount", 0) > 0
+
+    def get_persona(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """C-M8: the user's current evolving persona row (or None)."""
+        row = self.db.fetch_one(
+            "SELECT user_id, persona, score, updated_at FROM user_persona WHERE user_id = ?",
+            (user_id,),
+        )
+        return dict(row) if row else None
+
+    def set_persona(self, user_id: str, persona: str, score: float) -> None:
+        """C-M8: upsert the user's persona (keep-best is decided by the caller)."""
+        now = _now_ms()
+        self.db.execute(
+            """INSERT INTO user_persona (user_id, persona, score, updated_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT (user_id) DO UPDATE SET persona = EXCLUDED.persona,
+                   score = EXCLUDED.score, updated_at = EXCLUDED.updated_at""",
+            (user_id, persona, float(score), now),
+        )
 
     def create_memory(
         self, user_id: str, category: str, value: str, *, source: str = "explicit",
