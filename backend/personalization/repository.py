@@ -105,9 +105,12 @@ class PersonalizationRepository:
     # ── Durable memory ───────────────────────────────────────────────────
 
     def list_memory(self, user_id: str) -> List[Dict[str, Any]]:
+        # C-M1: superseded (soft-deleted / replaced) memories are excluded from
+        # all recall — reconciliation keeps the live set clean.
         rows = self.db.fetch_all(
             """SELECT id, user_id, category, value, source, salience, created_at, updated_at
-               FROM memory_item WHERE user_id = ? ORDER BY created_at DESC""",
+               FROM memory_item WHERE user_id = ? AND superseded_at IS NULL
+               ORDER BY created_at DESC""",
             (user_id,),
         )
         return [dict(r) for r in rows]
@@ -151,6 +154,20 @@ class PersonalizationRepository:
         cur = self.db.execute(
             "DELETE FROM memory_item WHERE id = ? AND user_id = ?",
             (mem_id, user_id),
+        )
+        return getattr(cur, "rowcount", 0) > 0
+
+    def supersede_memory(self, user_id: str, old_id: str,
+                         new_id: Optional[str] = None) -> bool:
+        """C-M1: soft-delete a memory (reconcile UPDATE/DELETE). Sets
+        ``superseded_at`` so the row drops out of recall; ``new_id`` optionally
+        points at the replacement memory (UPDATE) — left NULL for a plain
+        removal (DELETE). Only affects a currently-live row (idempotent)."""
+        now = _now_ms()
+        cur = self.db.execute(
+            """UPDATE memory_item SET superseded_by = ?, superseded_at = ?, updated_at = ?
+               WHERE id = ? AND user_id = ? AND superseded_at IS NULL""",
+            (new_id, now, now, old_id, user_id),
         )
         return getattr(cur, "rowcount", 0) > 0
 
