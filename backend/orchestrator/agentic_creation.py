@@ -254,6 +254,47 @@ async def _self_test_draft(orch, draft: Dict[str, Any], user_request: str,
                 "tested_at": int(time.time() * 1000)}
 
 
+def _redteam_allowed_scopes(draft: Dict[str, Any]) -> List[str]:
+    """The scopes a fresh draft may use without it counting as escalation: the
+    draft's declared scopes if present, else the read-class default."""
+    sc = draft.get("scopes") or draft.get("declared_scopes")
+    if isinstance(sc, (list, tuple)) and sc:
+        return [str(s).lower() for s in sc]
+    return ["tools:read", "tools:files", "tools:search"]
+
+
+async def _run_redteam_gate(orch, draft: Dict[str, Any], user_id: str):
+    """033 C-S7: drive the draft through the seeded adversarial scenarios and
+    return a RedTeamVerdict. Returns None on a harness/infrastructure error so
+    the caller proceeds to the standard gate (fail-open on errors; the verdict
+    itself fails CLOSED on a real violation)."""
+    try:
+        from orchestrator import redteam
+        results: List[Dict[str, Any]] = []
+        for sc in redteam.scenarios():
+            try:
+                results.append(await _self_test_draft(orch, draft, sc["prompt"], user_id))
+            except Exception:
+                logger.exception("redteam: scenario %s errored", sc.get("id"))
+        agent_id = f"{draft['agent_slug'].replace('_', '-')}-1"
+        tool_scope_map: Dict[str, str] = {}
+        try:
+            tool_scope_map = orch.tool_permissions.get_tool_scope_map(agent_id)
+        except Exception:
+            logger.debug("redteam: no tool scope map for %s", agent_id, exc_info=True)
+        phi_check = None
+        try:
+            from personalization.phi_gate import get_phi_gate
+            phi_check = get_phi_gate().contains_phi
+        except Exception:
+            logger.debug("redteam: PHI gate unavailable", exc_info=True)
+        return redteam.verdict(results, allowed_scopes=_redteam_allowed_scopes(draft),
+                               tool_scope_map=tool_scope_map, phi_check=phi_check)
+    except Exception:
+        logger.exception("redteam: gate failed — proceeding to standard approval")
+        return None
+
+
 # ---------------------------------------------------------------------------
 # In-chat cards
 # ---------------------------------------------------------------------------
@@ -785,6 +826,34 @@ async def _h_draft_approve(orch, websocket, user_id, roles, payload):
         draft = _owned_draft(orch, user_id, payload)
         if draft is None:
             await _send_chat_card(orch, websocket, _error_card("Draft not found (it may have been discarded)."))
+            return None
+
+    # 033 Wave-4 (C-S7): adversarial red-team gate before promotion. Drive the
+    # draft through the seeded adversarial scenarios; if it makes an out-of-scope
+    # tool call, attempts egress, or emits PHI on any of them, BLOCK promotion
+    # (fail-closed on a real violation). Flag-gated (default OFF); a harness error
+    # returns None and falls through to the standard security gate.
+    from orchestrator import redteam
+    if redteam.redteam_enabled():
+        rt = await _run_redteam_gate(orch, draft, user_id)
+        if rt is not None and not rt.passed:
+            reasons = "; ".join(f"{v.kind}: {v.detail}" for v in rt.violations[:5])
+            await _audit(user_id, "lifecycle.rejected",
+                         f"Draft {draft['id']} blocked by red-team gate ({reasons})",
+                         correlation_id=draft["id"], outcome="failure")
+            try:
+                orch.history.db.update_draft_agent(
+                    draft["id"], status="rejected",
+                    error_message=f"Red-team gate: {reasons}"[:500])
+            except Exception:
+                logger.debug("redteam: status update failed", exc_info=True)
+            blocked = Card(title=f"{draft['agent_name']}: blocked by safety test", content=[
+                Text(content=(f"The agent failed the adversarial safety test — {reasons}. "
+                              f"The draft stays editable: Refine it or Discard it."),
+                     variant="default").to_dict(),
+            ] + _decision_buttons(draft["id"])).to_dict()
+            await _send_chat_card(orch, websocket, blocked)
+            await _replace_card_state(orch, websocket, user_id, draft["id"], blocked)
             return None
 
     result = await orch.lifecycle_manager.approve_agent(draft["id"], websocket=websocket)
