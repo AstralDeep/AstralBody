@@ -78,6 +78,52 @@ def derive_keywords(value: str, *, limit: int = 8) -> str:
     return " ".join(out)
 
 
+def pagerank_enabled() -> bool:
+    """FF_MEMORY_PAGERANK feature flag (default ON; feature 033 C-M3). When on
+    and the user has a link graph, ``memory_search`` ranks by Personalized
+    PageRank over the memory graph (single-step multi-hop), seeded by the
+    query's direct matches. Fail-open: off / no graph / any error → the C-M2
+    1-hop expansion."""
+    return os.getenv("FF_MEMORY_PAGERANK", "true").strip().lower() not in ("0", "false", "no", "off")
+
+
+def personalized_pagerank(adjacency: Dict[str, List[str]], seeds: Dict[str, float],
+                          *, alpha: float = 0.85, iters: int = 20) -> Dict[str, float]:
+    """Personalized PageRank over an (undirected) memory graph.
+
+    ``adjacency``: ``{node: [neighbour, …]}``. ``seeds``: ``{node: weight>0}`` —
+    the restart (personalization) distribution. Returns ``{node: score}``. Pure
+    and deterministic; ~O((nodes+edges) × iters). Dangling nodes redistribute
+    their mass over the restart distribution so total mass is conserved. With an
+    empty seed set it degrades to uniform restart (ordinary PageRank)."""
+    nodes = set(adjacency)
+    nodes.update(seeds)
+    for nbrs in adjacency.values():
+        nodes.update(nbrs)
+    if not nodes:
+        return {}
+    seed_total = sum(w for w in seeds.values() if w > 0)
+    if seed_total > 0:
+        restart = {n: (max(seeds.get(n, 0.0), 0.0) / seed_total) for n in nodes}
+    else:
+        restart = {n: 1.0 / len(nodes) for n in nodes}
+    rank = dict(restart)
+    for _ in range(max(1, iters)):
+        nxt = {n: (1.0 - alpha) * restart[n] for n in nodes}
+        for n in nodes:
+            nbrs = adjacency.get(n) or []
+            if nbrs:
+                share = alpha * rank[n] / len(nbrs)
+                for m in nbrs:
+                    nxt[m] = nxt.get(m, 0.0) + share
+            else:  # dangling node — spread mass over the restart distribution
+                mass = alpha * rank[n]
+                for m in nodes:
+                    nxt[m] += mass * restart[m]
+        rank = nxt
+    return rank
+
+
 def _extract_json(content: str) -> Optional[dict]:
     """Pull the first balanced JSON object from a string that may be fenced or
     wrapped in prose. Returns the parsed dict, or None."""
@@ -324,8 +370,12 @@ class MemoryTools:
         use_ms = multisignal_enabled()
         total = len(items)
         scored = []
+        seed_scores: Dict[str, float] = {}
+        order: Dict[str, int] = {}
         for idx, it in enumerate(items):
-            overlap = len(q & _tokens(f"{it.get('category','')} {it.get('value','')}"))
+            order[str(it.get("id"))] = idx
+            overlap = len(q & _tokens(
+                f"{it.get('category','')} {it.get('value','')} {it.get('keywords') or ''}"))
             if not overlap:
                 continue
             score = float(overlap)
@@ -337,13 +387,23 @@ class MemoryTools:
                     logger.debug("memory_search: multi-signal scoring failed — overlap only",
                                  exc_info=True)
                     score = float(overlap)
+            seed_scores[str(it.get("id"))] = score
             scored.append((score, idx, it))
-        # higher score first; ties keep recency order (idx asc)
+        if not seed_scores:
+            return []
+        # C-M3: rank by Personalized PageRank over the link graph (single-step
+        # multi-hop), seeded by the direct matches. Returns None (→ fallback)
+        # when there is no graph or the repo predates links.
+        if pagerank_enabled():
+            try:
+                ranked = self._pagerank_rank(user_id, items, seed_scores, order, limit)
+                if ranked is not None:
+                    return ranked
+            except Exception:
+                logger.debug("memory_search: pagerank failed — falling back", exc_info=True)
+        # Fallback: direct hits (ties keep recency), then the C-M2 1-hop expansion.
         scored.sort(key=lambda t: (-t[0], t[1]))
         results = [it for _, _, it in scored[:limit]]
-        # C-M2: single-step multi-hop — pull in the linked neighbours of the top
-        # hits so "connect-the-dots" recall surfaces related memories that share
-        # no query tokens themselves. Fail-open to the direct hits.
         if linking_enabled() and results and len(results) < limit:
             try:
                 results = self._expand_with_links(user_id, results, items, limit)
@@ -351,6 +411,37 @@ class MemoryTools:
                 logger.debug("memory_search: link expansion failed — direct hits only",
                              exc_info=True)
         return results
+
+    def _pagerank_rank(self, user_id: str, items: List[Dict[str, Any]],
+                       seed_scores: Dict[str, float], order: Dict[str, int],
+                       limit: int) -> Optional[List[Dict[str, Any]]]:
+        """Rank memories by Personalized PageRank over the user's link graph,
+        seeded by ``seed_scores``. Returns None when there is no graph (the
+        caller then uses the direct/expansion fallback)."""
+        list_links = getattr(self.repo, "list_links", None)
+        if list_links is None:
+            return None
+        edges = list_links(user_id)
+        if not edges:
+            return None
+        adjacency: Dict[str, List[str]] = {}
+        for e in edges:
+            adjacency.setdefault(str(e["memory_id"]), []).append(str(e["linked_id"]))
+        ppr = personalized_pagerank(adjacency, seed_scores)
+        by_id = {str(it.get("id")): it for it in items}
+        ranked_ids = [nid for nid in by_id
+                      if nid in seed_scores or ppr.get(nid, 0.0) > 1e-9]
+        # Direct matches (seeds) lead, ordered by their match strength; then the
+        # associated (non-seed) memories the graph surfaced, ordered by PageRank
+        # mass. (Pure PPR can rank a degree-1 seed's neighbour above the seed —
+        # not what recall wants, so seeds are pinned ahead.)
+        ranked_ids.sort(key=lambda nid: (
+            0 if nid in seed_scores else 1,
+            -seed_scores.get(nid, 0.0),
+            -ppr.get(nid, 0.0),
+            order.get(nid, 1 << 30),
+        ))
+        return [by_id[nid] for nid in ranked_ids[:limit]]
 
     def _expand_with_links(self, user_id: str, results: List[Dict[str, Any]],
                            all_items: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
