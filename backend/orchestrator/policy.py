@@ -24,7 +24,10 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger("orchestrator.policy")
 
 ALLOW, DENY, CONFIRM, REWRITE = "allow", "deny", "confirm", "rewrite"
-_EFFECTS = (ALLOW, DENY, CONFIRM, REWRITE)
+#: 033 C-S8 — a terminal effect requiring the call to carry a valid single-use
+#: transaction token (verified+consumed at dispatch by ``transaction_token``).
+REQUIRE_TOKEN = "require_token"
+_EFFECTS = (ALLOW, DENY, CONFIRM, REWRITE, REQUIRE_TOKEN)
 
 
 @dataclass(frozen=True)
