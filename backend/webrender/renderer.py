@@ -18,6 +18,7 @@ import html
 import json
 import logging
 import math
+import os
 import re as _re
 from typing import Any, Callable, Dict, List
 
@@ -1059,17 +1060,122 @@ def render(components: List[Dict[str, Any]], profile: Any = None) -> str:
 # Feature 028 — workspace fragments (contracts/ws-workspace-protocol.md)
 # ---------------------------------------------------------------------------
 
-def render_component_fragment(component: Dict[str, Any]) -> str:
+# ---------------------------------------------------------------------------
+# Feature 033 (C-U6) — provenance / grounding surfacing
+# ---------------------------------------------------------------------------
+
+def provenance_enabled() -> bool:
+    """FF_PROVENANCE_SURFACING (default ON; feature 033 C-U6).
+
+    When on, each top-level canvas component gets a subtle footer showing
+    whether its content is GROUNDED (traces to an agent tool result) or
+    AI-GENERATED (model-authored designer garnish) — so a hallucinated card no
+    longer looks identical to a verified one. Surfaced selectively (skipped on
+    decorative types and space/audio-constrained surfaces) per the source's
+    "don't overload" guidance. Fail-open: off ⇒ legacy markup unchanged."""
+    return os.getenv("FF_PROVENANCE_SURFACING", "true").strip().lower() not in ("0", "false", "no", "off")
+
+
+#: Decorative / structural types that assert no facts — never footed.
+_PROV_SKIP_TYPES = frozenset({"divider", "skeleton"})
+_PROV_GROUNDED = frozenset({"grounded", "verified", "tool", "search", "source"})
+_PROV_ESTIMATED = frozenset({"estimated", "uncertain", "approx", "low_confidence"})
+
+
+def _subtree_tool_source(comp: Dict[str, Any]) -> str:
+    """First ``_source_tool`` found anywhere in the component subtree (itself or
+    a nested content/children/tabs descendant), else ''. A designed garnish
+    container that wraps tool refs is thus correctly read as grounded."""
+    if not isinstance(comp, dict):
+        return ""
+    st = comp.get("_source_tool")
+    if isinstance(st, str) and st.strip():
+        return st.strip()
+    for key in ("content", "children"):
+        nested = comp.get(key)
+        if isinstance(nested, list):
+            for ch in nested:
+                found = _subtree_tool_source(ch)
+                if found:
+                    return found
+    tabs = comp.get("tabs")
+    if isinstance(tabs, list):
+        for tab in tabs:
+            if isinstance(tab, dict) and isinstance(tab.get("content"), list):
+                for ch in tab["content"]:
+                    found = _subtree_tool_source(ch)
+                    if found:
+                        return found
+    return ""
+
+
+def provenance_of(component: Dict[str, Any]) -> str:
+    """The effective provenance kind for a component: an explicit ``provenance``
+    attribute (normalized) wins; otherwise ``grounded`` when the subtree traces
+    to a tool, else ``generated``."""
+    if not isinstance(component, dict):
+        return "generated"
+    explicit = component.get("provenance")
+    if isinstance(explicit, str) and explicit.strip():
+        kind = explicit.strip().lower()
+        if kind in _PROV_GROUNDED:
+            return "grounded"
+        if kind in _PROV_ESTIMATED:
+            return "estimated"
+        if kind in ("generated", "model", "ai"):
+            return "generated"
+        # unknown explicit value → fall through to derivation
+    return "grounded" if _subtree_tool_source(component) else "generated"
+
+
+def _provenance_footer(component: Dict[str, Any]) -> str:
+    """Subtle grounding footer for one top-level component (or '' when off /
+    decorative)."""
+    if not provenance_enabled() or not isinstance(component, dict):
+        return ""
+    ctype = str(component.get("type", "")).strip().lower()
+    if ctype in _PROV_SKIP_TYPES:
+        return ""
+    kind = provenance_of(component)
+    if kind == "grounded":
+        tool = _subtree_tool_source(component)
+        agent = component.get("_source_agent")
+        title = ("Data from the %s agent%s" % (agent, f" ({tool})" if tool else "")
+                 if agent else "Sourced from a tool result")
+        icon, label, tone = "✓", "tool data", "text-green-400/70"
+    elif kind == "estimated":
+        title = "Estimated / low-confidence value"
+        icon, label, tone = "≈", "estimated", "text-yellow-400/70"
+    else:
+        title = "Written by the assistant — not sourced from a tool"
+        icon, label, tone = "✦", "AI-generated", "text-astral-muted/70"
+    return (
+        f'<div class="astral-provenance astral-provenance--{kind} mt-1 flex justify-end" '
+        f'title="{_attr(title)}">'
+        f'<span class="inline-flex items-center gap-1 text-[10px] {tone}">'
+        f'<span aria-hidden="true">{esc(icon)}</span>'
+        f'<span class="astral-provenance-label">{esc(label)}</span></span></div>'
+    )
+
+
+def render_component_fragment(component: Dict[str, Any], profile: Any = None) -> str:
     """Render one top-level workspace component wrapped in its identity anchor.
 
     The ``data-component-id`` wrapper is the morph target for ``ui_upsert``
     ops on the web client (replace-node-by-id, else append). Components
     without an identity render unwrapped (legacy behavior preserved).
+
+    Feature 033 (C-U6): a subtle provenance footer is appended inside the
+    wrapper — skipped on space/audio-constrained surfaces (watch/voice) given
+    the ``profile``, and when FF_PROVENANCE_SURFACING is off.
     """
     if not isinstance(component, dict):
         return ""
     cid = component.get("component_id")
     inner = render_one(component)
+    dtype = getattr(getattr(profile, "device_type", None), "value", "")
+    if dtype not in ("watch", "voice"):
+        inner += _provenance_footer(component)
     if not cid:
         return inner
     return f'<div class="astral-component" data-component-id="{_attr(cid)}">{inner}</div>'
@@ -1082,5 +1188,5 @@ def render_workspace(components: List[Dict[str, Any]], profile: Any = None) -> s
     device re-adapt) so every top-level component remains an upsert target.
     Markup is identical to :func:`render` except for the wrappers.
     """
-    inner = "".join(render_component_fragment(c) for c in (components or []) if isinstance(c, dict))
+    inner = "".join(render_component_fragment(c, profile) for c in (components or []) if isinstance(c, dict))
     return f'<div class="dynamic-renderer space-y-3">{inner}</div>'

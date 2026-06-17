@@ -34,9 +34,12 @@ def _card(title: str, body: str, **extra):
 # render_component_fragment — identity wrapper (research D12, 028 FR-019)
 # ---------------------------------------------------------------------------
 
-def test_fragment_with_component_id_wraps_card_markup():
+def test_fragment_with_component_id_wraps_card_markup(monkeypatch):
     """028 FR-019: a component bearing an identity renders inside its
-    data-component-id anchor with the unchanged card markup inside."""
+    data-component-id anchor with the unchanged card markup inside. (The 033
+    C-U6 provenance footer is a separate, flag-gated addition covered in
+    tests/webrender/test_provenance.py; disabled here to assert wrapper parity.)"""
+    monkeypatch.setenv("FF_PROVENANCE_SURFACING", "false")
     comp = _card("Vitals", "all good", component_id="wc_x")
     out = render_component_fragment(comp)
     assert out.startswith('<div class="astral-component" data-component-id="wc_x">')
@@ -47,9 +50,10 @@ def test_fragment_with_component_id_wraps_card_markup():
     assert out == f'<div class="astral-component" data-component-id="wc_x">{inner}</div>'
 
 
-def test_fragment_without_component_id_is_legacy_parity():
+def test_fragment_without_component_id_is_legacy_parity(monkeypatch):
     """028 FR-019 (legacy parity): no identity -> no wrapper; output equals
-    render_one exactly."""
+    render_one exactly (with the C-U6 provenance footer off)."""
+    monkeypatch.setenv("FF_PROVENANCE_SURFACING", "false")
     comp = _card("Vitals", "all good")
     out = render_component_fragment(comp)
     assert out == render_one(comp)
@@ -113,9 +117,11 @@ def test_render_workspace_wraps_each_component_in_order():
         assert inner in plain
 
 
-def test_render_workspace_without_ids_equals_render():
+def test_render_workspace_without_ids_equals_render(monkeypatch):
     """028 FR-019 (legacy parity): with no identities present, render_workspace
-    output is byte-identical to render()."""
+    output is byte-identical to render(). (With the 033 C-U6 provenance footer
+    off — that footer is a canvas-only addition, tested separately.)"""
+    monkeypatch.setenv("FF_PROVENANCE_SURFACING", "false")
     comps = [_card("Plain", "no id"), {"type": "text", "content": "hello"}]
     assert render_workspace(comps) == render(comps)
 
