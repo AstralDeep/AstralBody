@@ -396,6 +396,18 @@ class Orchestrator:
             "LLM_MODEL", "meta-llama/Llama-3.2-90B-Vision-Instruct"
         )
 
+        # Feature 040 / 033 Wave-0 (C-U12): default reasoning-effort knob
+        # threaded through _call_llm. Unset → nothing is sent (zero behavior
+        # change on endpoints that predate reasoning models). Callers may
+        # override per-call; this is only the global default.
+        self.llm_reasoning_effort = self._valid_reasoning_effort(
+            os.getenv("LLM_REASONING_EFFORT")
+        )
+        # 033 Wave-0 (C-N14/C-U12): per-(base_url, model) capability cache of
+        # optional request params the endpoint rejected, so we probe once and
+        # then stop sending them. {(base_url, model): {"response_format", …}}.
+        self._llm_unsupported_params: Dict[tuple, set] = {}
+
         # Pre-built default OpenAI client. Used directly only for the
         # legacy `_combine_components_llm` call site that does not
         # accept a websocket; user-initiated calls go through
@@ -3916,11 +3928,28 @@ COMPONENT UPDATE RULES:
         return "other"
 
     async def _call_llm(self, websocket, messages, tools_desc=None, temperature=None,
-                        feature: str = "tool_dispatch"):
+                        feature: str = "tool_dispatch", response_format=None,
+                        reasoning_effort=None):
         """Helper to call LLM with retries and exponential backoff.
 
         Only retries on transient errors (502, 503, 504). Fails fast on
         non-transient errors like 424 (model not found) or 401 (auth).
+
+        033 Wave-0 optional enhancement params, both probe-and-fallback so a
+        plainer OpenAI-compatible endpoint is never broken by them:
+
+        * ``response_format`` (C-N14 — enforced structured output): a
+          ``response_format`` value (e.g. ``{"type": "json_object"}`` or a
+          ``json_schema`` block) passed straight through to the endpoint.
+        * ``reasoning_effort`` (C-U12 — reasoning-budget knob): ``"minimal"`` /
+          ``"low"`` / ``"medium"`` / ``"high"``; falls back to the
+          ``LLM_REASONING_EFFORT`` global default when the caller passes None.
+
+        If the endpoint rejects either param (400 / unsupported / unknown
+        keyword), it is recorded as unsupported for this (base_url, model) and
+        the call is retried without it — the request still succeeds, just
+        without the enhancement. Subsequent calls skip the rejected param
+        entirely.
 
         Feature 006: credential resolution happens here. The caller's
         credentials (or operator default) are picked up from the
@@ -3948,7 +3977,22 @@ COMPONENT UPDATE RULES:
         # The resolved.model is the user's chosen model when source=USER,
         # else the operator default model (== self.llm_model).
         call_model = resolved.model
-        for attempt in range(1, self.MAX_RETRIES + 1):
+        # 033 Wave-0: assemble the optional enhancement params, minus any this
+        # endpoint already told us it doesn't support (probe cache). The
+        # in-loop except strips any that draw a fresh rejection.
+        cap_key = (getattr(resolved, "base_url", None), call_model)
+        unsupported = getattr(self, "_llm_unsupported_params", {}).get(cap_key, set())
+        effort = reasoning_effort if reasoning_effort is not None else getattr(
+            self, "llm_reasoning_effort", None)
+        effort = self._valid_reasoning_effort(effort)
+        extra_kwargs: Dict[str, Any] = {}
+        if response_format is not None and "response_format" not in unsupported:
+            extra_kwargs["response_format"] = response_format
+        if effort is not None and "reasoning_effort" not in unsupported:
+            extra_kwargs["reasoning_effort"] = effort
+        attempt = 0
+        while attempt < self.MAX_RETRIES:
+            attempt += 1
             try:
                 kwargs = {
                     "model": call_model,
@@ -3959,6 +4003,7 @@ COMPONENT UPDATE RULES:
                     kwargs["tool_choice"] = "auto"
                 if temperature is not None:
                     kwargs["temperature"] = temperature
+                kwargs.update(extra_kwargs)
 
                 response = await asyncio.to_thread(
                     client.chat.completions.create,
@@ -4014,6 +4059,26 @@ COMPONENT UPDATE RULES:
                 return response.choices[0].message, usage
             except Exception as e:
                 error_str = str(e)
+
+                # 033 Wave-0: did the endpoint reject one of our optional
+                # enhancement params? If so, remember it for this
+                # (base_url, model), strip it, and retry immediately — the
+                # request itself is fine, just without the enhancement.
+                drop = self._llm_unsupported_extras(error_str, extra_kwargs)
+                if drop:
+                    cache = getattr(self, "_llm_unsupported_params", None)
+                    if cache is not None:
+                        cache.setdefault(cap_key, set()).update(drop)
+                    for p in drop:
+                        extra_kwargs.pop(p, None)
+                    logger.info(
+                        "LLM endpoint rejected %s; retrying without it", sorted(drop)
+                    )
+                    # A capability-probe rejection is not a real failure —
+                    # don't spend a retry attempt on it.
+                    attempt -= 1
+                    continue
+
                 is_transient = any(code in error_str for code in ["502", "503", "504", "Bad Gateway", "Service Unavailable", "Connection", "timeout"])
                 is_fatal = any(code in error_str for code in ["424", "401", "403", "Repository Not Found", "Invalid username"])
 
@@ -4072,6 +4137,123 @@ COMPONENT UPDATE RULES:
                 await asyncio.sleep(backoff)
         # Defensive: should be unreachable since the MAX_RETRIES branch raises.
         return None, None
+
+    _REASONING_EFFORTS = ("minimal", "low", "medium", "high")
+
+    @classmethod
+    def _valid_reasoning_effort(cls, value):
+        """Normalize a reasoning-effort value (C-U12). Returns the lowercased
+        value if it is one of the recognized levels, else None (so an unset or
+        garbage env/arg is simply not sent)."""
+        if value is None:
+            return None
+        v = str(value).strip().lower()
+        return v if v in cls._REASONING_EFFORTS else None
+
+    @staticmethod
+    def _llm_unsupported_extras(error_str: str, extra_kwargs: Dict[str, Any]) -> set:
+        """033 Wave-0 capability probe: given a failed completion's error text
+        and the optional enhancement params we sent, return the subset the
+        endpoint appears to reject (so the caller can drop + remember them).
+
+        Conservative: only fires on signals that look like an unsupported /
+        malformed *parameter* (not a transient 5xx or an auth error). When the
+        message names a specific param, only that one is dropped; when it is a
+        generic "unsupported parameter" 400 that names none of ours, all active
+        enhancement params are dropped (they are optional, so dropping them to
+        keep the call working is always safe).
+        """
+        if not extra_kwargs:
+            return set()
+        low = (error_str or "").lower()
+        # Never treat transient/auth failures as a param-capability problem.
+        if any(code in low for code in ("502", "503", "504", "bad gateway",
+                                        "service unavailable", "connection",
+                                        "timeout", "401", "403")):
+            return set()
+        named = {p for p in extra_kwargs if p in low}
+        if named:
+            return named
+        generic = any(sig in low for sig in (
+            "unsupported", "unrecognized", "unexpected keyword", "unknown parameter",
+            "unknown field", "not supported", "invalid parameter", "extra inputs",
+            "no longer supported", "is not permitted", "unknown argument",
+        ))
+        if generic and ("400" in low or "param" in low or "argument" in low
+                        or "field" in low or "input" in low):
+            return set(extra_kwargs)
+        return set()
+
+    async def _call_llm_json(self, websocket, messages, *, schema=None,
+                             schema_name: str = "result", temperature=None,
+                             feature: str = "structured", reasoning_effort=None):
+        """C-N14 — request enforced structured (JSON) output and parse it.
+
+        Passes a ``response_format`` (a strict ``json_schema`` block when
+        ``schema`` is given, else plain ``json_object``) through
+        :meth:`_call_llm`, which probe-and-falls-back if the endpoint can't do
+        it. Returns the parsed object, or ``None`` when the call failed or the
+        content was not valid JSON — callers keep their existing best-effort
+        JSON-repair path as the fallback, so this is always safe to adopt.
+        """
+        if schema is not None:
+            response_format = {
+                "type": "json_schema",
+                "json_schema": {"name": schema_name, "schema": schema, "strict": True},
+            }
+        else:
+            response_format = {"type": "json_object"}
+        msg, _usage = await self._call_llm(
+            websocket, messages, tools_desc=None, temperature=temperature,
+            feature=feature, response_format=response_format,
+            reasoning_effort=reasoning_effort,
+        )
+        content = getattr(msg, "content", None) if msg is not None else None
+        if not content:
+            return None
+        try:
+            return json.loads(content)
+        except (ValueError, TypeError):
+            # Tolerate a fenced ```json block or surrounding prose.
+            extracted = self._extract_json_block(content)
+            if extracted is not None:
+                try:
+                    return json.loads(extracted)
+                except (ValueError, TypeError):
+                    return None
+            return None
+
+    @staticmethod
+    def _extract_json_block(text: str):
+        """Best-effort: pull the first balanced JSON object/array out of a
+        string that may be wrapped in a ```json fence or prose. Returns the
+        substring or None."""
+        if not isinstance(text, str):
+            return None
+        s = text.strip()
+        if s.startswith("```"):
+            # strip a leading fence line and a trailing fence
+            nl = s.find("\n")
+            if nl != -1:
+                s = s[nl + 1:]
+            if s.rstrip().endswith("```"):
+                s = s.rstrip()[:-3]
+            s = s.strip()
+        starts = [i for i in (s.find("{"), s.find("[")) if i != -1]
+        if not starts:
+            return None
+        start = min(starts)
+        open_ch = s[start]
+        close_ch = "}" if open_ch == "{" else "]"
+        depth = 0
+        for i in range(start, len(s)):
+            if s[i] == open_ch:
+                depth += 1
+            elif s[i] == close_ch:
+                depth -= 1
+                if depth == 0:
+                    return s[start:i + 1]
+        return None
 
     async def _emit_llm_usage_report(self, websocket, *, feature, model, usage, outcome):
         """Send an ``llm_usage_report`` message to ``websocket`` carrying the
