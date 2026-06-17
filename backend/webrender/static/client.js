@@ -278,9 +278,12 @@
       case "chat_loaded":
         activeChatId = data.chat && data.chat.id; chat.innerHTML = ""; canvas.innerHTML = "";
         timelineMode = false; setStatus("");
-        // Feature 028 (FR-028): component-bearing history messages carry a
-        // server-rendered `html` form — no more empty bubbles. The workspace
-        // itself re-hydrates via the ui_render the server pushes right after.
+        // Feature 028 (FR-028) + 045: the chat rail is TEXT ONLY. Component
+        // messages carry a server-rendered `html` form containing only their
+        // text primitives (the server drops rich components); a turn whose
+        // output was purely rich gets no `html` and renders no bubble here —
+        // it lives on the canvas, which re-hydrates via the ui_render the
+        // server pushes right after.
         if (data.chat && data.chat.messages) data.chat.messages.forEach(function (m) {
           // Feature 031: re-hydrated attachment chip leads the user's message
           // on its own line (consistent with the live-send rendering above).
@@ -292,9 +295,11 @@
             appendChatBubble(m.role, attChip + (m.content ? "<div>" + escapeText(m.content) + "</div>" : ""));
           } else if (m.html) {
             appendChatBubble(m.role, attChip + m.html);
-          } else {
+          } else if (attChip) {
+            // Component-only message with no text — keep just the attachment chip.
             appendChatBubble(m.role, attChip);
           }
+          // else: a rich-component-only turn — shown on the canvas, no chat bubble.
         });
         break;
       case "user_preferences":
