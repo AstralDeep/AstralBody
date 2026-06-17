@@ -37,9 +37,11 @@ def _card(title: str, body: str, **extra):
 def test_fragment_with_component_id_wraps_card_markup(monkeypatch):
     """028 FR-019: a component bearing an identity renders inside its
     data-component-id anchor with the unchanged card markup inside. (The 033
-    C-U6 provenance footer is a separate, flag-gated addition covered in
-    tests/webrender/test_provenance.py; disabled here to assert wrapper parity.)"""
+    C-U6 provenance footer and the C-D9 a11y landmark are separate, flag-gated
+    additions covered in their own suites; disabled here to assert the bare
+    identity-wrapper parity.)"""
     monkeypatch.setenv("FF_PROVENANCE_SURFACING", "false")
+    monkeypatch.setenv("FF_A11Y", "false")
     comp = _card("Vitals", "all good", component_id="wc_x")
     out = render_component_fragment(comp)
     assert out.startswith('<div class="astral-component" data-component-id="wc_x">')
