@@ -1178,7 +1178,15 @@ def render_component_fragment(component: Dict[str, Any], profile: Any = None) ->
         inner += _provenance_footer(component)
     if not cid:
         return inner
-    return f'<div class="astral-component" data-component-id="{_attr(cid)}">{inner}</div>'
+    # Feature 033 (C-D9): WCAG-by-construction — wrap each top-level component
+    # as a labelled ARIA landmark so a screen reader can navigate between them.
+    attrs = f' data-component-id="{_attr(cid)}"'
+    from webrender import a11y
+    if a11y.a11y_enabled():
+        role = a11y.landmark_role(component)
+        if role:
+            attrs += f' role="{_attr(role)}" aria-label="{_attr(a11y.landmark_label(component))}"'
+    return f'<div class="astral-component"{attrs}>{inner}</div>'
 
 
 def render_workspace(components: List[Dict[str, Any]], profile: Any = None) -> str:
