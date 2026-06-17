@@ -40,6 +40,7 @@ from orchestrator.compaction import compact_messages
 from orchestrator import context_engineering
 from orchestrator import datamarking
 from orchestrator import model_router
+from orchestrator import viewport
 from orchestrator.hooks import HookManager, HookEvent, HookContext
 from orchestrator.task_state import TaskManager, TaskState
 from orchestrator.concurrency_cap import ConcurrencyCap
@@ -1901,6 +1902,9 @@ class Orchestrator:
                 elif msg.action == "update_device":
                     # ROTE: viewport / capability change from the frontend
                     device_info = msg.payload.get("device") or {}
+                    # 033 C-D7: capture the pre-change profile so we can diff the
+                    # canvas adaptation and push only what actually changed.
+                    old_profile = self.rote.get_profile(websocket)
                     new_profile, re_adapted, profile_changed = self.rote.update_device(websocket, device_info)
                     await self._safe_send(websocket, json.dumps({
                         "type": "rote_config",
@@ -1920,8 +1924,17 @@ class Orchestrator:
                                 # just the flat component list.
                                 ws_components = self._canvas_components(active_chat, user_id)
                                 if ws_components:
-                                    await self.send_ui_render(websocket, ws_components)
-                                    handled_via_workspace = True
+                                    # 033 C-D7: when the live-viewport flag is on,
+                                    # push only the components whose adaptation
+                                    # actually changed (targeted upsert to THIS
+                                    # socket — other devices didn't change). Any
+                                    # failure falls through to the full re-render.
+                                    if viewport.viewport_enabled() and await self._readapt_targeted(
+                                            websocket, active_chat, old_profile, new_profile, ws_components):
+                                        handled_via_workspace = True
+                                    else:
+                                        await self.send_ui_render(websocket, ws_components)
+                                        handled_via_workspace = True
                             except Exception:
                                 logger.exception("workspace re-adapt failed after device change")
                     # Legacy fallback for sockets with no persisted workspace.
@@ -6627,6 +6640,43 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             )
         except Exception:
             logger.debug("workspace denial audit failed", exc_info=True)
+
+    async def _readapt_targeted(self, websocket, chat_id, old_profile, new_profile,
+                                components: List[Dict]) -> bool:
+        """033 C-D7: on a viewport/orientation change, re-render each canvas
+        component under the old and new profile and push a ``ui_upsert`` for ONLY
+        the ones whose fragment actually changed — to THIS socket alone (other
+        devices on the chat didn't change). Returns True when handled (even if
+        nothing changed — that means the canvas looks identical, no work needed),
+        False on any error so the caller falls back to a full re-render."""
+        try:
+            from shared.protocol import UIUpsert
+            from webrender import render_component_fragment
+            from rote.adapter import ComponentAdapter
+            from rote.capabilities import DeviceType
+
+            def _render(comp, profile):
+                if profile.device_type == DeviceType.BROWSER:
+                    adapted = comp
+                else:
+                    al = ComponentAdapter.adapt([comp], profile)
+                    adapted = al[0] if len(al) == 1 else {"type": "container", "content": al}
+                    if isinstance(adapted, dict):
+                        adapted["component_id"] = comp.get("component_id")
+                return adapted, render_component_fragment(
+                    adapted if isinstance(adapted, dict) else comp, profile)
+
+            ops = viewport.targeted_ops(
+                components, lambda c: _render(c, old_profile),
+                lambda c: _render(c, new_profile))
+            if ops:
+                await self._safe_send(websocket, UIUpsert(chat_id=chat_id, ops=ops).to_json())
+            logger.info("C-D7 targeted re-adapt: %d/%d components changed on chat=%s",
+                        len(ops), len(components), chat_id)
+            return True
+        except Exception:
+            logger.exception("C-D7 targeted re-adapt failed; falling back to full render")
+            return False
 
     async def send_ui_upsert(self, websocket, chat_id: str, user_id: str, ops: List[Dict]):
         """Fan a ``ui_upsert`` out to every socket of ``user_id`` whose active
