@@ -736,6 +736,29 @@ class Database:
         # unsigned rows (no key, or pre-C-S9) are simply not flagged.
         cursor.execute('ALTER TABLE memory_item ADD COLUMN IF NOT EXISTS signature TEXT')
 
+        # Feature 033 (C-M6): temporal validity. valid_from/valid_to bound when a
+        # fact is in force (NULL = open); ingested_at records when it was learned
+        # (vs created_at). Enables as-of queries + contradiction/abstention.
+        cursor.execute('ALTER TABLE memory_item ADD COLUMN IF NOT EXISTS valid_from BIGINT')
+        cursor.execute('ALTER TABLE memory_item ADD COLUMN IF NOT EXISTS valid_to BIGINT')
+        cursor.execute('ALTER TABLE memory_item ADD COLUMN IF NOT EXISTS ingested_at BIGINT')
+        # Feature 033 (C-M7): principled forgetting. recall_count + last_recalled_at
+        # drive the Ebbinghaus retention curve (reinforcement-on-recall); a decayed
+        # low-strength memory becomes a forgetting candidate.
+        cursor.execute('ALTER TABLE memory_item ADD COLUMN IF NOT EXISTS recall_count INTEGER DEFAULT 0')
+        cursor.execute('ALTER TABLE memory_item ADD COLUMN IF NOT EXISTS last_recalled_at BIGINT')
+
+        # Feature 033 (C-M8): evolving per-user persona (human-readable steering
+        # text refined by keep-best; updated by recent turns + 004 feedback).
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_persona (
+                user_id TEXT PRIMARY KEY,
+                persona TEXT NOT NULL DEFAULT '',
+                score DOUBLE PRECISION DEFAULT 0,
+                updated_at BIGINT
+            )
+        ''')
+
         # Transient promotion candidates; consumed/aged by the dreaming sweep.
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS short_term_signal (

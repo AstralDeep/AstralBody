@@ -1016,6 +1016,22 @@ PRIMITIVE_RENDERERS.update({
 })
 
 
+def render_generative(component: Dict[str, Any]) -> str:
+    """033 C-N2: render a model-composed generative widget from its constrained
+    grammar ``spec`` — escape-by-default, structurally bounded. Flag-gated: when
+    FF_GENERATIVE_PRIMITIVES is off the type renders the standard unsupported
+    placeholder (today's behavior for an unknown type)."""
+    from webrender import generative
+    if not generative.generative_enabled():
+        return ('<div class="astral-unsupported text-xs text-astral-muted italic '
+                'border border-white/10 rounded p-2">[unsupported component: '
+                'generative]</div>')
+    return generative.render(component.get("spec"))
+
+
+PRIMITIVE_RENDERERS["generative"] = render_generative
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
