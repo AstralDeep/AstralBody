@@ -39,6 +39,7 @@ from orchestrator.tool_security import ToolSecurityAnalyzer
 from orchestrator.compaction import compact_messages
 from orchestrator import context_engineering
 from orchestrator import datamarking
+from orchestrator import model_router
 from orchestrator.hooks import HookManager, HookEvent, HookContext
 from orchestrator.task_state import TaskManager, TaskState
 from orchestrator.concurrency_cap import ConcurrencyCap
@@ -4077,6 +4078,24 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             extra_kwargs["response_format"] = response_format
         if effort is not None and "reasoning_effort" not in unsupported:
             extra_kwargs["reasoning_effort"] = effort
+        # 033 Wave-3 (C-D6): device-capability-aware model router. Cheap-first —
+        # pick the cheapest tier that fits this task, capped by the connecting
+        # device; a low-confidence response escalates one tier (below). Flag-
+        # gated (default OFF) + fail-open: with the flag off, or no MODEL_TIERS
+        # configured, call_model is the already-resolved default, unchanged.
+        _route_tier: Optional[int] = None
+        escalated = False
+        if model_router.router_enabled():
+            try:
+                prof = self.rote.get_profile(websocket) if websocket is not None else None
+                dtype = prof.device_type.value if prof is not None else None
+                dec = model_router.route(
+                    feature, default_model=call_model, device_type=dtype,
+                    device_caps=getattr(prof, "capabilities", None))
+                call_model, _route_tier = dec.model, dec.tier
+            except Exception:
+                logger.debug("model_router: selection failed — using default model",
+                             exc_info=True)
         attempt = 0
         while attempt < self.MAX_RETRIES:
             attempt += 1
@@ -4143,6 +4162,24 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                         usage=usage,
                         outcome="success",
                     )
+                # 033 Wave-3 (C-D6): cheap-first cascade — if the router placed
+                # this call on a lower tier and the response reads low-confidence
+                # (hedge/refusal/empty), escalate ONE tier and re-issue once. Only
+                # for prose turns (tool-call turns aren't graded this way). Bounded
+                # by ``escalated`` so it happens at most once.
+                if (_route_tier is not None and not escalated and not tools_desc
+                        and model_router.router_enabled()
+                        and not model_router.confidence_ok(getattr(_msg, "content", None))):
+                    _next = model_router.escalate(_route_tier)
+                    _next_model = (model_router.resolve_model(_next, resolved.model)
+                                   if _next is not None else None)
+                    if _next_model and _next_model != call_model:
+                        escalated, _route_tier, call_model = True, _next, _next_model
+                        logger.info("model_router: low-confidence → escalating to "
+                                    "tier %s (%s)", model_router.tier_name(_next),
+                                    _next_model)
+                        attempt -= 1  # the escalation re-call isn't a retry
+                        continue
                 return response.choices[0].message, usage
             except Exception as e:
                 error_str = str(e)
