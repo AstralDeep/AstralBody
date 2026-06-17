@@ -4766,6 +4766,20 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             roles = ra.get("roles") if isinstance(ra, dict) else None
         return list(roles) if isinstance(roles, (list, tuple)) else []
 
+    def _taint_tracker(self, chat_id: Optional[str]):
+        """Per-chat C-S2 taint tracker (the data-flow scope), lazily created."""
+        store = getattr(self, "_taint_trackers", None)
+        if store is None:
+            store = {}
+            self._taint_trackers = store
+        key = chat_id or "_global"
+        tracker = store.get(key)
+        if tracker is None:
+            from orchestrator.taint import TaintTracker
+            tracker = TaintTracker()
+            store[key] = tracker
+        return tracker
+
     async def execute_single_tool(self, websocket, tool_call, tool_to_agent: Dict, chat_id: str = None, user_id: str = None, tool_to_unqualified: Optional[Dict[str, str]] = None) -> Optional[MCPResponse]:
         """Execute a single tool call and render its UI components. Returns the Result object."""
         # The LLM may have emitted a qualified name (e.g. "forecaster-1__submit_dataset")
@@ -4894,6 +4908,28 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 # Never forward a consumed authorization token to the agent.
                 if isinstance(args, dict) and "_txn_token" in args:
                     args = {k: v for k, v in args.items() if k != "_txn_token"}
+
+        # 033 Wave-4 (C-S2): value-level taint/data-flow gate. If this call is a
+        # write/egress SINK and its arguments carry untrusted-tainted values
+        # (effective trust = min over data ancestors, recorded from prior
+        # untrusted-source outputs — survives multi-hop laundering), refuse it.
+        # Flag-gated (default OFF) + fail-open: unknown values are trusted, so a
+        # call with only constants/user intent always passes.
+        if user_id:
+            from orchestrator import taint as _taint
+            if _taint.taint_enabled() and _taint.is_sink(agent_id, tool_name):
+                tracker = self._taint_tracker(chat_id)
+                trust = tracker.effective_trust_of_args(args)
+                if _taint.check_flow(trust) == "deny":
+                    msg = (f"'{tool_name}' was blocked: it would send untrusted "
+                           f"data (from a web/third-party source) into a "
+                           f"write/egress action.")
+                    logger.warning("taint.deny user=%s tool=%s agent=%s trust=%s",
+                                   user_id, tool_name, agent_id, _taint.trust_name(trust))
+                    alert = Alert(message=msg, variant="warning")
+                    await self.send_ui_render(websocket, [alert.to_dict()])
+                    return MCPResponse(error={"message": msg, "retryable": False},
+                                       ui_components=[alert.to_dict()])
 
         # Map file paths if chat_id provided
         if chat_id:
@@ -5072,6 +5108,22 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     result.correlation_id = _audit_ctx.correlation_id
                 except Exception:
                     pass
+
+        # 033 Wave-4 (C-S2): record the call's output taint so it propagates
+        # through the chain. The output's trust = min(source trust, input trust):
+        # an untrusted web/third-party source taints its output, and any tool
+        # that consumed untrusted input passes the taint on (laundering survives
+        # an intermediate hop). Flag-gated; best-effort (never affects the call).
+        if user_id and result is not None and result.error is None:
+            try:
+                from orchestrator import taint as _taint
+                if _taint.taint_enabled():
+                    tracker = self._taint_tracker(chat_id)
+                    src = _taint.classify_source(agent_id, tool_name)
+                    inp = tracker.effective_trust_of_args(args)
+                    tracker.record_output(result.ui_components, src, inp)
+            except Exception:
+                logger.debug("taint: output record failed", exc_info=True)
 
         # 015-external-ai-agents: release cap if the dispatch errored or returned
         # nothing — there will be no terminal ToolProgress to do it. Successful
