@@ -34,15 +34,24 @@ class _FakeRepo:
     def __init__(self):
         self.rows = []
 
-    def create_memory(self, user_id, category, value, *, source="explicit", salience=0.0):
+    def create_memory(self, user_id, category, value, *, source="explicit",
+                       salience=0.0, keywords=None):
         item = {"id": f"m{len(self.rows)}", "user_id": user_id, "category": category,
-                "value": value, "source": source, "superseded_at": None, "superseded_by": None}
+                "value": value, "source": source, "keywords": keywords,
+                "superseded_at": None, "superseded_by": None}
         self.rows.append(item)
         return dict(item)
 
     def list_memory(self, user_id):
         return [dict(r) for r in self.rows
                 if r["user_id"] == user_id and r["superseded_at"] is None]
+
+    # C-M2 linked-note surface (links not asserted by the reconcile tests).
+    def add_link(self, user_id, a_id, b_id):
+        return True
+
+    def linked_ids(self, user_id, mem_id):
+        return []
 
     def supersede_memory(self, user_id, old_id, new_id=None):
         for r in self.rows:
