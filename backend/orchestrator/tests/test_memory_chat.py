@@ -17,8 +17,10 @@ class _FakeRepo:
         self.memory = []
         self.signals = []
 
-    def create_memory(self, user_id, category, value, *, source="explicit", salience=0.0):
-        item = {"id": f"m{len(self.memory)}", "category": category, "value": value, "source": source}
+    def create_memory(self, user_id, category, value, *, source="explicit",
+                       salience=0.0, keywords=None):
+        item = {"id": f"m{len(self.memory)}", "category": category, "value": value,
+                "source": source, "keywords": keywords}
         self.memory.append(item)
         return item
 
@@ -27,6 +29,13 @@ class _FakeRepo:
 
     def add_signal(self, user_id, category, value):
         self.signals.append((category, value))
+
+    # C-M2 link surface (links not asserted by these dispatch tests).
+    def add_link(self, user_id, a_id, b_id):
+        return True
+
+    def linked_ids(self, user_id, mem_id):
+        return []
 
 
 class _Gate:

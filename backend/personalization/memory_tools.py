@@ -44,6 +44,40 @@ def _tokens(text: str) -> set:
     return set(re.findall(r"[a-z0-9]+", (text or "").lower()))
 
 
+#: C-M2 linked-note tuning.
+LINK_MIN_OVERLAP = 1      # shared content keywords required to link two memories
+LINK_MAX_NEIGHBORS = 5    # max links created per new memory
+
+_KEYWORD_STOPWORDS = frozenset(
+    "the a an of to in on at for and or but with from into about as is are was "
+    "were be been being i you he she it we they me my your his her our their "
+    "this that these those prefer prefers like likes want wants use uses using "
+    "have has had do does did will would can could should note remember".split()
+)
+
+
+def linking_enabled() -> bool:
+    """FF_MEMORY_LINKING feature flag (default ON; feature 033 C-M2). When on, a
+    new memory is linked to keyword-overlapping neighbours and recall pulls in a
+    hit's linked neighbours (single-step multi-hop). Fail-open: off or any error
+    leaves memory unlinked and retrieval unchanged."""
+    return os.getenv("FF_MEMORY_LINKING", "true").strip().lower() not in ("0", "false", "no", "off")
+
+
+def derive_keywords(value: str, *, limit: int = 8) -> str:
+    """Deterministic content keywords for a memory note (space-joined): the
+    first ``limit`` distinct ≥3-char non-stopword tokens. The self-organizing
+    retrieval/link signal — no LLM, no embedding service."""
+    out: List[str] = []
+    for t in re.findall(r"[a-z0-9]{3,}", (value or "").lower()):
+        if t in _KEYWORD_STOPWORDS or t in out:
+            continue
+        out.append(t)
+        if len(out) >= limit:
+            break
+    return " ".join(out)
+
+
 def _extract_json(content: str) -> Optional[dict]:
     """Pull the first balanced JSON object from a string that may be fenced or
     wrapped in prose. Returns the parsed dict, or None."""
@@ -146,8 +180,42 @@ class MemoryTools:
             }
         return category, value, None
 
+    def _create_linked(self, user_id: str, category: str, value: str) -> Dict[str, Any]:
+        """Create a memory note (with derived keywords, C-M2) and link it into
+        the keyword-overlap graph. Linking failures never block the write."""
+        keywords = derive_keywords(value)
+        item = self.repo.create_memory(user_id, category, value,
+                                       source="explicit", keywords=keywords)
+        if linking_enabled():
+            try:
+                self._link_new(user_id, item["id"], value, keywords)
+            except Exception:
+                logger.debug("memory.link_failed", exc_info=True)
+        return item
+
+    def _link_new(self, user_id: str, new_id: str, value: str, keywords: str) -> int:
+        """Link a just-created memory to its keyword-overlapping live neighbours
+        (strongest first, capped). Returns the number of links created."""
+        kw = _tokens(keywords) or _tokens(value)
+        if not kw:
+            return 0
+        scored = []
+        for it in self.repo.list_memory(user_id):
+            if it.get("id") == new_id:
+                continue
+            other = _tokens(it.get("keywords") or "") or _tokens(it.get("value", ""))
+            overlap = len(kw & other)
+            if overlap >= LINK_MIN_OVERLAP:
+                scored.append((overlap, it["id"]))
+        scored.sort(key=lambda t: -t[0])
+        linked = 0
+        for _, oid in scored[:LINK_MAX_NEIGHBORS]:
+            if self.repo.add_link(user_id, new_id, oid):
+                linked += 1
+        return linked
+
     def _do_add(self, user_id: str, category: str, value: str) -> Dict[str, Any]:
-        item = self.repo.create_memory(user_id, category, value, source="explicit")
+        item = self._create_linked(user_id, category, value)
         logger.info("memory.remembered",
                     extra={"user_id": user_id, "category": category, "memory_id": item["id"]})
         return {"stored": True, "id": item["id"], "category": category}
@@ -216,7 +284,7 @@ class MemoryTools:
             return {"stored": False, "action": "delete", "superseded": tgt["id"]}
         if action == "UPDATE" and tgt is not None:
             new_value = decision.get("value") or value
-            item = self.repo.create_memory(user_id, category, new_value, source="explicit")
+            item = self._create_linked(user_id, category, new_value)
             self.repo.supersede_memory(user_id, tgt["id"], item["id"])
             logger.info("memory.reconcile_update",
                         extra={"user_id": user_id, "category": category,
@@ -272,4 +340,32 @@ class MemoryTools:
             scored.append((score, idx, it))
         # higher score first; ties keep recency order (idx asc)
         scored.sort(key=lambda t: (-t[0], t[1]))
-        return [it for _, _, it in scored[:limit]]
+        results = [it for _, _, it in scored[:limit]]
+        # C-M2: single-step multi-hop — pull in the linked neighbours of the top
+        # hits so "connect-the-dots" recall surfaces related memories that share
+        # no query tokens themselves. Fail-open to the direct hits.
+        if linking_enabled() and results and len(results) < limit:
+            try:
+                results = self._expand_with_links(user_id, results, items, limit)
+            except Exception:
+                logger.debug("memory_search: link expansion failed — direct hits only",
+                             exc_info=True)
+        return results
+
+    def _expand_with_links(self, user_id: str, results: List[Dict[str, Any]],
+                           all_items: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+        """Append the 1-hop linked neighbours of the current hits (not already
+        present), best matches first, up to ``limit``."""
+        by_id = {it.get("id"): it for it in all_items}
+        seen = {it.get("id") for it in results}
+        expanded = list(results)
+        for it in results:
+            if len(expanded) >= limit:
+                break
+            for lid in self.repo.linked_ids(user_id, it.get("id")):
+                if lid not in seen and lid in by_id:
+                    expanded.append(by_id[lid])
+                    seen.add(lid)
+                    if len(expanded) >= limit:
+                        break
+        return expanded[:limit]
