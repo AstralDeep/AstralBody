@@ -4859,7 +4859,26 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 except Exception:
                     logger.debug("policy: evaluation failed — allowing", exc_info=True)
                     decision = policy.PolicyDecision()
-                if decision.effect in (policy.DENY, policy.CONFIRM):
+                # 033 C-S8: a require_token rule demands a valid single-use
+                # transaction token bound to (agent, user, tool, hash(args)).
+                # Fail-closed — missing/tampered/expired/replayed ⇒ deny.
+                if decision.effect == policy.REQUIRE_TOKEN:
+                    from orchestrator import transaction_token as _txn
+                    token = args.get("_txn_token") if isinstance(args, dict) else None
+                    ok_tok, why = _txn.verify_and_consume(
+                        _txn.default_store(), token, agent_id or "", user_id,
+                        tool_name, args)
+                    if not ok_tok:
+                        msg = decision.reason or (
+                            f"'{tool_name}' needs a valid one-time authorization "
+                            f"token ({why}).")
+                        logger.warning("policy.require_token user=%s tool=%s rule=%s reason=%s",
+                                       user_id, tool_name, decision.rule_id, why)
+                        alert = Alert(message=msg, variant="warning")
+                        await self.send_ui_render(websocket, [alert.to_dict()])
+                        return MCPResponse(error={"message": msg, "retryable": False},
+                                           ui_components=[alert.to_dict()])
+                elif decision.effect in (policy.DENY, policy.CONFIRM):
                     msg = decision.reason or (
                         f"'{tool_name}' needs confirmation before it can run."
                         if decision.effect == policy.CONFIRM
@@ -4872,6 +4891,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                                        ui_components=[alert.to_dict()])
                 if decision.args is not None:
                     args = decision.args  # rewritten (e.g. a secret arg redacted)
+                # Never forward a consumed authorization token to the agent.
+                if isinstance(args, dict) and "_txn_token" in args:
+                    args = {k: v for k, v in args.items() if k != "_txn_token"}
 
         # Map file paths if chat_id provided
         if chat_id:
