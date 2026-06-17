@@ -113,6 +113,28 @@ def lint_enabled() -> bool:
     return os.getenv("FF_UI_DESIGNER_LINT", "true").strip().lower() not in ("0", "false", "no", "off")
 
 
+def conservative_enabled() -> bool:
+    """FF_UI_DESIGNER_CONSERVATIVE feature flag (default ON; feature 039 C-U2).
+
+    When on, a re-design of an already-persisted arrangement is only adopted if
+    its score beats the current layout by :func:`adopt_margin` — avoiding
+    gratuitous canvas churn (Todi et al., CHI'21: penalize change, adapt only
+    when net-beneficial). Fail-open: any error adopts the new arrangement.
+    """
+    return os.getenv("FF_UI_DESIGNER_CONSERVATIVE", "true").strip().lower() not in ("0", "false", "no", "off")
+
+
+def adopt_margin() -> float:
+    """Score margin a re-design must beat the current layout by to be adopted
+    (operator override ``UI_DESIGNER_ADOPT_MARGIN``; default 0.5)."""
+    raw = os.getenv("UI_DESIGNER_ADOPT_MARGIN", "")
+    try:
+        value = float(raw)
+        return value if value >= 0 else 0.5
+    except (TypeError, ValueError):
+        return 0.5
+
+
 def should_design(round_components: Sequence[Dict[str, Any]], *, timeline_mode: bool = False) -> bool:
     """Invocation predicate: flag ∧ ≥2 rich components ∧ not viewing history."""
     if timeline_mode or not designer_enabled():
@@ -632,6 +654,38 @@ def score_arrangement(
     return round(acc[0], 4)
 
 
+def should_adopt(
+    new_layout: Sequence[Dict[str, Any]],
+    current_layout: Optional[Sequence[Dict[str, Any]]],
+    *,
+    ref_types: Optional[Dict[str, str]] = None,
+    allowed_types: Optional[Set[str]] = None,
+    margin: Optional[float] = None,
+) -> bool:
+    """Feature 039 (C-U2): should the freshly designed arrangement replace the
+    currently-persisted one?
+
+    Adopt when there is no current layout, when the content differs (a different
+    component set — not a re-arrangement, so the new components must be placed),
+    or when the new arrangement's score beats the current one's by ``margin``.
+    Otherwise keep the existing layout (avoid churn). Pure; never raises.
+    """
+    if not current_layout:
+        return True
+    try:
+        if set(iter_refs(new_layout)) != set(iter_refs(current_layout)):
+            return True
+    except Exception:
+        return True
+    m = adopt_margin() if margin is None else margin
+    try:
+        new_score = score_arrangement(new_layout, ref_types=ref_types, allowed_types=allowed_types)
+        cur_score = score_arrangement(current_layout, ref_types=ref_types, allowed_types=allowed_types)
+    except Exception:
+        return True
+    return new_score > cur_score + m
+
+
 # ───────────────────────────── lint ──────────────────────────────────────────
 # Feature 033 (capability C-U7): LLM-generated UI injects deceptive patterns
 # unprompted (Deception at Scale, CHI'26; 1K generated components). The
@@ -769,6 +823,7 @@ async def design_round(
     layout_key: str,
     allowed_types: Set[str],
     llm_call: Callable[[List[Dict[str, str]]], Awaitable[Optional[str]]],
+    current_layout: Optional[Sequence[Dict[str, Any]]] = None,
     timeout_s: Optional[float] = None,
     max_rounds: Optional[int] = None,
 ) -> Optional[List[Dict[str, Any]]]:
@@ -942,6 +997,17 @@ async def design_round(
                 final = linted
         except Exception:
             logger.debug("ui_designer: lint_arrangement failed — keeping unlinted", exc_info=True)
+
+    # Feature 039 (C-U2): don't churn a persisted canvas for a marginal gain —
+    # keep the existing arrangement unless the new one is meaningfully better.
+    if conservative_enabled() and current_layout:
+        try:
+            if not should_adopt(final, current_layout, ref_types=ref_types, allowed_types=allowed_types):
+                logger.info("ui_designer.conservative chat=%s layout_key=%s — kept existing "
+                            "(re-design not worth the disruption)", chat_id, layout_key)
+                final = list(current_layout)
+        except Exception:
+            logger.debug("ui_designer: conservative check failed — adopting new", exc_info=True)
 
     layout = stamp_garnish_ids(final, chat_id, layout_key)
 
