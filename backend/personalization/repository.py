@@ -109,7 +109,7 @@ class PersonalizationRepository:
         # all recall — reconciliation keeps the live set clean.
         rows = self.db.fetch_all(
             """SELECT id, user_id, category, value, source, salience, created_at,
-                      updated_at, keywords
+                      updated_at, keywords, signature
                FROM memory_item WHERE user_id = ? AND superseded_at IS NULL
                ORDER BY created_at DESC""",
             (user_id,),
@@ -126,17 +126,20 @@ class PersonalizationRepository:
             raise ValueError(f"invalid memory source: {source}")
         mem_id = str(uuid.uuid4())
         now = _now_ms()
+        # C-S9: HMAC-sign the row's identifying fields (None when no key set).
+        from .memory_guard import sign_fields
+        signature = sign_fields(mem_id, user_id, category, value, source)
         self.db.execute(
             """INSERT INTO memory_item
                    (id, user_id, category, value, source, salience, created_at,
-                    updated_at, keywords)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (mem_id, user_id, category, value, source, salience, now, now, keywords),
+                    updated_at, keywords, signature)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (mem_id, user_id, category, value, source, salience, now, now, keywords, signature),
         )
         return {
             "id": mem_id, "user_id": user_id, "category": category, "value": value,
             "source": source, "salience": salience, "created_at": now, "updated_at": now,
-            "keywords": keywords,
+            "keywords": keywords, "signature": signature,
         }
 
     def get_memory(self, user_id: str, mem_id: str) -> Optional[Dict[str, Any]]:

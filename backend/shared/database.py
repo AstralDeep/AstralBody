@@ -721,6 +721,11 @@ class Database:
             )
         ''')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_memory_link_from ON memory_link(user_id, memory_id)')
+        # Feature 033 (C-S9): memory-poisoning defense. Optional HMAC signature
+        # over the row's identifying fields (keyed by MEMORY_HMAC_KEY) so direct
+        # tampering of a durable memory is detectable at retrieval. Nullable —
+        # unsigned rows (no key, or pre-C-S9) are simply not flagged.
+        cursor.execute('ALTER TABLE memory_item ADD COLUMN IF NOT EXISTS signature TEXT')
 
         # Transient promotion candidates; consumed/aged by the dreaming sweep.
         cursor.execute('''
