@@ -706,6 +706,21 @@ class Database:
         cursor.execute('ALTER TABLE memory_item ADD COLUMN IF NOT EXISTS superseded_by UUID')
         cursor.execute('ALTER TABLE memory_item ADD COLUMN IF NOT EXISTS superseded_at BIGINT')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_memory_item_live ON memory_item(user_id, superseded_at)')
+        # Feature 033 (C-M2): A-MEM-style linked notes. Each memory carries
+        # derived `keywords` (a self-organizing retrieval signal), and related
+        # memories are connected in the undirected `memory_link` graph so recall
+        # can pull in a hit's linked neighbours (single-step multi-hop).
+        cursor.execute('ALTER TABLE memory_item ADD COLUMN IF NOT EXISTS keywords TEXT')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS memory_link (
+                user_id TEXT NOT NULL,
+                memory_id UUID NOT NULL,
+                linked_id UUID NOT NULL,
+                created_at BIGINT,
+                PRIMARY KEY (user_id, memory_id, linked_id)
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_memory_link_from ON memory_link(user_id, memory_id)')
 
         # Transient promotion candidates; consumed/aged by the dreaming sweep.
         cursor.execute('''

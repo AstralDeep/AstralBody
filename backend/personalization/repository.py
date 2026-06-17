@@ -108,7 +108,8 @@ class PersonalizationRepository:
         # C-M1: superseded (soft-deleted / replaced) memories are excluded from
         # all recall — reconciliation keeps the live set clean.
         rows = self.db.fetch_all(
-            """SELECT id, user_id, category, value, source, salience, created_at, updated_at
+            """SELECT id, user_id, category, value, source, salience, created_at,
+                      updated_at, keywords
                FROM memory_item WHERE user_id = ? AND superseded_at IS NULL
                ORDER BY created_at DESC""",
             (user_id,),
@@ -117,7 +118,7 @@ class PersonalizationRepository:
 
     def create_memory(
         self, user_id: str, category: str, value: str, *, source: str = "explicit",
-        salience: float = 0.0,
+        salience: float = 0.0, keywords: Optional[str] = None,
     ) -> Dict[str, Any]:
         if category not in MEMORY_CATEGORIES:
             raise ValueError(f"invalid memory category: {category}")
@@ -127,13 +128,15 @@ class PersonalizationRepository:
         now = _now_ms()
         self.db.execute(
             """INSERT INTO memory_item
-                   (id, user_id, category, value, source, salience, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (mem_id, user_id, category, value, source, salience, now, now),
+                   (id, user_id, category, value, source, salience, created_at,
+                    updated_at, keywords)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (mem_id, user_id, category, value, source, salience, now, now, keywords),
         )
         return {
             "id": mem_id, "user_id": user_id, "category": category, "value": value,
             "source": source, "salience": salience, "created_at": now, "updated_at": now,
+            "keywords": keywords,
         }
 
     def get_memory(self, user_id: str, mem_id: str) -> Optional[Dict[str, Any]]:
@@ -170,6 +173,38 @@ class PersonalizationRepository:
             (new_id, now, now, old_id, user_id),
         )
         return getattr(cur, "rowcount", 0) > 0
+
+    # ── Linked-note graph (C-M2) ─────────────────────────────────────────
+
+    def add_link(self, user_id: str, a_id: str, b_id: str) -> bool:
+        """Create an undirected link between two memories (stored as both
+        directed edges so a single-column lookup finds neighbours either way).
+        Idempotent; a self-link is ignored."""
+        if not a_id or not b_id or a_id == b_id:
+            return False
+        now = _now_ms()
+        for src, dst in ((a_id, b_id), (b_id, a_id)):
+            try:
+                self.db.execute(
+                    """INSERT INTO memory_link (user_id, memory_id, linked_id, created_at)
+                       VALUES (?, ?, ?, ?)
+                       ON CONFLICT (user_id, memory_id, linked_id) DO NOTHING""",
+                    (user_id, src, dst, now),
+                )
+            except Exception:
+                return False
+        return True
+
+    def linked_ids(self, user_id: str, mem_id: str) -> List[str]:
+        """Ids of memories linked to ``mem_id`` (live links only — superseded
+        targets are filtered out by the join)."""
+        rows = self.db.fetch_all(
+            """SELECT l.linked_id FROM memory_link l
+               JOIN memory_item m ON m.id = l.linked_id AND m.user_id = l.user_id
+               WHERE l.user_id = ? AND l.memory_id = ? AND m.superseded_at IS NULL""",
+            (user_id, mem_id),
+        )
+        return [str(r["linked_id"]) for r in rows]
 
     # ── Short-term signals ───────────────────────────────────────────────
 

@@ -19,9 +19,10 @@ class _FakeRepo:
         self.memory = []
         self.signals = []
 
-    def create_memory(self, user_id, category, value, *, source="explicit", salience=0.0):
+    def create_memory(self, user_id, category, value, *, source="explicit",
+                       salience=0.0, keywords=None):
         item = {"id": f"m{len(self.memory)}", "user_id": user_id, "category": category,
-                "value": value, "source": source}
+                "value": value, "source": source, "keywords": keywords}
         self.memory.append(item)
         return item
 
@@ -31,6 +32,13 @@ class _FakeRepo:
 
     def list_memory(self, user_id):
         return list(self.memory)
+
+    # C-M2 link surface (links not asserted by these legacy tests).
+    def add_link(self, user_id, a_id, b_id):
+        return True
+
+    def linked_ids(self, user_id, mem_id):
+        return []
 
 
 def test_remember_stores_clean_value():
