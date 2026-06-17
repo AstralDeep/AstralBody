@@ -692,10 +692,20 @@ class Database:
                 source TEXT NOT NULL CHECK (source IN ('explicit','promoted')),
                 salience REAL NOT NULL DEFAULT 0,
                 created_at BIGINT,
-                updated_at BIGINT
+                updated_at BIGINT,
+                superseded_by UUID,
+                superseded_at BIGINT
             )
         ''')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_memory_item_user_cat ON memory_item(user_id, category)')
+        # Feature 033 (C-M1): reconcile-don't-append. A memory updated/deleted by
+        # the LLM-mediated write path is soft-deleted (superseded_at set, optional
+        # superseded_by pointer to its replacement) rather than hard-removed, so
+        # history stays auditable and retrieval simply excludes superseded rows.
+        # Idempotent ADD COLUMN for databases seeded before the columns existed.
+        cursor.execute('ALTER TABLE memory_item ADD COLUMN IF NOT EXISTS superseded_by UUID')
+        cursor.execute('ALTER TABLE memory_item ADD COLUMN IF NOT EXISTS superseded_at BIGINT')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_memory_item_live ON memory_item(user_id, superseded_at)')
 
         # Transient promotion candidates; consumed/aged by the dreaming sweep.
         cursor.execute('''
