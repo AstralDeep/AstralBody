@@ -6518,7 +6518,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                         adapted["component_id"] = cid
                 html = None
                 try:
-                    html = render_component_fragment(adapted if isinstance(adapted, dict) else comp)
+                    html = render_component_fragment(
+                        adapted if isinstance(adapted, dict) else comp, profile)
                 except Exception:
                     logger.exception("webrender: ui_upsert fragment render failed")
                 wire_ops.append({"op": "upsert", "component_id": cid,
