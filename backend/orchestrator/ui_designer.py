@@ -216,12 +216,14 @@ def build_design_messages(
     canvas_rows: Sequence[Dict[str, Any]],
     allowed_types: Set[str],
     archetype: Optional[str] = None,
+    task_prior: str = "",
 ) -> List[Dict[str, str]]:
     """Build the chat-completion messages for one design pass.
 
     ``archetype`` (C-U3), when set, appends a one-line layout-prior hint so the
-    LLM's draft starts from a task-appropriate arrangement. ``None`` reproduces
-    the legacy prompt verbatim."""
+    LLM's draft starts from a task-appropriate arrangement. ``task_prior`` (C-N1),
+    when set, appends the deterministically-derived structural spine. Both empty
+    reproduce the legacy prompt verbatim."""
     request = (user_request or "").strip()
     if len(request) > _MAX_REQUEST_CHARS:
         request = request[:_MAX_REQUEST_CHARS] + "…"
@@ -245,6 +247,7 @@ def build_design_messages(
     palette = ", ".join(sorted(allowed_types))
     prior = archetype_prior(archetype)
     prior_block = f"\nTASK SHAPE: {prior}\n" if prior else ""
+    task_block = f"\n{task_prior.strip()}\n" if task_prior and task_prior.strip() else ""
     user_prompt = f"""USER REQUEST FOR THIS ROUND:
 {request or '(not provided)'}
 
@@ -252,7 +255,7 @@ THIS ROUND'S COMPONENTS (place each exactly once via a ref node):
 {digests}
 {canvas_block}
 FULL ALLOWED TYPE PALETTE: {palette}
-{prior_block}
+{prior_block}{task_block}
 {_LAYOUT_GUIDANCE}"""
 
     return [
@@ -317,11 +320,12 @@ def build_refine_messages(
     canvas_rows: Sequence[Dict[str, Any]],
     allowed_types: Set[str],
     archetype: Optional[str] = None,
+    task_prior: str = "",
 ) -> List[Dict[str, str]]:
     """Build the critique/improve messages for one refinement pass.
 
-    ``archetype`` (C-U3) appends the same task-shape prior as the draft pass so
-    refinements keep steering toward the task-appropriate arrangement."""
+    ``archetype`` (C-U3) and ``task_prior`` (C-N1) append the same priors as the
+    draft pass so refinements keep steering toward the intended structure."""
     request = (user_request or "").strip()
     if len(request) > _MAX_REQUEST_CHARS:
         request = request[:_MAX_REQUEST_CHARS] + "…"
@@ -351,6 +355,7 @@ def build_refine_messages(
     palette = ", ".join(sorted(allowed_types))
     prior = archetype_prior(archetype)
     prior_block = f"\nTASK SHAPE: {prior}\n" if prior else ""
+    task_block = f"\n{task_prior.strip()}\n" if task_prior and task_prior.strip() else ""
     user_prompt = f"""USER REQUEST FOR THIS ROUND:
 {request or '(not provided)'}
 
@@ -364,7 +369,7 @@ CURRENT ARRANGEMENT (JSON):
 {layout_json}
 
 FULL ALLOWED TYPE PALETTE: {palette}
-{prior_block}
+{prior_block}{task_block}
 {_LAYOUT_GUIDANCE}
 
 {_REFINE_GUIDANCE}"""
@@ -1049,6 +1054,25 @@ async def design_round(
             logger.debug("ui_designer: classify_archetype failed — no archetype", exc_info=True)
         if archetype:
             logger.info("ui_designer.archetype chat=%s archetype=%s", chat_id, archetype)
+    # 033 Wave-1 (C-N1): optional task-model pre-pass — ask the LLM for a typed
+    # task schema, then DERIVE a deterministic structural prior from it. Adds one
+    # LLM round-trip so it is default-off; strictly fail-open (any error → no
+    # prior, base designer behavior).
+    task_prior = ""
+    try:
+        from orchestrator import task_model
+        if task_model.taskmodel_enabled():
+            schema_content = await asyncio.wait_for(
+                llm_call(task_model.build_schema_messages(user_request, round_components)),
+                timeout=budget)
+            schema = task_model.parse_task_schema(schema_content) if schema_content else None
+            if schema:
+                task_prior = task_model.schema_prior(schema)
+                if task_prior:
+                    logger.info("ui_designer.taskmodel chat=%s entities=%d",
+                                chat_id, len(schema.get("entities", [])))
+    except Exception:
+        logger.debug("ui_designer: task-model pre-pass failed — no prior", exc_info=True)
     ref_types: Dict[str, str] = {}
     for _c in round_components:
         if isinstance(_c, dict) and _c.get("component_id"):
@@ -1075,7 +1099,7 @@ async def design_round(
     current: Optional[List[Dict[str, Any]]] = None
     passes_used = 0
     messages = build_design_messages(user_request, round_components, canvas_rows,
-                                     allowed_types, archetype=archetype)
+                                     allowed_types, archetype=archetype, task_prior=task_prior)
 
     for attempt in range(1, rounds + 1):
         passes_used = attempt
@@ -1165,7 +1189,8 @@ async def design_round(
             logger.info("ui_designer.refine chat=%s round=%d outcome=improved", chat_id, attempt)
         if attempt < rounds:
             messages = build_refine_messages(user_request, current, round_components,
-                                             canvas_rows, allowed_types, archetype=archetype)
+                                             canvas_rows, allowed_types,
+                                             archetype=archetype, task_prior=task_prior)
 
     if current is None:
         _fallback("invalid", "no usable arrangement produced")
