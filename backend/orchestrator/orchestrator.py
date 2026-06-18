@@ -1941,8 +1941,9 @@ class Orchestrator:
                     if not handled_via_workspace and re_adapted is not None:
                         re_html = None
                         try:
-                            from webrender import render_for_target
-                            re_html = render_for_target("web", re_adapted, self.rote.get_profile(websocket))
+                            from webrender import render_for_target, target_for_profile
+                            _re_prof = self.rote.get_profile(websocket)
+                            re_html = render_for_target(target_for_profile(_re_prof), re_adapted, _re_prof)
                         except Exception:
                             logger.exception("webrender: failed to re-render UI after device change")
                         msg_out = UIUpdate(components=re_adapted, html=re_html)
@@ -2048,6 +2049,25 @@ class Orchestrator:
                     # Feature 028 — standardized deterministic component
                     # action (contracts/component-action.md).
                     await self._handle_component_action(websocket, user_id, msg.payload or {})
+
+                elif msg.action == "authorize_action":
+                    # C-S8 — the user confirmed a require_token-gated call: mint a
+                    # one-time token and re-dispatch the call through the normal
+                    # tool gate (which verifies + consumes it).
+                    _p = msg.payload or {}
+                    _aid, _tool = _p.get("agent_id"), _p.get("tool")
+                    _targs = dict(_p.get("args") or {})
+                    _tok = self.mint_action_token(_aid, user_id, _tool, _targs)
+                    if _tok and _tool:
+                        from types import SimpleNamespace as _SNS
+                        _targs["_txn_token"] = _tok
+                        _tc = _SNS(id="authz", function=_SNS(
+                            name=_tool, arguments=json.dumps(_targs)))
+                        await self.execute_single_tool(
+                            websocket, _tc, {_tool: _aid}, _p.get("chat_id"), user_id=user_id)
+                    else:
+                        await self.send_ui_render(websocket, [Alert(
+                            message="Couldn't authorize that action.", variant="warning").to_dict()])
 
                 elif msg.action == "table_paginate":
                     # Feature 028 (FR-038): pagination clicks that carry the
@@ -3344,6 +3364,31 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 {"role": "user", "content": message}
             ]
 
+            # Expose the user's request to the per-tool supervisor gate
+            # (intent-alignment, C-S5) during this turn's tool dispatch.
+            if not hasattr(self, "_active_request"):
+                self._active_request = {}
+            if chat_id:
+                self._active_request[chat_id] = message
+
+            # 033 turn coordination (flag-gated + fail-open via turn_hooks):
+            # flow tool-budget (C-S1), dual ledger (C-N7), skill recall (C-N10),
+            # plan-deviation (C-S12). All no-ops when their flags are off.
+            from orchestrator import turn_hooks
+            _flow = turn_hooks.flow_pattern(
+                message, tool_count=len(tools_desc), has_attachment=bool(attachments))
+            _ledger = turn_hooks.new_ledger(message)
+            _skill_store = self._skill_store(user_id)
+            _matched_skill = turn_hooks.match_skill(_skill_store, message)
+            if _matched_skill is not None:
+                messages.append({"role": "system", "content": (
+                    f"A learned recipe matches this request: {_matched_skill.name} "
+                    f"(tools: {', '.join(_matched_skill.tools)}). Prefer replaying "
+                    "it when appropriate.")})
+            _tool_trace: List[Dict[str, Any]] = []   # successful steps → skill induction
+            _tools_used = 0                          # for the flow tool budget
+            _plan_tools = None                       # turn-1 tool set = the plan
+
             MAX_TURNS = 10
             turn_count = 0
             heartbeat_task = await self._start_heartbeat(websocket)
@@ -3493,8 +3538,50 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                         if res:
                             tool_results.append(res)
                     else:
-                        res_list = await self.execute_parallel_tools(websocket, llm_msg.tool_calls, tool_to_agent, chat_id, user_id=user_id, tool_to_unqualified=tool_to_unqualified)
-                        tool_results.extend(res_list)
+                        # 033 fan-out (C-N8): an oversized parallel wave is split
+                        # into bounded batches run in sequence; otherwise one
+                        # wave as before. No-op (single wave) when off / small.
+                        _batches = turn_hooks.fanout_batches(list(llm_msg.tool_calls))
+                        if _batches:
+                            logger.info("fanout chat=%s calls=%d batches=%d",
+                                        chat_id, len(llm_msg.tool_calls), len(_batches))
+                            for _batch in _batches:
+                                tool_results.extend(await self.execute_parallel_tools(
+                                    websocket, _batch, tool_to_agent, chat_id,
+                                    user_id=user_id, tool_to_unqualified=tool_to_unqualified))
+                        else:
+                            res_list = await self.execute_parallel_tools(websocket, llm_msg.tool_calls, tool_to_agent, chat_id, user_id=user_id, tool_to_unqualified=tool_to_unqualified)
+                            tool_results.extend(res_list)
+
+                    # 033 — flow budget (C-S1), plan-deviation (C-S12), and the
+                    # success trace for skill induction (C-N10). No-op when off.
+                    _turn_tools = [tc.function.name for tc in llm_msg.tool_calls]
+                    _tools_used += len(_turn_tools)
+                    for _i, _tc in enumerate(llm_msg.tool_calls):
+                        _r = tool_results[_i] if _i < len(tool_results) else None
+                        if _r is not None and not getattr(_r, "error", None):
+                            try:
+                                _ta = json.loads(_tc.function.arguments) if _tc.function.arguments else {}
+                            except Exception:
+                                _ta = {}
+                            _tool_trace.append({"tool": _tc.function.name, "args": _ta})
+                            # MAS payload defense (C-S14): scan the agent's output
+                            # for injection markers; log findings. No-op when off.
+                            _findings = turn_hooks.scan_payload(
+                                getattr(_r, "ui_components", None) or getattr(_r, "content", None))
+                            if _findings:
+                                logger.warning("mas_defense.scan chat=%s tool=%s findings=%d",
+                                               chat_id, _tc.function.name, len(_findings))
+                    if _plan_tools is None:
+                        _plan_tools = list(_turn_tools)
+                    elif turn_hooks.plan_deviation(_plan_tools, _turn_tools) is not None:
+                        logger.warning("asi_coverage.deviation chat=%s tools=%s", chat_id, _turn_tools)
+                    if turn_hooks.over_tool_budget(_flow, _tools_used):
+                        logger.info("flow_patterns budget reached (pattern=%s used=%d)", _flow, _tools_used)
+                        messages.append({"role": "system", "content": (
+                            "Tool budget for this turn is exhausted — give your best "
+                            "final answer now without calling more tools.")})
+                        tools_desc = []
 
                     # Collect tool UI components and tag each (recursively) with source metadata
                     def _tag_source(comp, agent_id, tool_name, tool_params=None, correlation_id=None):
@@ -3649,7 +3736,43 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                         )
                     if not content:
                         content = "I'm not sure how to help with that."
-                    
+
+                    # 033 — supervisor drafted-answer review (C-S5): block an
+                    # answer that leaks a secret / PHI before it is sent. Skill
+                    # induction (C-N10): remember this turn's successful tool
+                    # sequence for future replay. Ledger snapshot (C-N7). No-ops
+                    # when their flags are off.
+                    _ok, _why = turn_hooks.review_answer(content)
+                    if not _ok:
+                        logger.warning("supervisor.block chat=%s reason=%s", chat_id, _why)
+                        content = ("I can't share that response — it may expose "
+                                   "sensitive or private information.")
+                    turn_hooks.induce_skill(_skill_store, message, _tool_trace)
+                    if _ledger is not None and _plan_tools:
+                        _ledger.plan = list(_plan_tools)
+                        logger.info("ledger chat=%s plan=%s", chat_id, _ledger.plan)
+
+                    # 033 — Mixture-of-Agents panel (C-N9): for a hard pure-
+                    # reasoning answer, draft a small candidate panel and let moa
+                    # aggregate. Plain text only; no-op when off (default).
+                    _plain = not content.lstrip().startswith(("{", "["))
+                    if _plain and turn_hooks.should_debate(
+                            difficulty=(0.7 if (_tools_used == 0 and len(content) > 400) else 0.2),
+                            confidence=0.4):
+                        _panel = [("draft", content, float(len(content)))]
+                        for _k in range(2):
+                            try:
+                                _pm, _ = await self._call_llm(websocket, messages, [], feature="moa_panel")
+                                _pt = _sanitize_text_response(_pm.content or "") if _pm else ""
+                                if _pt:
+                                    _panel.append((f"cand{_k}", _pt, float(len(_pt))))
+                            except Exception:
+                                break
+                        _agg = turn_hooks.aggregate_candidates(_panel)
+                        if _agg:
+                            logger.info("moa.panel chat=%s candidates=%d", chat_id, len(_panel))
+                            content = _agg
+
                     parsed_components = None
                     needs_retry = False
                     error_msg = ""
@@ -4105,6 +4228,12 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     feature, default_model=call_model, device_type=dtype,
                     device_caps=getattr(prof, "capabilities", None))
                 call_model, _route_tier = dec.model, dec.tier
+                # On-device lane (C-D6): record whether this turn could run on a
+                # capable client's local model, so the client/operator can offload.
+                self._last_route_ondevice = bool(dec.ondevice)
+                if dec.ondevice:
+                    logger.info("model_router: on-device eligible (feature=%s tier=%s)",
+                                feature, model_router.tier_name(dec.tier))
             except Exception:
                 logger.debug("model_router: selection failed — using default model",
                              exc_info=True)
@@ -4829,6 +4958,25 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             store[key] = tracker
         return tracker
 
+    def _skill_store(self, user_id):
+        """Per-user in-memory learned-recipe store (skill memory, C-N10)."""
+        if not hasattr(self, "_skill_recipes"):
+            self._skill_recipes = {}
+        return self._skill_recipes.setdefault(user_id or "_anon", [])
+
+    def mint_action_token(self, agent_id, user_id, tool_name, args):
+        """Mint a single-use authorization token (C-S8) for a confirmed high-risk
+        call, bound to (agent, user, tool, hash(args)). This is the issue half of
+        the require_token policy effect — a confirmed call carries the token as
+        ``_txn_token`` and passes the gate's verify-and-consume. Returns None when
+        no signing key (TXN_TOKEN_KEY / MEMORY_HMAC_KEY) is configured."""
+        try:
+            from orchestrator import transaction_token as _txn
+            return _txn.mint(agent_id or "", user_id or "", tool_name, args)
+        except Exception:
+            logger.debug("mint_action_token failed", exc_info=True)
+            return None
+
     async def execute_single_tool(self, websocket, tool_call, tool_to_agent: Dict, chat_id: str = None, user_id: str = None, tool_to_unqualified: Optional[Dict[str, str]] = None) -> Optional[MCPResponse]:
         """Execute a single tool call and render its UI components. Returns the Result object."""
         # The LLM may have emitted a qualified name (e.g. "forecaster-1__submit_dataset")
@@ -4978,6 +5126,41 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     alert = Alert(message=msg, variant="warning")
                     await self.send_ui_render(websocket, [alert.to_dict()])
                     return MCPResponse(error={"message": msg, "retryable": False},
+                                       ui_components=[alert.to_dict()])
+
+        # Intent-alignment supervisor (C-S5) + high-risk human-in-the-loop
+        # (C-S11). Both default OFF and fail-open: when on, a destructive tool
+        # the user never asked for, or a risky (egress/irreversible/cross-
+        # principal/tainted) call, is held for confirmation instead of running.
+        if user_id and agent_id:
+            from orchestrator import supervisor as _sup
+            if _sup.supervisor_enabled():
+                request_text = getattr(self, "_active_request", {}).get(chat_id, "")
+                if not _sup.intent_aligned(request_text, tool_name):
+                    msg = (f"'{tool_name}' looks like a destructive action you "
+                           f"didn't ask for — please confirm before it runs.")
+                    logger.warning("supervisor.escalate user=%s tool=%s", user_id, tool_name)
+                    alert = Alert(message=msg, variant="warning")
+                    await self.send_ui_render(websocket, [alert.to_dict()])
+                    return MCPResponse(error={"message": msg, "retryable": False},
+                                       ui_components=[alert.to_dict()])
+            from orchestrator import hitl as _hitl
+            if _hitl.hitl_enabled():
+                trust = "trusted"
+                try:
+                    from orchestrator import taint as _tnt
+                    if _tnt.taint_enabled():
+                        trust = _tnt.trust_name(
+                            self._taint_tracker(chat_id).effective_trust_of_args(args))
+                except Exception:
+                    trust = "trusted"
+                risks = _hitl.assess_risk(tool_name, args, actor_principal=user_id, trust=trust)
+                if _hitl.requires_confirmation(risks):
+                    req = _hitl.confirmation_request(tool_name, risks)
+                    logger.warning("hitl.confirm user=%s tool=%s risks=%s", user_id, tool_name, risks)
+                    alert = Alert(message=req.summary, variant="warning")
+                    await self.send_ui_render(websocket, [alert.to_dict()])
+                    return MCPResponse(error={"message": req.summary, "retryable": False},
                                        ui_components=[alert.to_dict()])
 
         # Map file paths if chat_id provided
@@ -6949,10 +7132,10 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 from webrender import render_workspace
                 html = render_workspace(adapted, profile)
             else:
-                from webrender import render_for_target
-                # All current device targets render to web HTML; the seam allows
-                # future targets to register their own renderer (FR-011).
-                html = render_for_target("web", adapted, profile)
+                from webrender import render_for_target, target_for_profile
+                # Per-device renderer target — voice/aom native targets when
+                # FF_NATIVE_TARGETS is on, web otherwise (the registry seam).
+                html = render_for_target(target_for_profile(profile), adapted, profile)
         except Exception:
             logger.exception("webrender: failed to render UI (sending structured components only)")
         msg = UIRender(components=adapted, target=target, html=html)

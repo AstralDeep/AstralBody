@@ -136,6 +136,38 @@ def archetype_enabled() -> bool:
     return os.getenv("FF_UI_DESIGNER_ARCHETYPE", "true").strip().lower() not in ("0", "false", "no", "off")
 
 
+def objectives_bias_enabled() -> bool:
+    """FF_ADAPTIVE_OBJECTIVES feature flag (default OFF).
+
+    Delegates to :func:`rote.objectives.objectives_enabled` so the designer and
+    ROTE share a single flag. When on, :func:`design_round` folds the declarative
+    device-fit objectives score (``rote.objectives.score_adaptation``, averaged
+    over the components an arrangement places, scored against the connecting
+    device) into the candidate ranking alongside the structural
+    :func:`score_arrangement`. Default OFF → the ranking is unchanged. Fail-open:
+    any import/scoring error simply contributes no objectives bias."""
+    try:
+        from rote import objectives as _obj
+        return _obj.objectives_enabled()
+    except Exception:
+        return False
+
+
+def a11y_audit_enabled() -> bool:
+    """FF_UI_DESIGNER_A11Y feature flag (default OFF).
+
+    When on, :func:`design_round`'s lint stage runs the deterministic WCAG
+    audit (``webrender.a11y.a11y_audit``) over the final arrangement and logs
+    any findings (image without alt text, an action with no accessible label,
+    an unlabelled landmark/tab, an empty heading) as a structured
+    ``ui_designer.a11y_findings`` warning. The audit is advisory — it annotates
+    but never drops a valid arrangement, so a clean fail-open posture is
+    preserved. Default OFF → the lint stage is unchanged."""
+    return os.getenv("FF_UI_DESIGNER_A11Y", "false").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
 def adopt_margin() -> float:
     """Score margin a re-design must beat the current layout by to be adopted
     (operator override ``UI_DESIGNER_ADOPT_MARGIN``; default 0.5)."""
@@ -830,6 +862,88 @@ def score_arrangement(
     return round(acc[0], 4)
 
 
+#: Weight on the objectives device-fit bias folded into the candidate ranking
+#: when FF_ADAPTIVE_OBJECTIVES is on. The bias is the mean device-fit score
+#: (``rote.objectives.score_adaptation`` ∈ [0,1]) over the components an
+#: arrangement places, scaled so it tilts near-ties toward the device-best
+#: arrangement without overriding the structural score on a roomy surface
+#: (where every objectives score is high and uniform anyway).
+W_OBJECTIVES_BIAS = 2.0
+
+
+def _objective_node_types(
+    layout: Sequence[Any],
+    ref_types: Dict[str, str],
+) -> List[str]:
+    """Flatten an arrangement to the component types it actually renders.
+
+    Walks the tree (structural ``children``/``content`` + ``tabs`` content).
+    A ``ref`` leaf resolves to the real type of the component it places (via
+    ``ref_types``); every other node contributes its own type (so the designer's
+    device-fit garnish — a glanceable hero/metric on a small screen vs. a flat
+    stack — is judged too). Container nodes (which the objectives module has no
+    width/glance opinion on) contribute their type AND recurse into children."""
+    types: List[str] = []
+
+    def walk(node: Any) -> None:
+        if not isinstance(node, dict):
+            return
+        ntype = str(node.get("type", "")).strip().lower()
+        if ntype == REF_TYPE:
+            cid = str(node.get("component_id") or "")
+            types.append(ref_types.get(cid, ""))
+            return
+        types.append(ntype)
+        for key in _CHILD_KEYS:
+            nested = node.get(key)
+            if isinstance(nested, list):
+                for child in nested:
+                    walk(child)
+        tabs = node.get("tabs")
+        if isinstance(tabs, list):
+            for tab in tabs:
+                if isinstance(tab, dict) and isinstance(tab.get("content"), list):
+                    for child in tab["content"]:
+                        walk(child)
+
+    for n in layout:
+        walk(n)
+    return types
+
+
+def objectives_bias(
+    layout: Sequence[Any],
+    device: Optional[Dict[str, Any]],
+    ref_types: Optional[Dict[str, str]] = None,
+) -> float:
+    """Mean declarative device-fit score over the components an arrangement
+    renders, scaled by :data:`W_OBJECTIVES_BIAS`.
+
+    Flattens the layout to its rendered component types (``ref`` leaves resolve
+    to the real placed type via ``ref_types``; garnish nodes contribute their
+    own type) and averages ``rote.objectives.score_adaptation`` over them against
+    ``device`` (a plain ``{device_type, is_small, is_voice, max_grid_columns}``
+    model — see :func:`rote.objectives._device`). Because device-friendly
+    garnish (a glanceable hero/metric on a small/voice surface) lifts the mean,
+    this discriminates between arrangements of the *same* component set, not just
+    different sets. Pure; returns ``0.0`` for an empty layout and never raises
+    (callers still wrap it fail-open)."""
+    try:
+        from rote import objectives as _obj
+    except Exception:
+        return 0.0
+    ref_types = ref_types or {}
+    scores: List[float] = []
+    for ctype in _objective_node_types(layout, ref_types):
+        try:
+            scores.append(_obj.score_adaptation({"type": ctype}, device))
+        except Exception:
+            continue
+    if not scores:
+        return 0.0
+    return round(W_OBJECTIVES_BIAS * (sum(scores) / len(scores)), 4)
+
+
 def should_adopt(
     new_layout: Sequence[Dict[str, Any]],
     current_layout: Optional[Sequence[Dict[str, Any]]],
@@ -1000,6 +1114,7 @@ async def design_round(
     current_layout: Optional[Sequence[Dict[str, Any]]] = None,
     timeout_s: Optional[float] = None,
     max_rounds: Optional[int] = None,
+    device: Optional[Dict[str, Any]] = None,
 ) -> Optional[List[Dict[str, Any]]]:
     """Run a bounded multi-round design conversation; return the validated
     arrangement or ``None``.
@@ -1014,6 +1129,14 @@ async def design_round(
     pass that yields no usable arrangement (LLM error, timeout, refusal,
     unparseable/invalid output, retries exhausted) is logged with a
     structured reason and swallowed (fail-open).
+
+    ``device`` is an optional plain device model (``{device_type, is_small,
+    is_voice, max_grid_columns}``); when ``FF_ADAPTIVE_OBJECTIVES`` is on it
+    feeds the declarative device-fit objectives bias folded into candidate
+    ranking (C-D3). ``None`` (the default) scores against a full-browser model.
+    Independently, ``FF_UI_DESIGNER_A11Y`` runs a deterministic WCAG audit over
+    the chosen arrangement and logs findings (C-D9). Both default OFF →
+    behavior is exactly as before.
     """
     budget = timeout_s if timeout_s is not None else designer_timeout_seconds()
     rounds = max_rounds if max_rounds is not None else designer_max_rounds()
@@ -1037,6 +1160,17 @@ async def design_round(
     # the last one the conversation settled on. Fail-open: any scoring error (or
     # the flag off) leaves best_* unset → final == current.
     use_scorer = scorer_enabled()
+    # Fold device-fit objectives (C-D3) into the candidate ranking when
+    # FF_ADAPTIVE_OBJECTIVES is on: each candidate's structural score gets an
+    # additive bias = mean rote.objectives.score_adaptation over its placed
+    # components against the connecting device. Default OFF → ranking unchanged.
+    # Fail-open: any error leaves use_objectives False → no bias.
+    use_objectives = False
+    try:
+        use_objectives = objectives_bias_enabled()
+    except Exception:
+        logger.debug("ui_designer: objectives_bias_enabled() failed — no objectives bias",
+                     exc_info=True)
     # Classify the turn's interaction archetype once and seed BOTH the prompt
     # prior and the scorer bias from it. Fail-open: any error (or the flag off)
     # leaves archetype None → base designer behavior.
@@ -1079,12 +1213,25 @@ async def design_round(
 
     def _consider(candidate: List[Dict[str, Any]]) -> None:
         nonlocal best_layout, best_score
-        if not use_scorer:
+        if not (use_scorer or use_objectives):
             return
-        try:
-            s = score_arrangement(candidate, ref_types=ref_types, archetype=archetype)
-        except Exception:
-            logger.debug("ui_designer: score_arrangement failed — keeping last-wins", exc_info=True)
+        s = 0.0
+        scored = False
+        if use_scorer:
+            try:
+                s += score_arrangement(candidate, ref_types=ref_types, archetype=archetype)
+                scored = True
+            except Exception:
+                logger.debug("ui_designer: score_arrangement failed — keeping last-wins",
+                             exc_info=True)
+        if use_objectives:
+            try:
+                s += objectives_bias(candidate, device, ref_types)
+                scored = True
+            except Exception:
+                logger.debug("ui_designer: objectives_bias failed — no objectives bias",
+                             exc_info=True)
+        if not scored:
             return
         if best_score is None or s > best_score:
             best_layout, best_score = candidate, s
@@ -1189,9 +1336,9 @@ async def design_round(
         _fallback("invalid", "no usable arrangement produced")
         return None
 
-    # Return the highest-scoring arrangement, not just the last. Scorer off (or
-    # any scoring error) → best_layout is None → final=current.
-    final = best_layout if (use_scorer and best_layout is not None) else current
+    # Return the highest-scoring arrangement, not just the last. Both ranking
+    # flags off (or any scoring error) → best_layout is None → final=current.
+    final = best_layout if ((use_scorer or use_objectives) and best_layout is not None) else current
 
     # Strip manipulative dark-pattern garnish before render.
     if lint_enabled():
@@ -1203,6 +1350,23 @@ async def design_round(
                 final = linted
         except Exception:
             logger.debug("ui_designer: lint_arrangement failed — keeping unlinted", exc_info=True)
+
+    # Accessibility audit (C-D9): a deterministic WCAG post-validator over the
+    # final arrangement. Advisory — it annotates/logs findings but never drops a
+    # valid arrangement (fail-open). Default OFF (FF_UI_DESIGNER_A11Y).
+    a11y_findings: List[Dict[str, str]] = []
+    if a11y_audit_enabled():
+        try:
+            from webrender.a11y import a11y_audit
+            a11y_findings = a11y_audit(final) or []
+            if a11y_findings:
+                logger.warning(
+                    "ui_designer.a11y_findings chat=%s layout_key=%s count=%d kinds=%s",
+                    chat_id, layout_key, len(a11y_findings),
+                    sorted({f.get("type", "?") for f in a11y_findings}),
+                )
+        except Exception:
+            logger.debug("ui_designer: a11y_audit failed — skipping", exc_info=True)
 
     # Don't churn a persisted canvas for a marginal gain — keep the existing
     # arrangement unless the new one is meaningfully better.
@@ -1221,10 +1385,12 @@ async def design_round(
     latency_ms = int((time.monotonic() - started) * 1000)
     logger.info(
         "ui_designer.designed chat=%s layout_key=%s refs=%d garnish=%d rounds=%d "
-        "score=%s archetype=%s latency_ms=%d",
+        "score=%s archetype=%s a11y=%s latency_ms=%d",
         chat_id, layout_key, len(set(iter_refs(layout))), garnish_count, passes_used,
         ("%.3f" % best_score) if best_score is not None else "off",
-        archetype or "none", latency_ms,
+        archetype or "none",
+        len(a11y_findings) if a11y_audit_enabled() else "off",
+        latency_ms,
     )
     return layout
 

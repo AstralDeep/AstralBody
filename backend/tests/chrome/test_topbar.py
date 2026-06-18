@@ -4,7 +4,16 @@ Structural invariants (not byte-exact): menu groups/entries per
 contracts/settings-surfaces.md, admin DOM-absence (SC-005), ARIA menu
 markup (FR-017), sign-out plain link, and modal/notice escaping.
 """
+import pytest
+
 from webrender.chrome import chrome_error_block, notice_block, render_modal_shell, render_topbar
+
+
+@pytest.fixture(autouse=True)
+def _pulse_off_by_default(monkeypatch):
+    """Default the Pulse flag OFF for the existing structural tests (its
+    top-bar icon is flag-gated; the dedicated tests below set it explicitly)."""
+    monkeypatch.delenv("FF_PULSE_DIGEST", raising=False)
 
 
 def test_topbar_has_brand_status_and_settings_trigger():
@@ -54,6 +63,37 @@ def test_workspace_timeline_promoted_to_topbar_icon():
 def test_sign_out_is_plain_link_outside_js():
     html = render_topbar(roles=["user"])
     assert 'href="/auth/logout"' in html and 'role="menuitem"' in html
+
+
+# ── Feature 033 (C-U8) — Pulse digest top-bar icon (flag-gated) ──────────────
+
+def test_pulse_icon_absent_when_flag_off(monkeypatch):
+    """Default OFF: the Pulse button is absent from the DOM entirely."""
+    monkeypatch.delenv("FF_PULSE_DIGEST", raising=False)
+    html = render_topbar(roles=["user"])
+    assert 'id="astral-pulse-btn"' not in html
+    assert '&quot;surface&quot;: &quot;pulse&quot;' not in html
+
+
+def test_pulse_icon_present_when_flag_on(monkeypatch):
+    """Flag ON: the Pulse icon button appears, labelled, firing chrome_open →
+    surface 'pulse', and sits before the Settings dropdown."""
+    monkeypatch.setenv("FF_PULSE_DIGEST", "on")
+    html = render_topbar(roles=["user"])
+    assert 'id="astral-pulse-btn"' in html
+    assert 'aria-label="Pulse digest"' in html
+    assert 'data-tour-target="topbar.pulse"' in html
+    assert 'data-ui-action="chrome_open"' in html
+    assert '&quot;surface&quot;: &quot;pulse&quot;' in html
+    # It sits OUTSIDE (before) the Settings dropdown.
+    assert html.index('id="astral-pulse-btn"') < html.index('id="astral-settings"')
+
+
+def test_pulse_icon_on_for_any_role(monkeypatch):
+    """Pulse is per-user (not admin-gated) — present for a plain user too."""
+    monkeypatch.setenv("FF_PULSE_DIGEST", "1")
+    assert 'id="astral-pulse-btn"' in render_topbar(roles=["user"])
+    assert 'id="astral-pulse-btn"' in render_topbar(roles=None)
 
 
 def test_admin_group_present_for_admin():

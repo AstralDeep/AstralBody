@@ -163,6 +163,114 @@ async def _audit(user_id: str, action_type: str, description: str,
 
 
 # ---------------------------------------------------------------------------
+# Evolutionary archive (C-N4) — surrogate cheap-reject + archive on success
+# ---------------------------------------------------------------------------
+
+def _read_draft_code(orch, draft: Dict[str, Any]) -> str:
+    """Best-effort read of a draft's generated ``mcp_tools.py`` (empty on miss)."""
+    try:
+        agents_dir = orch.lifecycle_manager._agents_dir
+        path = os.path.join(agents_dir, draft["agent_slug"], "mcp_tools.py")
+        with open(path, "r", encoding="utf-8") as fh:
+            return fh.read()
+    except Exception:
+        logger.debug("archive: could not read draft code for %s", draft.get("id"),
+                     exc_info=True)
+        return ""
+
+
+#: Surrogate score at/above which a fresh draft is "high-confidence" enough to
+#: skip the costly behavioural self-test (the static security/spec gate at
+#: approval still runs). Tunable via ``DRAFT_ARCHIVE_SKIP_SCORE``.
+_SKIP_SELF_TEST_SCORE = float(os.getenv("DRAFT_ARCHIVE_SKIP_SCORE", "0.85"))
+
+
+def _maybe_skip_self_test(orch, draft: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """C-N4 surrogate predictor: when the archive feature is ON, use the cheap
+    static rubric to skip the expensive behavioural self-test.
+
+    Two skip paths, both flag-gated:
+
+    * **High-confidence skip** — ``surrogate_score`` ≥ :data:`_SKIP_SELF_TEST_SCORE`:
+      the draft looks well-formed, so trade the redundant behavioural run for
+      the predictor and synthesise a *passing* verdict (the security/spec gate
+      at approval still runs).
+    * **Cheap-reject skip** — :func:`draft_archive.should_skip_self_test`
+      (surrogate below the reject floor): the draft is predicted to fail, so
+      don't pay for a self-test at all; synthesise a *failing* verdict that
+      routes into the normal auto-refine loop.
+
+    Returns a self-test-shaped dict to USE (a skip happened), or ``None`` to
+    fall through to the real :func:`_self_test_draft`. Fail-open: OFF / any
+    error / a mid-range score returns ``None`` so the real self-test runs
+    exactly as before.
+    """
+    try:
+        from orchestrator import draft_archive
+        if not draft_archive.archive_enabled():
+            return None
+        code = _read_draft_code(orch, draft)
+        if not code:
+            return None
+        score = draft_archive.surrogate_score(code)
+        if score >= _SKIP_SELF_TEST_SCORE:
+            logger.info(
+                "archive: skipping self-test for high-confidence draft %s "
+                "(surrogate=%.2f ≥ %.2f)", draft.get("id"), score,
+                _SKIP_SELF_TEST_SCORE)
+            return {
+                "status": "passed",
+                "summary": (f"Self-test skipped — surrogate predictor score "
+                            f"{score:.2f} ≥ {_SKIP_SELF_TEST_SCORE:.2f} "
+                            f"(evolutionary archive)."),
+                "tools_called": [], "errors": [], "evidence": "",
+                "surrogate_score": round(score, 4),
+                "self_test_skipped": True,
+                "tested_at": int(time.time() * 1000),
+            }
+        if draft_archive.should_skip_self_test(code):
+            logger.info(
+                "archive: cheap-rejecting draft %s before self-test "
+                "(surrogate=%.2f predicted failure)", draft.get("id"), score)
+            return {
+                "status": "failed",
+                "summary": (f"Self-test skipped — surrogate predictor score "
+                            f"{score:.2f} predicts failure (evolutionary archive); "
+                            f"refine the tools."),
+                "tools_called": [], "errors": ["surrogate predicted failure"],
+                "evidence": "", "surrogate_score": round(score, 4),
+                "self_test_skipped": True,
+                "tested_at": int(time.time() * 1000),
+            }
+    except Exception:  # pragma: no cover — surrogate is best-effort
+        logger.debug("archive: surrogate pre-check failed", exc_info=True)
+    return None
+
+
+def _archive_on_success(orch, draft: Dict[str, Any], self_test: Dict[str, Any]) -> None:
+    """C-N4: archive a passing draft's code as a future exemplar. No-op unless
+    the archive flag is on and the self-test passed. Never raises."""
+    try:
+        from orchestrator import draft_archive
+        if not draft_archive.archive_enabled():
+            return
+        if (self_test or {}).get("status") != "passed":
+            return
+        code = _read_draft_code(orch, draft)
+        if not code:
+            return
+        # Prefer the surrogate score the skip-path already computed; otherwise
+        # treat a real passing self-test as a strong (1.0) exemplar.
+        score = self_test.get("surrogate_score")
+        if not isinstance(score, (int, float)) or score <= 0:
+            score = 1.0
+        draft_archive.record_archived_draft(
+            draft_archive.draft_fingerprint(draft), code, float(score))
+    except Exception:  # pragma: no cover — archiving is best-effort
+        logger.debug("archive: record-on-success failed", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
 # Self-test
 # ---------------------------------------------------------------------------
 
@@ -420,7 +528,10 @@ async def _create_capability(orch, args: Dict[str, Any], *, user_id: str,
                            ui_components=[card])
 
     draft = await lifecycle.start_draft_agent(draft_id, websocket=websocket)
-    self_test = await _self_test_draft(orch, draft, user_request, user_id)
+    # C-N4 surrogate cheap-skip: a high-confidence draft skips the costly
+    # behavioural self-test (flag-gated; falls through to the real run otherwise).
+    self_test = _maybe_skip_self_test(orch, draft) \
+        or await _self_test_draft(orch, draft, user_request, user_id)
 
     refines = 0
     while self_test["status"] != "passed" and refines < SELF_TEST_MAX_AUTO_REFINES:
@@ -434,10 +545,15 @@ async def _create_capability(orch, args: Dict[str, Any], *, user_id: str,
         if draft.get("status") == "error":
             break
         draft = await lifecycle.start_draft_agent(draft_id, websocket=websocket)
-        self_test = await _self_test_draft(orch, draft, user_request, user_id)
+        # The surrogate re-scores the (now refined) code; a high-confidence
+        # refinement skips the costly run, a still-weak one is cheap-rejected.
+        self_test = _maybe_skip_self_test(orch, draft) \
+            or await _self_test_draft(orch, draft, user_request, user_id)
 
     self_test["auto_refines"] = refines
     orch.history.db.update_draft_agent(draft_id, self_test=json.dumps(self_test))
+    # C-N4: a passing draft becomes a future codegen exemplar (flag-gated).
+    _archive_on_success(orch, orch.history.db.get_draft_agent(draft_id) or draft, self_test)
     await _audit(user_id, "lifecycle.auto_created",
                  f"Auto-created draft '{agent_name}' ({draft_id})",
                  correlation_id=draft_id, chat_id=chat_id,
@@ -861,6 +977,18 @@ async def _h_draft_approve(orch, websocket, user_id, roles, payload):
         agent_id = f"{draft['agent_slug'].replace('_', '-')}-1"
         if is_autoparse:
             await _promote_parser_global(orch, draft, agent_id, approved_by=user_id)
+        # C-N4: an approved (now-live) draft is a strong exemplar for future
+        # codegen of similar capability gaps. Flag-gated + best-effort.
+        try:
+            approved_draft = orch.history.db.get_draft_agent(draft["id"]) or draft
+            approved_self_test = json.loads(approved_draft.get("self_test") or "{}")
+            if approved_self_test.get("status") != "passed":
+                # Approval is itself a success signal even if the self-test
+                # verdict isn't recorded as "passed" (e.g. revision gate-check).
+                approved_self_test = {"status": "passed"}
+            _archive_on_success(orch, approved_draft, approved_self_test)
+        except Exception:
+            logger.debug("archive: approval-time record failed", exc_info=True)
         await _audit(user_id, "lifecycle.approved", f"Draft {draft['id']} approved → live",
                      correlation_id=corr, agent_id=agent_id)
         live_msg = ("Security checks passed. The parser is live and available to everyone — "

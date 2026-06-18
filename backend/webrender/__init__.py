@@ -17,6 +17,7 @@ from .renderer import (  # noqa: F401
 )
 from .registry import (  # noqa: F401
     render_for_target,
+    target_for_profile,
     register_target,
     get_renderer,
     TARGET_RENDERERS,
@@ -29,6 +30,7 @@ __all__ = [
     "render_component_fragment",
     "render_workspace",
     "render_for_target",
+    "target_for_profile",
     "register_target",
     "get_renderer",
     "esc",

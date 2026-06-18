@@ -7,7 +7,7 @@ All transformation is rule-based and synchronous.
 """
 from typing import Any, Dict, List, Optional
 
-from rote import fallback
+from rote import fallback, lod
 from rote.capabilities import DeviceProfile, DeviceType
 
 
@@ -17,6 +17,19 @@ class ComponentAdapter:
     @classmethod
     def adapt(cls, components: List[Dict], profile: DeviceProfile) -> List[Dict]:
         """Adapt a top-level list of components for the given device profile."""
+        # Level-of-detail ladder (C-D10): when FF_LOD_LADDER is on, collapse any
+        # component that authored an L1/L2/L3 ``lod`` ladder down to the rung the
+        # surface warrants (watch/voice → L1, mobile → L2, browser/tablet/tv →
+        # L3) BEFORE the per-type adaptation runs, so the rest of the pipeline
+        # sees only the level-appropriate content. Default OFF → untouched.
+        if lod.lod_enabled():
+            try:
+                device = cls._lod_device(profile)
+                components = [cls._apply_lod(c, device) for c in components]
+            except Exception:
+                # Fail-open: never let LOD resolution break adaptation.
+                pass
+
         result = []
         for comp in components:
             adapted = cls._adapt_component(comp, profile)
@@ -182,6 +195,59 @@ class ComponentAdapter:
             return out
 
         return [w for w in (walk(c) for c in components) if w is not None]
+
+    # Level-of-detail ladder (C-D10)
+
+    #: Component types small enough that their primary text lives in ``content``
+    #: (so an authored ``lod`` rung overwrites ``content``). Everything else
+    #: writes the resolved rung to ``content`` too — a text node is the universal
+    #: carrier — and the LOD ladder is opt-in per component (only acts when an
+    #: ``lod`` dict is present), so non-text components are unaffected unless the
+    #: author explicitly attached a ladder.
+    _LOD_CONTENT_KEY = "content"
+
+    @classmethod
+    def _lod_device(cls, profile: DeviceProfile) -> Dict[str, Any]:
+        """Bridge a :class:`DeviceProfile` to the plain device model the ``lod``
+        module reads (``{device_type, is_small}``). The small-screen surfaces
+        (watch, mobile) also set ``is_small`` so the ladder's ``is_small``
+        fallback / modality routing stays consistent for callers that omit an
+        explicit ``device_type``."""
+        dt = profile.device_type.value if profile.device_type else "browser"
+        is_small = profile.device_type in (DeviceType.WATCH, DeviceType.MOBILE)
+        return {"device_type": dt, "is_small": is_small}
+
+    @classmethod
+    def _apply_lod(cls, comp: Any, device: Dict[str, Any]) -> Any:
+        """Recursively collapse any ``lod`` ladder on ``comp`` (or its
+        descendants) to the rung ``device`` warrants. A component without an
+        ``lod`` dict is returned structurally unchanged (children still
+        recursed). The resolved rung is written to ``content`` and the consumed
+        ``lod`` key is dropped so it never reaches the renderer. Pure."""
+        if not isinstance(comp, dict):
+            return comp
+        out = dict(comp)
+        if isinstance(out.get("lod"), dict):
+            resolved = lod.pick_content(out, device)
+            out.pop("lod", None)
+            # Only overwrite when the ladder produced something AND ``content``
+            # is not a child list (a container's children must survive). An
+            # empty resolution leaves the component's existing content intact.
+            if resolved != "" and not isinstance(out.get(cls._LOD_CONTENT_KEY), list):
+                out[cls._LOD_CONTENT_KEY] = resolved
+        for key in ("content", "children"):
+            kids = out.get(key)
+            if isinstance(kids, list):
+                out[key] = [cls._apply_lod(c, device) for c in kids]
+        tabs = out.get("tabs")
+        if isinstance(tabs, list):
+            new_tabs = []
+            for tab in tabs:
+                if isinstance(tab, dict) and isinstance(tab.get("content"), list):
+                    tab = {**tab, "content": [cls._apply_lod(c, device) for c in tab["content"]]}
+                new_tabs.append(tab)
+            out["tabs"] = new_tabs
+        return out
 
     # Internal helpers
 

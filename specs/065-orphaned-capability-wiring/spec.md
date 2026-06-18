@@ -2,8 +2,41 @@
 
 **Feature Branch**: `065-orphaned-capability-wiring`
 **Created**: 2026-06-17
-**Status**: Awaiting triage decisions
+**Status**: RESOLVED — all 19 modules + companions wired into the runtime (decision: wire all)
 **Input**: Code review of all work from spec 033 onward. The final "Batch 1–6" wave (PR #80) plus a few earlier branches landed 19 capability modules that were fully built and unit-tested but **never imported by production code**. This spec inventories each one so a human can decide, per module: **delete** (preserved in git history, re-add when the feature is real) or **keep + wire** into the running product.
+
+## Resolution (2026-06-17) — all wired
+
+Per the decision to "wire it all up", every orphaned module and companion below was integrated into the live runtime, each **behind a feature flag (default OFF/safe), fail-open, with real integration tests** (drive the actual path + assert behavior, plus a flag-OFF no-op assertion). Default product behavior is unchanged until a flag is flipped. Flags are documented in `.env.example`. Validated: **3,625 tests pass, ruff clean.**
+
+| Module | Wired into | Flag |
+|---|---|---|
+| supervisor (C-S5) | `execute_single_tool` intent gate + drafted-answer review (`turn_hooks`) | `FF_RUNTIME_SUPERVISOR` |
+| hitl (C-S11) | `execute_single_tool` confirmation gate | `FF_HITL_HIGHRISK` |
+| flow_patterns (C-S1) | chat-loop per-turn tool budget (`turn_hooks`) | `FF_FLOW_PATTERNS` |
+| ledger (C-N7) | chat-loop task ledger (`turn_hooks`) | `FF_DUAL_LEDGER` |
+| asi_coverage (C-S12) | chat-loop plan-deviation (`turn_hooks`) | `FF_ASI_COVERAGE` |
+| skill_memory (C-N10) | chat-loop recipe match/induce (`turn_hooks`, per-user store) | `FF_SKILL_MEMORY` |
+| moa (C-N9) | final-answer candidate panel + aggregate (`turn_hooks`) | `FF_MOA_DEBATE` |
+| fanout (C-N8) | parallel-dispatch batching (`turn_hooks`) | `FF_ASYNC_FANOUT` |
+| mas_defense (C-S14) | scan agent outputs in the loop (`turn_hooks`) | `FF_MAS_DEFENSE` |
+| living_memory (C-M6/7/8) | `MemoryTools` read/write + repository seams | `FF_MEMORY_TEMPORAL/FORGETTING/PERSONA` |
+| project_scope (C-U9) | `memory_item.project_id` + repo/tools filter | `FF_PROJECT_MEMORY` |
+| sleeptime (C-N11) | dreaming sweep idle precompute | `FF_SLEEPTIME_COMPUTE` |
+| pulse (C-U8) | `pulse` chrome surface + topbar icon | `FF_PULSE_DIGEST` |
+| objectives (C-D3) | UI-designer ranking bias | `FF_ADAPTIVE_OBJECTIVES` |
+| lod (C-D10) | ROTE `adapt` level-of-detail pre-pass | `FF_LOD_LADDER` |
+| a11y_audit (C-D9) | UI-designer lint stage | `FF_UI_DESIGNER_A11Y` |
+| draft_archive (C-N4) | agentic-creation codegen + self-test skip | `FF_DRAFT_ARCHIVE` |
+| agent_eval (C-N5) | feedback quality job trajectory scoring | `FF_AGENT_EVAL` |
+| voice/aom (C-D4/D5) | `target_for_profile` render-target dispatch | `FF_NATIVE_TARGETS` |
+| transaction_token.mint (C-S8) | `mint_action_token` + `authorize_action` ui_event | (uses `TXN_TOKEN_KEY`) |
+| model_router on-device (C-D6) | `_last_route_ondevice` surfaced in `_call_llm` | `FF_MODEL_ROUTER` |
+| repository seams | now driven by living_memory | — |
+
+The original per-module triage tables below are retained as the design record.
+
+---
 
 ## Overview
 

@@ -1,4 +1,4 @@
-"""Feature 035 (capability 033 C-N5) — the trajectory-evaluation backbone.
+"""Capability 033 C-N5 — the trajectory-evaluation backbone.
 
 The self-improving agent architecture (US3) needs a *measurement* substrate:
 the agentic-frameworks literature (Agent-as-a-Judge, arXiv:2410.10934; Google
@@ -21,13 +21,35 @@ A trajectory item may be a bare tool-name string or a dict carrying a
 is required (an LLM judge MAY layer on top, but the deterministic gate never
 depends on model availability — the same posture the 033 verification harness
 mandates).
+
+Folding trajectory scoring into a live signal (the daily feedback-quality job)
+is gated by ``FF_AGENT_EVAL`` (default OFF — see :func:`agent_eval_enabled`).
+The pure metric functions below carry no flag and are always importable.
 """
 from __future__ import annotations
 
+import os
 from math import comb
 from typing import Any, Dict, List, Sequence, Union
 
 ToolCall = Union[str, Dict[str, Any]]
+
+
+def agent_eval_enabled() -> bool:
+    """Return whether trajectory-evaluation wiring is enabled.
+
+    Controlled by the ``FF_AGENT_EVAL`` environment variable. Truthy values are
+    ``1``, ``true``, ``yes`` and ``on`` (case-insensitive, surrounding
+    whitespace ignored). Anything else — including an unset variable — is
+    treated as disabled (fail-closed), so the deterministic metrics never run
+    inside the quality job unless an operator opts in.
+    """
+    return os.getenv("FF_AGENT_EVAL", "false").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
 
 def _tool_name(call: ToolCall) -> str:
@@ -81,7 +103,13 @@ def trajectory_single_tool_use(predicted: Sequence[ToolCall], tool_name: str) ->
 
 
 def score_trajectory(predicted: Sequence[ToolCall], reference: Sequence[ToolCall]) -> Dict[str, float]:
-    """All six trajectory metrics as a dict (the ADK/Vertex named set)."""
+    """The five trajectory comparison metrics as a dict (the ADK/Vertex named
+    set: exact / in-order / any-order match, precision, recall).
+
+    ``single_tool_use`` is intentionally excluded — it grades a single named
+    tool rather than the predicted-vs-reference sequence, so it is offered as a
+    standalone helper, not part of this aggregate-ready dict.
+    """
     return {
         "exact_match": trajectory_exact_match(predicted, reference),
         "in_order_match": trajectory_in_order_match(predicted, reference),
@@ -140,3 +168,56 @@ def pass_k_from_outcomes(outcomes: Sequence[bool], k: int) -> float:
     :func:`pass_hat_k`)."""
     outs = list(outcomes)
     return pass_hat_k(len(outs), sum(1 for o in outs if o), k)
+
+
+# ───────────────────────── batch aggregation ─────────────────────────────────
+# Used by the feedback-quality job (C-N5 wiring) to fold a tool's recent
+# trajectories into one [0, 1] reliability/quality number per (agent, tool).
+
+def score_trajectory_batch(
+    pairs: Sequence[Sequence[Sequence[ToolCall]]],
+    weights: Dict[str, float] = None,
+) -> Dict[str, Any]:
+    """Aggregate many ``(predicted, reference)`` trajectory pairs into one
+    quality summary.
+
+    Each item in ``pairs`` is a 2-tuple ``(predicted, reference)``. For each
+    pair we compute :func:`score_trajectory` then :func:`aggregate_quality`;
+    the batch result reports the mean aggregate, the per-pair exact-match
+    reliability, and the count. An empty batch yields zeros.
+
+    Returns a dict::
+
+        {"trajectory_count": int,
+         "mean_quality": float,          # mean aggregate_quality over pairs
+         "exact_match_rate": float,      # fraction of pairs that matched exactly
+         "metric_means": {metric: mean, ...}}
+    """
+    items = [p for p in (pairs or []) if p and len(p) == 2]
+    n = len(items)
+    if n == 0:
+        return {
+            "trajectory_count": 0,
+            "mean_quality": 0.0,
+            "exact_match_rate": 0.0,
+            "metric_means": {},
+        }
+
+    per_scores: List[Dict[str, float]] = []
+    aggregates: List[float] = []
+    for predicted, reference in items:
+        s = score_trajectory(predicted, reference)
+        per_scores.append(s)
+        aggregates.append(aggregate_quality(s, weights))
+
+    metric_keys = sorted({k for s in per_scores for k in s})
+    metric_means = {
+        k: round(sum(s.get(k, 0.0) for s in per_scores) / n, 4) for k in metric_keys
+    }
+    exact = sum(1 for s in per_scores if s.get("exact_match", 0.0) >= 1.0)
+    return {
+        "trajectory_count": n,
+        "mean_quality": round(sum(aggregates) / n, 4),
+        "exact_match_rate": round(exact / n, 4),
+        "metric_means": metric_means,
+    }
