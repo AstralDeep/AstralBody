@@ -1,8 +1,8 @@
-"""Feature 026 — renderer registry & client-target dispatch.
+"""Renderer registry & client-target dispatch.
 
-This is the seam that makes new client targets additive (FR-011, SC-005): a new
-target registers a renderer here; primitive definitions (``astralprims``) and
-agent code never change. The web renderer is the only target implemented now.
+This is the seam that makes new client targets additive: a new target registers
+a renderer here; primitive definitions (``astralprims``) and agent code never
+change.
 """
 from __future__ import annotations
 
@@ -16,10 +16,8 @@ from .aom import render_aom
 logger = logging.getLogger("webrender")
 
 # Client target -> renderer callable(components, profile) -> target output.
-# 033 Wave-3 (C-D4): the `voice` target renders structured SSML for TTS.
-# 033 Wave-3 (C-D5): the `aom` target renders a navigable semantic role/name/
-# state tree (not HTML) for assistive tech — the "add a target = add a
-# renderer" proof; primitives + agent code are untouched.
+# The `voice` target renders structured SSML for TTS; the `aom` target renders a
+# navigable semantic role/name/state tree (not HTML) for assistive tech.
 TARGET_RENDERERS: Dict[str, Callable[[List[Dict[str, Any]], Any], Any]] = {
     "web": render_web,
     "voice": render_voice,
@@ -43,9 +41,9 @@ def get_renderer(type_name: str) -> Optional[Callable[[Dict[str, Any]], str]]:
 def render_for_target(target: Optional[str], components: List[Dict[str, Any]], profile: Any = None) -> Any:
     """Render the (ROTE-adapted) structured representation for a client target.
 
-    Unknown/unsupported targets are handled predictably (FR-013): we log a
-    non-silent warning and fall back to the default (web) renderer rather than
-    failing the response.
+    Unknown/unsupported targets are handled predictably: we log a non-silent
+    warning and fall back to the default (web) renderer rather than failing the
+    response.
     """
     key = (target or DEFAULT_TARGET).lower()
     fn = TARGET_RENDERERS.get(key)

@@ -1,16 +1,16 @@
-"""Orchestrator-callable memory tools (feature 025, US4/T035).
+"""Orchestrator-callable memory tools.
 
 ``remember`` (explicit), ``memory_search`` and ``memory_get`` (recall), plus
-``capture_signal`` (post-turn auto-capture). Every write passes the PHI gate
-(FR-016/FR-017): PHI-flagged content is used live but never persisted. The
-class is constructed with a repository and (optionally) an injected gate so it
-is unit-testable without Presidio.
+``capture_signal`` (post-turn auto-capture). Every write passes the PHI gate:
+PHI-flagged content is used live but never persisted. The class is constructed
+with a repository and (optionally) an injected gate so it is unit-testable
+without Presidio.
 
-Feature 033 (C-M1) — reconcile-don't-append. ``remember_reconciled`` adds an
-LLM-mediated ADD / UPDATE / DELETE / NOOP decision over related existing
-memories, with supersession (soft-delete + ``superseded_by``) instead of
-monotonic growth. Strictly fail-open: with the flag off, no injected LLM, no
-related candidates, or any error, it degrades to the legacy append.
+Reconcile-don't-append: ``remember_reconciled`` adds an LLM-mediated ADD /
+UPDATE / DELETE / NOOP decision over related existing memories, with
+supersession (soft-delete + ``superseded_by``) instead of monotonic growth.
+Strictly fail-open: with the flag off, no injected LLM, no related candidates,
+or any error, it degrades to the legacy append.
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ RECONCILE_MAX_CANDIDATES = 8
 
 
 def reconcile_enabled() -> bool:
-    """FF_MEMORY_RECONCILE feature flag (default ON; feature 033 C-M1).
+    """FF_MEMORY_RECONCILE feature flag (default ON).
 
     When on — AND an LLM is injected AND there are related existing memories —
     a durable write is reconciled (ADD/UPDATE/DELETE/NOOP with supersession)
@@ -45,7 +45,7 @@ def _tokens(text: str) -> set:
     return set(re.findall(r"[a-z0-9]+", (text or "").lower()))
 
 
-#: C-M2 linked-note tuning.
+#: Linked-note tuning.
 LINK_MIN_OVERLAP = 1      # shared content keywords required to link two memories
 LINK_MAX_NEIGHBORS = 5    # max links created per new memory
 
@@ -58,17 +58,17 @@ _KEYWORD_STOPWORDS = frozenset(
 
 
 def linking_enabled() -> bool:
-    """FF_MEMORY_LINKING feature flag (default ON; feature 033 C-M2). When on, a
-    new memory is linked to keyword-overlapping neighbours and recall pulls in a
-    hit's linked neighbours (single-step multi-hop). Fail-open: off or any error
-    leaves memory unlinked and retrieval unchanged."""
+    """FF_MEMORY_LINKING feature flag (default ON). When on, a new memory is
+    linked to keyword-overlapping neighbours and recall pulls in a hit's linked
+    neighbours (single-step multi-hop). Fail-open: off or any error leaves
+    memory unlinked and retrieval unchanged."""
     return os.getenv("FF_MEMORY_LINKING", "true").strip().lower() not in ("0", "false", "no", "off")
 
 
 def derive_keywords(value: str, *, limit: int = 8) -> str:
     """Deterministic content keywords for a memory note (space-joined): the
     first ``limit`` distinct ≥3-char non-stopword tokens. The self-organizing
-    retrieval/link signal — no LLM, no embedding service."""
+    retrieval/link signal."""
     out: List[str] = []
     for t in re.findall(r"[a-z0-9]{3,}", (value or "").lower()):
         if t in _KEYWORD_STOPWORDS or t in out:
@@ -80,11 +80,10 @@ def derive_keywords(value: str, *, limit: int = 8) -> str:
 
 
 def pagerank_enabled() -> bool:
-    """FF_MEMORY_PAGERANK feature flag (default ON; feature 033 C-M3). When on
-    and the user has a link graph, ``memory_search`` ranks by Personalized
-    PageRank over the memory graph (single-step multi-hop), seeded by the
-    query's direct matches. Fail-open: off / no graph / any error → the C-M2
-    1-hop expansion."""
+    """FF_MEMORY_PAGERANK feature flag (default ON). When on and the user has a
+    link graph, ``memory_search`` ranks by Personalized PageRank over the memory
+    graph (single-step multi-hop), seeded by the query's direct matches.
+    Fail-open: off / no graph / any error → the 1-hop expansion."""
     return os.getenv("FF_MEMORY_PAGERANK", "true").strip().lower() not in ("0", "false", "no", "off")
 
 
@@ -210,7 +209,7 @@ class MemoryTools:
     # ── shared write helpers ────────────────────────────────────────────────
 
     def _gate_value(self, category: str, value: str):
-        """Normalize category, strip value, and gate (PHI + C-S9 poisoning).
+        """Normalize category, strip value, and gate (PHI + poisoning).
         Returns ``(category, value, refusal_dict_or_None)``."""
         if category not in MEMORY_CATEGORIES:
             category = "context"
@@ -225,8 +224,8 @@ class MemoryTools:
                 "reason": "That looked like protected health information, so I did not "
                           "save it to long-term memory. I can still use it for this task.",
             }
-        # C-S9: never persist assistant-directed instructions as a durable "fact"
-        # — the AgentPoison/MINJA vector. Used live, never written.
+        # Never persist assistant-directed instructions as a durable "fact" —
+        # the memory-poisoning vector. Used live, never written.
         if memory_guard.guard_enabled() and memory_guard.is_poisoning_attempt(value):
             logger.warning("memory.write_refused_poison",
                            extra={"user_id": "?", "category": category})
@@ -239,8 +238,8 @@ class MemoryTools:
         return category, value, None
 
     def _create_linked(self, user_id: str, category: str, value: str) -> Dict[str, Any]:
-        """Create a memory note (with derived keywords, C-M2) and link it into
-        the keyword-overlap graph. Linking failures never block the write."""
+        """Create a memory note (with derived keywords) and link it into the
+        keyword-overlap graph. Linking failures never block the write."""
         keywords = derive_keywords(value)
         item = self.repo.create_memory(user_id, category, value,
                                        source="explicit", keywords=keywords)
@@ -304,9 +303,9 @@ class MemoryTools:
         self, user_id: str, category: str, value: str, *,
         llm_call: Optional[Callable[[List[Dict[str, str]]], Awaitable[Optional[str]]]] = None,
     ) -> Dict[str, Any]:
-        """C-M1: reconcile a durable write against related memories via an
-        injected ``llm_call``, applying ADD/UPDATE/DELETE/NOOP with
-        supersession. Fail-open to a plain append at every step."""
+        """Reconcile a durable write against related memories via an injected
+        ``llm_call``, applying ADD/UPDATE/DELETE/NOOP with supersession.
+        Fail-open to a plain append at every step."""
         category, value, refusal = self._gate_value(category, value)
         if refusal is not None:
             return refusal
@@ -362,14 +361,13 @@ class MemoryTools:
         if not value or self.gate.contains_phi(value):
             return False
         self.repo.add_signal(user_id, category, value)
-        # 030 FR-017: structured observability for short-term signal capture.
         logger.info("memory.signal_captured",
                     extra={"user_id": user_id, "category": category})
         return True
 
     def _live_memory(self, user_id: str) -> List[Dict[str, Any]]:
-        """Live memories with C-S9 tamper-filtering: a row whose HMAC signature
-        no longer matches its fields is dropped from recall (and logged)."""
+        """Live memories with tamper-filtering: a row whose HMAC signature no
+        longer matches its fields is dropped from recall (and logged)."""
         items = self.repo.list_memory(user_id)
         if not memory_guard.guard_enabled():
             return items
@@ -388,10 +386,10 @@ class MemoryTools:
 
     def memory_search(self, user_id: str, query: str, *, limit: int = 10) -> List[Dict[str, Any]]:
         """Token-overlap search over durable memory, ranked by a multi-signal
-        recency × importance × relevance composite (feature 036 C-M4) when
-        FF_MEMORY_MULTISIGNAL is on; fail-open to the legacy overlap-only rank."""
+        recency × importance × relevance composite when FF_MEMORY_MULTISIGNAL is
+        on; fail-open to the legacy overlap-only rank."""
         q = _tokens(query)
-        items = self._live_memory(user_id)  # recency DESC, C-S9 tamper-filtered
+        items = self._live_memory(user_id)  # recency DESC, tamper-filtered
         if not q:
             return items[:limit]
         use_ms = multisignal_enabled()
@@ -418,7 +416,7 @@ class MemoryTools:
             scored.append((score, idx, it))
         if not seed_scores:
             return []
-        # C-M3: rank by Personalized PageRank over the link graph (single-step
+        # Rank by Personalized PageRank over the link graph (single-step
         # multi-hop), seeded by the direct matches. Returns None (→ fallback)
         # when there is no graph or the repo predates links.
         if pagerank_enabled():
@@ -428,7 +426,7 @@ class MemoryTools:
                     return ranked
             except Exception:
                 logger.debug("memory_search: pagerank failed — falling back", exc_info=True)
-        # Fallback: direct hits (ties keep recency), then the C-M2 1-hop expansion.
+        # Fallback: direct hits (ties keep recency), then the 1-hop expansion.
         scored.sort(key=lambda t: (-t[0], t[1]))
         results = [it for _, _, it in scored[:limit]]
         if linking_enabled() and results and len(results) < limit:

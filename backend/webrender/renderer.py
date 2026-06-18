@@ -1,16 +1,15 @@
-"""Feature 026 — server-side web renderer.
+"""Server-side web renderer.
 
 The orchestrator renders ``astralprims`` primitive dicts (already ROTE-adapted)
 into web HTML. astralprims *defines* primitives + the structured representation;
-this module (in the orchestrator) *renders* them; ROTE *adapts* per device
-(Constitution Principle II, v2.0.1).
+this module (in the orchestrator) *renders* them; ROTE *adapts* per device.
 
 Implementation note: pure-Python render functions with explicit ``html.escape``
-give a hard escape-by-default guarantee (FR-017) and are deterministic /
-golden-testable. Markup parity targets the live ``frontend/src/components/
-DynamicRenderer.tsx`` (Tailwind class strings reproduced verbatim; the shell
-self-hosts Tailwind + Plotly). Text is always escaped; rich text goes through the
-narrow, sanitized markdown path in :mod:`webrender.sanitize`.
+give a hard escape-by-default guarantee and are deterministic / golden-testable.
+Markup parity targets the live ``frontend/src/components/DynamicRenderer.tsx``
+(Tailwind class strings reproduced verbatim; the shell self-hosts Tailwind +
+Plotly). Text is always escaped; rich text goes through the narrow, sanitized
+markdown path in :mod:`webrender.sanitize`.
 """
 from __future__ import annotations
 
@@ -28,9 +27,7 @@ logger = logging.getLogger("webrender")
 PRIMITIVE_RENDERERS: Dict[str, Callable[[Dict[str, Any]], str]] = {}
 
 
-# ---------------------------------------------------------------------------
-# Escaping & safe helpers (escape-by-default — FR-017 / SC-008)
-# ---------------------------------------------------------------------------
+# Escaping & safe helpers (escape-by-default)
 
 def esc(value: Any) -> str:
     """HTML-escape any value's string form (quotes included)."""
@@ -63,9 +60,7 @@ def safe_url(url: Any) -> str:
 from .sanitize import inline_md, block_md  # noqa: E402  (after esc/safe_url defined)
 
 
-# ---------------------------------------------------------------------------
 # Recursion
-# ---------------------------------------------------------------------------
 
 def _children(comp: Dict[str, Any]) -> List[Dict[str, Any]]:
     return comp.get("children") or comp.get("content") or []
@@ -76,9 +71,9 @@ def render_children(items: List[Any]) -> str:
 
 
 _SAFE_DATA_ATTR = _re.compile(r"^data-[a-z0-9-]+$")
-# Accessibility pass-through (feature 030): every WAI-ARIA attribute is
-# ``aria-`` followed by lowercase letters only (aria-label, aria-hidden,
-# aria-describedby, aria-valuemin, ...), so the key whitelist is exact.
+# Accessibility pass-through: every WAI-ARIA attribute is ``aria-`` followed by
+# lowercase letters only (aria-label, aria-hidden, aria-describedby,
+# aria-valuemin, ...), so the key whitelist is exact.
 _SAFE_ARIA_ATTR = _re.compile(r"^aria-[a-z]+$")
 # ``role`` values are restricted to a small allowlist of non-interactive
 # naming/grouping roles — enough to label and structure content, never to
@@ -93,14 +88,13 @@ def _base_attrs(comp: Dict[str, Any]) -> str:
     ``attributes`` is astralprims' documented free-form escape hatch; the web
     renderer honors only:
 
-    * ``data-*`` keys — feature 029 relies on this for nested morph anchors:
-      the designer's materializer stamps ``attributes["data-component-id"]``
+    * ``data-*`` keys — the adaptive UI designer relies on this for nested
+      morph anchors: the materializer stamps ``attributes["data-component-id"]``
       on refs nested inside arrangements so ``ui_upsert`` morphs keep finding
       them in the DOM;
-    * ``aria-*`` keys and ``role`` (feature 030 accessibility) — aria values
-      are attribute-escaped like any other text; ``role`` is value-validated
-      against the non-interactive ``_SAFE_ROLES`` allowlist and silently
-      dropped otherwise.
+    * ``aria-*`` keys and ``role`` — aria values are attribute-escaped like any
+      other text; ``role`` is value-validated against the non-interactive
+      ``_SAFE_ROLES`` allowlist and silently dropped otherwise.
 
     Everything else (onclick/style/src/href/class/...) is refused by design
     so authors cannot inject event handlers or override structural
@@ -126,11 +120,11 @@ def _explicit_attrs(comp: Dict[str, Any]) -> Dict[str, Any]:
 
     astralprims ``to_dict()`` MERGES ``attributes`` at the TOP LEVEL of the
     serialized dict (base.py ``_serialize``), while hand-built dicts and the
-    029 materializer set a nested ``"attributes"`` dict — so whitelisted
-    keys must be honored wherever they appear (030 finding: the welcome
-    buttons' aria-labels arrived flattened and were silently dropped).
-    Nested entries win on conflict. Only ``data-*``, ``aria-*`` and ``role``
-    are ever collected; everything else stays refused.
+    designer's materializer set a nested ``"attributes"`` dict — so whitelisted
+    keys must be honored wherever they appear (the welcome buttons' aria-labels
+    arrived flattened and were silently dropped otherwise). Nested entries win
+    on conflict. Only ``data-*``, ``aria-*`` and ``role`` are ever collected;
+    everything else stays refused.
     """
     found: Dict[str, Any] = {}
     sources = [comp]
@@ -153,9 +147,7 @@ def _has_explicit_attr(comp: Dict[str, Any], name: str) -> bool:
     return name in _explicit_attrs(comp)
 
 
-# ---------------------------------------------------------------------------
 # Primitive renderers (parity with DynamicRenderer.tsx)
-# ---------------------------------------------------------------------------
 
 def render_container(c):
     # Live container emits no wrapper — just its children.
@@ -187,8 +179,8 @@ def render_button(c):
     action = c.get("action", "")
     payload = c.get("payload", {}) or {}
     variant = c.get("variant", "primary")
-    # 029 visual refresh: primary = accent gradient (via .astral-btn-primary in
-    # astral.css, layered over the bg utility), secondary = outline, ghost = text.
+    # primary = accent gradient (via .astral-btn-primary in astral.css, layered
+    # over the bg utility), secondary = outline, ghost = text.
     # `.astral-action` stays the FIRST class — client.js dispatches on it.
     vcls = {
         "primary": "astral-btn-primary bg-astral-primary text-white",
@@ -196,11 +188,10 @@ def render_button(c):
         "ghost": "astral-btn-ghost bg-transparent hover:bg-white/5 text-astral-muted hover:text-astral-text",
     }.get(variant, "astral-btn-primary bg-astral-primary text-white")
     data = _attr(json.dumps(payload))
-    # Feature 030: buttons honor the attributes whitelist too, so the
-    # orchestrator can supply per-button aria-labels. ``_base_attrs`` comes
-    # AFTER data-action/data-payload — HTML keeps the first occurrence of a
-    # duplicated attribute, so passed-through data-* can never retarget the
-    # client.js dispatch contract.
+    # Buttons honor the attributes whitelist too, so the orchestrator can supply
+    # per-button aria-labels. ``_base_attrs`` comes AFTER data-action/data-payload
+    # — HTML keeps the first occurrence of a duplicated attribute, so
+    # passed-through data-* can never retarget the client.js dispatch contract.
     return (
         f'<button type="button" data-action="{_attr(action)}" data-payload="{data}"{_base_attrs(c)} '
         f'class="astral-action astral-btn px-4 py-2 rounded-lg text-sm font-medium transition-colors {vcls}">'
@@ -311,8 +302,8 @@ def render_card(c):
             '<span class="w-1 h-4 rounded-full bg-astral-primary inline-block"></span>'
             f'{inline_md(title)}</h3></div>'
         )
-    # 029: .astral-card carries the layered surface/elevation (astral.css);
-    # the children wrapper class stays exactly "space-y-3" (golden-pinned).
+    # .astral-card carries the layered surface/elevation (astral.css); the
+    # children wrapper class stays exactly "space-y-3" (golden-pinned).
     return f'<div{_base_attrs(c)} class="astral-card">{title_html}<div class="space-y-3">{render_children(_children(c))}</div></div>'
 
 
@@ -346,9 +337,9 @@ def render_table(c):
         frm = offset + 1
         to = min(offset + page_size, total)
         showing = f'<div class="text-xs text-astral-muted">{frm}–{to} of {esc(total)}</div>'
-    # a11y (feature 030): this renderer only ever emits column headers (rows
-    # are plain <td>), so every <th> is scope="col"; a future row-header
-    # variant must emit scope="row" on its own cells.
+    # a11y: this renderer only ever emits column headers (rows are plain <td>),
+    # so every <th> is scope="col"; a future row-header variant must emit
+    # scope="row" on its own cells.
     head = "".join(
         f'<th scope="col" class="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-astral-muted whitespace-nowrap">{esc(h)}</th>'
         for h in headers)
@@ -375,9 +366,9 @@ def render_table(c):
             f'<button class="astral-page-next text-xs px-3 py-1 rounded border border-white/10 text-astral-text hover:bg-white/10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"{next_dis}>Next</button>'
             f'</div></div>'
         )
-    # a11y (feature 030): an explicit title names the table for assistive
-    # tech (aria-label on <table> is announced on entry); the default
-    # "Table" placeholder adds nothing, so it is not emitted.
+    # a11y: an explicit title names the table for assistive tech (aria-label on
+    # <table> is announced on entry); the default "Table" placeholder adds
+    # nothing, so it is not emitted.
     table_aria = f' aria-label="{_attr(explicit_title)}"' if explicit_title else ""
     return (
         f'<div{_base_attrs(c)} class="astral-table-wrap rounded-lg border border-white/10">'
@@ -492,9 +483,9 @@ def render_metric(c):
                      f'<div class="h-full rounded-full {color}" style="width:{pw}%"></div></div>')
     title = c.get("title", "")
     value = c.get("value", "")
-    # a11y (feature 030): name the whole tile "<label>: <value>" so assistive
-    # tech announces the pairing the visual layout only implies. An author-
-    # supplied attributes["aria-label"] wins (no duplicate attribute emitted).
+    # a11y: name the whole tile "<label>: <value>" so assistive tech announces
+    # the pairing the visual layout only implies. An author-supplied
+    # attributes["aria-label"] wins (no duplicate attribute emitted).
     name = f"{title}: {value}" if str(title).strip() else str(value)
     aria = ""
     if name.strip() and not _has_explicit_attr(c, "aria-label"):
@@ -580,7 +571,7 @@ _CHART_KINDS = {"bar": "Bar chart", "line": "Line chart", "pie": "Pie chart"}
 
 
 def _chart_summary(chart_type: str, payload: Dict[str, Any]) -> str:
-    """Cheap, deterministic text alternative for a chart's data (feature 030).
+    """Cheap, deterministic text alternative for a chart's data.
 
     Not a full description — just enough for a screen-reader user to gauge
     what sighted users see: point/series count plus the numeric range."""
@@ -608,12 +599,12 @@ def _chart_div(c, chart_type, payload):
     title = c.get("title")
     title_html = f'<p class="text-sm font-medium text-astral-text mb-3">{esc(title)}</p>' if title else ""
     data = _attr(json.dumps(payload))
-    # a11y (feature 030): the chart node is an empty div until client-side
-    # Plotly draws into it — name it like an image (type + title, falling
-    # back to the data summary). The sr-only summary sits OUTSIDE the
-    # role="img" element (children of role="img" are presentational to AT)
-    # and therefore also survives Plotly.newPlot() replacing the chart div's
-    # contents in the browser.
+    # a11y: the chart node is an empty div until client-side Plotly draws into
+    # it — name it like an image (type + title, falling back to the data
+    # summary). The sr-only summary sits OUTSIDE the role="img" element
+    # (children of role="img" are presentational to AT) and therefore also
+    # survives Plotly.newPlot() replacing the chart div's contents in the
+    # browser.
     summary = _chart_summary(chart_type, payload)
     kind = _CHART_KINDS.get(chart_type, "Chart")
     name = f"{kind}: {title}" if title else f"{kind}: {summary}"
@@ -694,7 +685,7 @@ def render_file_download(c):
     url = c.get("url")
     filename = c.get("filename")
     # Root-relative URLs (/api/download/...) are valid: the browser resolves
-    # them against the serving origin (no hard-coded host — Constitution X).
+    # them against the serving origin (no hard-coded host).
     valid = bool(url) and url != "#" and str(url).startswith(("http", "/"))
     # Built outside the f-string: escaped quotes inside an f-string expression
     # are a SyntaxError on Python <=3.11 (the container runtime).
@@ -735,9 +726,7 @@ def render_audio(c):
             f'{label_html}{media}{desc_html}</div>')
 
 
-# ---------------------------------------------------------------------------
 # Dashboard & status primitives (astralprims >= 0.2.0)
-# ---------------------------------------------------------------------------
 
 _BADGE_VARIANTS = {
     "default": "bg-white/10 text-astral-text border-white/15",
@@ -754,7 +743,7 @@ def _badge_span(label, variant, icon=None, extra_attrs=""):
         vkey = variant if variant in _BADGE_VARIANTS else "default"
     except TypeError:  # unhashable variant from raw LLM/agent JSON
         vkey = "default"
-    # decorative emoji/symbol — hidden from assistive tech (feature 030)
+    # decorative emoji/symbol — hidden from assistive tech
     icon_html = f'<span class="astral-badge-icon" aria-hidden="true">{esc(icon)}</span>' if icon else ""
     return (
         f'<span{extra_attrs} class="astral-badge astral-badge--{vkey} inline-flex items-center gap-1 '
@@ -777,7 +766,7 @@ def render_hero(c):
     badges = [b for b in (c.get("badges") or []) if isinstance(b, str) and b.strip()]
     eyebrow_html = (f'<p class="text-xs font-semibold uppercase tracking-widest text-astral-primary mb-1">'
                     f'{esc(eyebrow)}</p>') if eyebrow else ""
-    # decorative emoji next to the h2 — hidden from assistive tech (feature 030)
+    # decorative emoji next to the h2 — hidden from assistive tech
     icon_html = f'<span class="astral-hero-icon text-3xl mr-3" aria-hidden="true">{esc(icon)}</span>' if icon else ""
     subtitle_html = f'<p class="text-sm text-astral-muted mt-1">{inline_md(subtitle)}</p>' if subtitle else ""
     badges_html = ""
@@ -848,10 +837,10 @@ def render_timeline(c):
             f'<div class="min-w-0"><p class="text-sm font-medium text-astral-text">{inline_md(str(item.get("title", "")))}</p>'
             f'{desc_html}</div></div></li>'
         )
-    # a11y (feature 030): markup is already a real <ol>/<li> list, but
-    # astral.css sets list-style:none on .astral-tl-list, which strips the
-    # implicit list role in WebKit/VoiceOver — restore it explicitly (the
-    # <li> children keep their implicit listitem role).
+    # a11y: markup is already a real <ol>/<li> list, but astral.css sets
+    # list-style:none on .astral-tl-list, which strips the implicit list role in
+    # WebKit/VoiceOver — restore it explicitly (the <li> children keep their
+    # implicit listitem role).
     return (f'<div{_base_attrs(c)} class="astral-timeline rounded-lg p-4">{title_html}'
             f'<ol class="astral-tl-list space-y-3" role="list">{"".join(rows)}</ol></div>')
 
@@ -890,7 +879,7 @@ def render_rating(c):
 
 
 def render_chat_history(c: Dict[str, Any]) -> str:
-    """Render the recent-chats surface (feature 040 redesign).
+    """Render the recent-chats surface.
 
     A scannable list of conversation rows. Each row is a real ``<button>`` that
     carries the ``astral-action`` dispatch contract (``data-action=load_chat`` +
@@ -951,7 +940,7 @@ _SKELETON_MAX_ROWS = 12
 
 
 def render_skeleton(c: Dict[str, Any]) -> str:
-    """Render a loading-skeleton placeholder (feature 037).
+    """Render a loading-skeleton placeholder.
 
     A server-driven, content-free shimmer placeholder shown while a surface
     (e.g. the chat-history list) loads. Carries NO user data. ``role=status`` +
@@ -1017,10 +1006,10 @@ PRIMITIVE_RENDERERS.update({
 
 
 def render_generative(component: Dict[str, Any]) -> str:
-    """033 C-N2: render a model-composed generative widget from its constrained
-    grammar ``spec`` — escape-by-default, structurally bounded. Flag-gated: when
+    """Render a model-composed generative widget from its constrained grammar
+    ``spec`` — escape-by-default, structurally bounded. Flag-gated: when
     FF_GENERATIVE_PRIMITIVES is off the type renders the standard unsupported
-    placeholder (today's behavior for an unknown type)."""
+    placeholder (the behavior for an unknown type)."""
     from webrender import generative
     if not generative.generative_enabled():
         return ('<div class="astral-unsupported text-xs text-astral-muted italic '
@@ -1032,12 +1021,10 @@ def render_generative(component: Dict[str, Any]) -> str:
 PRIMITIVE_RENDERERS["generative"] = render_generative
 
 
-# ---------------------------------------------------------------------------
 # Public API
-# ---------------------------------------------------------------------------
 
 def allowed_primitive_types() -> frozenset:
-    """The authoritative renderable-type set (feature 029, FR-020).
+    """The authoritative renderable-type set.
 
     Single source of truth for every LLM-output validator (combine/condense,
     final-response parsing, the adaptive UI designer): a type the renderer
@@ -1049,7 +1036,7 @@ def allowed_primitive_types() -> frozenset:
 
 def render_one(component: Dict[str, Any]) -> str:
     """Render a single primitive dict to an HTML fragment. Never raises on an
-    unknown/unsupported type — emits a readable placeholder (FR-014)."""
+    unknown/unsupported type — emits a readable placeholder."""
     if not isinstance(component, dict):
         return ""
     ctype = component.get("type", "")
@@ -1072,16 +1059,10 @@ def render(components: List[Dict[str, Any]], profile: Any = None) -> str:
     return f'<div class="dynamic-renderer space-y-3">{inner}</div>'
 
 
-# ---------------------------------------------------------------------------
-# Feature 028 — workspace fragments (contracts/ws-workspace-protocol.md)
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# Feature 033 (C-U6) — provenance / grounding surfacing
-# ---------------------------------------------------------------------------
+# Provenance / grounding surfacing
 
 def provenance_enabled() -> bool:
-    """FF_PROVENANCE_SURFACING (default ON; feature 033 C-U6).
+    """FF_PROVENANCE_SURFACING (default ON).
 
     When on, each top-level canvas component gets a subtle footer showing
     whether its content is GROUNDED (traces to an agent tool result) or
@@ -1181,9 +1162,9 @@ def render_component_fragment(component: Dict[str, Any], profile: Any = None) ->
     ops on the web client (replace-node-by-id, else append). Components
     without an identity render unwrapped (legacy behavior preserved).
 
-    Feature 033 (C-U6): a subtle provenance footer is appended inside the
-    wrapper — skipped on space/audio-constrained surfaces (watch/voice) given
-    the ``profile``, and when FF_PROVENANCE_SURFACING is off.
+    A subtle provenance footer is appended inside the wrapper — skipped on
+    space/audio-constrained surfaces (watch/voice) given the ``profile``, and
+    when FF_PROVENANCE_SURFACING is off.
     """
     if not isinstance(component, dict):
         return ""
@@ -1194,8 +1175,8 @@ def render_component_fragment(component: Dict[str, Any], profile: Any = None) ->
         inner += _provenance_footer(component)
     if not cid:
         return inner
-    # Feature 033 (C-D9): WCAG-by-construction — wrap each top-level component
-    # as a labelled ARIA landmark so a screen reader can navigate between them.
+    # WCAG-by-construction — wrap each top-level component as a labelled ARIA
+    # landmark so a screen reader can navigate between them.
     attrs = f' data-component-id="{_attr(cid)}"'
     from webrender import a11y
     if a11y.a11y_enabled():

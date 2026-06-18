@@ -1,4 +1,4 @@
-"""Feature 029 — the adaptive UI designer (contracts/ui-designer-llm.md).
+"""The adaptive UI designer.
 
 After a chat round produces two or more rich components, the designer runs a
 bounded multi-round LLM conversation that produces an *arrangement*: a layout
@@ -66,12 +66,12 @@ _MAX_LAYOUT_JSON_CHARS = 4000
 
 
 def designer_enabled() -> bool:
-    """FF_UI_DESIGNER feature flag (default ON; FR-029)."""
+    """FF_UI_DESIGNER feature flag (default ON)."""
     return os.getenv("FF_UI_DESIGNER", "true").strip().lower() not in ("0", "false", "no", "off")
 
 
 def designer_timeout_seconds() -> float:
-    """Operator-configurable per-pass design budget (FR-023)."""
+    """Operator-configurable per-pass design budget."""
     raw = os.getenv("UI_DESIGNER_TIMEOUT_SECONDS", "")
     try:
         value = float(raw)
@@ -91,7 +91,7 @@ def designer_max_rounds() -> int:
 
 
 def scorer_enabled() -> bool:
-    """FF_UI_DESIGNER_SCORER feature flag (default ON; feature 033 C-U1).
+    """FF_UI_DESIGNER_SCORER feature flag (default ON).
 
     When on, :func:`design_round` returns the highest-`score_arrangement`
     arrangement among the LLM's draft + refinements ("LLM proposes, code
@@ -103,7 +103,7 @@ def scorer_enabled() -> bool:
 
 
 def lint_enabled() -> bool:
-    """FF_UI_DESIGNER_LINT feature flag (default ON; feature 033 C-U7).
+    """FF_UI_DESIGNER_LINT feature flag (default ON).
 
     When on, :func:`design_round` strips manipulative dark-pattern language the
     LLM may inject into its own garnish (false urgency, confirmshaming, forced
@@ -114,18 +114,18 @@ def lint_enabled() -> bool:
 
 
 def conservative_enabled() -> bool:
-    """FF_UI_DESIGNER_CONSERVATIVE feature flag (default ON; feature 039 C-U2).
+    """FF_UI_DESIGNER_CONSERVATIVE feature flag (default ON).
 
     When on, a re-design of an already-persisted arrangement is only adopted if
     its score beats the current layout by :func:`adopt_margin` — avoiding
-    gratuitous canvas churn (Todi et al., CHI'21: penalize change, adapt only
-    when net-beneficial). Fail-open: any error adopts the new arrangement.
+    gratuitous canvas churn (penalize change, adapt only when net-beneficial).
+    Fail-open: any error adopts the new arrangement.
     """
     return os.getenv("FF_UI_DESIGNER_CONSERVATIVE", "true").strip().lower() not in ("0", "false", "no", "off")
 
 
 def archetype_enabled() -> bool:
-    """FF_UI_DESIGNER_ARCHETYPE feature flag (default ON; feature 033 C-U3).
+    """FF_UI_DESIGNER_ARCHETYPE feature flag (default ON).
 
     Classifies the turn's interaction archetype (compare / monitor / explore /
     summarize / decide / form) and seeds BOTH a layout-prior hint into the
@@ -155,9 +155,9 @@ def should_design(round_components: Sequence[Dict[str, Any]], *, timeline_mode: 
     return len(rich) >= MIN_DESIGN_COMPONENTS
 
 
-# ───────────────────────────── prompt ────────────────────────────────────────
+# prompt
 
-_LAYOUT_GUIDANCE = """LAYOUT VOCABULARY (compose freely from these astralprims types):
+_LAYOUT_GUIDANCE ="""LAYOUT VOCABULARY (compose freely from these astralprims types):
 - {"type": "ref", "component_id": "<id>"} — places one of the round's components. THE ONLY way to include tool output.
 - "hero": {"type": "hero", "title": "...", "subtitle": "...", "eyebrow": "...", "variant": "default|gradient|subtle", "badges": ["..."]} — ONE anchoring masthead at the top of dashboard/report rounds.
 - "grid": {"type": "grid", "columns": 2, "children": [...]} — side-by-side groups (2-3 columns max).
@@ -220,10 +220,10 @@ def build_design_messages(
 ) -> List[Dict[str, str]]:
     """Build the chat-completion messages for one design pass.
 
-    ``archetype`` (C-U3), when set, appends a one-line layout-prior hint so the
-    LLM's draft starts from a task-appropriate arrangement. ``task_prior`` (C-N1),
-    when set, appends the deterministically-derived structural spine. Both empty
-    reproduce the legacy prompt verbatim."""
+    ``archetype``, when set, appends a one-line layout-prior hint so the LLM's
+    draft starts from a task-appropriate arrangement. ``task_prior``, when set,
+    appends the deterministically-derived structural spine. Both empty reproduce
+    the legacy prompt verbatim."""
     request = (user_request or "").strip()
     if len(request) > _MAX_REQUEST_CHARS:
         request = request[:_MAX_REQUEST_CHARS] + "…"
@@ -324,8 +324,8 @@ def build_refine_messages(
 ) -> List[Dict[str, str]]:
     """Build the critique/improve messages for one refinement pass.
 
-    ``archetype`` (C-U3) and ``task_prior`` (C-N1) append the same priors as the
-    draft pass so refinements keep steering toward the intended structure."""
+    ``archetype`` and ``task_prior`` append the same priors as the draft pass so
+    refinements keep steering toward the intended structure."""
     request = (user_request or "").strip()
     if len(request) > _MAX_REQUEST_CHARS:
         request = request[:_MAX_REQUEST_CHARS] + "…"
@@ -398,7 +398,7 @@ def _is_done_reply(content: str) -> bool:
     return text.upper().rstrip(".!").strip() == "DONE"
 
 
-# ─────────────────────────── parse / validate ────────────────────────────────
+# parse / validate
 
 class DesignRejected(Exception):
     """Raised internally when a design response cannot be used (reason carried)."""
@@ -455,8 +455,8 @@ def _coerce_node(node: Any) -> Optional[Dict[str, Any]]:
 
 #: Types whose children/content (or tabs) the renderer actually renders.
 #: Refs nested anywhere else would be CLAIMED by the layout but never reach
-#: the DOM — a silent FR-018 visual drop — so the validator strips them and
-#: lets omission repair re-append the refs flat.
+#: the DOM — a silent visual drop — so the validator strips them and lets
+#: omission repair re-append the refs flat.
 _STRUCTURAL_TYPES = frozenset({"container", "card", "grid", "collapsible"})
 
 
@@ -534,7 +534,7 @@ def repair_layout(
     referenced: Sequence[str],
     round_ids_in_order: Sequence[str],
 ) -> List[Dict[str, Any]]:
-    """FR-018 omission repair: round components the design missed append flat."""
+    """Omission repair: round components the design missed append flat."""
     seen = set(referenced)
     missing = [cid for cid in dict.fromkeys(round_ids_in_order) if cid not in seen]
     if missing:
@@ -545,7 +545,7 @@ def repair_layout(
 
 
 def stamp_garnish_ids(layout: List[Dict[str, Any]], chat_id: str, layout_key: str) -> List[Dict[str, Any]]:
-    """Deterministic ids for top-level garnish nodes (FR-019).
+    """Deterministic ids for top-level garnish nodes.
 
     ``dg_<sha1(chat|layout_key|ordinal)[:12]>`` — stable across re-designs of
     the same round, so a regenerated arrangement updates the same DOM nodes.
@@ -565,14 +565,13 @@ def stamp_garnish_ids(layout: List[Dict[str, Any]], chat_id: str, layout_key: st
     return stamped
 
 
-# ───────────────────────────── score ─────────────────────────────────────────
-# Feature 033 (capability C-U1): the designer's DESIGN RULES (see
-# _LAYOUT_GUIDANCE) were enforced ONLY by the LLM's own free-text self-critique,
-# which the generative-UI literature (Draco / DracoGPT; Stanford Generative
-# Interfaces) shows is unreliable and unmeasurable. This deterministic scorer
-# turns those rules into a numeric objective so the LLM PROPOSES arrangements
-# and pure-Python code DECIDES which to keep. Higher is better. The function is
-# pure and must never raise (callers still wrap it fail-open).
+# score
+# The designer's DESIGN RULES (see _LAYOUT_GUIDANCE) are otherwise enforced ONLY
+# by the LLM's own free-text self-critique, which is unreliable and unmeasurable.
+# This deterministic scorer turns those rules into a numeric objective so the LLM
+# PROPOSES arrangements and pure-Python code DECIDES which to keep. Higher is
+# better. The function is pure and must never raise (callers still wrap it
+# fail-open).
 
 _ANCHOR_TYPES = frozenset({"hero", "metric"})
 _HEADLINE_TYPES = frozenset({"metric", "rating", "badge"})
@@ -592,10 +591,10 @@ W_GROUPING_PRESENT = 0.5     # rule 3: at least one grouping container present
 WALL_THRESHOLD = 6
 
 
-# ───────────────────── interaction archetypes (C-U3) ─────────────────────────
-# Feature 033 (C-U3): classify the turn's interaction archetype, then seed a
-# layout-prior hint into the designer prompt AND an additive bias into the
-# scorer so the arrangement fits the shape of the task.
+# interaction archetypes
+# Classify the turn's interaction archetype, then seed a layout-prior hint into
+# the designer prompt AND an additive bias into the scorer so the arrangement
+# fits the shape of the task.
 
 ARCHETYPES = ("compare", "monitor", "explore", "summarize", "decide", "form")
 
@@ -657,7 +656,7 @@ def classify_archetype(
     user_request: Optional[str],
     components: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> Optional[str]:
-    """Feature 033 (C-U3): classify a turn's interaction archetype.
+    """Classify a turn's interaction archetype.
 
     Deterministic keyword (request text) + shape (component types) heuristic.
     Returns one of :data:`ARCHETYPES`, or ``None`` when no signal is strong
@@ -692,7 +691,6 @@ def archetype_prior(archetype: Optional[str]) -> str:
 def archetype_bonus(
     layout: Sequence[Any],
     archetype: Optional[str],
-    ref_types: Optional[Dict[str, str]] = None,
 ) -> float:
     """Additive, archetype-specific score layered on top of the base structural
     score. Pure; ``0.0`` for no archetype / degenerate input."""
@@ -787,7 +785,6 @@ def score_arrangement(
     layout: Sequence[Any],
     *,
     ref_types: Optional[Dict[str, str]] = None,
-    allowed_types: Optional[Set[str]] = None,
     archetype: Optional[str] = None,
 ) -> float:
     """Deterministically score a (validated, pre-materialize) arrangement.
@@ -796,8 +793,7 @@ def score_arrangement(
         layout: the layout node list (``ref`` leaves + garnish nodes).
         ref_types: optional ``component_id -> component type`` map so ``ref``
             leaves can be scored by the real type they place (texture rule).
-        allowed_types: accepted for forward-compatibility; unused today.
-        archetype: optional interaction archetype (C-U3). When set, an additive
+        archetype: optional interaction archetype. When set, an additive
             :func:`archetype_bonus` is layered on top of the base structural
             score so the arrangement is judged for task-fit too. ``None`` (the
             default) reproduces the base score exactly.
@@ -830,7 +826,7 @@ def score_arrangement(
 
     _score_siblings(top, ref_types, acc)
     if archetype:
-        acc[0] += archetype_bonus(layout, archetype, ref_types=ref_types)
+        acc[0] += archetype_bonus(layout, archetype)
     return round(acc[0], 4)
 
 
@@ -839,11 +835,10 @@ def should_adopt(
     current_layout: Optional[Sequence[Dict[str, Any]]],
     *,
     ref_types: Optional[Dict[str, str]] = None,
-    allowed_types: Optional[Set[str]] = None,
     margin: Optional[float] = None,
 ) -> bool:
-    """Feature 039 (C-U2): should the freshly designed arrangement replace the
-    currently-persisted one?
+    """Should the freshly designed arrangement replace the currently-persisted
+    one?
 
     Adopt when there is no current layout, when the content differs (a different
     component set — not a re-arrangement, so the new components must be placed),
@@ -859,19 +854,18 @@ def should_adopt(
         return True
     m = adopt_margin() if margin is None else margin
     try:
-        new_score = score_arrangement(new_layout, ref_types=ref_types, allowed_types=allowed_types)
-        cur_score = score_arrangement(current_layout, ref_types=ref_types, allowed_types=allowed_types)
+        new_score = score_arrangement(new_layout, ref_types=ref_types)
+        cur_score = score_arrangement(current_layout, ref_types=ref_types)
     except Exception:
         return True
     return new_score > cur_score + m
 
 
-# ───────────────────────────── lint ──────────────────────────────────────────
-# Feature 033 (capability C-U7): LLM-generated UI injects deceptive patterns
-# unprompted (Deception at Scale, CHI'26; 1K generated components). The
-# designer may add its own garnish (hero/badge/text), so this deterministic
-# linter strips manipulative language from GARNISH text only — never from a
-# ``ref`` (tool output) — before the arrangement renders. Pure; never raises.
+# lint
+# LLM-generated UI can inject deceptive patterns unprompted. The designer may add
+# its own garnish (hero/badge/text), so this deterministic linter strips
+# manipulative language from GARNISH text only — never from a ``ref`` (tool
+# output) — before the arrangement renders. Pure; never raises.
 
 #: (rule name, compiled pattern). Patterns match manipulative copy; the matched
 #: span is redacted from garnish text fields and the rule recorded for audit.
@@ -939,7 +933,7 @@ def lint_arrangement(layout: Sequence[Any]) -> Tuple[List[Dict[str, Any]], List[
     return cleaned, flags
 
 
-# ───────────────────────────── materialize ───────────────────────────────────
+# materialize
 
 def materialize(
     layout: Sequence[Dict[str, Any]],
@@ -992,7 +986,7 @@ def materialize(
     return [w for w in (walk(n, 0) for n in (layout or [])) if w is not None]
 
 
-# ───────────────────────────── driver ────────────────────────────────────────
+# driver
 
 async def design_round(
     *,
@@ -1019,7 +1013,7 @@ async def design_round(
     ``None`` ALWAYS means "fall back to the legacy flat append" — a first
     pass that yields no usable arrangement (LLM error, timeout, refusal,
     unparseable/invalid output, retries exhausted) is logged with a
-    structured reason and swallowed (FR-022 fail-open).
+    structured reason and swallowed (fail-open).
     """
     budget = timeout_s if timeout_s is not None else designer_timeout_seconds()
     rounds = max_rounds if max_rounds is not None else designer_max_rounds()
@@ -1038,14 +1032,14 @@ async def design_round(
         logger.warning("ui_designer.fallback chat=%s reason=%s latency_ms=%d %s",
                        chat_id, reason, latency_ms, detail)
 
-    # Feature 033 (C-U1): LLM proposes, deterministic scorer decides. Track the
-    # highest-scoring arrangement across the draft + refinements and return it
-    # instead of merely the last one the conversation settled on. Fail-open: any
-    # scoring error (or the flag off) leaves best_* unset → final == current.
+    # LLM proposes, deterministic scorer decides. Track the highest-scoring
+    # arrangement across the draft + refinements and return it instead of merely
+    # the last one the conversation settled on. Fail-open: any scoring error (or
+    # the flag off) leaves best_* unset → final == current.
     use_scorer = scorer_enabled()
-    # Feature 033 (C-U3): classify the turn's interaction archetype once and
-    # seed BOTH the prompt prior and the scorer bias from it. Fail-open: any
-    # error (or the flag off) leaves archetype None → base designer behavior.
+    # Classify the turn's interaction archetype once and seed BOTH the prompt
+    # prior and the scorer bias from it. Fail-open: any error (or the flag off)
+    # leaves archetype None → base designer behavior.
     archetype: Optional[str] = None
     if archetype_enabled():
         try:
@@ -1054,10 +1048,10 @@ async def design_round(
             logger.debug("ui_designer: classify_archetype failed — no archetype", exc_info=True)
         if archetype:
             logger.info("ui_designer.archetype chat=%s archetype=%s", chat_id, archetype)
-    # 033 Wave-1 (C-N1): optional task-model pre-pass — ask the LLM for a typed
-    # task schema, then DERIVE a deterministic structural prior from it. Adds one
-    # LLM round-trip so it is default-off; strictly fail-open (any error → no
-    # prior, base designer behavior).
+    # Optional task-model pre-pass — ask the LLM for a typed task schema, then
+    # DERIVE a deterministic structural prior from it. Adds one LLM round-trip so
+    # it is default-off; strictly fail-open (any error → no prior, base designer
+    # behavior).
     task_prior = ""
     try:
         from orchestrator import task_model
@@ -1088,8 +1082,7 @@ async def design_round(
         if not use_scorer:
             return
         try:
-            s = score_arrangement(candidate, ref_types=ref_types,
-                                  allowed_types=allowed_types, archetype=archetype)
+            s = score_arrangement(candidate, ref_types=ref_types, archetype=archetype)
         except Exception:
             logger.debug("ui_designer: score_arrangement failed — keeping last-wins", exc_info=True)
             return
@@ -1196,11 +1189,11 @@ async def design_round(
         _fallback("invalid", "no usable arrangement produced")
         return None
 
-    # Feature 033 (C-U1): return the highest-scoring arrangement, not just the
-    # last. Scorer off (or any scoring error) → best_layout is None → final=current.
+    # Return the highest-scoring arrangement, not just the last. Scorer off (or
+    # any scoring error) → best_layout is None → final=current.
     final = best_layout if (use_scorer and best_layout is not None) else current
 
-    # Feature 033 (C-U7): strip manipulative dark-pattern garnish before render.
+    # Strip manipulative dark-pattern garnish before render.
     if lint_enabled():
         try:
             linted, dp_flags = lint_arrangement(final)
@@ -1211,11 +1204,11 @@ async def design_round(
         except Exception:
             logger.debug("ui_designer: lint_arrangement failed — keeping unlinted", exc_info=True)
 
-    # Feature 039 (C-U2): don't churn a persisted canvas for a marginal gain —
-    # keep the existing arrangement unless the new one is meaningfully better.
+    # Don't churn a persisted canvas for a marginal gain — keep the existing
+    # arrangement unless the new one is meaningfully better.
     if conservative_enabled() and current_layout:
         try:
-            if not should_adopt(final, current_layout, ref_types=ref_types, allowed_types=allowed_types):
+            if not should_adopt(final, current_layout, ref_types=ref_types):
                 logger.info("ui_designer.conservative chat=%s layout_key=%s — kept existing "
                             "(re-design not worth the disruption)", chat_id, layout_key)
                 final = list(current_layout)

@@ -1,12 +1,10 @@
-"""Spotlighting / datamarking — 033 Wave-0 (C-S4).
+"""Spotlighting / datamarking.
 
 A lightweight, pure prompt-injection defense for untrusted content that enters
 the chat reasoning loop (tool outputs derived from fetched pages, parsed files,
-or other external data). "Spotlighting" (Hines et al., 2024) wraps untrusted
-spans in clearly-labeled, unforgeable boundaries and tells the model — in the
-system prompt — that anything inside those boundaries is *data, never
-instructions*. Reported attack-success-rate drops from ~50% to <3% with no
-measurable hit to task quality.
+or other external data). "Spotlighting" wraps untrusted spans in
+clearly-labeled, unforgeable boundaries and tells the model — in the system
+prompt — that anything inside those boundaries is *data, never instructions*.
 
 Pieces:
 
@@ -22,13 +20,12 @@ Pieces:
 * :func:`spotlight_system_addendum` — the one-time system-prompt note that makes
   the markers meaningful.
 
-This composes with C-N15 (two-tier output): a tool that supplies a
+This composes with the two-tier output path: a tool that supplies a
 ``_model_digest`` is contributing *tool-authored* (trusted) text and is left
 unmarked; only raw, non-digest tool output is spotlighted as untrusted.
 
 Default behavior is purely additive (delimiting only) — it never deletes or
-rewrites content unless ``sanitize`` is explicitly requested. No new
-third-party dependency (Constitution V).
+rewrites content unless ``sanitize`` is explicitly requested.
 """
 from __future__ import annotations
 
@@ -57,8 +54,7 @@ def _close(sentinel: str) -> str:
 
 # Conservative set of direct-override patterns. Deliberately narrow: each
 # targets an explicit instruction-to-the-model phrase, not ordinary prose, so
-# benign tool output is left intact. Span removal is opt-in (FR: "optional
-# span-level removal").
+# benign tool output is left intact. Span removal is opt-in.
 _OVERRIDE_PATTERNS = [
     re.compile(r"ignore\s+(?:all\s+|any\s+)?(?:previous|prior|earlier|above)\s+"
                r"(?:instructions?|prompts?|messages?|context)", re.IGNORECASE),

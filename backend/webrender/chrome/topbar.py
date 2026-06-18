@@ -1,15 +1,13 @@
-"""Feature 027 — top bar + static settings menu (server-rendered, role-gated).
+"""Top bar + static settings menu (server-rendered, role-gated).
 
 Rendered into the shell at ``GET /`` so the menu is *static*: always present,
-opens with zero server round-trip (spec A2/FR-012). Group/entry inventory per
-contracts/settings-surfaces.md; the Admin tools group is rendered ONLY when
+opens with zero server round-trip. The Admin tools group is rendered ONLY when
 the session roles include ``admin`` — absent from the DOM for everyone else
-(FR-014; UX-only gating, server-side checks stay authoritative). Entries
-whose availability rule fails are omitted; empty groups hide their heading
-(FR-019).
+(UX-only gating, server-side checks stay authoritative). Entries whose
+availability rule fails are omitted; empty groups hide their heading.
 
-Menu markup follows the WAI-ARIA menu pattern (FR-017); the keyboard and
-open/close behavior lives in ``webrender/static/client.js``.
+Menu markup follows the WAI-ARIA menu pattern; the keyboard and open/close
+behavior lives in ``webrender/static/client.js``.
 """
 import json
 
@@ -29,9 +27,9 @@ _GEAR_SVG = (
     '2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>'
 )
 
-# Feature 045 — "history" glyph (clock + counter-clockwise arrow) for the
-# top-bar Workspace-timeline button: a recognizable "go back to an earlier
-# version" affordance sitting right next to Settings.
+# "history" glyph (clock + counter-clockwise arrow) for the top-bar
+# Workspace-timeline button: a recognizable "go back to an earlier version"
+# affordance sitting right next to Settings.
 _HISTORY_SVG = (
     '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
     'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
@@ -49,7 +47,7 @@ def _menu_entries(roles):
 
     Each entry: (key, label, surface, params) — ``surface=None`` marks the
     sign-out link. Availability rules: all Account/Help entries are backed by
-    unconditional backends; Admin tools requires the admin role (FR-014).
+    unconditional backends; Admin tools requires the admin role.
     """
     groups = [
         ("Account", [
@@ -58,9 +56,8 @@ def _menu_entries(roles):
             ("personalization", "Personalization", "personalization", {}),
             ("audit", "Audit log", "audit", {}),
             ("theme", "Theme", "theme", {}),
-            # Feature 028's workspace timeline used to live here; feature 045
-            # promoted it to a dedicated top-bar icon (see render_topbar) so
-            # returning to an earlier canvas is one click, not buried in a menu.
+            # The workspace timeline is a dedicated top-bar icon (see
+            # render_topbar), not a menu entry.
         ]),
         ("Help", [
             ("tour", "Take the tour", "tour", {}),
@@ -72,7 +69,7 @@ def _menu_entries(roles):
             ("tool-quality", "Tool quality", "admin_tools", {"tab": "quality"}),
             ("tutorial-admin", "Tutorial admin", "admin_tools", {"tab": "tutorial"}),
         ]))
-    # FR-019: drop empty groups (defensive — none are empty today).
+    # Drop empty groups (defensive — none are empty today).
     return [(label, entries) for label, entries in groups if entries]
 
 
@@ -93,7 +90,7 @@ def _menu_html(roles):
                 f"data-ui-action=\"chrome_open\" data-ui-payload='{esc(payload)}'>{esc(text)}</button>"
             )
     # Session group — Sign out is a plain link so it works without JS
-    # (feature 016 semantics live behind GET /auth/logout).
+    # (logout semantics live behind GET /auth/logout).
     items.append(
         '<div class="border-t border-white/5 mt-1 pt-1" role="presentation"></div>'
         '<a href="/auth/logout" role="menuitem" tabindex="-1" '
@@ -116,9 +113,9 @@ def render_topbar(roles=None) -> str:
         'class="h-8 w-auto select-none" draggable="false"></div>'
         '<div class="flex items-center gap-3">'
         '<span id="astral-status" class="text-xs text-astral-muted" role="status"></span>'
-        # Feature 045 — Workspace-timeline icon next to Settings. Reuses the
-        # generic `chrome_open` delegation (client.js injects the active chat
-        # id into params at click time), so no new client wiring is needed.
+        # Workspace-timeline icon next to Settings. Reuses the generic
+        # `chrome_open` delegation (client.js injects the active chat id into
+        # params at click time), so no new client wiring is needed.
         '<button type="button" id="astral-timeline-btn" data-tour-target="topbar.timeline" '
         'class="flex items-center justify-center p-1.5 rounded-lg text-astral-muted '
         'hover:text-astral-text hover:bg-white/5" aria-label="Workspace timeline" '

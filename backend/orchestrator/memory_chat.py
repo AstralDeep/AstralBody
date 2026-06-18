@@ -1,7 +1,7 @@
-"""030-finish-soul-integration — cross-session memory from chat (025 T036).
+"""Cross-session memory from chat.
 
-Feature 025 shipped working memory tools (``personalization/memory_tools.py``)
-and passive prompt-injected recall, but the tools were never registered with the
+The memory tools (``personalization/memory_tools.py``) and passive
+prompt-injected recall existed, but the tools were not registered with the
 orchestrator, so the assistant could not actually *use* them on request. This
 module makes them reachable as LLM tool calls, mirroring ``scheduling_chat.py``
 (a pseudo-agent id keeps the meta-tool outside every real-agent permission gate).
@@ -86,7 +86,7 @@ def meta_tool_definitions() -> List[Dict[str, Any]]:
 
 
 def should_inject(draft_agent_id: Optional[str]) -> bool:
-    """Offered on normal chat turns only — same exclusions as feature 027/030 scheduling."""
+    """Offered on normal chat turns only — same exclusions as scheduling."""
     return flags.is_enabled("memory_chat") and not draft_agent_id
 
 
@@ -142,8 +142,8 @@ async def handle_meta_tool(orch, tool_name: str, args: Dict[str, Any], *,
         value = str(args.get("value") or "").strip()
         category = str(args.get("category") or "context").strip()
 
-        # 033 C-M1: reconcile the write (ADD/UPDATE/DELETE/NOOP + supersession)
-        # via the user's LLM. Fail-open inside remember_reconciled → plain append.
+        # Reconcile the write (ADD/UPDATE/DELETE/NOOP + supersession) via the
+        # user's LLM. Fail-open inside remember_reconciled → plain append.
         async def _reconcile_llm(messages):
             msg, _ = await orch._call_llm(websocket, messages, feature="memory_reconcile")
             return getattr(msg, "content", None) if msg else None

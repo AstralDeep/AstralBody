@@ -1,4 +1,4 @@
-"""Taint / provenance tracking — 033 Wave-4 (C-S2).
+"""Taint / provenance tracking.
 
 A value-level data-flow control: data carries a trust label whose effective
 value is the **minimum over its data ancestors** (a value is only as trusted as
@@ -9,13 +9,13 @@ The defense survives **multi-hop laundering**: taint propagates through any tool
 that *consumes* untrusted input — if tool A (an untrusted web source) feeds tool
 B, B's output is recorded untrusted too, so washing data through an intermediate
 tool doesn't bleach it. (Laundering through an LLM *rephrase* is the separate
-spotlight/datamark concern, C-S4.)
+spotlight/datamark concern.)
 
-Pure + deterministic; a content fingerprint (stdlib ``hashlib``) identifies a
-value. **No new dependency.** Flag ``FF_TAINT_TRACKING`` (default OFF) gates the
-dispatch enforcement, which is additive + fail-open: an unknown value is treated
-as trusted (constants, user intent), so with the flag off — or on with no
-untrusted sources seen — nothing changes.
+Pure + deterministic; a content fingerprint identifies a value. Flag
+``FF_TAINT_TRACKING`` (default OFF) gates the dispatch enforcement, which is
+additive + fail-open: an unknown value is treated as trusted (constants, user
+intent), so with the flag off — or on with no untrusted sources seen — nothing
+changes.
 """
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ _SINK_TOOLS = {
 
 
 def taint_enabled() -> bool:
-    """FF_TAINT_TRACKING feature flag (default OFF; feature 033 C-S2)."""
+    """FF_TAINT_TRACKING feature flag (default OFF)."""
     return os.getenv("FF_TAINT_TRACKING", "false").strip().lower() in ("1", "true", "yes", "on")
 
 

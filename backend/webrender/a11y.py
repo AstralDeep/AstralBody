@@ -1,4 +1,4 @@
-"""Accessibility as a render constraint — 033 Wave-3 (C-D9).
+"""Accessibility as a render constraint.
 
 Two deterministic, dependency-free pieces:
 
@@ -12,8 +12,8 @@ Two deterministic, dependency-free pieces:
   label, an unlabelled landmark/tab, an empty heading). Pure; usable as a
   designer check or a CI gate. Never raises.
 
-No new dependency. Kept renderer-independent (no import of the renderer) so the
-renderer can import this without a cycle; escaping happens at the call site.
+Kept renderer-independent (no import of the renderer) so the renderer can import
+this without a cycle; escaping happens at the call site.
 """
 from __future__ import annotations
 
@@ -30,9 +30,8 @@ _LANDMARK_ROLES = {
 
 
 def a11y_enabled() -> bool:
-    """FF_A11Y feature flag (default ON; feature 033 C-D9). When on, top-level
-    components render as labelled ARIA landmarks. Off restores the bare
-    identity wrapper."""
+    """FF_A11Y feature flag (default ON). When on, top-level components render as
+    labelled ARIA landmarks. Off restores the bare identity wrapper."""
     return os.getenv("FF_A11Y", "true").strip().lower() not in ("0", "false", "no", "off")
 
 
