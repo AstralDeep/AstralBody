@@ -52,12 +52,9 @@ class AgentLifecycleManager:
         """
         self.db = db
         self.orchestrator = orchestrator
-        # Feature 006: agent-generation is a heavy server-side flow that
-        # runs against the operator's default credentials regardless of
-        # which user kicked it off (FR-011 — server-initiated jobs use
-        # operator defaults). Users who want their personal LLM
-        # subscription used for agent generation specifically would
-        # need a separate scope decision; out-of-scope for feature 006.
+        # Agent-generation is a heavy server-side flow that runs against the
+        # operator's default credentials regardless of which user kicked it
+        # off (server-initiated jobs use operator defaults).
         self.generator = AgentCodeGenerator(
             llm_client=getattr(orchestrator, 'llm_client', None),
             llm_model=getattr(orchestrator, 'llm_model', None),
@@ -69,7 +66,7 @@ class AgentLifecycleManager:
             os.path.join(os.path.dirname(__file__), '..', 'agents')
         )
 
-    # ─── Progress Callback ───────────────────────────────────────────
+    # Progress Callback
 
     async def _send_progress(self, websocket, draft_id: str, step: str,
                               message: str, status: str, detail: Dict = None):
@@ -111,7 +108,7 @@ class AgentLifecycleManager:
             logger.warning(f"Failed to extract REQUIRED_CREDENTIALS: {e}")
         return []
 
-    # ─── Spec Validation ─────────────────────────────────────────────
+    # Spec Validation
 
     async def _validate_and_fix(self, draft_id: str, slug: str,
                                  tools_code: str, agent_name: str,
@@ -195,7 +192,7 @@ class AgentLifecycleManager:
             os.remove(marker)
             logger.info(f"Removed .draft marker for {slug}")
 
-    # ─── Slug Sanitization ───────────────────────────────────────────
+    # Slug Sanitization
 
     def _sanitize_slug(self, name: str) -> str:
         """Convert agent name to a safe directory slug. Alphanumeric + underscores only."""
@@ -216,7 +213,7 @@ class AgentLifecycleManager:
             counter += 1
         return slug
 
-    # ─── Create Draft ────────────────────────────────────────────────
+    # Create Draft
 
     async def create_draft(self, user_id: str, agent_name: str, description: str,
                             tools_spec: List[Dict] = None, skill_tags: List[str] = None,
@@ -248,7 +245,7 @@ class AgentLifecycleManager:
         logger.info(f"Created draft agent '{agent_name}' (id={draft_id}, slug={slug}) for user {user_id}")
         return self.db.get_draft_agent(draft_id)
 
-    # ─── Generate Code ───────────────────────────────────────────────
+    # Generate Code
 
     async def generate_code(self, draft_id: str, websocket=None) -> Dict[str, Any]:
         """Generate the 3 agent files for a draft."""
@@ -289,6 +286,18 @@ class AgentLifecycleManager:
             knowledge_context = ""
             if hasattr(self.orchestrator, 'knowledge_index'):
                 knowledge_context = self.orchestrator.knowledge_index.get_generation_context(description)
+
+            # C-N4 evolutionary archive: condition codegen on past successful
+            # exemplars for a similar capability gap. Flag-gated + fail-open —
+            # OFF / empty archive leaves knowledge_context byte-identical.
+            try:
+                from orchestrator import draft_archive
+                if draft_archive.archive_enabled():
+                    fp = draft_archive.draft_fingerprint(draft)
+                    knowledge_context = draft_archive.exemplar_prompt_for(
+                        knowledge_context, fp)
+            except Exception:  # pragma: no cover — conditioning is best-effort
+                logger.debug("draft-archive: codegen conditioning skipped", exc_info=True)
 
             tools_code = await self.generator.generate_tools_file(
                 agent_name=agent_name,
@@ -421,7 +430,7 @@ class AgentLifecycleManager:
             self._append_log(draft_id, f"ERROR: {e}")
             return self.db.get_draft_agent(draft_id)
 
-    # ─── Start Draft Agent for Testing ───────────────────────────────
+    # Start Draft Agent for Testing
 
     def _find_next_port(self) -> int:
         """Find the next available port for a draft agent."""
@@ -459,11 +468,11 @@ class AgentLifecycleManager:
                                 align_scopes: bool = True) -> Dict[str, Any]:
         """Start a draft agent subprocess for testing.
 
-        Feature 027: ``align_scopes=False`` starts the process WITHOUT
-        rewriting ownership or enabling all scopes — used when restarting an
-        already-live agent (startup relaunch, revision swap), where the
-        testing-mode defaults would clobber the user's saved permissions and
-        reset a public agent to private.
+        ``align_scopes=False`` starts the process WITHOUT rewriting ownership
+        or enabling all scopes — used when restarting an already-live agent
+        (startup relaunch, revision swap), where the testing-mode defaults
+        would clobber the user's saved permissions and reset a public agent to
+        private.
         """
         draft = self.db.get_draft_agent(draft_id)
         if not draft:
@@ -489,10 +498,10 @@ class AgentLifecycleManager:
                                    f"Starting agent on port {port}...", TESTING)
         self._append_log(draft_id, f"Starting agent on port {port}...")
 
-        # 033 Wave-4 (C-S6): when enabled, wrap the generated-code child in an
-        # OS-level sandbox — resource limits (fork-time preexec), a temp-scoped
-        # filesystem, and a secret-scrubbed env. Flag-gated + fail-open: off /
-        # non-POSIX / any setup error launches exactly as before.
+        # When enabled, wrap the generated-code child in an OS-level sandbox —
+        # resource limits (fork-time preexec), a temp-scoped filesystem, and a
+        # secret-scrubbed env. Flag-gated + fail-open: off / non-POSIX / any
+        # setup error launches exactly as before.
         sandbox_kwargs: Dict[str, Any] = {}
         try:
             from orchestrator import sandbox as _sandbox
@@ -566,14 +575,13 @@ class AgentLifecycleManager:
                 draft["user_id"], agent_id,
                 {"tools:read": True, "tools:write": True, "tools:search": True, "tools:system": True}
             )
-            # Feature 013 follow-up: per-(tool, kind) rows added by the
-            # permissions endpoint backfill take priority over agent_scopes
-            # in is_tool_allowed. If the user opened the permissions modal
-            # BEFORE starting the draft (when scopes default to False),
-            # those rows would be False and would shadow the True scope
-            # state we just wrote — leaving the user with "scopes are
-            # enabled" but tools still blocked. Force the per-tool rows to
-            # match the draft's True scope state so both layers agree.
+            # Per-(tool, kind) rows added by the permissions endpoint backfill
+            # take priority over agent_scopes in is_tool_allowed. If the user
+            # opened the permissions modal BEFORE starting the draft (when
+            # scopes default to False), those rows would be False and would
+            # shadow the True scope state we just wrote — leaving the user with
+            # "scopes are enabled" but tools still blocked. Force the per-tool
+            # rows to match the draft's True scope state so both layers agree.
             try:
                 tool_scope_map = self.orchestrator.tool_permissions.get_tool_scope_map(agent_id)
                 for tool_name, required_scope in tool_scope_map.items():
@@ -639,7 +647,7 @@ class AgentLifecycleManager:
             del self._draft_processes[draft_id]
             logger.info(f"Stopped draft agent process for {draft_id}")
 
-    # ─── Refine Agent ────────────────────────────────────────────────
+    # Refine Agent
 
     async def refine_agent(self, draft_id: str, user_message: str,
                             websocket=None) -> Dict[str, Any]:
@@ -777,7 +785,7 @@ class AgentLifecycleManager:
                                        f"Refinement failed: {e}", ERROR)
             return self.db.get_draft_agent(draft_id)
 
-    # ─── Auto-Fix Tool Errors ────────────────────────────────────────
+    # Auto-Fix Tool Errors
 
     def _find_draft_by_agent_id(self, agent_id: str) -> Optional[Dict[str, Any]]:
         """Look up a draft record by runtime agent_id (e.g. 'etf-agent-1'), any status."""
@@ -904,7 +912,7 @@ class AgentLifecycleManager:
                 pass
             return True
 
-    # ─── Approve Agent ───────────────────────────────────────────────
+    # Approve Agent
 
     async def approve_agent(self, draft_id: str, websocket=None) -> Dict[str, Any]:
         """Run comprehensive analysis and approve/reject the agent."""
@@ -1012,8 +1020,7 @@ class AgentLifecycleManager:
                 # orchestrator.agents via discover_agent. We call it FIRST so
                 # those side-effects happen, then restore status=LIVE below
                 # (otherwise the TESTING write inside start_draft_agent would
-                # clobber the LIVE flip on the auto-approval path — feature
-                # 012-fix-agent-flows Story 3).
+                # clobber the LIVE flip on the auto-approval path).
                 start_failed = False
                 if draft_id not in self._draft_processes or \
                    self._draft_processes[draft_id].poll() is not None:
@@ -1079,10 +1086,9 @@ class AgentLifecycleManager:
                 )
 
                 # Broadcast updated dashboard + agent_list to all UI clients
-                # of the owning user so the live agents UI updates within
-                # SC-003's 10-second budget without a manual page reload.
-                # Mirrors the per-user broadcast pattern used elsewhere in
-                # orchestrator.py for permission updates.
+                # of the owning user so the live agents UI updates without a
+                # manual page reload. Mirrors the per-user broadcast pattern
+                # used elsewhere in orchestrator.py for permission updates.
                 if self.orchestrator:
                     target_user_id = draft["user_id"]
                     for client in list(getattr(self.orchestrator, 'ui_clients', [])):
@@ -1111,7 +1117,7 @@ class AgentLifecycleManager:
                                        f"Approval analysis failed: {e}", ERROR)
             return self.db.get_draft_agent(draft_id)
 
-    # ─── Admin Review ────────────────────────────────────────────────
+    # Admin Review
 
     async def admin_review(self, draft_id: str, decision: str, admin_user_id: str,
                             notes: str = None, websocket=None) -> Dict[str, Any]:
@@ -1158,7 +1164,7 @@ class AgentLifecycleManager:
         else:
             raise ValueError(f"Invalid decision: {decision}. Must be 'approve' or 'reject'.")
 
-    # ─── Delete Draft ────────────────────────────────────────────────
+    # Delete Draft
 
     async def delete_draft(self, draft_id: str) -> bool:
         """Delete a draft agent — stops process, removes files, deletes DB record."""
@@ -1206,11 +1212,11 @@ class AgentLifecycleManager:
         # Delete DB record
         self.db.delete_draft_agent(draft_id)
 
-        # 030: purge the permission/ownership rows the test flow created for
-        # the draft's runtime agent id. These previously LEAKED after
-        # discard (live incident: a discarded draft's all-scopes-enabled
-        # rows persisted, so its broken generated tools kept dispatching in
-        # normal chats and shadowed first-party tools).
+        # Purge the permission/ownership rows the test flow created for the
+        # draft's runtime agent id. Without this they leak after discard: a
+        # discarded draft's all-scopes-enabled rows persist, so its broken
+        # generated tools keep dispatching in normal chats and shadow
+        # first-party tools.
         runtime_agent_id = slug.replace("_", "-") + "-1"
         self._purge_agent_permission_rows(runtime_agent_id)
 
@@ -1231,8 +1237,8 @@ class AgentLifecycleManager:
                              table, agent_id, exc_info=True)
 
     def reconcile_orphaned_draft_permissions(self, agent_ids=None) -> int:
-        """Boot-time sweep (030): purge permission rows leaked by drafts
-        discarded BEFORE the delete-time purge existed.
+        """Boot-time sweep: purge permission rows leaked by drafts discarded
+        before the delete-time purge ran.
 
         An agent id is an orphaned draft when (a) no ``draft_agents`` row
         maps to it (approved-live agents keep their row with status

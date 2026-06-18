@@ -1,7 +1,7 @@
-"""Capability fallback ladder — 033 Wave-3 (C-D1).
+"""Capability fallback ladder.
 
 A renderer target publishes the set of primitive types it can render; ROTE then
-substitutes any *unsupported* type down a fixed degradation ladder
+substitutes any unsupported type down a fixed degradation ladder
 (timeline→list, chart→table→text, …) so the SDUI contract degrades gracefully
 on a constrained or brand-new target instead of emitting an "unsupported
 component" placeholder. ``text`` is assumed universally renderable and is the
@@ -9,11 +9,11 @@ terminal of every ladder.
 
 This module is the pure contract: the ladder and :func:`first_supported`. The
 structural conversion + recursion lives in ``ComponentAdapter`` (it reuses the
-existing text extraction). No new dependency.
+existing text extraction).
 """
 from __future__ import annotations
 
-from typing import AbstractSet, Tuple
+from typing import AbstractSet
 
 #: Per-primitive ordered substitution candidates (best-fidelity first). Every
 #: chain bottoms out at ``text``, which is assumed always supported.
@@ -57,8 +57,3 @@ def first_supported(ctype: str, supported: AbstractSet[str]) -> str:
         if cand in supported:
             return cand
     return TERMINAL
-
-
-def ladder_for(ctype: str) -> Tuple[str, ...]:
-    """The (read-only) degradation chain for a primitive type."""
-    return FALLBACK_LADDER.get((ctype or "").strip().lower(), (TERMINAL,))

@@ -747,6 +747,12 @@ class Database:
         # low-strength memory becomes a forgetting candidate.
         cursor.execute('ALTER TABLE memory_item ADD COLUMN IF NOT EXISTS recall_count INTEGER DEFAULT 0')
         cursor.execute('ALTER TABLE memory_item ADD COLUMN IF NOT EXISTS last_recalled_at BIGINT')
+        # Feature 033 (C-U9): project-scoped memory partitioning. A memory tagged
+        # to a project_id is private to that project; a NULL project_id is the
+        # GLOBAL slice (visible in every project). NULL preserves today's behavior
+        # (FF_PROJECT_MEMORY off ⇒ every write is global ⇒ this column stays NULL).
+        cursor.execute('ALTER TABLE memory_item ADD COLUMN IF NOT EXISTS project_id TEXT')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_memory_item_user_project ON memory_item(user_id, project_id)')
 
         # Feature 033 (C-M8): evolving per-user persona (human-readable steering
         # text refined by keep-best; updated by recent turns + 004 feedback).

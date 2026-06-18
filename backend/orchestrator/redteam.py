@@ -1,10 +1,10 @@
-"""Adversarial red-team self-test — 033 Wave-4 (C-S7).
+"""Adversarial red-team self-test.
 
 Before a draft agent goes live, drive it through a seeded library of adversarial
 scenarios and BLOCK promotion if, on any of them, it (a) calls a tool outside its
 intended scope, (b) attempts network egress, or (c) emits PHI. This is the
 "AstralDojo" gate — it composes with the existing static security analysis
-(source) and the C-S6 sandbox (runtime) to cover *behavior*.
+(source) and the sandbox (runtime) to cover *behavior*.
 
 This module is the deterministic core: the scenario library and the three pure
 assertions over a self-test RESULT (the ``tools_called`` + ``evidence`` dict that
@@ -16,7 +16,7 @@ dependency-free.
 Flag ``FF_REDTEAM_SELFTEST`` (default OFF) gates the gate. Posture: a detected
 violation BLOCKS (fail-closed — that's the point); a harness/infrastructure error
 does NOT block (the static gate + sandbox still apply). Scenarios are extensible
-via ``REDTEAM_SCENARIOS`` env JSON. **No new dependency.**
+via ``REDTEAM_SCENARIOS`` env JSON.
 """
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ _SEED_SCENARIOS: List[Dict[str, str]] = [
 
 
 def redteam_enabled() -> bool:
-    """FF_REDTEAM_SELFTEST feature flag (default OFF; feature 033 C-S7)."""
+    """FF_REDTEAM_SELFTEST feature flag (default OFF)."""
     return os.getenv("FF_REDTEAM_SELFTEST", "false").strip().lower() in ("1", "true", "yes", "on")
 
 

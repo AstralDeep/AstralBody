@@ -14,11 +14,16 @@ This keeps the evolutionary logic trivially testable and side-effect free.
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import re
+import threading
+import time
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
+
+logger = logging.getLogger("Orchestrator.DraftArchive")
 
 __all__ = [
     "ArchivedDraft",
@@ -27,7 +32,18 @@ __all__ = [
     "top_exemplars",
     "condition_prompt",
     "should_skip_self_test",
+    # Wiring helpers (in-process archive store; no DB tables).
+    "get_archive",
+    "record_archived_draft",
+    "reset_archive",
+    "exemplar_prompt_for",
+    "draft_fingerprint",
+    "ARCHIVE_MAX",
 ]
+
+#: Cap on the in-process archive (most-recent-wins ring). Keeps memory bounded
+#: in a long-lived process without a database. Tunable via ``DRAFT_ARCHIVE_MAX``.
+ARCHIVE_MAX = int(os.getenv("DRAFT_ARCHIVE_MAX", "200"))
 
 
 # ───────────────────────────── feature flag ──────────────────────────────────
@@ -336,3 +352,113 @@ def condition_prompt(
         return base_prompt
 
     return base_prompt + "".join(parts)
+
+
+# ───────────────────────── in-process archive store ──────────────────────────
+# The archive itself has no database (a new table is out of scope — Constitution
+# IX / task constraint). A long-lived orchestrator process keeps a bounded,
+# thread-safe, most-recent-wins list of successful drafts here. It survives for
+# the life of the process; a restart starts cold (acceptable — the archive only
+# *conditions* generation and *skips* a redundant self-test, never gates
+# correctness). All public entry points below are inert unless
+# :func:`archive_enabled` is true.
+
+_ARCHIVE: List[ArchivedDraft] = []
+_ARCHIVE_LOCK = threading.Lock()
+
+
+def draft_fingerprint(draft: dict) -> str:
+    """Derive a relevance fingerprint for a draft row (archive key + exemplar
+    lookup basis).
+
+    Prefers the draft's persisted ``gap_fingerprint`` (the agentic-creation
+    dedup key) when present; otherwise falls back to a token-rich basis built
+    from the agent name, slug and description so :func:`top_exemplars`'
+    Jaccard overlap still has signal for manually-created drafts. Never raises.
+    """
+    try:
+        gap = (draft.get("gap_fingerprint") or "").strip()
+        name = (draft.get("agent_name") or "").strip()
+        slug = (draft.get("agent_slug") or "").strip()
+        desc = (draft.get("description") or "").strip()
+        # The gap fingerprint is a sha256 hex digest (no token signal on its
+        # own), so always pair it with human terms for the Jaccard ranker.
+        basis = " ".join(t for t in (gap, name, slug, desc) if t)
+        return basis or (gap or name or slug)
+    except Exception:  # pragma: no cover — defensive
+        return ""
+
+
+def get_archive() -> List[ArchivedDraft]:
+    """Return a snapshot copy of the current in-process archive (best→nothing
+    order is *not* guaranteed; callers rank via :func:`top_exemplars`)."""
+    with _ARCHIVE_LOCK:
+        return list(_ARCHIVE)
+
+
+def reset_archive() -> None:
+    """Clear the in-process archive (test isolation / operator reset)."""
+    with _ARCHIVE_LOCK:
+        _ARCHIVE.clear()
+
+
+def record_archived_draft(
+    fingerprint: str,
+    code: str,
+    score: float,
+    *,
+    created_at: Optional[int] = None,
+) -> Optional[ArchivedDraft]:
+    """Archive a draft outcome. No-op (returns ``None``) when the feature flag
+    is off, the code is empty, or the score is non-positive (failures are never
+    offered back as exemplars).
+
+    Bounded most-recent-wins: when the archive exceeds :data:`ARCHIVE_MAX`, the
+    oldest record is evicted. Thread-safe. Never raises.
+    """
+    if not archive_enabled():
+        return None
+    try:
+        if not (code or "").strip() or score <= 0.0:
+            return None
+        rec = ArchivedDraft(
+            fingerprint=fingerprint or "",
+            code=code,
+            score=_clamp01(score),
+            created_at=int(created_at if created_at is not None else time.time()),
+        )
+        with _ARCHIVE_LOCK:
+            _ARCHIVE.append(rec)
+            if len(_ARCHIVE) > ARCHIVE_MAX:
+                del _ARCHIVE[: len(_ARCHIVE) - ARCHIVE_MAX]
+        logger.info(
+            "draft-archive: recorded exemplar (fingerprint=%s, score=%.2f, size=%d)",
+            rec.fingerprint, rec.score, len(_ARCHIVE),
+        )
+        return rec
+    except Exception:  # pragma: no cover — archiving must never break creation
+        logger.debug("draft-archive: record failed", exc_info=True)
+        return None
+
+
+def exemplar_prompt_for(
+    base_prompt: str,
+    fingerprint: str,
+    *,
+    k: int = 3,
+    max_chars: int = 4000,
+) -> str:
+    """Condition ``base_prompt`` on the top archived exemplars for ``fingerprint``.
+
+    Returns ``base_prompt`` unchanged when the flag is off or the archive holds
+    nothing relevant. Convenience wrapper over :func:`top_exemplars` +
+    :func:`condition_prompt` so callers need a single call. Never raises.
+    """
+    if not archive_enabled():
+        return base_prompt
+    try:
+        exemplars = top_exemplars(get_archive(), fingerprint, k=k)
+        return condition_prompt(base_prompt, exemplars, max_chars=max_chars)
+    except Exception:  # pragma: no cover — conditioning is best-effort
+        logger.debug("draft-archive: exemplar conditioning failed", exc_info=True)
+        return base_prompt

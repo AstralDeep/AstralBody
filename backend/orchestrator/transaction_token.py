@@ -1,19 +1,17 @@
-"""Single-use transaction tokens — 033 Wave-4 (C-S8).
+"""Single-use transaction tokens.
 
 A transaction token is a short-lived, single-use authorization that BINDS one
-specific call: ``(agent, user, tool, hash(args))``. It is HMAC-signed (stdlib)
-with ``TXN_TOKEN_KEY`` (falling back to ``MEMORY_HMAC_KEY``) so it is
-unforgeable, carries its own expiry, and a process-local :class:`ConsumedStore`
-makes it one-shot — a replayed token is refused.
+specific call: ``(agent, user, tool, hash(args))``. It is HMAC-signed with
+``TXN_TOKEN_KEY`` (falling back to ``MEMORY_HMAC_KEY``) so it is unforgeable,
+carries its own expiry, and a process-local :class:`ConsumedStore` makes it
+one-shot — a replayed token is refused.
 
-This backs the C-S3 policy engine's ``require_token`` effect: a rule can require
-that a sensitive call carry a valid token (minted by a confirm/admin path),
-turning "deny unless confirmed" into "deny unless *this exact call* was
-authorized." It closes the confused-deputy / replay gap — a token for
-``transfer(amount=5)`` cannot be reused, nor retargeted to ``amount=500`` or to
-a different tool/agent/user, because any of those changes the signed binding.
-
-Pure crypto + an in-memory store; **no new dependency**.
+This backs the policy engine's ``require_token`` effect: a rule can require that
+a sensitive call carry a valid token (minted by a confirm/admin path), turning
+"deny unless confirmed" into "deny unless *this exact call* was authorized." It
+closes the confused-deputy / replay gap — a token for ``transfer(amount=5)``
+cannot be reused, nor retargeted to ``amount=500`` or to a different
+tool/agent/user, because any of those changes the signed binding.
 
 Posture: **fail-CLOSED**. The effect is strictly opt-in (an operator must write
 a ``require_token`` rule AND the policy engine is OFF by default), so a missing
