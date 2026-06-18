@@ -24,6 +24,23 @@ import shared  # noqa: F401 — normalizes USE_MOCK_AUTH/KEYCLOAK_* env aliases 
 
 logger = logging.getLogger("AuthProxy")
 
+
+def allowed_azp_values(primary_client_id: Optional[str]) -> set:
+    """The OIDC ``azp`` (authorized-party) client IDs the orchestrator accepts:
+    the primary web client plus any in ``KEYCLOAK_ALLOWED_AZP`` (comma-separated).
+
+    This lets additional first-party clients — e.g. the native desktop app
+    (``astral-desktop``) — authenticate without weakening the single-client check
+    for everyone else. Empty/unset env ⇒ only the primary client is accepted,
+    i.e. identical to the previous behavior.
+    """
+    allowed = {primary_client_id} if primary_client_id else set()
+    for extra in os.getenv("KEYCLOAK_ALLOWED_AZP", "").split(","):
+        extra = extra.strip()
+        if extra:
+            allowed.add(extra)
+    return allowed
+
 if os.getenv("VITE_USE_MOCK_AUTH", "").lower() == "true":
     logger.info("Mock auth ENABLED — all tokens accepted as test_user with roles [admin, user]")
 else:
@@ -191,7 +208,7 @@ async def get_current_user_payload(request: Request, credentials: HTTPAuthorizat
             options={"verify_aud": False, "verify_at_hash": False}
         )
         azp = payload.get("azp")
-        if azp and azp != client_id:
+        if azp and azp not in allowed_azp_values(client_id):
              raise HTTPException(status_code=401, detail="Invalid client")
         try:
             request.state.audit_claims = payload

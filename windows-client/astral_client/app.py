@@ -107,11 +107,14 @@ class Canvas(QScrollArea):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, url: str, token: str):
+    def __init__(self, url: str, token: str, session=None):
         super().__init__()
         self.setWindowTitle("AstralBody — Windows")
         self.resize(1280, 860)
         self.active_chat: Optional[str] = None
+        self._url = url
+        self._auth_session = session   # OIDC session (for silent token refresh)
+        self._reauth_tries = 0
 
         ctx = RenderContext(emit=self._emit)
         self.client = OrchestratorClient(url, token, device_caps(supported_types=native_types()))
@@ -187,10 +190,29 @@ class MainWindow(QMainWindow):
             T.VARIANT_COLORS["error"][0] if s.startswith(("closed", "auth_required")) else T.MUTED)
         self._status.setText(nice)
         self._status.setStyleSheet(f"color:{color}; padding:6px 14px; background:{T.SURFACE};")
-        if s == "connected" and not self._win_agent_registered:
-            self._win_agent_registered = True
-            url = f"http://{self._win_agent_host}:{self._win_agent_port}"
-            self.client.send_event("register_external_agent", {"url": url})
+        if s == "connected":
+            self._reauth_tries = 0
+            if not self._win_agent_registered:
+                self._win_agent_registered = True
+                url = f"http://{self._win_agent_host}:{self._win_agent_port}"
+                self.client.send_event("register_external_agent", {"url": url})
+        elif s.startswith("auth_required") and self._auth_session and self._reauth_tries < 2:
+            # Token expired/invalid — silently refresh and reconnect.
+            self._reauth_tries += 1
+            new_token = self._auth_session.refresh()
+            if new_token:
+                self._reconnect(new_token)
+
+    def _reconnect(self, token: str) -> None:
+        try:
+            self.client.stop()
+        except Exception:
+            pass
+        self._win_agent_registered = False
+        self.client = OrchestratorClient(self._url, token, device_caps(supported_types=native_types()))
+        self.client.message.connect(self._on_message)
+        self.client.status.connect(self._on_status)
+        self.client.start()
 
     def _on_message(self, msg: dict) -> None:
         t = msg.get("type")
@@ -249,15 +271,35 @@ def configure(app: QApplication) -> None:
     app.setStyleSheet(T.APP_STYLESHEET + T.ROOT_BG_STYLE)
 
 
+def resolve_auth(args):
+    """Return (token, session). An explicit --token/ASTRAL_TOKEN wins (use
+    'dev-token' for a mock-auth orchestrator). Otherwise, if a Keycloak authority
+    is configured, run the interactive OIDC desktop login; else fall back to
+    'dev-token'."""
+    if args.token:
+        return args.token, None
+    if args.authority:
+        try:
+            from .auth import oidc_login
+            session = oidc_login(args.authority, args.client_id)
+            return session.access_token, session
+        except Exception as exc:  # noqa: BLE001
+            print(f"OIDC login failed ({exc}); falling back to dev-token.")
+    return "dev-token", None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="AstralBody native Windows client")
     ap.add_argument("--url", default=os.getenv("ASTRAL_WS_URL", "ws://127.0.0.1:8001/ws"))
-    ap.add_argument("--token", default=os.getenv("ASTRAL_TOKEN", "dev-token"))
+    ap.add_argument("--token", default=os.getenv("ASTRAL_TOKEN", ""))
+    ap.add_argument("--authority", default=os.getenv("KEYCLOAK_AUTHORITY", ""))
+    ap.add_argument("--client-id", default=os.getenv("ASTRAL_DESKTOP_CLIENT_ID", "astral-desktop"))
     args = ap.parse_args()
 
     app = QApplication(sys.argv)
     configure(app)
-    win = MainWindow(args.url, args.token)
+    token, session = resolve_auth(args)
+    win = MainWindow(args.url, token, session=session)
     win.show()
     return app.exec()
 

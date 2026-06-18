@@ -60,12 +60,24 @@ QT_QPA_PLATFORM=offscreen .venv/Scripts/python tests/e2e_live.py --prompt "roll 
 
 ## Auth
 
-- **Dev**: `dev-token` against a mock-auth orchestrator.
-- **Production**: obtain a Keycloak access token via OIDC Authorization-Code +
-  PKCE (RFC 8252) with a loopback redirect, and pass it via `--token` /
-  `ASTRAL_TOKEN`. This requires a new public Keycloak client (`astral-desktop`)
-  and relaxing the orchestrator's single-`azp` check to a configurable
-  allow-list. (Not yet implemented — tracked as a follow-up.)
+- **Dev**: `dev-token` against a mock-auth orchestrator (`--token dev-token`, the
+  default when no authority is configured).
+- **Real Keycloak (OIDC)**: set `--authority <realm-url>` (or `KEYCLOAK_AUTHORITY`)
+  and the app runs **Authorization-Code + PKCE with a loopback redirect** (RFC
+  8252) — it opens the system browser, you log in, and the token is used for
+  `register_ui`; it silently refreshes on expiry. An explicit `--token` always
+  wins.
+
+Two one-time setup steps for real auth:
+1. Create a **public** Keycloak client `astral-desktop` (override with
+   `--client-id` / `ASTRAL_DESKTOP_CLIENT_ID`): Client authentication OFF,
+   Standard Flow ON, PKCE `S256`, redirect URI `http://127.0.0.1/*` (loopback),
+   scopes `openid profile email offline_access`.
+2. Add it to the orchestrator's accepted clients: `KEYCLOAK_ALLOWED_AZP=astral-desktop`.
+
+```bash
+.venv/Scripts/python main.py --authority https://iam.example.com/realms/Astral
+```
 
 ## Windows tools agent (client-hosted)
 
