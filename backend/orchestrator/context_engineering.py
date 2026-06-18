@@ -1,4 +1,4 @@
-"""Context engineering — 033 Wave-0 (C-N16).
+"""Context engineering.
 
 Two pure, opt-in helpers for keeping the chat ReAct loop's context window
 cache-stable and lean. Both are *fail-open* and produce **byte-identical**
@@ -20,13 +20,6 @@ land dormant behind ``FF_CONTEXT_ENGINEERING`` (default off):
    tombstone while preserving each message's ``role`` / ``tool_call_id`` /
    ``name`` so the assistant→tool pairing the Chat Completions API requires
    stays intact.
-
-The reasoning-budget knob named in the C-N16 cluster already shipped as C-U12
-(``_call_llm(reasoning_effort=…)``); the catalog tool-search / ``defer_loading``
-meta-tool sub-item is intentionally left for a follow-on (it changes tool
-dispatch, out of scope for a Wave-0 quick win).
-
-No new third-party dependency (Constitution V).
 """
 from __future__ import annotations
 

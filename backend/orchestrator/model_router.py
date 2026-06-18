@@ -1,16 +1,16 @@
-"""Device-capability-aware model router — 033 Wave-3 (C-D6).
+"""Device-capability-aware model router.
 
 A cheap-first cascade in front of the LLM client factory. Each task starts on
 the cheapest model tier that plausibly handles it (capped by the connecting
-device), and **escalates one tier on a low-confidence response**. An optional
+device), and escalates one tier on a low-confidence response. An optional
 on-device lane is advertised for simple tasks on clients that carry a browser-AI
 capability — but the server stays authoritative (the lane is a hint; the server
 model is always resolved as the fallback).
 
-Pure + deterministic; stdlib only. **No new dependency.** Flag
-``FF_MODEL_ROUTER`` (default OFF) gates the dispatch hook, which is additive +
-fail-open: with the flag off, or when no per-tier models are configured, the
-caller keeps using its already-resolved model unchanged.
+Pure + deterministic; stdlib only. Flag ``FF_MODEL_ROUTER`` (default OFF) gates
+the dispatch hook, which is additive + fail-open: with the flag off, or when no
+per-tier models are configured, the caller keeps using its already-resolved
+model unchanged.
 
 Tier→model strings come from the ``MODEL_TIERS`` env (JSON, e.g.
 ``{"small":"…-8b","medium":"…-70b","large":"…-405b"}``); any tier without a
@@ -49,7 +49,7 @@ _HEDGE_MARKERS = (
 
 
 def router_enabled() -> bool:
-    """FF_MODEL_ROUTER feature flag (default OFF; feature 033 C-D6)."""
+    """FF_MODEL_ROUTER feature flag (default OFF)."""
     return os.getenv("FF_MODEL_ROUTER", "false").strip().lower() in ("1", "true", "yes", "on")
 
 

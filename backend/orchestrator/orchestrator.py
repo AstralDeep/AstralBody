@@ -129,8 +129,8 @@ TEXT-ONLY MODE (no agents currently available):
 # volatile sections (the file-mapping list, the live-canvas listing) are
 # substituted. ``context_engineering.compose_system_prompt`` fills them in
 # place by default (byte-identical to the legacy f-string), or — when
-# FF_CONTEXT_ENGINEERING is on (033 Wave-0 C-N16) — blanks them here and
-# appends them last so the stable instruction prefix stays cache-friendly.
+# FF_CONTEXT_ENGINEERING is on — blanks them here and appends them last so the
+# stable instruction prefix stays cache-friendly.
 CHAT_SYSTEM_TEMPLATE = """You are an AI orchestrator. Your goal is to simplify complex tasks for the user by intelligently using available tools.
 
 %%ASTRAL_FILE_CONTEXT%%
@@ -440,22 +440,22 @@ class Orchestrator:
             "LLM_MODEL", "meta-llama/Llama-3.2-90B-Vision-Instruct"
         )
 
-        # Feature 040 / 033 Wave-0 (C-U12): default reasoning-effort knob
-        # threaded through _call_llm. Unset → nothing is sent (zero behavior
-        # change on endpoints that predate reasoning models). Callers may
-        # override per-call; this is only the global default.
+        # Default reasoning-effort knob threaded through _call_llm. Unset →
+        # nothing is sent (zero behavior change on endpoints that predate
+        # reasoning models). Callers may override per-call; this is only the
+        # global default.
         self.llm_reasoning_effort = self._valid_reasoning_effort(
             os.getenv("LLM_REASONING_EFFORT")
         )
-        # 033 Wave-0 (C-N14/C-U12): per-(base_url, model) capability cache of
-        # optional request params the endpoint rejected, so we probe once and
-        # then stop sending them. {(base_url, model): {"response_format", …}}.
+        # Per-(base_url, model) capability cache of optional request params the
+        # endpoint rejected, so we probe once and then stop sending them.
+        # {(base_url, model): {"response_format", …}}.
         self._llm_unsupported_params: Dict[tuple, set] = {}
 
-        # 033 Wave-0 (C-S4): when datamarking is engaged, also surgically remove
-        # well-known instruction-override spans from untrusted tool output
-        # (FR: "optional span-level removal"). Off by default — the default
-        # defense is delimiting only, which never mutates content.
+        # When datamarking is engaged, also surgically remove well-known
+        # instruction-override spans from untrusted tool output (optional
+        # span-level removal). Off by default — the default defense is
+        # delimiting only, which never mutates content.
         self._datamark_sanitize_spans = os.getenv(
             "DATAMARK_SANITIZE_SPANS", "false"
         ).lower() in ("true", "1", "yes")
@@ -1902,8 +1902,8 @@ class Orchestrator:
                 elif msg.action == "update_device":
                     # ROTE: viewport / capability change from the frontend
                     device_info = msg.payload.get("device") or {}
-                    # 033 C-D7: capture the pre-change profile so we can diff the
-                    # canvas adaptation and push only what actually changed.
+                    # Capture the pre-change profile so we can diff the canvas
+                    # adaptation and push only what actually changed.
                     old_profile = self.rote.get_profile(websocket)
                     new_profile, re_adapted, profile_changed = self.rote.update_device(websocket, device_info)
                     await self._safe_send(websocket, json.dumps({
@@ -1911,21 +1911,21 @@ class Orchestrator:
                         "device_profile": new_profile.to_dict(),
                         "speech_server_available": bool(os.getenv("SPEACHES_URL", "").strip()),
                     }))
-                    # Feature 028 (D17): a device change re-renders the FULL
-                    # persisted workspace from server state. The pre-028
-                    # single-slot _last_components replay would wipe all but
-                    # the most recent fragment once partial upserts exist.
+                    # A device change re-renders the FULL persisted workspace
+                    # from server state. A single-slot _last_components replay
+                    # would wipe all but the most recent fragment once partial
+                    # upserts exist.
                     handled_via_workspace = False
                     if profile_changed:
                         active_chat = self._ws_active_chat.get(id(websocket))
                         if active_chat:
                             try:
-                                # Feature 029: re-adapt the designed canvas, not
-                                # just the flat component list.
+                                # Re-adapt the designed canvas, not just the
+                                # flat component list.
                                 ws_components = self._canvas_components(active_chat, user_id)
                                 if ws_components:
-                                    # 033 C-D7: when the live-viewport flag is on,
-                                    # push only the components whose adaptation
+                                    # When the live-viewport flag is on, push
+                                    # only the components whose adaptation
                                     # actually changed (targeted upsert to THIS
                                     # socket — other devices didn't change). Any
                                     # failure falls through to the full re-render.
@@ -3229,10 +3229,10 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                         f"| Type: {sc['component_type']} | Tool: {source_tool} | Agent: {source_agent}\n"
                     )
 
-            # 033 Wave-0 (C-N16 — context engineering): with the flag on, the
-            # volatile file/canvas sections are appended LAST so the stable
-            # instruction prefix stays KV-cache-friendly; off → byte-identical
-            # in-place substitution of the legacy f-string.
+            # With the flag on, the volatile file/canvas sections are appended
+            # LAST so the stable instruction prefix stays KV-cache-friendly;
+            # off → byte-identical in-place substitution of the legacy
+            # f-string.
             system_prompt = context_engineering.compose_system_prompt(
                 CHAT_SYSTEM_TEMPLATE,
                 file_context=file_context,
@@ -3300,15 +3300,14 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             if scheduler_tool_injected:
                 system_prompt += scheduling_chat.SYSTEM_PROMPT_ADDENDUM
 
-            # 030 — memory guidance accompanies the memory meta-tools.
+            # Memory guidance accompanies the memory meta-tools.
             if memory_tool_injected:
                 system_prompt += memory_chat.SYSTEM_PROMPT_ADDENDUM
 
-            # 033 Wave-0 (C-S4 — spotlighting/datamarking): mint one unguessable
-            # sentinel for this turn and tell the model that anything wrapped in
-            # its markers is untrusted DATA, never instructions. Untrusted
-            # (non-digest) tool outputs are wrapped at append time below. No-op
-            # when the flag is off.
+            # Mint one unguessable sentinel for this turn and tell the model
+            # that anything wrapped in its markers is untrusted DATA, never
+            # instructions. Untrusted (non-digest) tool outputs are wrapped at
+            # append time below. No-op when the flag is off.
             datamark_on = flags.is_enabled("datamarking")
             turn_sentinel = datamarking.make_turn_sentinel() if datamark_on else None
             if datamark_on:
@@ -3389,9 +3388,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     if was_compacted:
                         logger.info("Context compacted before LLM call")
 
-                # 033 Wave-0 (C-N16): in-loop context editing — tombstone stale
-                # tool outputs so a long tool-calling loop doesn't pin volatile
-                # (often untrusted) text in the window. Fail-open; off by default.
+                # In-loop context editing — tombstone stale tool outputs so a
+                # long tool-calling loop doesn't pin volatile (often untrusted)
+                # text in the window. Fail-open; off by default.
                 if flags.is_enabled("context_engineering"):
                     try:
                         messages, _n_edited = context_engineering.edit_context(messages)
@@ -3564,17 +3563,17 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                                 except Exception:
                                     logger.debug("workspace snapshot failed (tool turn)", exc_info=True)
 
-                    # Append tool outputs to LLM conversation history. C-N15:
-                    # the LLM-visible text is the two-tier digest (a tool's
+                    # Append tool outputs to LLM conversation history. The
+                    # LLM-visible text is the two-tier digest (a tool's
                     # `_model_digest` wins; else the existing `_data`/full-result
                     # serialization) — see _tool_result_to_llm_content.
                     for i, tc in enumerate(llm_msg.tool_calls):
                         res = tool_results[i] if i < len(tool_results) else None
                         tool_content = self._tool_result_to_llm_content(res)
-                        # 033 Wave-0 (C-S4): spotlight untrusted tool output.
-                        # A tool's own `_model_digest` (C-N15) is tool-authored
-                        # and trusted; only raw, non-digest output is wrapped as
-                        # untrusted data the model must not obey.
+                        # Spotlight untrusted tool output. A tool's own
+                        # `_model_digest` is tool-authored and trusted; only
+                        # raw, non-digest output is wrapped as untrusted data
+                        # the model must not obey.
                         if datamark_on and not self._result_has_model_digest(res):
                             tool_content = datamarking.spotlight(
                                 tool_content, turn_sentinel,
@@ -4036,13 +4035,13 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         Only retries on transient errors (502, 503, 504). Fails fast on
         non-transient errors like 424 (model not found) or 401 (auth).
 
-        033 Wave-0 optional enhancement params, both probe-and-fallback so a
-        plainer OpenAI-compatible endpoint is never broken by them:
+        Optional enhancement params, both probe-and-fallback so a plainer
+        OpenAI-compatible endpoint is never broken by them:
 
-        * ``response_format`` (C-N14 — enforced structured output): a
+        * ``response_format`` (enforced structured output): a
           ``response_format`` value (e.g. ``{"type": "json_object"}`` or a
           ``json_schema`` block) passed straight through to the endpoint.
-        * ``reasoning_effort`` (C-U12 — reasoning-budget knob): ``"minimal"`` /
+        * ``reasoning_effort`` (reasoning-budget knob): ``"minimal"`` /
           ``"low"`` / ``"medium"`` / ``"high"``; falls back to the
           ``LLM_REASONING_EFFORT`` global default when the caller passes None.
 
@@ -4052,11 +4051,11 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         without the enhancement. Subsequent calls skip the rejected param
         entirely.
 
-        Feature 006: credential resolution happens here. The caller's
-        credentials (or operator default) are picked up from the
-        per-WebSocket credential store via ``_resolve_llm_client_for``.
+        Credential resolution happens here. The caller's credentials (or
+        operator default) are picked up from the per-WebSocket credential
+        store via ``_resolve_llm_client_for``.
         Every call emits an ``llm_call`` audit event with
-        ``credential_source`` so SC-006 invariants can be verified;
+        ``credential_source``;
         ``LLMUnavailable`` (no credentials anywhere) emits
         ``llm_unconfigured`` instead and returns ``(None, None)``.
 
@@ -4078,9 +4077,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # The resolved.model is the user's chosen model when source=USER,
         # else the operator default model (== self.llm_model).
         call_model = resolved.model
-        # 033 Wave-0: assemble the optional enhancement params, minus any this
-        # endpoint already told us it doesn't support (probe cache). The
-        # in-loop except strips any that draw a fresh rejection.
+        # Assemble the optional enhancement params, minus any this endpoint
+        # already told us it doesn't support (probe cache). The in-loop except
+        # strips any that draw a fresh rejection.
         cap_key = (getattr(resolved, "base_url", None), call_model)
         unsupported = getattr(self, "_llm_unsupported_params", {}).get(cap_key, set())
         effort = reasoning_effort if reasoning_effort is not None else getattr(
@@ -4091,10 +4090,10 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             extra_kwargs["response_format"] = response_format
         if effort is not None and "reasoning_effort" not in unsupported:
             extra_kwargs["reasoning_effort"] = effort
-        # 033 Wave-3 (C-D6): device-capability-aware model router. Cheap-first —
-        # pick the cheapest tier that fits this task, capped by the connecting
-        # device; a low-confidence response escalates one tier (below). Flag-
-        # gated (default OFF) + fail-open: with the flag off, or no MODEL_TIERS
+        # Device-capability-aware model router. Cheap-first — pick the cheapest
+        # tier that fits this task, capped by the connecting device; a
+        # low-confidence response escalates one tier (below). Flag-gated
+        # (default OFF) + fail-open: with the flag off, or no MODEL_TIERS
         # configured, call_model is the already-resolved default, unchanged.
         _route_tier: Optional[int] = None
         escalated = False
@@ -4175,11 +4174,11 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                         usage=usage,
                         outcome="success",
                     )
-                # 033 Wave-3 (C-D6): cheap-first cascade — if the router placed
-                # this call on a lower tier and the response reads low-confidence
-                # (hedge/refusal/empty), escalate ONE tier and re-issue once. Only
-                # for prose turns (tool-call turns aren't graded this way). Bounded
-                # by ``escalated`` so it happens at most once.
+                # Cheap-first cascade — if the router placed this call on a
+                # lower tier and the response reads low-confidence
+                # (hedge/refusal/empty), escalate ONE tier and re-issue once.
+                # Only for prose turns (tool-call turns aren't graded this
+                # way). Bounded by ``escalated`` so it happens at most once.
                 if (_route_tier is not None and not escalated and not tools_desc
                         and model_router.router_enabled()
                         and not model_router.confidence_ok(getattr(_msg, "content", None))):
@@ -4197,10 +4196,10 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             except Exception as e:
                 error_str = str(e)
 
-                # 033 Wave-0: did the endpoint reject one of our optional
-                # enhancement params? If so, remember it for this
-                # (base_url, model), strip it, and retry immediately — the
-                # request itself is fine, just without the enhancement.
+                # Did the endpoint reject one of our optional enhancement
+                # params? If so, remember it for this (base_url, model), strip
+                # it, and retry immediately — the request itself is fine, just
+                # without the enhancement.
                 drop = self._llm_unsupported_extras(error_str, extra_kwargs)
                 if drop:
                     cache = getattr(self, "_llm_unsupported_params", None)
@@ -4279,9 +4278,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
     @classmethod
     def _valid_reasoning_effort(cls, value):
-        """Normalize a reasoning-effort value (C-U12). Returns the lowercased
-        value if it is one of the recognized levels, else None (so an unset or
-        garbage env/arg is simply not sent)."""
+        """Normalize a reasoning-effort value. Returns the lowercased value if
+        it is one of the recognized levels, else None (so an unset or garbage
+        env/arg is simply not sent)."""
         if value is None:
             return None
         v = str(value).strip().lower()
@@ -4289,9 +4288,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
     @staticmethod
     def _llm_unsupported_extras(error_str: str, extra_kwargs: Dict[str, Any]) -> set:
-        """033 Wave-0 capability probe: given a failed completion's error text
-        and the optional enhancement params we sent, return the subset the
-        endpoint appears to reject (so the caller can drop + remember them).
+        """Capability probe: given a failed completion's error text and the
+        optional enhancement params we sent, return the subset the endpoint
+        appears to reject (so the caller can drop + remember them).
 
         Conservative: only fires on signals that look like an unsupported /
         malformed *parameter* (not a transient 5xx or an auth error). When the
@@ -4324,7 +4323,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
     async def _call_llm_json(self, websocket, messages, *, schema=None,
                              schema_name: str = "result", temperature=None,
                              feature: str = "structured", reasoning_effort=None):
-        """C-N14 — request enforced structured (JSON) output and parse it.
+        """Request enforced structured (JSON) output and parse it.
 
         Passes a ``response_format`` (a strict ``json_schema`` block when
         ``schema`` is given, else plain ``json_object``) through
@@ -4394,8 +4393,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
     @staticmethod
     def _tool_result_to_llm_content(res) -> str:
-        """033 Wave-0 (C-N15 — two-tier tool output): the text a tool result
-        contributes to the LLM conversation.
+        """Two-tier tool output: the text a tool result contributes to the LLM
+        conversation.
 
         A tool may split its result into a short model-facing tier and a larger
         renderer-only tier. Precedence:
@@ -4427,9 +4426,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
     @staticmethod
     def _result_has_model_digest(res) -> bool:
-        """True when a tool result carries a C-N15 ``_model_digest`` — i.e. the
-        LLM-visible text is tool-authored (trusted) and should NOT be wrapped as
-        untrusted by C-S4 datamarking."""
+        """True when a tool result carries a ``_model_digest`` — i.e. the
+        LLM-visible text is tool-authored (trusted) and should NOT be wrapped
+        as untrusted by datamarking."""
         result = getattr(res, "result", None)
         return isinstance(result, dict) and result.get("_model_digest") is not None
 
@@ -4804,7 +4803,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         return tool_name in (md.get("long_running_tools") or [])
 
     def _policy_roles(self, websocket) -> List[str]:
-        """Best-effort session roles for the C-S3 policy engine. Handles a flat
+        """Best-effort session roles for the policy engine. Handles a flat
         ``roles`` claim or the Keycloak ``realm_access.roles`` shape; returns
         ``[]`` when unavailable (role-predicated rules simply won't match)."""
         claims = self.ui_sessions.get(websocket) if websocket is not None else None
@@ -4817,7 +4816,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         return list(roles) if isinstance(roles, (list, tuple)) else []
 
     def _taint_tracker(self, chat_id: Optional[str]):
-        """Per-chat C-S2 taint tracker (the data-flow scope), lazily created."""
+        """Per-chat taint tracker (the data-flow scope), lazily created."""
         store = getattr(self, "_taint_trackers", None)
         if store is None:
             store = {}
@@ -4908,9 +4907,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 ui_components=[alert.to_dict()]
             )
 
-        # 033 Wave-4 (C-S3): deterministic pre-action policy engine — an ordered,
-        # fail-closed rule chain (data, admin-extensible via POLICY_RULES) on top
-        # of the permission gate. Default OFF + no seed rules ⇒ purely additive.
+        # Deterministic pre-action policy engine — an ordered, fail-closed rule
+        # chain (data, admin-extensible via POLICY_RULES) on top of the
+        # permission gate. Default OFF + no seed rules ⇒ purely additive.
         # deny/confirm block the call; rewrite redacts args before execution.
         if user_id:
             from orchestrator import policy
@@ -4923,9 +4922,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 except Exception:
                     logger.debug("policy: evaluation failed — allowing", exc_info=True)
                     decision = policy.PolicyDecision()
-                # 033 C-S8: a require_token rule demands a valid single-use
-                # transaction token bound to (agent, user, tool, hash(args)).
-                # Fail-closed — missing/tampered/expired/replayed ⇒ deny.
+                # A require_token rule demands a valid single-use transaction
+                # token bound to (agent, user, tool, hash(args)). Fail-closed —
+                # missing/tampered/expired/replayed ⇒ deny.
                 if decision.effect == policy.REQUIRE_TOKEN:
                     from orchestrator import transaction_token as _txn
                     token = args.get("_txn_token") if isinstance(args, dict) else None
@@ -4959,12 +4958,12 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 if isinstance(args, dict) and "_txn_token" in args:
                     args = {k: v for k, v in args.items() if k != "_txn_token"}
 
-        # 033 Wave-4 (C-S2): value-level taint/data-flow gate. If this call is a
-        # write/egress SINK and its arguments carry untrusted-tainted values
-        # (effective trust = min over data ancestors, recorded from prior
-        # untrusted-source outputs — survives multi-hop laundering), refuse it.
-        # Flag-gated (default OFF) + fail-open: unknown values are trusted, so a
-        # call with only constants/user intent always passes.
+        # Value-level taint/data-flow gate. If this call is a write/egress SINK
+        # and its arguments carry untrusted-tainted values (effective trust =
+        # min over data ancestors, recorded from prior untrusted-source outputs
+        # — survives multi-hop laundering), refuse it. Flag-gated (default OFF)
+        # + fail-open: unknown values are trusted, so a call with only
+        # constants/user intent always passes.
         if user_id:
             from orchestrator import taint as _taint
             if _taint.taint_enabled() and _taint.is_sink(agent_id, tool_name):
@@ -5159,11 +5158,11 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 except Exception:
                     pass
 
-        # 033 Wave-4 (C-S2): record the call's output taint so it propagates
-        # through the chain. The output's trust = min(source trust, input trust):
-        # an untrusted web/third-party source taints its output, and any tool
-        # that consumed untrusted input passes the taint on (laundering survives
-        # an intermediate hop). Flag-gated; best-effort (never affects the call).
+        # Record the call's output taint so it propagates through the chain.
+        # The output's trust = min(source trust, input trust): an untrusted
+        # web/third-party source taints its output, and any tool that consumed
+        # untrusted input passes the taint on (laundering survives an
+        # intermediate hop). Flag-gated; best-effort (never affects the call).
         if user_id and result is not None and result.error is None:
             try:
                 from orchestrator import taint as _taint
@@ -6371,9 +6370,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 return (msg.content or "") if msg else None
 
             from webrender import allowed_primitive_types
-            # Feature 039 (C-U2): the current persisted arrangement for this
-            # layout_key (if any) lets the designer avoid re-arranging it for a
-            # marginal gain.
+            # The current persisted arrangement for this layout_key (if any)
+            # lets the designer avoid re-arranging it for a marginal gain.
             _current_layout = None
             try:
                 for _lay in self.workspace.live_layouts(chat_id, user_id):
@@ -6643,12 +6641,13 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
     async def _readapt_targeted(self, websocket, chat_id, old_profile, new_profile,
                                 components: List[Dict]) -> bool:
-        """033 C-D7: on a viewport/orientation change, re-render each canvas
-        component under the old and new profile and push a ``ui_upsert`` for ONLY
-        the ones whose fragment actually changed — to THIS socket alone (other
+        """On a viewport/orientation change, re-render each canvas component
+        under the old and new profile and push a ``ui_upsert`` for ONLY the
+        ones whose fragment actually changed — to THIS socket alone (other
         devices on the chat didn't change). Returns True when handled (even if
-        nothing changed — that means the canvas looks identical, no work needed),
-        False on any error so the caller falls back to a full re-render."""
+        nothing changed — that means the canvas looks identical, no work
+        needed), False on any error so the caller falls back to a full
+        re-render."""
         try:
             from shared.protocol import UIUpsert
             from webrender import render_component_fragment

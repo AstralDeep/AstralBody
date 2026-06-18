@@ -1,20 +1,20 @@
-"""Live viewport/orientation re-adaptation — 033 Wave-3 (C-D7).
+"""Live viewport/orientation re-adaptation.
 
 When a client reports a viewport/orientation change, ROTE already re-derives the
 device profile and the ``update_device`` handler re-adapts the current canvas.
-Today that re-adaptation re-renders the WHOLE canvas (a full ``ui_render``),
-which flashes every component and loses scroll position even when only a couple
+A full re-adaptation re-renders the WHOLE canvas (a full ``ui_render``), which
+flashes every component and loses scroll position even when only a couple
 actually adapt differently.
 
-This computes a **targeted update**: render each canvas component under the old
-and the new profile and emit a ``ui_upsert`` op for ONLY the components whose
+This computes a targeted update: render each canvas component under the old and
+the new profile and emit a ``ui_upsert`` op for ONLY the components whose
 rendered fragment actually changed. A rotate that bumps ``max_grid_columns``
 re-pushes the grids; the untouched text/cards stay put.
 
 Pure + deterministic — the diff takes two render callables so it is testable
-without the renderer. **No new dependency.** Flag ``FF_LIVE_VIEWPORT`` (default
-OFF) gates the dispatch hook; off keeps today's full re-render. Additive +
-fail-open: any error in the diff falls back to the full render.
+without the renderer. Flag ``FF_LIVE_VIEWPORT`` (default OFF) gates the dispatch
+hook; off keeps the full re-render. Additive + fail-open: any error in the diff
+falls back to the full render.
 """
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ RenderFn = Callable[[Dict[str, Any]], Tuple[Any, Any]]
 
 
 def viewport_enabled() -> bool:
-    """FF_LIVE_VIEWPORT feature flag (default OFF; feature 033 C-D7)."""
+    """FF_LIVE_VIEWPORT feature flag (default OFF)."""
     return os.getenv("FF_LIVE_VIEWPORT", "false").strip().lower() in ("1", "true", "yes", "on")
 
 

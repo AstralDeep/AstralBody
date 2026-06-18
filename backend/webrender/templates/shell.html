@@ -32,9 +32,9 @@
 </head>
 <body class="bg-astral-bg text-astral-text">
   <div class="flex flex-col h-screen">
-    <!-- Feature 027: server-rendered top bar + static settings menu
-         (role-gated at GET / time; see webrender/chrome/topbar.py).
-         Feature 029: glass/border styling moved into astral.css (#astral-topbar). -->
+    <!-- Server-rendered top bar + static settings menu (role-gated at GET /
+         time; see webrender/chrome/topbar.py). Glass/border styling lives in
+         astral.css (#astral-topbar). -->
     <header id="astral-topbar" class="flex items-center">%%ASTRAL_TOPBAR%%</header>
     <main class="flex flex-1 min-h-0">
       <!-- Canvas: server-rendered UI (astralprims primitives). The initial
@@ -43,17 +43,17 @@
       <section id="astral-canvas" data-tour-target="canvas.workspace" class="astral-canvas-panel flex-1 overflow-y-auto p-4 space-y-3"></section>
       <!-- Chat panel: raised glass rail (astral.css owns surface/border) -->
       <aside class="astral-chat-panel w-[380px] max-w-[40%] flex flex-col min-h-0">
-        <!-- Feature 037: server-driven chat-history surface (skeleton → list), ROTE-adapted -->
+        <!-- Server-driven chat-history surface (skeleton → list), ROTE-adapted -->
         <div id="astral-history" class="astral-history-region shrink-0 overflow-y-auto max-h-44 border-b border-white/10 px-3 py-2 space-y-1"></div>
         <div id="astral-chat" class="flex-1 overflow-y-auto p-3 space-y-2"></div>
         <form id="astral-form" class="astral-chat-form p-3 flex flex-col gap-2">
-          <!-- Feature 031: attachment chips for files staged on the next turn -->
+          <!-- Attachment chips for files staged on the next turn -->
           <div id="astral-attachments" class="astral-attachments hidden flex flex-wrap gap-1.5"></div>
           <div class="flex gap-2 items-center">
-            <!-- Feature 031: attachment (paperclip) control. The hidden input
-                 carries class astral-file-upload so the existing client.js
-                 change-listener handles selection; accept list is injected
-                 server-side from the content_type allow-list (single source). -->
+            <!-- Attachment (paperclip) control. The hidden input carries class
+                 astral-file-upload so the client.js change-listener handles
+                 selection; accept list is injected server-side from the
+                 content_type allow-list (single source). -->
             <button type="button" id="astral-attach-btn" class="astral-attach-btn shrink-0" title="Attach files" aria-label="Attach files" data-tour-target="chat.attach">
               <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
             </button>
@@ -66,7 +66,7 @@
       </aside>
     </main>
   </div>
-  <!-- Feature 027: chrome modal root (settings surfaces render here via chrome_render) -->
+  <!-- Chrome modal root (settings surfaces render here via chrome_render) -->
   <div id="astral-modal"></div>
   <script src="/static/client.js"></script>
 </body>

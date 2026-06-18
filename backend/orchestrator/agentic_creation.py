@@ -1,14 +1,12 @@
-"""Feature 027 — agentic agent/tool creation from chat.
+"""Agentic agent/tool creation from chat.
 
 Implements the orchestrator meta-tools (``create_capability``,
-``extend_agent``) per contracts/agentic-creation.md. When the chat LLM
-determines no offered tool can serve the user's request, it calls a
-meta-tool; the handler auto-creates a draft through the existing 012
-lifecycle, self-tests it, and returns an in-chat card with
-approve / refine / discard decisions. Nothing reaches the live fleet
-without explicit user approval (spec FR-002); live-agent revisions
-re-pass the security gate before a backed-up, rollback-safe swap
-(FR-006).
+``extend_agent``). When the chat LLM determines no offered tool can serve the
+user's request, it calls a meta-tool; the handler auto-creates a draft through
+the existing lifecycle, self-tests it, and returns an in-chat card with
+approve / refine / discard decisions. Nothing reaches the live fleet without
+explicit user approval; live-agent revisions re-pass the security gate before
+a backed-up, rollback-safe swap.
 
 Audit: one correlation_id per capability gap — the draft id (a uuid4)
 — pairing ``lifecycle.gap_detected`` with the terminal lifecycle events
@@ -31,8 +29,8 @@ logger = logging.getLogger("Orchestrator.AgenticCreation")
 
 META_AGENT_ID = "__orchestrator__"
 
-SELF_TEST_TIMEOUT_S = 120          # A11 bound per attempt
-SELF_TEST_MAX_AUTO_REFINES = 1     # A11 bound on auto-refine retries
+SELF_TEST_TIMEOUT_S = 120          # bound per attempt
+SELF_TEST_MAX_AUTO_REFINES = 1     # bound on auto-refine retries
 
 SYSTEM_PROMPT_ADDENDUM = """
 CAPABILITY GAPS (create_capability / extend_agent):
@@ -113,18 +111,18 @@ def meta_tool_definitions() -> List[Dict[str, Any]]:
 
 
 def should_inject(draft_agent_id: Optional[str]) -> bool:
-    """Meta-tools are offered on normal chat turns only (D1).
+    """Meta-tools are offered on normal chat turns only.
 
     Excluded: draft-test sessions (the draft's own tools are under test) and
     turns where the feature flag is off. Text-only turns are excluded at the
-    call site (feature 008 semantics preserved).
+    call site.
     """
     return flags.is_enabled("agentic_creation") and not draft_agent_id
 
 
 def gap_fingerprint(agent_name: str, tools_spec: Optional[List[Dict]] = None,
                     extra: str = "") -> str:
-    """Stable fingerprint of a requested capability (FR-007 dedup key)."""
+    """Stable fingerprint of a requested capability (dedup key)."""
     names = sorted((t.get("name") or "").strip().lower() for t in (tools_spec or []))
     basis = "|".join([(agent_name or "").strip().lower(), *names, (extra or "").strip().lower()])
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:32]
@@ -220,12 +218,12 @@ async def _self_test_draft(orch, draft: Dict[str, Any], user_request: str,
 
     Executes on a ``VirtualWebSocket`` (audit-attributable, no real socket)
     in an isolated chat so the user's conversation is not polluted. Bounded
-    by ``SELF_TEST_TIMEOUT_S`` (A11).
+    by ``SELF_TEST_TIMEOUT_S``.
 
-    Feature 031: ``attachments`` lets an auto-created *parser* draft self-test
-    against the exact uploaded file that triggered its creation — the structured
-    attachment block is injected so the draft's ``parse_<ext>`` tool runs on the
-    real file.
+    ``attachments`` lets an auto-created *parser* draft self-test against the
+    exact uploaded file that triggered its creation — the structured
+    attachment block is injected so the draft's ``parse_<ext>`` tool runs on
+    the real file.
     """
     from orchestrator.async_tasks import BackgroundTask, VirtualWebSocket
 
@@ -264,9 +262,9 @@ def _redteam_allowed_scopes(draft: Dict[str, Any]) -> List[str]:
 
 
 async def _run_redteam_gate(orch, draft: Dict[str, Any], user_id: str):
-    """033 C-S7: drive the draft through the seeded adversarial scenarios and
-    return a RedTeamVerdict. Returns None on a harness/infrastructure error so
-    the caller proceeds to the standard gate (fail-open on errors; the verdict
+    """Drive the draft through the seeded adversarial scenarios and return a
+    RedTeamVerdict. Returns None on a harness/infrastructure error so the
+    caller proceeds to the standard gate (fail-open on errors; the verdict
     itself fails CLOSED on a real violation)."""
     try:
         from orchestrator import redteam
@@ -312,7 +310,7 @@ def _decision_buttons(draft_id: str, revision: bool = False) -> List[Dict[str, A
 
 def creation_card(draft: Dict[str, Any], self_test: Dict[str, Any],
                   revision: bool = False, note: str = "") -> Dict[str, Any]:
-    """The approve/refine/discard card presented in chat (US1 scenarios 2-3)."""
+    """The approve/refine/discard card presented in chat."""
     status = self_test.get("status", "unknown")
     verdict = {"passed": "✓ Self-test passed", "failed": "✗ Self-test failed",
                "timeout": "✗ Self-test timed out"}.get(status, "Self-test pending")
@@ -326,10 +324,10 @@ def creation_card(draft: Dict[str, Any], self_test: Dict[str, Any],
         lines.append(Text(content=note, variant="caption").to_dict())
     what = "Draft revision" if revision else "Draft agent"
     return Card(
-        # Stable author identity (030): every state of this draft's card
-        # carries the same id, so decision outcomes REPLACE the actionable
-        # card on the canvas instead of leaving stale Approve/Refine/Discard
-        # buttons clickable after a decision was already made.
+        # Stable author identity: every state of this draft's card carries the
+        # same id, so decision outcomes REPLACE the actionable card on the
+        # canvas instead of leaving stale Approve/Refine/Discard buttons
+        # clickable after a decision was already made.
         id=f"draft-card-{draft['id']}",
         title=f"{what}: {draft.get('agent_name', 'unnamed')}",
         content=lines + _decision_buttons(draft["id"], revision=revision),
@@ -383,7 +381,7 @@ async def _create_capability(orch, args: Dict[str, Any], *, user_id: str,
     fingerprint = gap_fingerprint(agent_name, tools_spec)
     existing = orch.history.db.find_gap_draft(user_id, chat_id or "", fingerprint)
     if existing:
-        # FR-007: route repeat requests to the staged draft, never duplicate.
+        # Route repeat requests to the staged draft, never duplicate.
         self_test = json.loads(existing.get("self_test") or "{}")
         card = creation_card(existing, self_test,
                              note="This capability is already staged — decide on the existing draft.")
@@ -409,7 +407,7 @@ async def _create_capability(orch, args: Dict[str, Any], *, user_id: str,
                  correlation_id=draft_id, outcome="in_progress", chat_id=chat_id,
                  inputs_meta={"gap_fingerprint": fingerprint, "draft_id": draft_id})
 
-    # Generate + start + self-test (≤1 auto-refine on failure — A11).
+    # Generate + start + self-test (≤1 auto-refine on failure).
     draft = await lifecycle.generate_code(draft_id, websocket=websocket)
     if draft.get("status") in ("error", "rejected"):
         await _audit(user_id, "lifecycle.auto_created", "Generation failed",
@@ -481,7 +479,7 @@ async def _extend_agent(orch, args: Dict[str, Any], *, user_id: str,
         return MCPResponse(error={"message": "extend_agent needs agent_id and instruction",
                                   "retryable": False})
 
-    # Ownership gate (FR-010): only the owner may stage a revision.
+    # Ownership gate: only the owner may stage a revision.
     db = orch.history.db
     ownership = db.get_agent_ownership(agent_id)
     user = db.get_user(user_id) or {}
@@ -588,7 +586,7 @@ async def _extend_agent(orch, args: Dict[str, Any], *, user_id: str,
 
 
 async def apply_revision(orch, rev: Dict[str, Any], user_id: str) -> Dict[str, Any]:
-    """Gate + swap a staged revision into its live agent (FR-006).
+    """Gate + swap a staged revision into its live agent.
 
     The live agent's code changes only inside this function, and every
     failure path restores the backup before restart — a failed gate or
@@ -692,7 +690,7 @@ def _owned_draft(orch, user_id: str, payload: Dict[str, Any]) -> Optional[Dict[s
 
 def _decidable_draft(orch, user_id: str, roles, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Draft the caller may refine/discard: the owner, OR an admin acting on an
-    auto-created attachment parser (origin ``auto_attachment``, feature 031)."""
+    auto-created attachment parser (origin ``auto_attachment``)."""
     draft_id = str(payload.get("draft_id") or "")
     draft = orch.history.db.get_draft_agent(draft_id) if draft_id else None
     if not draft:
@@ -710,7 +708,7 @@ async def _send_chat_card(orch, websocket, component: Dict[str, Any]):
 
 async def _replace_card_state(orch, websocket, user_id: str, draft_id: str,
                               card: Dict[str, Any]) -> None:
-    """Swap the canvas decision card for its post-decision state (030).
+    """Swap the canvas decision card for its post-decision state.
 
     The creation card persists in the chat's workspace under the stable
     author id ``draft-card-<draft_id>``; upserting a card with the same id
@@ -738,9 +736,9 @@ def _terminal_card(draft_id: str, title: str, message: str) -> Dict[str, Any]:
 
 
 async def _promote_parser_global(orch, draft, agent_id, *, approved_by):
-    """Feature 031 (FR-017): promote an approved attachment parser to a global,
-    public capability and mark the registry live so every user's future uploads
-    of that type resolve to ``covered``. Best-effort; never raises.
+    """Promote an approved attachment parser to a global, public capability and
+    mark the registry live so every user's future uploads of that type resolve
+    to ``covered``. Best-effort; never raises.
     """
     try:
         from orchestrator import attachment_autoparse
@@ -773,10 +771,10 @@ async def _promote_parser_global(orch, draft, agent_id, *, approved_by):
         except Exception:
             logger.debug("autoparse: scope grant failed", exc_info=True)
 
-        # FR-017 / 031 T031: the parser is live and the uploader is scoped, so
-        # re-run their original request and deliver the parsed result into the
-        # original chat. If the original turn can't be recovered/replayed, fall
-        # back to the notify ("ask again to read your file").
+        # The parser is live and the uploader is scoped, so re-run their
+        # original request and deliver the parsed result into the original
+        # chat. If the original turn can't be recovered/replayed, fall back to
+        # the notify ("ask again to read your file").
         if requested_by:
             replayed = await attachment_autoparse.auto_continue_after_go_live(
                 orch,
@@ -801,12 +799,12 @@ async def _promote_parser_global(orch, draft, agent_id, *, approved_by):
 
 
 async def _h_draft_approve(orch, websocket, user_id, roles, payload):
-    """Approve a draft: existing security gate → live (US1 scenario 4).
+    """Approve a draft: existing security gate → live.
 
-    Feature 031: auto-created attachment-parser drafts (origin
-    ``auto_attachment``) require the **admin** role to approve (FR-015) and are
-    promoted **globally** (public, available to all users — FR-017), not into
-    the approver's private fleet. Non-admins are refused and audited.
+    Auto-created attachment-parser drafts (origin ``auto_attachment``) require
+    the **admin** role to approve and are promoted **globally** (public,
+    available to all users), not into the approver's private fleet. Non-admins
+    are refused and audited.
     """
     draft_id = str(payload.get("draft_id") or "")
     raw_draft = orch.history.db.get_draft_agent(draft_id) if draft_id else None
@@ -828,11 +826,11 @@ async def _h_draft_approve(orch, websocket, user_id, roles, payload):
             await _send_chat_card(orch, websocket, _error_card("Draft not found (it may have been discarded)."))
             return None
 
-    # 033 Wave-4 (C-S7): adversarial red-team gate before promotion. Drive the
-    # draft through the seeded adversarial scenarios; if it makes an out-of-scope
-    # tool call, attempts egress, or emits PHI on any of them, BLOCK promotion
-    # (fail-closed on a real violation). Flag-gated (default OFF); a harness error
-    # returns None and falls through to the standard security gate.
+    # Adversarial red-team gate before promotion. Drive the draft through the
+    # seeded adversarial scenarios; if it makes an out-of-scope tool call,
+    # attempts egress, or emits PHI on any of them, BLOCK promotion
+    # (fail-closed on a real violation). Flag-gated (default OFF); a harness
+    # error returns None and falls through to the standard security gate.
     from orchestrator import redteam
     if redteam.redteam_enabled():
         rt = await _run_redteam_gate(orch, draft, user_id)
@@ -890,7 +888,7 @@ async def _h_draft_approve(orch, websocket, user_id, roles, payload):
 
 
 async def _h_draft_refine(orch, websocket, user_id, roles, payload):
-    """Refine a draft conversationally (US1 scenario 5)."""
+    """Refine a draft conversationally."""
     draft = _decidable_draft(orch, user_id, roles, payload)
     if draft is None:
         await _send_chat_card(orch, websocket, _error_card("Draft not found (it may have been discarded)."))
@@ -922,13 +920,13 @@ async def _h_draft_refine(orch, websocket, user_id, roles, payload):
 
 
 async def _h_draft_discard(orch, websocket, user_id, roles, payload):
-    """Decline/discard a draft (FR-002: declined drafts are removed)."""
+    """Decline/discard a draft (declined drafts are removed)."""
     draft = _decidable_draft(orch, user_id, roles, payload)
     if draft is None:
         await _send_chat_card(orch, websocket, _error_card("Draft not found (already discarded?)."))
         return None
-    # Feature 031: if this is an auto-created parser, mark its registry row
-    # discarded so the format can be re-attempted by a later upload.
+    # If this is an auto-created parser, mark its registry row discarded so the
+    # format can be re-attempted by a later upload.
     if draft.get("origin") == "auto_attachment":
         try:
             from orchestrator.attachments.parser_repo import (

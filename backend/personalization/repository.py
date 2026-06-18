@@ -105,8 +105,8 @@ class PersonalizationRepository:
     # ── Durable memory ───────────────────────────────────────────────────
 
     def list_memory(self, user_id: str) -> List[Dict[str, Any]]:
-        # C-M1: superseded (soft-deleted / replaced) memories are excluded from
-        # all recall — reconciliation keeps the live set clean.
+        # Superseded (soft-deleted / replaced) memories are excluded from all
+        # recall — reconciliation keeps the live set clean.
         rows = self.db.fetch_all(
             """SELECT id, user_id, category, value, source, salience, created_at,
                       updated_at, keywords, signature, valid_from, valid_to,
@@ -117,7 +117,7 @@ class PersonalizationRepository:
         )
         return [dict(r) for r in rows]
 
-    # ── Living memory seams (C-M6 temporal / C-M7 recall / C-M8 persona) ──
+    # ── Living memory seams (temporal / recall / persona) ──
 
     def set_validity(self, user_id: str, mem_id: str, *, valid_from=None,
                      valid_to=None, ingested_at=None) -> bool:
@@ -171,7 +171,7 @@ class PersonalizationRepository:
             raise ValueError(f"invalid memory source: {source}")
         mem_id = str(uuid.uuid4())
         now = _now_ms()
-        # C-S9: HMAC-sign the row's identifying fields (None when no key set).
+        # HMAC-sign the row's identifying fields (None when no key set).
         from .memory_guard import sign_fields
         signature = sign_fields(mem_id, user_id, category, value, source)
         self.db.execute(
@@ -210,10 +210,10 @@ class PersonalizationRepository:
 
     def supersede_memory(self, user_id: str, old_id: str,
                          new_id: Optional[str] = None) -> bool:
-        """C-M1: soft-delete a memory (reconcile UPDATE/DELETE). Sets
-        ``superseded_at`` so the row drops out of recall; ``new_id`` optionally
-        points at the replacement memory (UPDATE) — left NULL for a plain
-        removal (DELETE). Only affects a currently-live row (idempotent)."""
+        """Soft-delete a memory (reconcile UPDATE/DELETE). Sets ``superseded_at``
+        so the row drops out of recall; ``new_id`` optionally points at the
+        replacement memory (UPDATE) — left NULL for a plain removal (DELETE).
+        Only affects a currently-live row (idempotent)."""
         now = _now_ms()
         cur = self.db.execute(
             """UPDATE memory_item SET superseded_by = ?, superseded_at = ?, updated_at = ?
@@ -222,7 +222,7 @@ class PersonalizationRepository:
         )
         return getattr(cur, "rowcount", 0) > 0
 
-    # ── Linked-note graph (C-M2) ─────────────────────────────────────────
+    # ── Linked-note graph ──
 
     def add_link(self, user_id: str, a_id: str, b_id: str) -> bool:
         """Create an undirected link between two memories (stored as both
@@ -256,7 +256,7 @@ class PersonalizationRepository:
 
     def list_links(self, user_id: str) -> List[Dict[str, str]]:
         """All live directed link edges for a user (both directions of each
-        undirected link), filtered to live endpoints. Powers the C-M3
+        undirected link), filtered to live endpoints. Powers the
         Personalized-PageRank graph in one query."""
         rows = self.db.fetch_all(
             """SELECT l.memory_id, l.linked_id FROM memory_link l

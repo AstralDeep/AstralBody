@@ -1,8 +1,7 @@
-/* Feature 026 — Astral theme (ported from frontend/src/index.css, midnight preset).
+/* Astral theme (midnight preset).
    Tailwind utilities are provided by the self-hosted Play CDN (vendor/tailwind.js);
    this file carries the CSS-var palette + custom utilities the renderer emits.
 
-   Feature 029 (T035/T036 — FR-031/FR-032): design-token system + visual refresh.
    No build step, no new framework — hand-written CSS only. Every behavioral
    class/attribute the client queries (.astral-action, .astral-pp-*, .astral-page-*,
    .astral-pagination, .astral-chart, .astral-theme-apply, .astral-file-upload,
@@ -11,14 +10,12 @@
    prefers-reduced-motion: no-preference. */
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
-/* =========================================================================
-   1. Design tokens (FR-031)
+/* 1. Design tokens
    The --astral-* RGB channel triplets are the LIVE theme palette: client.js
    theme_apply mutates them at runtime and the vendored Tailwind runtime maps
    them into utilities, so they keep their channel form and midnight defaults
    (pinned by the Theme chrome surface). Every token below derives from them
-   so user themes restyle the whole system coherently.
-   ========================================================================= */
+   so user themes restyle the whole system coherently. */
 :root {
   /* live palette — deep-space navy with an indigo→violet accent (midnight) */
   --astral-bg:        15 18 33;     /* #0F1221 */
@@ -90,9 +87,7 @@
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-/* =========================================================================
-   2. Base — page floor, typography, selection, focus, scrollbars
-   ========================================================================= */
+/* 2. Base — page floor, typography, selection, focus, scrollbars */
 html, body { height: 100%; }
 body {
   margin: 0;
@@ -137,9 +132,7 @@ body {
 }
 .scrollbar-thin { scrollbar-width: thin; }
 
-/* =========================================================================
-   3. Shell — top bar glass, canvas vs chat panel distinction, composer
-   ========================================================================= */
+/* 3. Shell — top bar glass, canvas vs chat panel distinction, composer */
 #astral-topbar {
   position: relative;
   z-index: 40;
@@ -176,10 +169,8 @@ body {
   background: rgb(var(--astral-bg) / 0.45);
 }
 
-/* =========================================================================
-   4. Shared field + button polish (renderer adds .astral-field / .astral-btn
-      ALONGSIDE its existing classes — behavior hooks unchanged)
-   ========================================================================= */
+/* 4. Shared field + button polish (renderer adds .astral-field / .astral-btn
+      ALONGSIDE its existing classes — behavior hooks unchanged) */
 .astral-field { border-radius: var(--radius-sm); }
 .astral-field:focus {
   outline: none;
@@ -208,10 +199,8 @@ body {
 .astral-btn-secondary { box-shadow: var(--shadow-1); }
 .astral-btn-ghost:hover { text-decoration: none; }
 
-/* =========================================================================
-   5. Primitive component polish (T036) — semantic classes added by
-      renderer.py alongside the existing utility classes
-   ========================================================================= */
+/* 5. Primitive component polish — semantic classes added by renderer.py
+      alongside the existing utility classes */
 
 /* cards: layered surface, soft border, hover elevation */
 .astral-card {
@@ -421,9 +410,7 @@ body {
 .astral-star { color: rgb(var(--astral-text) / 0.18); }
 .astral-star--filled { color: rgb(var(--color-warning)); text-shadow: 0 0 8px rgb(var(--color-warning) / 0.4); }
 
-/* =========================================================================
-   6. Chrome polish (feature 027/028 markup, styled here — token-matched)
-   ========================================================================= */
+/* 6. Chrome polish — token-matched */
 #astral-modal .astral-modal-backdrop {
   background: rgb(0 0 0 / 0.55);
 }
@@ -436,13 +423,10 @@ body {
 }
 .astral-chrome-notice, .astral-chrome-error { box-shadow: var(--shadow-1); }
 
-/* =========================================================================
-   7. Motion (FR-031) — component arrival/update transitions. Everything in
-      this block is gated on prefers-reduced-motion: no-preference; morph
-      replacements (ui_upsert replaceWith) are fresh insertions, so the
-      arrival animation doubles as the update transition with zero client.js
-      changes.
-   ========================================================================= */
+/* 7. Motion — component arrival/update transitions. Everything in this block
+      is gated on prefers-reduced-motion: no-preference; morph replacements
+      (ui_upsert replaceWith) are fresh insertions, so the arrival animation
+      doubles as the update transition with zero client.js changes. */
 @keyframes astral-rise {
   from { opacity: 0; transform: translateY(8px); }
   to   { opacity: 1; transform: translateY(0); }
@@ -490,9 +474,7 @@ body {
   }
 }
 
-/* =========================================================================
-   8. Pre-029 rules (kept verbatim where still load-bearing)
-   ========================================================================= */
+/* 8. Glass surfaces + misc utilities */
 .glass {
   background: rgb(var(--astral-surface) / 0.60);
   backdrop-filter: blur(12px);
@@ -519,7 +501,7 @@ body {
 details > summary { list-style: none; }
 details > summary::-webkit-details-marker { display: none; }
 
-/* Feature 027 — toggle switches (Agents & permissions sections) */
+/* toggle switches (Agents & permissions sections) */
 .astral-switch { position: relative; display: inline-flex; align-items: center; cursor: pointer; flex-shrink: 0; }
 .astral-switch input {
   position: absolute; inset: 0; width: 100%; height: 100%;
@@ -553,7 +535,7 @@ details > summary::-webkit-details-marker { display: none; }
 .astral-switch input:disabled + .astral-switch-track { opacity: 0.4; }
 .astral-switch:has(input:disabled) { cursor: not-allowed; }
 
-/* Feature 027 — tour spotlight + chrome modal helpers */
+/* tour spotlight + chrome modal helpers */
 .astral-tour-highlight {
   outline: 2px solid rgb(var(--astral-primary));
   outline-offset: 3px;
@@ -564,9 +546,9 @@ details > summary::-webkit-details-marker { display: none; }
 }
 #astral-tour-card { transform: translateX(-50%); }
 
-/* Feature 030 — accessibility: visually-hidden text for screen readers
-   (standard clip-rect pattern). Used for chart data fallbacks and any
-   server-rendered sr-only annotations. */
+/* accessibility: visually-hidden text for screen readers (standard clip-rect
+   pattern). Used for chart data fallbacks and any server-rendered sr-only
+   annotations. */
 .astral-sr-only {
   position: absolute;
   width: 1px;
@@ -579,7 +561,7 @@ details > summary::-webkit-details-marker { display: none; }
   border: 0;
 }
 
-/* Feature 031 — attachment (paperclip) control + chips in the chat input.
+/* attachment (paperclip) control + chips in the chat input.
    Server-rendered shell markup; styled with the runtime astral-* tokens. */
 .astral-attach-btn {
   display: inline-flex;
@@ -645,7 +627,7 @@ details > summary::-webkit-details-marker { display: none; }
 }
 .astral-chip-remove:hover { color: rgb(var(--astral-text)); background: rgb(255 255 255 / 0.12); }
 
-/* Feature 031 — paperclip popover menu (Upload / Choose existing). */
+/* paperclip popover menu (Upload / Choose existing). */
 .astral-attach-menu {
   position: absolute;
   bottom: 56px;
@@ -672,7 +654,7 @@ details > summary::-webkit-details-marker { display: none; }
 }
 .astral-attach-menu-item:hover { background: rgb(255 255 255 / 0.08); }
 
-/* Feature 037 — server-driven loading skeleton (cross-device shimmer) */
+/* server-driven loading skeleton (cross-device shimmer) */
 @keyframes astral-shimmer {
   0% { background-position: 200% 0; }
   100% { background-position: -200% 0; }
@@ -689,11 +671,9 @@ details > summary::-webkit-details-marker { display: none; }
   .astral-skeleton-line { animation: none; }
 }
 
-/* =========================================================================
-   Feature 040 — recent-chats surface (chat_history primitive)
+/* recent-chats surface (chat_history primitive)
    Scannable conversation rows: agent glyph + title + preview + relative time
-   + saved marker. Styles only; the row's .astral-action contract is untouched.
-   ========================================================================= */
+   + saved marker. Styles only; the row's .astral-action contract is untouched. */
 .astral-history-head {
   display: flex;
   align-items: center;

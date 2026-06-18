@@ -1,4 +1,4 @@
-"""Task-model-first generative UI — 033 Wave-1 (C-N1 / F1+F2).
+"""Task-model-first generative UI.
 
 Instead of free-forming a layout, the model first describes the turn as a typed
 **task model** — a task plus entities whose attributes are typed (SVAL / DICT /
@@ -13,8 +13,6 @@ This module is the pure, deterministic heart: the rule table
 (:func:`derive_layout`), the schema parser, and the prompt builder for the
 optional LLM schema pre-pass. Integration lives in ``ui_designer`` behind
 ``FF_UI_DESIGNER_TASKMODEL`` and is strictly fail-open.
-
-No new dependency — pure prompt + dict rules within the SDUI palette.
 """
 from __future__ import annotations
 
@@ -22,8 +20,7 @@ import json
 import os
 from typing import Any, Dict, List, Optional
 
-#: Typed attributes the task model can carry (A-N-PAGE / Jin et al. taxonomy,
-#: mapped onto AstralBody's needs).
+#: Typed attributes the task model can carry, mapped onto AstralBody's needs.
 ATTR_TYPES = ("SVAL", "DICT", "ARRY", "PNTR", "TEMPORAL")
 
 #: Roles that refine how a scalar (SVAL) or array (ARRY) is rendered.
@@ -36,7 +33,7 @@ _TIMELINE_ROLES = frozenset({"timeline", "events", "history", "schedule", "log"}
 
 def attr_to_primitive(attr_type: str, *, role: Optional[str] = None,
                       cardinality: str = "one") -> str:
-    """F2 rule table: map a typed, role-annotated attribute to ONE astralprims
+    """Rule table: map a typed, role-annotated attribute to ONE astralprims
     primitive type. Deterministic and total — an unknown type falls back to
     ``text``.
 
@@ -85,7 +82,7 @@ def _attr_spec(attr: Dict[str, Any]) -> Optional[Dict[str, str]]:
 
 
 def derive_layout(schema: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """F1 deterministic derivation: a typed task schema → a layout SKELETON
+    """Deterministic derivation: a typed task schema → a layout SKELETON
     (astralprims structural dicts; no data — the semantic spine).
 
     ``schema = {"task": str, "entities": [{"name": str, "attributes":
@@ -204,8 +201,8 @@ def build_schema_messages(user_request: str,
 
 
 def taskmodel_enabled() -> bool:
-    """FF_UI_DESIGNER_TASKMODEL (default OFF; feature 033 C-N1). When on, the
-    designer runs a task-schema pre-pass and derives a deterministic structural
-    prior. Default OFF because it adds an LLM round-trip; the deterministic
-    engine is always available. Fail-open: any error → no prior."""
+    """FF_UI_DESIGNER_TASKMODEL (default OFF). When on, the designer runs a
+    task-schema pre-pass and derives a deterministic structural prior. Default
+    OFF because it adds an LLM round-trip; the deterministic engine is always
+    available. Fail-open: any error → no prior."""
     return os.getenv("FF_UI_DESIGNER_TASKMODEL", "false").strip().lower() in ("1", "true", "yes", "on")

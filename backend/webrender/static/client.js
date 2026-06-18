@@ -1,9 +1,9 @@
-/* Feature 026 — thin server-driven UI client.
+/* Thin server-driven UI client.
  * The orchestrator renders astralprims primitives to HTML (ROTE-adapted) and
- * pushes it over the existing WebSocket protocol. This client inserts the
+ * pushes it over the WebSocket protocol. This client inserts the
  * server-rendered `html`, merges streamed chunks by stream_id, initializes
  * Plotly charts, and posts user actions back as {type:"ui_event", action, payload}.
- * Mirrors frontend/src/hooks/useWebSocket.ts behavior. No build step. */
+ * No build step. */
 (function () {
   "use strict";
   if (window.self !== window.top) return; // don't connect inside auth-renew iframes
@@ -11,18 +11,18 @@
   var WS_URL = (location.protocol === "https:" ? "wss:" : "ws:") + "//" + location.host + "/ws";
   var API_URL = location.origin;
   var TOKEN_KEY = "astralbody.token";
-  // Feature 028: the shell-injected token bootstraps the first connect; every
-  // reconnect re-fetches /auth/session (which silently refreshes server-side)
-  // instead of reusing a stale token. The 'dev-token' literal fallback is
-  // gone — mock-auth dev still works because /auth/session answers for it.
+  // The shell-injected token bootstraps the first connect; every reconnect
+  // re-fetches /auth/session (which silently refreshes server-side) instead of
+  // reusing a stale token. Mock-auth dev works because /auth/session answers
+  // for it.
   var token = sessionStorage.getItem(TOKEN_KEY) || window.__ASTRAL_TOKEN__ || "";
 
   var ws = null, attempts = 0, activeChatId = null, streamSeq = {}, firstConnect = true;
-  var timelineMode = false; // Feature 028 — read-only workspace history view
+  var timelineMode = false; // read-only workspace history view
   var authRetried = false;  // one silent auth_required recovery per connection
-  // Feature 028 (FR-011): the server says whether this page load resumes an
-  // existing session (false only right after interactive sign-in). Echoed
-  // into the first register_ui; reconnects within a page are always resumes.
+  // The server says whether this page load resumes an existing session (false
+  // only right after interactive sign-in). Echoed into the first register_ui;
+  // reconnects within a page are always resumes.
   var serverResumed = (window.__ASTRAL_RESUMED__ !== false);
 
   /** Redirect to the server-side Keycloak login, preserving the destination. */
@@ -166,7 +166,7 @@
     chat.scrollTop = chat.scrollHeight;
   }
 
-  // ---- Feature 028: workspace upsert morph (contracts/ws-workspace-protocol.md) ----
+  // ---- workspace upsert morph ----
   // Each op targets [data-component-id]: replace the node in place when it
   // exists (no flicker, neighbors untouched), append when new, remove on op
   // 'remove'. Side effects (Plotly/theme) re-run on inserted subtrees only.
@@ -227,24 +227,24 @@
     switch (data.type) {
       case "ui_render":
         if (data.target === "chat") appendChatBubble("assistant", data.html);
-        else if (data.target === "history") { var hr = document.getElementById("astral-history"); if (hr) setHTML(hr, data.html); } // Feature 037
+        else if (data.target === "history") { var hr = document.getElementById("astral-history"); if (hr) setHTML(hr, data.html); }
         else setHTML(canvas, data.html);
         break;
-      case "ui_upsert": applyUpsert(data); break; // Feature 028 — in-place workspace updates
+      case "ui_upsert": applyUpsert(data); break; // in-place workspace updates
       case "ui_update": setHTML(canvas, data.html); break;
       case "ui_append": appendHTML(canvas, data.html); break;
-      case "workspace_timeline_mode": // Feature 028 — read-only history view
+      case "workspace_timeline_mode": // read-only history view
         timelineMode = !!data.active;
         setStatus(timelineMode ? "Viewing workspace history (read-only)" : "");
         break;
-      case "chat_deleted": // Feature 028 — chat removed (possibly from another tab)
+      case "chat_deleted": // chat removed (possibly from another tab)
         if (data.chat_id && data.chat_id === activeChatId) {
           activeChatId = null; timelineMode = false;
           setHTML(canvas, "");
           setStatus("This chat was deleted.");
         }
         break;
-      case "auth_required": // Feature 028 — recoverable WS auth failure (D4)
+      case "auth_required": // recoverable WS auth failure
         if (!authRetried) {
           authRetried = true;
           refreshToken(true, function (ok) {
@@ -263,7 +263,7 @@
         if (data.terminal) delete streamSeq[data.stream_id];
         break;
       }
-      case "chrome_render": // Feature 027: server-rendered chrome regions
+      case "chrome_render": // server-rendered chrome regions
         if (data.region === "modal") setModal(data.html || "");
         else if (data.region === "topbar") {
           var tb = document.getElementById("astral-topbar");
@@ -278,15 +278,15 @@
       case "chat_loaded":
         activeChatId = data.chat && data.chat.id; chat.innerHTML = ""; canvas.innerHTML = "";
         timelineMode = false; setStatus("");
-        // Feature 028 (FR-028) + 045: the chat rail is TEXT ONLY. Component
-        // messages carry a server-rendered `html` form containing only their
-        // text primitives (the server drops rich components); a turn whose
-        // output was purely rich gets no `html` and renders no bubble here —
-        // it lives on the canvas, which re-hydrates via the ui_render the
-        // server pushes right after.
+        // The chat rail is TEXT ONLY. Component messages carry a
+        // server-rendered `html` form containing only their text primitives
+        // (the server drops rich components); a turn whose output was purely
+        // rich gets no `html` and renders no bubble here — it lives on the
+        // canvas, which re-hydrates via the ui_render the server pushes right
+        // after.
         if (data.chat && data.chat.messages) data.chat.messages.forEach(function (m) {
-          // Feature 031: re-hydrated attachment chip leads the user's message
-          // on its own line (consistent with the live-send rendering above).
+          // Re-hydrated attachment chip leads the user's message on its own
+          // line (consistent with the live-send rendering above).
           var attChip = "";
           if (m.attachments && m.attachments.length) {
             attChip = attachChipHtml(m.attachments.map(function (a) { return a.filename; }).join(", "));
@@ -314,9 +314,9 @@
 
   function escapeText(s) { var d = document.createElement("div"); d.textContent = s == null ? "" : String(s); return d.innerHTML; }
 
-  // Feature 031: render attachment(s) as a pill on its own line above the
-  // request text (a plain "📎 name" prefix collapses onto the query line
-  // because chat bubbles don't preserve newlines).
+  // Render attachment(s) as a pill on its own line above the request text (a
+  // plain "📎 name" prefix collapses onto the query line because chat bubbles
+  // don't preserve newlines).
   function attachChipHtml(names) {
     return "<div class=\"mb-1\"><span class=\"inline-flex items-center gap-1 rounded "
       + "bg-white/10 border border-white/10 px-2 py-0.5 text-xs\">📎 "
@@ -340,9 +340,9 @@
   }
 
   // ---- outgoing: chat + delegated component actions ----
-  // Feature 031: a message may carry staged attachments (see the attachment
-  // block lower down). readyAttachments()/clearStagedAttachments() are declared
-  // there; function/var hoisting makes them available here at call time.
+  // A message may carry staged attachments (see the attachment block lower
+  // down). readyAttachments()/clearStagedAttachments() are declared there;
+  // function/var hoisting makes them available here at call time.
   function sendChat(message) {
     var ready = (typeof readyAttachments === "function") ? readyAttachments() : [];
     if (!message && !ready.length) return;
@@ -372,14 +372,14 @@
     sendChat(v);
   });
 
-  // Delegated handlers for server-rendered interactive primitives (FR-012)
+  // Delegated handlers for server-rendered interactive primitives
   document.addEventListener("click", function (e) {
     var btn = e.target.closest && e.target.closest(".astral-action");
     if (btn) {
       var act = btn.getAttribute("data-action"); var payload = {};
       try { payload = JSON.parse(btn.getAttribute("data-payload") || "{}"); } catch (_) {}
-      // Feature 028: actions emitted inside a workspace component carry its
-      // identity (FR-034); historical views are inert except chrome actions.
+      // Actions emitted inside a workspace component carry its identity;
+      // historical views are inert except chrome actions.
       var compHost = btn.closest && btn.closest("[data-component-id]");
       if (compHost && !payload.component_id) payload.component_id = compHost.getAttribute("data-component-id");
       if (!payload.chat_id && activeChatId) payload.chat_id = activeChatId;
@@ -439,9 +439,8 @@
     });
     sendChat(msg);
   }
-  // Feature 028 (FR-038): pagination carries the table's component identity
-  // so the server updates ONLY that table in place via the standardized
-  // component_action pipeline (pre-028 it replaced the whole canvas).
+  // Pagination carries the table's component identity so the server updates
+  // ONLY that table in place via the standardized component_action pipeline.
   function paginateComponentId(el) {
     var host = el && el.closest && el.closest("[data-component-id]");
     return host ? host.getAttribute("data-component-id") : null;
@@ -462,11 +461,8 @@
       params: Object.assign({}, ctx.source_params, { limit: size, offset: 0 }) });
   }
 
-  // =========================================================================
-  // Feature 031 — attachment staging: paperclip → pick → upload → chip → send
-  // as structured attachments[] on the next chat_message. Replaces the legacy
-  // "[Attachment: …]" text hack.
-  // =========================================================================
+  // Attachment staging: paperclip → pick → upload → chip → send as structured
+  // attachments[] on the next chat_message.
   var stagedAttachments = [];   // {uid, attachment_id|null, filename, category, state, note}
   var attachSeq = 0;
   var MAX_ATTACHMENTS = 10;
@@ -619,15 +615,13 @@
     e.target.value = "";  // allow re-selecting the same file later
   });
 
-  // =========================================================================
-  // Feature 027 — chrome runtime: settings menu, modal surfaces, generic
-  // [data-ui-action] delegation, and the tour step-runner. Server renders all
-  // chrome HTML (webrender/chrome/); this block is plumbing only.
-  // =========================================================================
+  // Chrome runtime: settings menu, modal surfaces, generic [data-ui-action]
+  // delegation, and the tour step-runner. Server renders all chrome HTML
+  // (webrender/chrome/); this block is plumbing only.
   var modalRoot = document.getElementById("astral-modal");
   var modalReturnFocus = null;
 
-  /** Replace the chrome modal content; empty html closes it (FR-017 focus restore). */
+  /** Replace the chrome modal content; empty html closes it (restores focus). */
   function setModal(htmlStr) {
     if (!modalRoot) return;
     if (htmlStr) {
@@ -727,8 +721,8 @@
     if (el.getAttribute("data-ui-collect") === "true") {
       payload.fields = collectChromeFields(el.closest("[data-ui-form]") || modalRoot);
     }
-    // Feature 028: the timeline surface needs the active chat, which only
-    // the client knows at click time (the static menu is rendered per shell).
+    // The timeline surface needs the active chat, which only the client knows
+    // at click time (the static menu is rendered per shell).
     if (act === "chrome_open" && payload.surface === "workspace_timeline") {
       payload.params = payload.params || {};
       if (!payload.params.chat_id && activeChatId) payload.params.chat_id = activeChatId;
@@ -852,9 +846,9 @@
     ws.onerror = function () { try { ws.close(); } catch (e) {} };
     ws.onclose = function () {
       setStatus("Disconnected"); attempts++;
-      // Feature 028 (D4): refresh the session token BEFORE reconnecting so a
-      // register_ui after the access-token TTL recovers silently instead of
-      // dead-ending. First connect uses the shell-injected token directly.
+      // Refresh the session token BEFORE reconnecting so a register_ui after
+      // the access-token TTL recovers silently instead of dead-ending. First
+      // connect uses the shell-injected token directly.
       if (attempts <= 10) setTimeout(function () {
         refreshToken(false, function () { connect(); });
       }, 3000);

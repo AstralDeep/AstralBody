@@ -22,20 +22,18 @@ class ComponentAdapter:
             adapted = cls._adapt_component(comp, profile)
             if adapted is not None:
                 result.append(adapted)
-        # 033 Wave-3 (C-D1): substitute any primitive the target can't render
-        # down the fallback ladder (timeline→list, chart→table→text, …). No-op
-        # when supported_types is None (today's behavior — full support).
+        # Substitute any primitive the target can't render down the fallback
+        # ladder (timeline→list, chart→table→text, …). No-op when
+        # supported_types is None (full support).
         supported = getattr(profile, "supported_types", None)
         if supported:
             result = [cls._degrade_unsupported(c, supported) for c in result]
-        # 033 Wave-0 (C-D2): apply declarative host bounds last — strip
-        # interactivity on read-only surfaces and cap action-buttons. No-op
-        # under the default host-config (interactive, unlimited actions).
+        # Apply declarative host bounds last — strip interactivity on read-only
+        # surfaces and cap action-buttons. No-op under the default host-config
+        # (interactive, unlimited actions).
         return cls._enforce_host_limits(result, profile)
 
-    # ------------------------------------------------------------------
-    # C-D1 — capability fallback ladder
-    # ------------------------------------------------------------------
+    # Capability fallback ladder
 
     @classmethod
     def _degrade_unsupported(cls, comp: Dict, supported) -> Dict:
@@ -147,12 +145,12 @@ class ComponentAdapter:
 
     @classmethod
     def _enforce_host_limits(cls, components: List[Dict], profile: DeviceProfile) -> List[Dict]:
-        """Bound what a surface renders, per the declarative host-config
-        (C-D2). On a non-interactive (read-only) surface every action-button is
-        dropped; otherwise, when ``max_actions`` is set, action-buttons past the
-        budget are dropped (deepest-tree order preserved). This is a security
-        bound: a compromised agent cannot exceed the host's action budget on a
-        given surface. Returns the components unchanged when nothing applies."""
+        """Bound what a surface renders, per the declarative host-config. On a
+        non-interactive (read-only) surface every action-button is dropped;
+        otherwise, when ``max_actions`` is set, action-buttons past the budget
+        are dropped (deepest-tree order preserved). This is a security bound: a
+        compromised agent cannot exceed the host's action budget on a given
+        surface. Returns the components unchanged when nothing applies."""
         read_only = not getattr(profile, "supports_interactivity", True)
         max_actions = getattr(profile, "max_actions", 0) or 0
         if not read_only and max_actions <= 0:
@@ -185,9 +183,7 @@ class ComponentAdapter:
 
         return [w for w in (walk(c) for c in components) if w is not None]
 
-    # ------------------------------------------------------------------
     # Internal helpers
-    # ------------------------------------------------------------------
 
     @classmethod
     def _adapt_component(cls, comp: Dict, profile: DeviceProfile) -> Optional[Dict]:
@@ -245,9 +241,7 @@ class ComponentAdapter:
         # Everything else passes through
         return comp
 
-    # ------------------------------------------------------------------
     # Per-type adaptation
-    # ------------------------------------------------------------------
 
     @classmethod
     def _adapt_chart(cls, comp: Dict, profile: DeviceProfile) -> Optional[Dict]:
@@ -423,9 +417,9 @@ class ComponentAdapter:
 
     @classmethod
     def _adapt_skeleton(cls, comp: Dict, profile: DeviceProfile) -> Optional[Dict]:
-        """Feature 037 — cap the loading-skeleton's placeholder row count on
-        small surfaces so it fits a watch/phone (VOICE is handled earlier by
-        text collapse). Other targets pass through unchanged."""
+        """Cap the loading-skeleton's placeholder row count on small surfaces
+        so it fits a watch/phone (VOICE is handled earlier by text collapse).
+        Other targets pass through unchanged."""
         try:
             count = int(comp.get("count", 4))
         except (TypeError, ValueError):
@@ -438,7 +432,7 @@ class ComponentAdapter:
 
     @classmethod
     def _adapt_chat_history(cls, comp: Dict, profile: DeviceProfile) -> Optional[Dict]:
-        """Feature 040 — condense the recent-chats surface on small screens.
+        """Condense the recent-chats surface on small screens.
 
         The full row (avatar + title + preview + time) is right for
         browser/tablet/TV; a watch has no room for previews and few rows, and a
@@ -473,9 +467,7 @@ class ComponentAdapter:
         ]
         return {**comp, "children": adapted}
 
-    # ------------------------------------------------------------------
     # Text extraction (for VOICE profile)
-    # ------------------------------------------------------------------
 
     @classmethod
     def _extract_text(cls, comp: Dict) -> str:
@@ -563,8 +555,8 @@ class ComponentAdapter:
             parts.append(f"{label}: {value} out of {max_value} stars")
 
         elif comp_type == "chat_history":
-            # Feature 040 — voice surfaces speak the recent-chats list so the
-            # user hears which conversations they can reopen.
+            # Voice surfaces speak the recent-chats list so the user hears which
+            # conversations they can reopen.
             parts.append(str(comp.get("title") or "Recent chats"))
             titles = [str(it.get("title")).strip()
                       for it in (comp.get("items") or [])
@@ -575,12 +567,12 @@ class ComponentAdapter:
                 parts.append(": no conversations yet")
 
         elif comp_type == "skeleton":
-            # Feature 037 — voice surfaces speak the loading state.
+            # Voice surfaces speak the loading state.
             parts.append(str(comp.get("label") or "Loading"))
 
         elif comp_type == "button":
-            # Feature 037 — speak actionable labels (e.g. chat-history items)
-            # so voice users hear what they can open.
+            # Speak actionable labels (e.g. chat-history items) so voice users
+            # hear what they can open.
             parts.append(comp.get("label", ""))
 
         # Recurse into children/content/tabs
