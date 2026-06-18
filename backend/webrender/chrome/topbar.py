@@ -11,6 +11,7 @@ behavior lives in ``webrender/static/client.js``.
 """
 import json
 
+from dreaming.pulse import pulse_enabled
 from webrender import esc
 
 _GEAR_SVG = (
@@ -40,6 +41,35 @@ _HISTORY_SVG = (
 # chrome_open payload for the top-bar timeline button (the client injects the
 # active chat id into params at click time — see client.js).
 _TIMELINE_PAYLOAD = json.dumps({"surface": "workspace_timeline", "params": {}})
+
+# "sparkle" glyph for the Pulse digest button — a recognizable "here's what I
+# noticed" affordance. Only rendered when FF_PULSE_DIGEST is enabled.
+_PULSE_SVG = (
+    '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1'
+    'M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/><circle cx="12" cy="12" r="3"/></svg>'
+)
+
+# chrome_open payload for the Pulse top-bar button (no per-chat params needed —
+# the digest is computed from the user's current state).
+_PULSE_PAYLOAD = json.dumps({"surface": "pulse", "params": {}})
+
+
+def _pulse_button() -> str:
+    """The Pulse top-bar icon button — present ONLY when FF_PULSE_DIGEST is on
+    (default OFF). Fires the generic ``chrome_open`` delegation to surface
+    ``pulse``; absent from the DOM entirely when the flag is off."""
+    if not pulse_enabled():
+        return ""
+    return (
+        '<button type="button" id="astral-pulse-btn" data-tour-target="topbar.pulse" '
+        'class="flex items-center justify-center p-1.5 rounded-lg text-astral-muted '
+        'hover:text-astral-text hover:bg-white/5" aria-label="Pulse digest" '
+        'title="Pulse — what the assistant worked out while you were away" '
+        'data-ui-action="chrome_open" '
+        f"data-ui-payload='{esc(_PULSE_PAYLOAD)}'>{_PULSE_SVG}</button>"
+    )
 
 
 def _menu_entries(roles):
@@ -113,6 +143,9 @@ def render_topbar(roles=None) -> str:
         'class="h-8 w-auto select-none" draggable="false"></div>'
         '<div class="flex items-center gap-3">'
         '<span id="astral-status" class="text-xs text-astral-muted" role="status"></span>'
+        # Pulse digest icon (033 C-U8) — present only when FF_PULSE_DIGEST is on.
+        # Reuses the generic `chrome_open` delegation (no new client wiring).
+        + _pulse_button() +
         # Workspace-timeline icon next to Settings. Reuses the generic
         # `chrome_open` delegation (client.js injects the active chat id into
         # params at click time), so no new client wiring is needed.

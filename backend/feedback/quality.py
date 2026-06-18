@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import logging
 import os
+from collections import Counter
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from audit.recorder import get_recorder, make_correlation_id, now_utc
 from audit.schemas import AuditEventCreate
@@ -48,6 +49,130 @@ def _read_thresholds():
         float(os.getenv(FAIL_RATE_ENV, str(DEFAULT_FAIL_RATE))),
         float(os.getenv(NEG_FB_RATE_ENV, str(DEFAULT_NEG_FB_RATE))),
     )
+
+
+# ───────────────────── trajectory evaluation (C-N5 wiring) ────────────────────
+# When FF_AGENT_EVAL is on, fold a deterministic trajectory-quality signal into
+# the daily job. We reconstruct each turn's ordered tool-call sequence from the
+# hash-chained audit trail (agent_tool_call *.end rows, grouped by
+# correlation_id, ordered by recorded_at) and score each agent's trajectories
+# against its OWN modal trajectory — a consistency/reliability measure (the same
+# posture as τ-bench pass^k) that needs no external ground-truth reference.
+
+#: Cap on trajectories pulled per window (bounds the extra query cost).
+TRAJ_CAP_ENV = "FEEDBACK_QUALITY_TRAJECTORY_CAP"
+DEFAULT_TRAJ_CAP = 2000
+
+
+def _fetch_agent_trajectories(
+    repo: FeedbackRepository, window_start: datetime, window_end: datetime,
+    *, cap: int = DEFAULT_TRAJ_CAP,
+) -> Dict[str, List[List[str]]]:
+    """Reconstruct per-agent ordered tool-call trajectories from the audit log.
+
+    Returns ``{agent_id: [[tool_name, ...], ...]}`` — one inner list per
+    distinct ``correlation_id`` (a turn), tools in ``recorded_at`` order. Reads
+    through the repository's DB handle (no schema change). Best-effort: any
+    error yields an empty mapping so the quality job is never broken by it.
+    """
+    try:
+        conn = repo._db._get_connection()
+    except Exception:
+        logger.debug("agent_eval: could not open DB connection", exc_info=True)
+        return {}
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT agent_id, correlation_id,
+                   REPLACE(REPLACE(action_type, 'tool.', ''), '.end', '') AS tool_name
+            FROM audit_events
+            WHERE event_class = 'agent_tool_call'
+              AND action_type LIKE 'tool.%%.end'
+              AND agent_id IS NOT NULL
+              AND recorded_at >= %s AND recorded_at <= %s
+            ORDER BY agent_id, correlation_id, recorded_at ASC, event_id ASC
+            LIMIT %s
+            """,
+            (window_start, window_end, cap),
+        )
+        rows = cur.fetchall()
+    except Exception:
+        logger.debug("agent_eval: trajectory query failed", exc_info=True)
+        return {}
+    finally:
+        conn.close()
+
+    by_agent: Dict[str, Dict[Any, List[str]]] = {}
+    for r in rows:
+        agent_id = r["agent_id"]
+        corr = r["correlation_id"]
+        tool = r["tool_name"]
+        by_agent.setdefault(agent_id, {}).setdefault(corr, []).append(tool)
+    return {a: list(turns.values()) for a, turns in by_agent.items()}
+
+
+def _score_agent_trajectories(
+    trajectories: List[List[str]],
+) -> Optional[Dict[str, Any]]:
+    """Score one agent's trajectories against its modal (consensus) trajectory.
+
+    Uses ``orchestrator.agent_eval`` (the C-N5 backbone): the most common
+    tool-sequence is the reference; every trajectory is scored against it and
+    folded into a single quality + a pass^k reliability number. Returns ``None``
+    when there is nothing to score or the backbone is unavailable.
+    """
+    if not trajectories:
+        return None
+    try:
+        from orchestrator import agent_eval
+    except Exception:  # pragma: no cover — backbone import shouldn't fail
+        logger.debug("agent_eval: backbone import failed", exc_info=True)
+        return None
+
+    # Reference = modal trajectory (most frequent ordered tool sequence).
+    modal_key, _ = Counter(tuple(t) for t in trajectories).most_common(1)[0]
+    reference = list(modal_key)
+
+    pairs = [(t, reference) for t in trajectories]
+    batch = agent_eval.score_trajectory_batch(pairs)
+
+    # Reliability: pass^k over "exactly matches the consensus" per turn.
+    outcomes = [
+        agent_eval.trajectory_exact_match(t, reference) >= 1.0 for t in trajectories
+    ]
+    k = min(len(outcomes), int(os.getenv("FEEDBACK_QUALITY_PASS_K", "2")) or 2)
+    pass_k = agent_eval.pass_k_from_outcomes(outcomes, k) if k >= 1 else 0.0
+
+    return {
+        "trajectory_count": batch["trajectory_count"],
+        "mean_quality": batch["mean_quality"],
+        "consensus_match_rate": batch["exact_match_rate"],
+        "pass_k": pass_k,
+        "k": k,
+        "reference_len": len(reference),
+        "metric_means": batch["metric_means"],
+    }
+
+
+def evaluate_trajectories(
+    repo: FeedbackRepository, window_start: datetime, window_end: datetime,
+    *, cap: int = DEFAULT_TRAJ_CAP,
+) -> Dict[str, Dict[str, Any]]:
+    """Compute a per-agent trajectory-quality summary for the window.
+
+    Returns ``{agent_id: summary}`` (summary as in :func:`_score_agent_trajectories`).
+    The daily job calls this only when ``FF_AGENT_EVAL`` is enabled; it is a
+    pure read (no writes) and never raises.
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    for agent_id, trajectories in _fetch_agent_trajectories(
+        repo, window_start, window_end, cap=cap
+    ).items():
+        summary = _score_agent_trajectories(trajectories)
+        if summary is not None:
+            out[agent_id] = summary
+    return out
 
 
 def classify_status(
@@ -143,7 +268,89 @@ async def compute_for_window(
                 neg_fb_rate_threshold=neg_fb_rate_threshold,
             )
 
+    # C-N5: fold a deterministic trajectory-quality signal into the job output
+    # (flag-gated; default OFF → byte-identical behaviour to before).
+    await _maybe_evaluate_trajectories(repo, window_start, window_end, snapshots)
+
     return snapshots
+
+
+async def _maybe_evaluate_trajectories(
+    repo: FeedbackRepository, window_start: datetime, window_end: datetime,
+    snapshots: List[ToolQualitySignalDTO],
+) -> Dict[str, Any]:
+    """Score recent agent tool-call trajectories and fold the result into the
+    job output: stamp each snapshot DTO with a ``trajectory_quality`` attribute
+    and emit one ``agent_eval`` audit event per agent. No-op + ``{}`` unless
+    ``FF_AGENT_EVAL`` is on. Never raises (the daily job must not break).
+    """
+    try:
+        from orchestrator.agent_eval import agent_eval_enabled
+        if not agent_eval_enabled():
+            return {}
+        summaries = evaluate_trajectories(repo, window_start, window_end)
+        if not summaries:
+            logger.info("agent_eval: no trajectories to score in window")
+            return {}
+
+        # Fold into the returned snapshots so callers that inspect them see the
+        # per-agent trajectory quality without a separate query.
+        for dto in snapshots:
+            summary = summaries.get(dto.agent_id)
+            if summary is not None:
+                try:
+                    setattr(dto, "trajectory_quality", summary)
+                except Exception:
+                    pass
+
+        for agent_id, summary in summaries.items():
+            logger.info(
+                "agent_eval: agent=%s trajectories=%d mean_quality=%.3f "
+                "consensus_match=%.3f pass^%d=%.3f",
+                agent_id, summary["trajectory_count"], summary["mean_quality"],
+                summary["consensus_match_rate"], summary["k"], summary["pass_k"],
+            )
+            await _emit_trajectory_event(agent_id, summary)
+        return summaries
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("agent_eval: trajectory evaluation failed: %s", exc)
+        return {}
+
+
+async def _emit_trajectory_event(agent_id: str, summary: Dict[str, Any]) -> None:
+    """Emit an ``agent_eval`` (class ``tool_quality``) audit event carrying a
+    per-agent trajectory-quality summary. Best-effort."""
+    rec = get_recorder()
+    if rec is None:
+        return
+    try:
+        await rec.record(AuditEventCreate(
+            actor_user_id="system",
+            auth_principal="system:feedback.quality_job",
+            agent_id=agent_id,
+            event_class="tool_quality",
+            action_type="trajectory_evaluated",
+            description=(
+                f"Trajectory evaluation for {agent_id}: "
+                f"{summary['trajectory_count']} turns, "
+                f"mean_quality={summary['mean_quality']:.3f}, "
+                f"pass^{summary['k']}={summary['pass_k']:.3f}"
+            ),
+            correlation_id=make_correlation_id(),
+            outcome="success",
+            inputs_meta={
+                "agent_id": agent_id,
+                "trajectory_count": summary["trajectory_count"],
+                "mean_quality": summary["mean_quality"],
+                "consensus_match_rate": summary["consensus_match_rate"],
+                "pass_k": summary["pass_k"],
+                "k": summary["k"],
+                "metric_means": summary["metric_means"],
+            },
+            started_at=now_utc(),
+        ))
+    except Exception as exc:  # pragma: no cover
+        logger.warning("agent_eval audit emit failed: %s", exc)
 
 
 async def _emit_transition_event(

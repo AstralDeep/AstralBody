@@ -287,6 +287,18 @@ class AgentLifecycleManager:
             if hasattr(self.orchestrator, 'knowledge_index'):
                 knowledge_context = self.orchestrator.knowledge_index.get_generation_context(description)
 
+            # C-N4 evolutionary archive: condition codegen on past successful
+            # exemplars for a similar capability gap. Flag-gated + fail-open —
+            # OFF / empty archive leaves knowledge_context byte-identical.
+            try:
+                from orchestrator import draft_archive
+                if draft_archive.archive_enabled():
+                    fp = draft_archive.draft_fingerprint(draft)
+                    knowledge_context = draft_archive.exemplar_prompt_for(
+                        knowledge_context, fp)
+            except Exception:  # pragma: no cover — conditioning is best-effort
+                logger.debug("draft-archive: codegen conditioning skipped", exc_info=True)
+
             tools_code = await self.generator.generate_tools_file(
                 agent_name=agent_name,
                 description=description,

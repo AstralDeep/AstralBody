@@ -39,6 +39,8 @@ SURFACE_MODULES = {
     "workspace_timeline": "webrender.chrome.surfaces.workspace_timeline",
     # Feature 031 — attachment library (browse / reuse / delete).
     "attachments": "webrender.chrome.surfaces.attachments",
+    # Feature 033 (C-U8) — Pulse "morning digest" (flag-gated, default OFF).
+    "pulse": "webrender.chrome.surfaces.pulse",
 }
 
 

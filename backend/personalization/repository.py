@@ -104,17 +104,36 @@ class PersonalizationRepository:
 
     # ── Durable memory ───────────────────────────────────────────────────
 
-    def list_memory(self, user_id: str) -> List[Dict[str, Any]]:
+    def list_memory(self, user_id: str, *, project_id: Optional[str] = None,
+                    include_global: bool = True) -> List[Dict[str, Any]]:
         # Superseded (soft-deleted / replaced) memories are excluded from all
         # recall — reconciliation keeps the live set clean.
-        rows = self.db.fetch_all(
-            """SELECT id, user_id, category, value, source, salience, created_at,
+        #
+        # C-U9 — ``project_id`` semantics:
+        #   * None          → NO filter, every live row (legacy / flag-off path).
+        #   * GLOBAL sentinel → the global slice only (project_id IS NULL).
+        #   * a concrete id → that project's rows plus (when ``include_global``)
+        #                     the untagged/global ones; private rows never leak.
+        from .project_scope import GLOBAL
+        cols = ("""SELECT id, user_id, category, value, source, salience, created_at,
                       updated_at, keywords, signature, valid_from, valid_to,
-                      ingested_at, recall_count, last_recalled_at
-               FROM memory_item WHERE user_id = ? AND superseded_at IS NULL
-               ORDER BY created_at DESC""",
-            (user_id,),
-        )
+                      ingested_at, recall_count, last_recalled_at, project_id
+               FROM memory_item WHERE user_id = ? AND superseded_at IS NULL""")
+        if project_id is None:
+            rows = self.db.fetch_all(cols + " ORDER BY created_at DESC", (user_id,))
+        elif project_id == GLOBAL:
+            rows = self.db.fetch_all(
+                cols + " AND project_id IS NULL ORDER BY created_at DESC", (user_id,))
+        elif include_global:
+            rows = self.db.fetch_all(
+                cols + " AND (project_id = ? OR project_id IS NULL) ORDER BY created_at DESC",
+                (user_id, project_id),
+            )
+        else:
+            rows = self.db.fetch_all(
+                cols + " AND project_id = ? ORDER BY created_at DESC",
+                (user_id, project_id),
+            )
         return [dict(r) for r in rows]
 
     # ── Living memory seams (temporal / recall / persona) ──
@@ -164,6 +183,7 @@ class PersonalizationRepository:
     def create_memory(
         self, user_id: str, category: str, value: str, *, source: str = "explicit",
         salience: float = 0.0, keywords: Optional[str] = None,
+        project_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         if category not in MEMORY_CATEGORIES:
             raise ValueError(f"invalid memory category: {category}")
@@ -172,19 +192,22 @@ class PersonalizationRepository:
         mem_id = str(uuid.uuid4())
         now = _now_ms()
         # HMAC-sign the row's identifying fields (None when no key set).
+        # project_id is partition metadata (like keywords) — NOT part of the
+        # signed identity, so pre-C-U9 signed rows stay valid.
         from .memory_guard import sign_fields
         signature = sign_fields(mem_id, user_id, category, value, source)
         self.db.execute(
             """INSERT INTO memory_item
                    (id, user_id, category, value, source, salience, created_at,
-                    updated_at, keywords, signature)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (mem_id, user_id, category, value, source, salience, now, now, keywords, signature),
+                    updated_at, keywords, signature, project_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (mem_id, user_id, category, value, source, salience, now, now, keywords,
+             signature, project_id),
         )
         return {
             "id": mem_id, "user_id": user_id, "category": category, "value": value,
             "source": source, "salience": salience, "created_at": now, "updated_at": now,
-            "keywords": keywords, "signature": signature,
+            "keywords": keywords, "signature": signature, "project_id": project_id,
         }
 
     def get_memory(self, user_id: str, mem_id: str) -> Optional[Dict[str, Any]]:
