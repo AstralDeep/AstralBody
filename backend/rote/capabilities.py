@@ -24,6 +24,7 @@ logger = logging.getLogger("rote.capabilities")
 
 class DeviceType(str, Enum):
     BROWSER = "browser"  # Full desktop browser
+    WINDOWS = "windows"  # Native Windows desktop app (renders structured components natively)
     TABLET  = "tablet"   # iPad / Android tablet (~768-1024px)
     MOBILE  = "mobile"   # Phone (<=480px viewport)
     WATCH   = "watch"    # Smartwatch (<=200px viewport, or explicit)
@@ -37,6 +38,14 @@ class DeviceType(str, Enum):
 # buttons are stripped).
 _BASE_HOST_CONFIG: Dict[str, dict] = {
     "browser": dict(max_grid_columns=6, supports_charts=True, supports_tables=True,
+                    supports_code=True, supports_file_io=True, supports_tabs=True,
+                    max_text_chars=0, max_table_rows=0, max_table_cols=0,
+                    max_actions=0, supports_interactivity=True),
+    # Native Windows desktop: full-capability surface like a browser, but it
+    # renders structured components with native widgets (not HTML) — it reports
+    # a `supported_types` set so ROTE substitutes the web-only primitives
+    # (e.g. plotly_chart) it can't draw natively.
+    "windows": dict(max_grid_columns=6, supports_charts=True, supports_tables=True,
                     supports_code=True, supports_file_io=True, supports_tabs=True,
                     max_text_chars=0, max_table_rows=0, max_table_cols=0,
                     max_actions=0, supports_interactivity=True),
@@ -180,4 +189,8 @@ class DeviceProfile:
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
         d["device_type"] = self.device_type.value
+        # supported_types is a frozenset for fast membership checks, but the
+        # profile is JSON-serialized into rote_config — emit it as a sorted list.
+        if d.get("supported_types") is not None:
+            d["supported_types"] = sorted(d["supported_types"])
         return d
