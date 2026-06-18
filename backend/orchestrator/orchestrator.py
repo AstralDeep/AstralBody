@@ -8181,12 +8181,10 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 options={"verify_aud": False, "verify_at_hash": False}
             )
 
-            # Verify authorized party is an accepted first-party client (web +
-            # any KEYCLOAK_ALLOWED_AZP, e.g. the native desktop app).
+            # Verify authorized party matches our client
             azp = payload.get("azp")
-            from orchestrator.auth import allowed_azp_values
-            if azp and azp not in allowed_azp_values(expected_client):
-                logger.warning(f"Token azp '{azp}' is not an accepted client (expected one of {sorted(allowed_azp_values(expected_client))})")
+            if azp and azp != expected_client:
+                logger.warning(f"Token azp '{azp}' does not match expected client '{expected_client}'")
                 return None
 
             # Extract Roles

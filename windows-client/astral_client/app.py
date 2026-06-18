@@ -271,17 +271,27 @@ def configure(app: QApplication) -> None:
     app.setStyleSheet(T.APP_STYLESHEET + T.ROOT_BG_STYLE)
 
 
+def _http_base(ws_url: str) -> str:
+    """ws://host:port/ws -> http://host:port (the orchestrator's HTTP origin /
+    BFF base)."""
+    from urllib.parse import urlparse
+    u = urlparse(ws_url)
+    scheme = "https" if u.scheme == "wss" else "http"
+    return f"{scheme}://{u.netloc}"
+
+
 def resolve_auth(args):
     """Return (token, session). An explicit --token/ASTRAL_TOKEN wins (use
     'dev-token' for a mock-auth orchestrator). Otherwise, if a Keycloak authority
-    is configured, run the interactive OIDC desktop login; else fall back to
-    'dev-token'."""
+    is configured, run the interactive OIDC desktop login (reusing the web's
+    astral-frontend client, exchanging through the orchestrator's BFF); else fall
+    back to 'dev-token'."""
     if args.token:
         return args.token, None
     if args.authority:
         try:
             from .auth import oidc_login
-            session = oidc_login(args.authority, args.client_id)
+            session = oidc_login(args.authority, _http_base(args.url), args.client_id)
             return session.access_token, session
         except Exception as exc:  # noqa: BLE001
             print(f"OIDC login failed ({exc}); falling back to dev-token.")
@@ -293,7 +303,9 @@ def main() -> int:
     ap.add_argument("--url", default=os.getenv("ASTRAL_WS_URL", "ws://127.0.0.1:8001/ws"))
     ap.add_argument("--token", default=os.getenv("ASTRAL_TOKEN", ""))
     ap.add_argument("--authority", default=os.getenv("KEYCLOAK_AUTHORITY", ""))
-    ap.add_argument("--client-id", default=os.getenv("ASTRAL_DESKTOP_CLIENT_ID", "astral-desktop"))
+    # Reuse the web's confidential client; the code/refresh exchange is proxied
+    # through the orchestrator's BFF (which holds the secret).
+    ap.add_argument("--client-id", default=os.getenv("ASTRAL_CLIENT_ID", "astral-frontend"))
     args = ap.parse_args()
 
     app = QApplication(sys.argv)

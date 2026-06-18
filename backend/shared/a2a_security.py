@@ -87,11 +87,9 @@ class A2ASecurityValidator:
             )
             azp = payload.get("azp")
             if azp and azp != self.client_id:
-                # Also allow the agent service client + any KEYCLOAK_ALLOWED_AZP
-                # (e.g. the native desktop app).
+                # Also allow the agent service client
                 agent_client = os.getenv("AGENT_SERVICE_CLIENT_ID", "astral-agent-service")
-                extra = {x.strip() for x in os.getenv("KEYCLOAK_ALLOWED_AZP", "").split(",") if x.strip()}
-                if azp != agent_client and azp not in extra:
+                if azp != agent_client:
                     logger.warning(f"A2A token rejected: invalid azp={azp}")
                     return None
             return payload

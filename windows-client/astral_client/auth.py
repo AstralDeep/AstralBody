@@ -1,10 +1,13 @@
-"""Native desktop OIDC login — Authorization Code + PKCE with a loopback
-redirect (RFC 8252). Opens the system browser to Keycloak, captures the auth
-code on a localhost callback, and exchanges it for an access token. Stdlib only.
+"""Native desktop OIDC login that REUSES the web's `astral-frontend` client.
 
-Requires a public Keycloak client (default ``astral-desktop``) with Standard
-Flow + PKCE (S256) and a loopback redirect URI (http://127.0.0.1:*/callback),
-and the orchestrator's KEYCLOAK_ALLOWED_AZP including that client id.
+`astral-frontend` is a *confidential* Keycloak client (it has a client_secret),
+so the desktop can't exchange the auth code directly — it would have to embed the
+secret. Instead it does Authorization-Code + PKCE with a loopback redirect (RFC
+8252) for the browser step, then exchanges the code through the orchestrator's
+existing **BFF token proxy** (`POST {base}/auth/token`), which injects the secret
+server-side. No new Keycloak client and no azp change are needed; the only realm
+change is adding the loopback redirect URI (`http://127.0.0.1/*`) to
+`astral-frontend`'s allowed redirects.
 """
 from __future__ import annotations
 
@@ -33,24 +36,28 @@ def _b64u(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
 
+def _post_form(url: str, fields: dict, timeout: int = 20) -> dict:
+    data = urlencode(fields).encode()
+    req = Request(url, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"})
+    return json.load(urlopen(req, timeout=timeout))
+
+
 @dataclass
 class Session:
-    """A logged-in session — current access token + silent refresh."""
+    """A logged-in session — current access token + silent refresh, both routed
+    through the orchestrator's BFF token proxy (``token_url``)."""
     access_token: str
     refresh_token: Optional[str]
-    token_endpoint: str
+    token_url: str
     client_id: str
 
     def refresh(self) -> Optional[str]:
-        """Refresh the access token using the refresh token. Returns the new
-        access token, or None if refresh isn't possible."""
         if not self.refresh_token:
             return None
         try:
-            data = urlencode({"grant_type": "refresh_token", "refresh_token": self.refresh_token,
-                              "client_id": self.client_id}).encode()
-            r = json.load(urlopen(Request(self.token_endpoint, data=data,
-                          headers={"Content-Type": "application/x-www-form-urlencoded"}), timeout=15))
+            r = _post_form(self.token_url, {"grant_type": "refresh_token",
+                                            "refresh_token": self.refresh_token,
+                                            "client_id": self.client_id}, timeout=15)
             self.access_token = r["access_token"]
             self.refresh_token = r.get("refresh_token", self.refresh_token)
             return self.access_token
@@ -59,15 +66,18 @@ class Session:
             return None
 
 
-def oidc_login(authority: str, client_id: str = "astral-desktop",
+def oidc_login(authority: str, bff_base: str, client_id: str = "astral-frontend",
                scopes: str = _DEFAULT_SCOPES, timeout: int = 300) -> Session:
-    """Run the interactive PKCE loopback login and return a Session.
+    """Interactive PKCE loopback login that exchanges through the BFF.
 
-    ``authority`` is the Keycloak realm URL, e.g.
-    ``https://iam.example.com/realms/Astral``.
+    ``authority`` — the Keycloak realm URL (used only to find the *authorize*
+    endpoint for the browser step). ``bff_base`` — the orchestrator HTTP origin
+    (e.g. ``http://127.0.0.1:8001``); the code/refresh exchange POSTs to
+    ``{bff_base}/auth/token``.
     """
     conf = json.load(urlopen(f"{authority.rstrip('/')}/.well-known/openid-configuration", timeout=15))
-    auth_ep, token_ep = conf["authorization_endpoint"], conf["token_endpoint"]
+    auth_ep = conf["authorization_endpoint"]
+    token_url = f"{bff_base.rstrip('/')}/auth/token"
 
     verifier = _b64u(secrets.token_bytes(32))
     challenge = _b64u(hashlib.sha256(verifier.encode("ascii")).digest())
@@ -84,7 +94,7 @@ def oidc_login(authority: str, client_id: str = "astral-desktop",
             self.end_headers()
             self.wfile.write(_DONE_HTML)
 
-        def log_message(self, *a):  # silence the dev server
+        def log_message(self, *a):
             pass
 
     server = HTTPServer(("127.0.0.1", 0), _Handler)
@@ -99,8 +109,6 @@ def oidc_login(authority: str, client_id: str = "astral-desktop",
     logger.info("opening browser for OIDC login (client=%s)", client_id)
     webbrowser.open(f"{auth_ep}?{params}")
 
-    server.timeout = timeout
-    # handle a single callback request (the redirect), then close.
     t = threading.Thread(target=server.handle_request, daemon=True)
     t.start()
     t.join(timeout)
@@ -112,11 +120,9 @@ def oidc_login(authority: str, client_id: str = "astral-desktop",
     if captured.get("state") != state:
         raise RuntimeError("OIDC state mismatch — aborting.")
 
-    data = urlencode({
+    tok = _post_form(token_url, {
         "grant_type": "authorization_code", "code": code, "redirect_uri": redirect_uri,
         "client_id": client_id, "code_verifier": verifier,
-    }).encode()
-    tok = json.load(urlopen(Request(token_ep, data=data,
-                    headers={"Content-Type": "application/x-www-form-urlencoded"}), timeout=20))
+    })
     return Session(access_token=tok["access_token"], refresh_token=tok.get("refresh_token"),
-                   token_endpoint=token_ep, client_id=client_id)
+                   token_url=token_url, client_id=client_id)

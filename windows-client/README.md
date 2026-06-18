@@ -68,16 +68,30 @@ QT_QPA_PLATFORM=offscreen .venv/Scripts/python tests/e2e_live.py --prompt "roll 
   `register_ui`; it silently refreshes on expiry. An explicit `--token` always
   wins.
 
-Two one-time setup steps for real auth:
-1. Create a **public** Keycloak client `astral-desktop` (override with
-   `--client-id` / `ASTRAL_DESKTOP_CLIENT_ID`): Client authentication OFF,
-   Standard Flow ON, PKCE `S256`, redirect URI `http://127.0.0.1/*` (loopback),
-   scopes `openid profile email offline_access`.
-2. Add it to the orchestrator's accepted clients: `KEYCLOAK_ALLOWED_AZP=astral-desktop`.
+It **reuses the web's `astral-frontend` client** (no new Keycloak client): the
+browser does PKCE, then the auth-code/refresh exchange is proxied through the
+orchestrator's BFF (`POST {base}/auth/token`), which injects the client secret
+server-side — so the desktop never holds it. Override the client with
+`--client-id` / `ASTRAL_CLIENT_ID`.
+
+One-time Keycloak change: add a **loopback redirect URI** `http://127.0.0.1/*`
+to the existing `astral-frontend` client's allowed redirects.
 
 ```bash
 .venv/Scripts/python main.py --authority https://iam.example.com/realms/Astral
 ```
+
+> **TODO (production hardening): switch to a dedicated public client, don't reuse
+> the BFF.** Reusing `astral-frontend` via the orchestrator's BFF token proxy is
+> the pragmatic choice for now (no new Keycloak client to manage), but the
+> by-the-book native-app posture (RFC 8252 / OAuth 2.0 for Native Apps) is a
+> **dedicated public Keycloak client** (e.g. `astral-desktop`: Client
+> authentication OFF, Standard Flow + PKCE `S256`, loopback redirect) that does
+> the token exchange **directly against Keycloak** — so the desktop doesn't
+> depend on the orchestrator's BFF and the web/desktop auth surfaces are isolated.
+> That requires: (1) creating the public client, and (2) accepting its `azp` on
+> the orchestrator (a configurable allow-list rather than the current single-`azp`
+> check). Migrate to this before shipping the desktop app to real users.
 
 ## Windows tools agent (client-hosted)
 

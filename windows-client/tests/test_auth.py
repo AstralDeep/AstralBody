@@ -26,14 +26,14 @@ def test_session_refresh(monkeypatch):
         return io.BytesIO(json.dumps({"access_token": "NEW", "refresh_token": "R2"}).encode())
     monkeypatch.setattr(auth, "urlopen", fake_urlopen)
     s = auth.Session(access_token="OLD", refresh_token="R1",
-                     token_endpoint="http://kc/token", client_id="astral-desktop")
+                     token_url="http://127.0.0.1:8001/auth/token", client_id="astral-frontend")
     assert s.refresh() == "NEW"
     assert s.access_token == "NEW" and s.refresh_token == "R2"
 
 
 def test_session_refresh_without_token_is_none():
     s = auth.Session(access_token="OLD", refresh_token=None,
-                     token_endpoint="http://kc/token", client_id="astral-desktop")
+                     token_url="http://127.0.0.1:8001/auth/token", client_id="astral-frontend")
     assert s.refresh() is None
 
 
