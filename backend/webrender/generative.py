@@ -1,18 +1,18 @@
-"""Gated open-ended / generative primitives — 033 Wave-1 (C-N2).
+"""Gated open-ended / generative primitives.
 
 Lets the model compose a NOVEL widget beyond the closed astralprims palette —
-but safely, by expressing it as a **constrained grammar** (a small set of
-compositional building blocks) that a deterministic **post-validator** checks
-and an **escape-by-default** renderer materializes. The model never emits raw
-HTML; it emits a typed tree of allowed nodes, every text leaf is HTML-escaped,
-styling is fixed CSS classes (no model-supplied inline style/script), and the
-tree is bounded in size and depth. A genuinely new *named* primitive still rides
-the draft→self-test→admin-approval rail; this module is the safety floor under
-that — an unapproved generative spec renders only from the safe grammar.
+but safely, by expressing it as a constrained grammar (a small set of
+compositional building blocks) that a deterministic post-validator checks and an
+escape-by-default renderer materializes. The model never emits raw HTML; it
+emits a typed tree of allowed nodes, every text leaf is HTML-escaped, styling is
+fixed CSS classes (no model-supplied inline style/script), and the tree is
+bounded in size and depth. A genuinely new named primitive still rides the
+draft→self-test→admin-approval rail; this module is the safety floor under that —
+an unapproved generative spec renders only from the safe grammar.
 
-Pure, stdlib only (``html.escape``). **No new dependency.** Flag
-``FF_GENERATIVE_PRIMITIVES`` (default OFF). Fail-safe: an invalid spec renders a
-plain notice, never the unvalidated content.
+Pure, stdlib only (``html.escape``). Flag ``FF_GENERATIVE_PRIMITIVES`` (default
+OFF). Fail-safe: an invalid spec renders a plain notice, never the unvalidated
+content.
 """
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ _MAX_TEXT = 2000
 
 
 def generative_enabled() -> bool:
-    """FF_GENERATIVE_PRIMITIVES feature flag (default OFF; feature 033 C-N2)."""
+    """FF_GENERATIVE_PRIMITIVES feature flag (default OFF)."""
     return os.getenv("FF_GENERATIVE_PRIMITIVES", "false").strip().lower() in (
         "1", "true", "yes", "on")
 

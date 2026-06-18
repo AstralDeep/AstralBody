@@ -1,5 +1,6 @@
 from __future__ import annotations
 import sys
+import uuid
 from pathlib import Path
 import pytest
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -266,3 +267,106 @@ def test_pipeline_anticipate_then_plan():
     # The plan is a subset of the anticipated set, top-priority first.
     assert all(p in anticipated for p in plan)
     assert plan == sleeptime.precompute_plan(anticipated, budget=2)  # deterministic
+
+
+# --- REAL integration: run_sweep wires sleeptime through the live repo -------
+#
+# These drive dreaming.consolidation.run_sweep against the REAL
+# PersonalizationRepository + Postgres (the same path scheduler/runner.py uses
+# per-user), proving the precompute is produced and PERSISTED into the existing
+# user_personalization.personality jsonb (no new table) — and that the flag OFF
+# leaves it untouched.
+
+def _can_connect() -> bool:
+    try:
+        import psycopg2
+        from shared.database import _build_database_url
+        conn = psycopg2.connect(_build_database_url())
+        conn.close()
+        return True
+    except Exception:
+        return False
+
+
+needs_db = pytest.mark.skipif(not _can_connect(), reason="Postgres unavailable")
+
+
+class _CleanAnalyzer:
+    def analyze(self, text, language, entities, score_threshold):
+        return []
+
+
+def _clean_gate():
+    from personalization.phi_gate import PHIGate
+    return PHIGate(analyzer=_CleanAnalyzer())
+
+
+@pytest.fixture
+def repo_user():
+    """Real repository + a uuid-unique user; all rows cleaned on teardown."""
+    from personalization.repository import PersonalizationRepository
+    from shared.database import Database
+    db = Database()
+    repo = PersonalizationRepository(db)
+    user = f"pytest-sleeptime-{uuid.uuid4().hex[:8]}"
+    yield repo, user, db
+    for table in ("short_term_signal", "memory_item", "consolidation_sweep",
+                  "user_personalization"):
+        try:
+            db.execute(f"DELETE FROM {table} WHERE user_id = ?", (user,))
+        except Exception:
+            pass
+
+
+NOW = 1_748_300_000_000
+
+
+@needs_db
+def test_run_sweep_persists_precompute_when_enabled(monkeypatch, repo_user):
+    """Flag ON + idle: run_sweep over the real repo anticipates next questions
+    and stores the plan in user_personalization.personality (read back from DB)."""
+    from dreaming.consolidation import run_sweep
+    monkeypatch.setenv("FF_SLEEPTIME_COMPUTE", "on")
+    repo, user, _db = repo_user
+
+    # Seed: a durable goal memory (survives) + a one-off signal carrying a topic.
+    repo.upsert_profile(user, profession="researcher", personality={"tone": "warm"})
+    repo.create_memory(user, "goal", "ship the v2 release", source="explicit", salience=3.0)
+    repo.add_signal(user, "context", "Looking into Kubernetes scaling")
+
+    sweep = run_sweep(repo, _clean_gate(), user, now_ms=NOW,
+                      last_activity_ms=NOW - 10 * 60_000)
+
+    # A real plan came back...
+    assert sweep["precompute"], "expected anticipated questions persisted"
+    qs = [q["question"] for q in sweep["precompute"]]
+    assert any("v2 release" in q for q in qs) or any("Kubernetes" in q for q in qs)
+
+    # ...and it is readable from the DB-backed profile, alongside the preserved
+    # user-facing trait (NO new table was used).
+    profile = repo.get_profile(user)
+    personality = profile["personality"]
+    assert personality.get("tone") == "warm"
+    plan = personality.get("_sleeptime_precompute")
+    assert plan is not None and plan["trigger"] == "idle"
+    assert plan["questions"] == sweep["precompute"]
+
+
+@needs_db
+def test_run_sweep_no_precompute_when_disabled(monkeypatch, repo_user):
+    """Flag OFF (default): the same inputs leave the personality jsonb unchanged."""
+    from dreaming.consolidation import run_sweep
+    monkeypatch.delenv("FF_SLEEPTIME_COMPUTE", raising=False)
+    repo, user, _db = repo_user
+
+    repo.upsert_profile(user, personality={"tone": "warm"})
+    repo.create_memory(user, "goal", "ship the v2 release", source="explicit", salience=3.0)
+    repo.add_signal(user, "context", "Looking into Kubernetes scaling")
+
+    sweep = run_sweep(repo, _clean_gate(), user, now_ms=NOW,
+                      last_activity_ms=NOW - 10 * 60_000)
+
+    assert sweep["precompute"] == []
+    profile = repo.get_profile(user)
+    assert "_sleeptime_precompute" not in (profile["personality"] or {})
+    assert profile["personality"].get("tone") == "warm"

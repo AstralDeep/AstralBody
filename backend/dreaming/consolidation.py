@@ -49,6 +49,97 @@ def select_promotions(
     return eligible[:max_promote]
 
 
+# Key under which the idle anticipatory precompute plan is stashed inside the
+# user's existing ``user_personalization.personality`` jsonb (NO new table —
+# 033 C-N11 constraint). A leading underscore namespaces it away from the
+# user-facing personality traits (tone/notes/...).
+_SLEEPTIME_PLAN_KEY = "_sleeptime_precompute"
+# Cap on how many recent signal values are mined for follow-up topics.
+_SLEEPTIME_MAX_SIGNALS = 25
+
+
+def _run_sleeptime_precompute(
+    repo,
+    user_id: str,
+    *,
+    now_ms: int,
+    last_activity_ms: Optional[int],
+    idle_after_ms: int,
+    budget: int,
+) -> Optional[Dict[str, Any]]:
+    """Idle-time anticipatory precompute (033 C-N11 / sleeptime.py).
+
+    Returns the persisted plan record, or ``None`` when sleeptime is disabled,
+    the user is still active, the repo can't store a plan, or nothing is worth
+    precomputing. Behind ``FF_SLEEPTIME_COMPUTE`` (default OFF) — when the flag
+    is off this is a no-op. Best-effort: never raises into the sweep.
+    """
+    # Import lazily so consolidation has no hard dependency on the optional
+    # sleeptime module path and the flag is read at call time (testable).
+    from dreaming.sleeptime import (
+        anticipate_questions,
+        is_idle,
+        precompute_plan,
+        sleeptime_enabled,
+    )
+
+    if not sleeptime_enabled():
+        return None
+    # Only precompute when the user is actually idle. When the caller can't
+    # supply a last-activity timestamp we treat the scheduled sweep itself as
+    # idle-time (a sweep already implies a quiet window).
+    if last_activity_ms is not None and not is_idle(
+        last_activity_ms, now_ms, idle_after_ms=idle_after_ms
+    ):
+        return None
+
+    # Persisting needs a profile store; fail-closed if the repo lacks one.
+    if not (hasattr(repo, "upsert_profile") and hasattr(repo, "get_profile")):
+        return None
+
+    # Recent-topic signal: mine the still-pending short-term signal values
+    # (the freshest, in-DB, already-PHI-gated text we have for this user) plus
+    # durable goal/workflow memories.
+    try:
+        signals = repo.list_signals(user_id) or []
+    except Exception:  # pragma: no cover - defensive
+        signals = []
+    recent_messages = [str(s.get("value") or "") for s in signals[:_SLEEPTIME_MAX_SIGNALS]]
+    try:
+        memories = repo.list_memory(user_id) if hasattr(repo, "list_memory") else []
+    except Exception:  # pragma: no cover - defensive
+        memories = []
+
+    anticipated = anticipate_questions(recent_messages, list(memories or []))
+    plan = precompute_plan(anticipated, budget=budget)
+    if not plan:
+        return None
+
+    record = {
+        "generated_at": now_ms,
+        "trigger": "idle",
+        "questions": [
+            {"question": a.question, "rationale": a.rationale, "priority": a.priority}
+            for a in plan
+        ],
+    }
+    # Persist into the EXISTING personality jsonb (merge, never clobber the
+    # user-facing traits). Best-effort — a storage failure must not break the
+    # sweep's promotion path.
+    try:
+        profile = repo.get_profile(user_id) or {}
+        personality = dict(profile.get("personality") or {})
+        personality[_SLEEPTIME_PLAN_KEY] = record
+        repo.upsert_profile(user_id, personality=personality)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("dreaming.sleeptime persist failed (non-fatal)", exc_info=True)
+        return None
+
+    logger.info("dreaming.sleeptime_precomputed",
+                extra={"user_id": user_id, "precomputed": len(plan)})
+    return record
+
+
 def run_sweep(
     repo,
     phi_gate,
@@ -57,6 +148,9 @@ def run_sweep(
     trigger: str = "scheduled",
     min_recalls: int = 2,
     now_ms: Optional[int] = None,
+    last_activity_ms: Optional[int] = None,
+    idle_after_ms: int = 300_000,
+    precompute_budget: int = 3,
 ) -> Dict[str, Any]:
     """Run one consolidation sweep for ``user_id``; return the sweep record.
 
@@ -64,6 +158,14 @@ def run_sweep(
     gate at promotion (defense in depth — signals were already gated at
     capture). Consumed signals are deleted; a ``consolidation_sweep`` row is
     written for review.
+
+    When ``FF_SLEEPTIME_COMPUTE`` is enabled (default OFF, 033 C-N11) and the
+    user is idle, the sweep also anticipates likely next questions and persists
+    a small precompute plan into the user's existing personality jsonb (no new
+    table). ``last_activity_ms`` (epoch-ms of the user's last activity) gates
+    the idle check; when omitted the scheduled sweep is itself treated as
+    idle-time. The returned record gains a ``precompute`` block describing what
+    was anticipated (empty list when sleeptime is off or nothing qualified).
     """
     now_ms = now_ms or int(time.time() * 1000)
     signals = repo.list_signals(user_id)
@@ -97,11 +199,23 @@ def run_sweep(
         "summary": summary,
         "trigger": trigger,
     }
-    # Persist the sweep record (best-effort; caller audits).
+    # Persist the sweep record (best-effort; caller audits). The precompute
+    # plan rides the existing personality store, so the DB-persisted sweep row
+    # shape is unchanged (no schema delta — 033 constraint).
     if hasattr(repo, "record_sweep"):
         repo.record_sweep(sweep)
+
+    # 033 C-N11: idle anticipatory precompute (flag-gated, default OFF). Run
+    # AFTER promotion so anticipation reflects the post-sweep memory state.
+    precompute = _run_sleeptime_precompute(
+        repo, user_id, now_ms=now_ms, last_activity_ms=last_activity_ms,
+        idle_after_ms=idle_after_ms, budget=precompute_budget,
+    )
+    sweep["precompute"] = (precompute or {}).get("questions", [])
+
     # 030 FR-017: structured observability for consolidation sweeps.
     logger.info("dreaming.sweep_ran",
                 extra={"user_id": user_id, "trigger": trigger,
-                       "considered": len(signals), "promoted": promoted})
+                       "considered": len(signals), "promoted": promoted,
+                       "precomputed": len(sweep["precompute"])})
     return sweep

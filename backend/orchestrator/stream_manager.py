@@ -1184,9 +1184,9 @@ class StreamManager:
                 chunk_html = None
                 if adapted_components:
                     try:
-                        from webrender import render_for_target
+                        from webrender import render_for_target, target_for_profile
                         profile = self._rote.get_profile(ws) if self._rote is not None else None
-                        chunk_html = render_for_target("web", adapted_components, profile)
+                        chunk_html = render_for_target(target_for_profile(profile), adapted_components, profile)
                     except Exception:
                         logger.exception("webrender: failed to render stream chunk")
 

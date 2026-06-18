@@ -1,24 +1,23 @@
-"""Feature 036 (capability 033 C-M4) — multi-signal memory retrieval scoring.
+"""Multi-signal memory retrieval scoring.
 
-Memory recall today is single-signal: ``repository.list_memory`` orders by
+Memory recall is otherwise single-signal: ``repository.list_memory`` orders by
 ``created_at`` (recency) and ``MemoryTools.memory_search`` ranks by raw token
-overlap (relevance). The Generative Agents recipe (Park et al., UIST 2023) — the
-canonical, still-cited memory-retrieval baseline — combines **recency ×
-importance × relevance** as a weighted composite, which beats any single signal.
+overlap (relevance). This combines **recency × importance × relevance** as a
+weighted composite, which beats any single signal.
 
 This module is the pure scoring core: every signal is normalised to [0, 1] and
-combined with renormalised weights. It is dependency-free and side-effect-free
-so it can rank `memory_item` rows (Postgres, no vector DB) and is trivially
-unit-testable. The importance signal reuses the existing ``salience`` column
-(and falls back to a source-based floor), so no schema change is required.
+combined with renormalised weights. It is side-effect-free so it can rank
+`memory_item` rows (Postgres, no vector DB) and is trivially unit-testable. The
+importance signal reuses the existing ``salience`` column (and falls back to a
+source-based floor), so no schema change is required.
 """
 from __future__ import annotations
 
 import os
 from typing import Any, Dict, Optional
 
-#: Generative-Agents-style weights (recency/importance/relevance). Tunable;
-#: renormalised over whatever signals a caller supplies.
+#: Weights (recency/importance/relevance). Tunable; renormalised over whatever
+#: signals a caller supplies.
 DEFAULT_WEIGHTS: Dict[str, float] = {"recency": 0.34, "importance": 0.33, "relevance": 0.33}
 
 

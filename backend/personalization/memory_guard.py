@@ -1,10 +1,9 @@
-"""Memory-poisoning defense — 033 Wave-4 (C-S9), timed to its dependent (FR-011).
+"""Memory-poisoning defense.
 
-Long-term memory is the highest-yield target in agentic security: AgentPoison
-backdoors an agent with <0.1% poison rate by getting a few trigger-bearing
-"facts" into durable memory, and MINJA does it query-only (no write access) by
-getting benign-looking content stored. Now that the write path is
-LLM-mediated (C-M1/M2/M3), it is exactly the surface those attacks target.
+Long-term memory is a high-yield target: poisoning attacks backdoor an agent by
+getting a few trigger-bearing "facts" into durable memory, and some do it
+query-only (no write access) by getting benign-looking content stored. Now that
+the write path is LLM-mediated, it is exactly the surface those attacks target.
 
 This module is the pure defense core:
 
@@ -16,8 +15,6 @@ This module is the pure defense core:
   Fail-open: no key ⇒ no signing; an unsigned legacy row is not flagged.
 * :func:`trust_of` — a row's trust level (``trusted`` user-stated · ``derived``
   auto-promoted · ``tampered`` failed-signature) for retrieval-time filtering.
-
-stdlib only (``hmac`` / ``hashlib`` / ``re``) — no new dependency.
 """
 from __future__ import annotations
 
@@ -53,10 +50,9 @@ _POISON_PATTERNS = [
 
 
 def guard_enabled() -> bool:
-    """FF_MEMORY_GUARD feature flag (default ON; feature 033 C-S9). When on,
-    instruction-injection content is refused at the durable-memory write path
-    and tampered rows are filtered at retrieval. Fail-open: off ⇒ legacy
-    behavior."""
+    """FF_MEMORY_GUARD feature flag (default ON). When on, instruction-injection
+    content is refused at the durable-memory write path and tampered rows are
+    filtered at retrieval. Fail-open: off ⇒ legacy behavior."""
     return os.getenv("FF_MEMORY_GUARD", "true").strip().lower() not in ("0", "false", "no", "off")
 
 

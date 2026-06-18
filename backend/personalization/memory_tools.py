@@ -1,16 +1,16 @@
-"""Orchestrator-callable memory tools (feature 025, US4/T035).
+"""Orchestrator-callable memory tools.
 
 ``remember`` (explicit), ``memory_search`` and ``memory_get`` (recall), plus
-``capture_signal`` (post-turn auto-capture). Every write passes the PHI gate
-(FR-016/FR-017): PHI-flagged content is used live but never persisted. The
-class is constructed with a repository and (optionally) an injected gate so it
-is unit-testable without Presidio.
+``capture_signal`` (post-turn auto-capture). Every write passes the PHI gate:
+PHI-flagged content is used live but never persisted. The class is constructed
+with a repository and (optionally) an injected gate so it is unit-testable
+without Presidio.
 
-Feature 033 (C-M1) — reconcile-don't-append. ``remember_reconciled`` adds an
-LLM-mediated ADD / UPDATE / DELETE / NOOP decision over related existing
-memories, with supersession (soft-delete + ``superseded_by``) instead of
-monotonic growth. Strictly fail-open: with the flag off, no injected LLM, no
-related candidates, or any error, it degrades to the legacy append.
+Reconcile-don't-append: ``remember_reconciled`` adds an LLM-mediated ADD /
+UPDATE / DELETE / NOOP decision over related existing memories, with
+supersession (soft-delete + ``superseded_by``) instead of monotonic growth.
+Strictly fail-open: with the flag off, no injected LLM, no related candidates,
+or any error, it degrades to the legacy append.
 """
 from __future__ import annotations
 
@@ -18,9 +18,12 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+from . import living_memory as lm
 from . import memory_guard
+from . import project_scope as ps
 from .phi_gate import PHIGate, get_phi_gate
 from .repository import MEMORY_CATEGORIES
 from .retrieval_scoring import multisignal_enabled, score_memory_row
@@ -30,9 +33,14 @@ logger = logging.getLogger("personalization.memory")
 #: Cap on related memories shown to the reconcile LLM (keeps the prompt cheap).
 RECONCILE_MAX_CANDIDATES = 8
 
+#: Categories that hold a single live value at a time (C-M6): a new value
+#: temporally supersedes the prior one. The rest are multi-valued (a user has
+#: many goals / preferences / context notes simultaneously) and never auto-close.
+_SINGULAR_CATEGORIES = frozenset({"profession"})
+
 
 def reconcile_enabled() -> bool:
-    """FF_MEMORY_RECONCILE feature flag (default ON; feature 033 C-M1).
+    """FF_MEMORY_RECONCILE feature flag (default ON).
 
     When on — AND an LLM is injected AND there are related existing memories —
     a durable write is reconciled (ADD/UPDATE/DELETE/NOOP with supersession)
@@ -45,7 +53,7 @@ def _tokens(text: str) -> set:
     return set(re.findall(r"[a-z0-9]+", (text or "").lower()))
 
 
-#: C-M2 linked-note tuning.
+#: Linked-note tuning.
 LINK_MIN_OVERLAP = 1      # shared content keywords required to link two memories
 LINK_MAX_NEIGHBORS = 5    # max links created per new memory
 
@@ -58,17 +66,17 @@ _KEYWORD_STOPWORDS = frozenset(
 
 
 def linking_enabled() -> bool:
-    """FF_MEMORY_LINKING feature flag (default ON; feature 033 C-M2). When on, a
-    new memory is linked to keyword-overlapping neighbours and recall pulls in a
-    hit's linked neighbours (single-step multi-hop). Fail-open: off or any error
-    leaves memory unlinked and retrieval unchanged."""
+    """FF_MEMORY_LINKING feature flag (default ON). When on, a new memory is
+    linked to keyword-overlapping neighbours and recall pulls in a hit's linked
+    neighbours (single-step multi-hop). Fail-open: off or any error leaves
+    memory unlinked and retrieval unchanged."""
     return os.getenv("FF_MEMORY_LINKING", "true").strip().lower() not in ("0", "false", "no", "off")
 
 
 def derive_keywords(value: str, *, limit: int = 8) -> str:
     """Deterministic content keywords for a memory note (space-joined): the
     first ``limit`` distinct ≥3-char non-stopword tokens. The self-organizing
-    retrieval/link signal — no LLM, no embedding service."""
+    retrieval/link signal."""
     out: List[str] = []
     for t in re.findall(r"[a-z0-9]{3,}", (value or "").lower()):
         if t in _KEYWORD_STOPWORDS or t in out:
@@ -80,11 +88,10 @@ def derive_keywords(value: str, *, limit: int = 8) -> str:
 
 
 def pagerank_enabled() -> bool:
-    """FF_MEMORY_PAGERANK feature flag (default ON; feature 033 C-M3). When on
-    and the user has a link graph, ``memory_search`` ranks by Personalized
-    PageRank over the memory graph (single-step multi-hop), seeded by the
-    query's direct matches. Fail-open: off / no graph / any error → the C-M2
-    1-hop expansion."""
+    """FF_MEMORY_PAGERANK feature flag (default ON). When on and the user has a
+    link graph, ``memory_search`` ranks by Personalized PageRank over the memory
+    graph (single-step multi-hop), seeded by the query's direct matches.
+    Fail-open: off / no graph / any error → the 1-hop expansion."""
     return os.getenv("FF_MEMORY_PAGERANK", "true").strip().lower() not in ("0", "false", "no", "off")
 
 
@@ -210,7 +217,7 @@ class MemoryTools:
     # ── shared write helpers ────────────────────────────────────────────────
 
     def _gate_value(self, category: str, value: str):
-        """Normalize category, strip value, and gate (PHI + C-S9 poisoning).
+        """Normalize category, strip value, and gate (PHI + poisoning).
         Returns ``(category, value, refusal_dict_or_None)``."""
         if category not in MEMORY_CATEGORIES:
             category = "context"
@@ -225,8 +232,8 @@ class MemoryTools:
                 "reason": "That looked like protected health information, so I did not "
                           "save it to long-term memory. I can still use it for this task.",
             }
-        # C-S9: never persist assistant-directed instructions as a durable "fact"
-        # — the AgentPoison/MINJA vector. Used live, never written.
+        # Never persist assistant-directed instructions as a durable "fact" —
+        # the memory-poisoning vector. Used live, never written.
         if memory_guard.guard_enabled() and memory_guard.is_poisoning_attempt(value):
             logger.warning("memory.write_refused_poison",
                            extra={"user_id": "?", "category": category})
@@ -238,18 +245,99 @@ class MemoryTools:
             }
         return category, value, None
 
-    def _create_linked(self, user_id: str, category: str, value: str) -> Dict[str, Any]:
-        """Create a memory note (with derived keywords, C-M2) and link it into
-        the keyword-overlap graph. Linking failures never block the write."""
+    def _read_scope(self, project_id: Optional[str]) -> Optional[str]:
+        """C-U9 read filter passed to ``repo.list_memory``. With FF_PROJECT_MEMORY
+        off this is None — no filtering, every row (today's behavior). With it on:
+        the GLOBAL sentinel for the global view (NULL-only slice) or a concrete
+        project id (that project + global)."""
+        if not ps.project_scope_enabled():
+            return None
+        return ps.normalize_project(project_id)  # GLOBAL sentinel or concrete id
+
+    def _write_project(self, project_id: Optional[str]) -> Optional[str]:
+        """C-U9 stored ``project_id`` for a write. None (→ NULL column) for the
+        global slice or when the flag is off (every write is global, as today);
+        a concrete project id partitions the row to that project."""
+        if not ps.project_scope_enabled():
+            return None
+        norm = ps.normalize_project(project_id)
+        return None if norm == ps.GLOBAL else norm
+
+    # ── repo adapters (keep the flag-off call signature byte-identical) ──────
+    #
+    # The C-U9 kwargs (`project_id`) are passed to the repository ONLY when a
+    # filter/partition is actually in effect. With scoping off every call is the
+    # exact legacy call — so any repo (including fakes that predate the kwarg)
+    # behaves identically to today.
+
+    def _repo_list(self, user_id: str, project_id: Optional[str]) -> List[Dict[str, Any]]:
+        if project_id is None:
+            return self.repo.list_memory(user_id)
+        return self.repo.list_memory(user_id, project_id=project_id)
+
+    def _repo_create(self, user_id: str, category: str, value: str, *,
+                     keywords: Optional[str], project_id: Optional[str]) -> Dict[str, Any]:
+        if project_id is None:
+            return self.repo.create_memory(user_id, category, value,
+                                           source="explicit", keywords=keywords)
+        return self.repo.create_memory(user_id, category, value, source="explicit",
+                                       keywords=keywords, project_id=project_id)
+
+    def _create_linked(self, user_id: str, category: str, value: str, *,
+                       project_id: Optional[str] = None) -> Dict[str, Any]:
+        """Create a memory note (with derived keywords) and link it into the
+        keyword-overlap graph. Linking failures never block the write."""
         keywords = derive_keywords(value)
-        item = self.repo.create_memory(user_id, category, value,
-                                       source="explicit", keywords=keywords)
+        item = self._repo_create(user_id, category, value,
+                                 keywords=keywords, project_id=project_id)
+        # C-M6: stamp temporal validity / provenance on the new fact (valid from
+        # now, open-ended) and close any contradicting live fact's window so an
+        # as-of recall surfaces the latest value. Flag-gated; failures never block.
+        if lm.temporal_enabled():
+            try:
+                self._stamp_validity(user_id, item, category, value, project_id)
+            except Exception:
+                logger.debug("memory.temporal_stamp_failed", exc_info=True)
         if linking_enabled():
             try:
                 self._link_new(user_id, item["id"], value, keywords)
             except Exception:
                 logger.debug("memory.link_failed", exc_info=True)
         return item
+
+    def _stamp_validity(self, user_id: str, item: Dict[str, Any], category: str,
+                        value: str, project_id: Optional[str]) -> None:
+        """C-M6/C-M9: record the new fact's validity window (valid_from=now,
+        ingested_at=now). For a SINGULAR category (e.g. ``profession``), a new
+        value supersedes the one prior live value temporally — the older fact's
+        window is closed (valid_to=now) so an as-of recall surfaces only the
+        latest. Multi-valued categories (goals, preferences, …) keep every live
+        fact; their conflicts are surfaced by :func:`detect_contradiction`, not
+        auto-closed. Compared within the same slice (a global write vs global
+        facts; a project write vs its project + global)."""
+        now = int(time.time() * 1000)
+        self.repo.set_validity(user_id, item["id"], valid_from=now,
+                               valid_to=None, ingested_at=now)
+        if category not in _SINGULAR_CATEGORIES:
+            return
+        # Resolve the read slice the stored project_id belongs to: a concrete id
+        # compares against that project + global; a global write (stored NULL)
+        # compares against the global slice only (when scoping is on).
+        if ps.project_scope_enabled() and project_id is None:
+            cmp_scope: Optional[str] = ps.GLOBAL
+        else:
+            cmp_scope = project_id  # concrete id, or None when scoping is off
+        new_norm = str(value).strip().lower()
+        for it in self._repo_list(user_id, cmp_scope):
+            if it.get("id") == item["id"] or str(it.get("category", "")) != category:
+                continue
+            if str(it.get("value", "")).strip().lower() == new_norm:
+                continue
+            if it.get("valid_to") is not None:  # only close a still-live fact
+                continue
+            self.repo.set_validity(user_id, it["id"],
+                                   valid_from=it.get("valid_from"), valid_to=now,
+                                   ingested_at=it.get("ingested_at"))
 
     def _link_new(self, user_id: str, new_id: str, value: str, keywords: str) -> int:
         """Link a just-created memory to its keyword-overlapping live neighbours
@@ -272,27 +360,36 @@ class MemoryTools:
                 linked += 1
         return linked
 
-    def _do_add(self, user_id: str, category: str, value: str) -> Dict[str, Any]:
-        item = self._create_linked(user_id, category, value)
+    def _do_add(self, user_id: str, category: str, value: str, *,
+                project_id: Optional[str] = None) -> Dict[str, Any]:
+        item = self._create_linked(user_id, category, value, project_id=project_id)
         logger.info("memory.remembered",
                     extra={"user_id": user_id, "category": category, "memory_id": item["id"]})
-        return {"stored": True, "id": item["id"], "category": category}
+        result = {"stored": True, "id": item["id"], "category": category}
+        if project_id is not None:
+            result["project_id"] = project_id
+        return result
 
     # ── writes ──────────────────────────────────────────────────────────────
 
-    def remember(self, user_id: str, category: str, value: str) -> Dict[str, Any]:
-        """Explicitly remember a durable fact (legacy append). PHI is refused."""
+    def remember(self, user_id: str, category: str, value: str, *,
+                 project_id: Optional[str] = None) -> Dict[str, Any]:
+        """Explicitly remember a durable fact (legacy append). PHI is refused.
+        ``project_id`` (C-U9, flag-gated) writes the fact into a project slice."""
         category, value, refusal = self._gate_value(category, value)
         if refusal is not None:
             return refusal
-        return self._do_add(user_id, category, value)
+        return self._do_add(user_id, category, value,
+                            project_id=self._write_project(project_id))
 
-    def _candidates(self, user_id: str, category: str, value: str) -> List[Dict[str, Any]]:
+    def _candidates(self, user_id: str, category: str, value: str, *,
+                    project_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Related live memories for reconciliation: same category and/or
-        token-overlap, best first, capped at RECONCILE_MAX_CANDIDATES."""
+        token-overlap, best first, capped at RECONCILE_MAX_CANDIDATES. Scoped to
+        the active project slice (+ global) when C-U9 is on."""
         vt = _tokens(value)
         scored = []
-        for it in self.repo.list_memory(user_id):  # live only (superseded excluded)
+        for it in self._repo_list(user_id, project_id):  # live only
             overlap = len(vt & _tokens(it.get("value", "")))
             same_cat = it.get("category") == category
             if overlap or same_cat:
@@ -303,18 +400,21 @@ class MemoryTools:
     async def remember_reconciled(
         self, user_id: str, category: str, value: str, *,
         llm_call: Optional[Callable[[List[Dict[str, str]]], Awaitable[Optional[str]]]] = None,
+        project_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """C-M1: reconcile a durable write against related memories via an
-        injected ``llm_call``, applying ADD/UPDATE/DELETE/NOOP with
-        supersession. Fail-open to a plain append at every step."""
+        """Reconcile a durable write against related memories via an injected
+        ``llm_call``, applying ADD/UPDATE/DELETE/NOOP with supersession.
+        Fail-open to a plain append at every step."""
         category, value, refusal = self._gate_value(category, value)
         if refusal is not None:
             return refusal
 
-        candidates = (self._candidates(user_id, category, value)
+        read_scope = self._read_scope(project_id)
+        write_proj = self._write_project(project_id)
+        candidates = (self._candidates(user_id, category, value, project_id=read_scope)
                       if (reconcile_enabled() and llm_call is not None) else [])
         if not candidates:
-            return self._do_add(user_id, category, value)
+            return self._do_add(user_id, category, value, project_id=write_proj)
 
         try:
             content = await llm_call(build_reconcile_messages(value, category, candidates))
@@ -342,7 +442,7 @@ class MemoryTools:
             return {"stored": False, "action": "delete", "superseded": tgt["id"]}
         if action == "UPDATE" and tgt is not None:
             new_value = decision.get("value") or value
-            item = self._create_linked(user_id, category, new_value)
+            item = self._create_linked(user_id, category, new_value, project_id=write_proj)
             self.repo.supersede_memory(user_id, tgt["id"], item["id"])
             logger.info("memory.reconcile_update",
                         extra={"user_id": user_id, "category": category,
@@ -350,7 +450,7 @@ class MemoryTools:
             return {"stored": True, "id": item["id"], "category": category,
                     "action": "update", "superseded": tgt["id"]}
         # ADD, or UPDATE/DELETE with no resolvable target → safe append.
-        result = self._do_add(user_id, category, value)
+        result = self._do_add(user_id, category, value, project_id=write_proj)
         result["action"] = "add"
         return result
 
@@ -362,15 +462,25 @@ class MemoryTools:
         if not value or self.gate.contains_phi(value):
             return False
         self.repo.add_signal(user_id, category, value)
-        # 030 FR-017: structured observability for short-term signal capture.
         logger.info("memory.signal_captured",
                     extra={"user_id": user_id, "category": category})
         return True
 
-    def _live_memory(self, user_id: str) -> List[Dict[str, Any]]:
-        """Live memories with C-S9 tamper-filtering: a row whose HMAC signature
-        no longer matches its fields is dropped from recall (and logged)."""
-        items = self.repo.list_memory(user_id)
+    def _live_memory(self, user_id: str, *,
+                     project_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Live memories with tamper-filtering: a row whose HMAC signature no
+        longer matches its fields is dropped from recall (and logged).
+
+        When C-U9 is on and a project is active, the slice is the project's rows
+        plus the global ones (filtered in SQL). When C-M6 is on, rows whose
+        validity window has closed (``valid_to`` in the past) are hidden — an
+        as-of-now point-in-time recall."""
+        items = self._repo_list(user_id, project_id)
+        if lm.temporal_enabled():
+            try:
+                items = lm.as_of(items, int(time.time() * 1000))
+            except Exception:
+                logger.debug("memory.temporal_filter_failed", exc_info=True)
         if not memory_guard.guard_enabled():
             return items
         kept = []
@@ -382,18 +492,39 @@ class MemoryTools:
             kept.append(it)
         return kept
 
-    def memory_get(self, user_id: str) -> List[Dict[str, Any]]:
-        """Return all durable memory items (for prompt recall), tamper-filtered."""
-        return self._live_memory(user_id)
+    def _reinforce(self, user_id: str, items: List[Dict[str, Any]]) -> None:
+        """C-M7: reinforcement-on-recall. Bump recall_count / reset the decay
+        clock for the rows actually surfaced. Flag-gated; failures never block a
+        recall (the read already succeeded)."""
+        if not lm.forgetting_enabled() or not items:
+            return
+        try:
+            for it in items:
+                mid = it.get("id")
+                if mid is not None:
+                    self.repo.record_recall(user_id, mid)
+        except Exception:
+            logger.debug("memory.reinforce_failed", exc_info=True)
 
-    def memory_search(self, user_id: str, query: str, *, limit: int = 10) -> List[Dict[str, Any]]:
+    def memory_get(self, user_id: str, *,
+                   project_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Return all durable memory items (for prompt recall), tamper-filtered."""
+        items = self._live_memory(user_id, project_id=self._read_scope(project_id))
+        self._reinforce(user_id, items)
+        return items
+
+    def memory_search(self, user_id: str, query: str, *, limit: int = 10,
+                      project_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Token-overlap search over durable memory, ranked by a multi-signal
-        recency × importance × relevance composite (feature 036 C-M4) when
-        FF_MEMORY_MULTISIGNAL is on; fail-open to the legacy overlap-only rank."""
+        recency × importance × relevance composite when FF_MEMORY_MULTISIGNAL is
+        on; fail-open to the legacy overlap-only rank."""
+        scope = self._read_scope(project_id)
         q = _tokens(query)
-        items = self._live_memory(user_id)  # recency DESC, C-S9 tamper-filtered
+        items = self._live_memory(user_id, project_id=scope)  # recency DESC, tamper-filtered
         if not q:
-            return items[:limit]
+            out = items[:limit]
+            self._reinforce(user_id, out)
+            return out
         use_ms = multisignal_enabled()
         total = len(items)
         scored = []
@@ -418,17 +549,18 @@ class MemoryTools:
             scored.append((score, idx, it))
         if not seed_scores:
             return []
-        # C-M3: rank by Personalized PageRank over the link graph (single-step
+        # Rank by Personalized PageRank over the link graph (single-step
         # multi-hop), seeded by the direct matches. Returns None (→ fallback)
         # when there is no graph or the repo predates links.
         if pagerank_enabled():
             try:
                 ranked = self._pagerank_rank(user_id, items, seed_scores, order, limit)
                 if ranked is not None:
+                    self._reinforce(user_id, ranked)
                     return ranked
             except Exception:
                 logger.debug("memory_search: pagerank failed — falling back", exc_info=True)
-        # Fallback: direct hits (ties keep recency), then the C-M2 1-hop expansion.
+        # Fallback: direct hits (ties keep recency), then the 1-hop expansion.
         scored.sort(key=lambda t: (-t[0], t[1]))
         results = [it for _, _, it in scored[:limit]]
         if linking_enabled() and results and len(results) < limit:
@@ -437,6 +569,7 @@ class MemoryTools:
             except Exception:
                 logger.debug("memory_search: link expansion failed — direct hits only",
                              exc_info=True)
+        self._reinforce(user_id, results)
         return results
 
     def _pagerank_rank(self, user_id: str, items: List[Dict[str, Any]],
@@ -487,3 +620,41 @@ class MemoryTools:
                     if len(expanded) >= limit:
                         break
         return expanded[:limit]
+
+    # ── C-M8 evolving persona ────────────────────────────────────────────────
+
+    def get_persona(self, user_id: str) -> str:
+        """The user's current persona steering text ("" when none / flag off).
+        Surfaced into prompt recall when FF_MEMORY_PERSONA is on."""
+        if not lm.persona_enabled():
+            return ""
+        row = self.repo.get_persona(user_id)
+        return (row or {}).get("persona", "") if row else ""
+
+    def evolve_persona(self, user_id: str, signals: List[str], *,
+                       proposal: Optional[str] = None) -> str:
+        """Fold preference ``signals`` into the user's persona via keep-best
+        (:func:`living_memory.evolve_persona`) and persist only when the candidate
+        scores strictly better — the persona never regresses. Returns the
+        effective persona text. No-op (returns current/"" ) when the flag is off.
+        Fail-open: any persistence error returns the in-memory best."""
+        if not lm.persona_enabled():
+            return ""
+        try:
+            row = self.repo.get_persona(user_id)
+            current = (row or {}).get("persona", "") if row else ""
+            # living_memory.evolve_persona is the keep-best: it scores BOTH the
+            # current persona and the candidate against THESE signals and returns
+            # whichever is better (never regresses). A returned text that differs
+            # from the current one is therefore a genuine improvement — persist it
+            # with its (correctly co-scored) score. Equal/worse → text unchanged →
+            # the stored row is left untouched, so repeated covered signals don't
+            # churn it.
+            candidate = lm.evolve_persona(current, signals, proposal=proposal)
+            if candidate.text != current:
+                self.repo.set_persona(user_id, candidate.text, candidate.score)
+                return candidate.text
+            return current
+        except Exception:
+            logger.debug("memory.persona_evolve_failed", exc_info=True)
+            return ""

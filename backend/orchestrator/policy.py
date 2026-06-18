@@ -1,4 +1,4 @@
-"""Deterministic pre-action policy engine — 033 Wave-4 (C-S3).
+"""Deterministic pre-action policy engine.
 
 One ordered, fail-closed rule chain evaluated before a tool runs. Each rule is
 DATA — a ``when`` predicate over the call context (tool, agent, roles, args) and
@@ -9,7 +9,7 @@ and evaluation continues; with no match the default is allow, so the engine is a
 strictly ADDITIVE gate on top of the existing PHI/scope checks.
 
 Pure + deterministic; a malformed rule never blocks (it just doesn't match), so
-a bad config degrades to today's behavior. stdlib only — no new dependency.
+a bad config degrades to today's behavior.
 """
 from __future__ import annotations
 
@@ -24,8 +24,8 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger("orchestrator.policy")
 
 ALLOW, DENY, CONFIRM, REWRITE = "allow", "deny", "confirm", "rewrite"
-#: 033 C-S8 — a terminal effect requiring the call to carry a valid single-use
-#: transaction token (verified+consumed at dispatch by ``transaction_token``).
+#: A terminal effect requiring the call to carry a valid single-use transaction
+#: token (verified+consumed at dispatch by ``transaction_token``).
 REQUIRE_TOKEN = "require_token"
 _EFFECTS = (ALLOW, DENY, CONFIRM, REWRITE, REQUIRE_TOKEN)
 
@@ -39,9 +39,9 @@ class PolicyDecision:
 
 
 def policy_enabled() -> bool:
-    """FF_POLICY_ENGINE feature flag (default OFF; feature 033 C-S3). Off means
-    the engine is not consulted (today's behavior); on evaluates ``POLICY_RULES``
-    before each tool call. Additive — with no rules every call is allowed."""
+    """FF_POLICY_ENGINE feature flag. Off means the engine is not consulted
+    (today's behavior); on evaluates ``POLICY_RULES`` before each tool call.
+    Additive — with no rules every call is allowed."""
     return os.getenv("FF_POLICY_ENGINE", "false").strip().lower() in ("1", "true", "yes", "on")
 
 

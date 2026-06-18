@@ -1,8 +1,8 @@
-"""Sandboxed execution for generated agent/parser code — 033 Wave-4 (C-S6).
+"""Sandboxed execution for generated agent/parser code.
 
 Model-written agent/parser code is launched as a child process (the draft-agent
 subprocess in ``agent_lifecycle.start_draft_agent``). Today that child inherits
-the orchestrator's full resources, environment and temp filesystem. C-S6 wraps
+the orchestrator's full resources, environment and temp filesystem. This wraps
 the launch in an OS-level sandbox so the static checks have a runtime backstop:
 
 * **Resource limits** (POSIX ``resource.setrlimit`` via a ``preexec_fn`` applied
@@ -22,10 +22,10 @@ blocklist, the egress-gated HTTP path, the self-test timeout). Socket creation i
 constrained here only indirectly (the descriptor cap + the static socket block +
 egress gating); a full seccomp syscall filter is a documented follow-on.
 
-Pure config + a fork-time hook; stdlib only (``resource`` is POSIX). **No new
-dependency.** Flag ``FF_SANDBOX_CODEGEN`` (default OFF) gates the wrap, which is
-additive + fail-open: off, on a non-POSIX host, or on any setup error, the launch
-is exactly today's. Limits are env-tunable with generous defaults so a normal
+Pure config + a fork-time hook (``resource`` is POSIX-only). Flag
+``FF_SANDBOX_CODEGEN`` (default OFF) gates the wrap, which is additive +
+fail-open: off, on a non-POSIX host, or on any setup error, the launch is
+exactly today's. Limits are env-tunable with generous defaults so a normal
 parser agent is unaffected.
 """
 from __future__ import annotations
@@ -48,7 +48,7 @@ _SECRET_ENV_DENYLIST = (
 
 
 def sandbox_enabled() -> bool:
-    """FF_SANDBOX_CODEGEN feature flag (default OFF; feature 033 C-S6)."""
+    """FF_SANDBOX_CODEGEN feature flag (default OFF)."""
     return os.getenv("FF_SANDBOX_CODEGEN", "false").strip().lower() in ("1", "true", "yes", "on")
 
 

@@ -1,4 +1,4 @@
-"""Feature 037 / 040 — server-driven chat-history surface components.
+"""Server-driven chat-history surface components.
 
 Builds the astralprims components for the recent-chats list and its loading
 skeleton. The orchestrator delivers them via ``send_ui_render(target="history")``
@@ -6,13 +6,12 @@ so ROTE adapts them per device (browser/tablet/TV full list, mobile/watch
 condensed, voice spoken) — the history surface is server-driven and
 cross-platform, never a web-only client render.
 
-Feature 040 redesign: the loaded state is a single ``chat_history`` primitive
-(rendered by ``webrender.render_chat_history``) — scannable conversation rows
-with an agent glyph, title, last-message preview, relative time and a
-saved-components marker — instead of a bare stack of title-only buttons. All
-enrichment (relative time, agent icon, saved flag) is derived here from the
-recent-chats rows the orchestrator already supplies, so no new query or schema
-is needed.
+The loaded state is a single ``chat_history`` primitive (rendered by
+``webrender.render_chat_history``) — scannable conversation rows with an agent
+glyph, title, last-message preview, relative time and a saved-components marker
+— instead of a bare stack of title-only buttons. All enrichment (relative time,
+agent icon, saved flag) is derived here from the recent-chats rows the
+orchestrator already supplies, so no new query or schema is needed.
 
 Pure builders (no orchestrator/DB dependency) so they are unit-testable on
 their own; the orchestrator only supplies the recent-chats rows.
@@ -32,22 +31,22 @@ _HEADING = {"type": "text", "content": "Recent chats", "variant": "h3"}
 #: Decorative per-agent glyphs (hidden from assistive tech in the renderer).
 #: Unknown/None agents fall back to a neutral speech-bubble.
 _AGENT_ICONS = {
-    "weather": "\U0001F324️",        # 🌤️
-    "etf_tracker_1": "\U0001F4C8",         # 📈
-    "summarizer": "\U0001F4DD",            # 📝
-    "dice_roller": "\U0001F3B2",           # 🎲
-    "medical": "\U0001FA7A",               # 🩺
-    "journal_review": "\U0001F4D3",        # 📓
-    "web_research": "\U0001F50E",          # 🔎
-    "ml_services": "\U0001F9E0",           # 🧠
-    "connectors": "\U0001F517",            # 🔗
-    "general": "\U0001F4AC",               # 💬
+    "weather": "\U0001F324️",
+    "etf_tracker_1": "\U0001F4C8",
+    "summarizer": "\U0001F4DD",
+    "dice_roller": "\U0001F3B2",
+    "medical": "\U0001FA7A",
+    "journal_review": "\U0001F4D3",
+    "web_research": "\U0001F50E",
+    "ml_services": "\U0001F9E0",
+    "connectors": "\U0001F517",
+    "general": "\U0001F4AC",
 }
-_DEFAULT_ICON = "\U0001F4AC"  # 💬
+_DEFAULT_ICON = "\U0001F4AC"
 
 
 def history_skeleton_components(label: str = "Loading your chats…") -> List[Dict[str, Any]]:
-    """The loading state: a heading + a chat-history skeleton (feature 037)."""
+    """The loading state: a heading + a chat-history skeleton."""
     return [dict(_HEADING), skeleton_component(variant="chat-history", count=6, label=label)]
 
 
@@ -95,7 +94,7 @@ def _relative_time(value: Any, *, now: Optional[float] = None) -> str:
 
 
 def history_surface_components(chats: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """The loaded state: a single ``chat_history`` primitive (feature 040).
+    """The loaded state: a single ``chat_history`` primitive.
 
     Each recent-chats row becomes an item with its title, last-message preview,
     relative time, agent glyph and saved-components marker. A chat with no id is
