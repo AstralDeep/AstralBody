@@ -18,16 +18,23 @@ import websockets
 from PySide6.QtCore import QObject, Signal
 
 
-def device_caps(width: int = 1280, height: int = 860) -> dict:
-    """Report a full-capability browser-class profile so the server sends the
-    complete component tree (we render natively, so we want no degradation)."""
-    return {
-        "device_type": "browser",
+def device_caps(width: int = 1280, height: int = 860,
+                supported_types=None) -> dict:
+    """Report this client as a native ``windows`` device with the set of SDUI
+    primitive types it renders natively. ROTE keys off ``device_type`` for the
+    desktop host-config and uses ``supported_types`` to substitute web-only
+    primitives (e.g. plotly_chart) the native renderer can't draw — so the
+    server adapts to the desktop app's real capabilities, not the web view's."""
+    caps = {
+        "device_type": "windows",
         "screen_width": width, "screen_height": height,
         "viewport_width": width, "viewport_height": height,
         "pixel_ratio": 1.0, "has_touch": False, "user_agent": "AstralWindowsClient/0.1",
         "connection_type": "wifi",
     }
+    if supported_types:
+        caps["supported_types"] = list(supported_types)
+    return caps
 
 
 class OrchestratorClient(QObject):
