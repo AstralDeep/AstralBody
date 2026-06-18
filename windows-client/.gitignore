@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# venv
+.venv/
+
+# PyInstaller build artifacts
+build/
+dist/
+*.manifest
+shot_*.png
