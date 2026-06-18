@@ -1,0 +1,4 @@
+PySide6>=6.6
+websockets>=12.0
+# build only:
+# pyinstaller>=6.0
