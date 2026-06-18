@@ -118,6 +118,20 @@ class MainWindow(QMainWindow):
         self.client.message.connect(self._on_message)
         self.client.status.connect(self._on_status)
 
+        # Host the Windows tools agent in-process; register it once connected so
+        # the assistant can run Windows-specific tools on this PC. The host the
+        # orchestrator reaches us at is host.docker.internal by default (it runs
+        # in Docker); override with ASTRAL_AGENT_HOST.
+        self._win_agent_host = os.getenv("ASTRAL_AGENT_HOST", "host.docker.internal")
+        self._win_agent_port = int(os.getenv("WIN_AGENT_PORT", "8771"))
+        self._win_agent_registered = False
+        if os.getenv("ASTRAL_WIN_AGENT", "1") not in ("0", "false", "no"):
+            try:
+                import win_agent.agent as _wa
+                _wa.start_agent_thread(port=self._win_agent_port)
+            except Exception:  # never block the UI if the agent can't start
+                pass
+
         # top status bar
         self._status = QLabel("connecting…")
         self._status.setStyleSheet(f"color:{T.MUTED}; padding:6px 14px; background:{T.SURFACE};")
@@ -173,6 +187,10 @@ class MainWindow(QMainWindow):
             T.VARIANT_COLORS["error"][0] if s.startswith(("closed", "auth_required")) else T.MUTED)
         self._status.setText(nice)
         self._status.setStyleSheet(f"color:{color}; padding:6px 14px; background:{T.SURFACE};")
+        if s == "connected" and not self._win_agent_registered:
+            self._win_agent_registered = True
+            url = f"http://{self._win_agent_host}:{self._win_agent_port}"
+            self.client.send_event("register_external_agent", {"url": url})
 
     def _on_message(self, msg: dict) -> None:
         t = msg.get("type")
