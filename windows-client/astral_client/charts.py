@@ -13,7 +13,7 @@ from PySide6.QtCharts import (
 
 from . import theme as T
 
-_PALETTE = ["#3b82f6", "#22c55e", "#f59e0b", "#a855f7", "#ef4444", "#06b6d4"]
+_PALETTE = ["#6366F1", "#8B5CF6", "#06B6D4", "#22C55E", "#EAB308", "#EF4444"]
 
 
 def _style(chart: QChart, title: str) -> QChartView:

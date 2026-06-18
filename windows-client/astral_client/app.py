@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 
 from . import theme as T
 from .protocol import OrchestratorClient, device_caps
-from .renderer import RenderContext, render
+from .renderer import RenderContext, render, supported_types as native_types, _scoped
 
 
 class ChatRail(QWidget):
@@ -39,11 +39,13 @@ class ChatRail(QWidget):
         bubble = QFrame()
         is_user = role == "user"
         bg = T.PRIMARY_SOFT if is_user else T.SURFACE
-        bubble.setStyleSheet(f"background:{bg}; border:1px solid {T.BORDER}; border-radius:10px;")
+        _scoped(bubble, f"background:{bg}; border:1px solid {T.BORDER}; border-radius:10px;")
         bl = QVBoxLayout(bubble); bl.setContentsMargins(12, 8, 12, 8)
         who = QLabel("You" if is_user else "Assistant")
+        who.setFrameShape(QFrame.Shape.NoFrame)
         who.setStyleSheet(f"color:{T.MUTED}; font-size:11px; font-weight:600; background:transparent;")
         body = QLabel(text); body.setWordWrap(True)
+        body.setFrameShape(QFrame.Shape.NoFrame)
         body.setTextFormat(Qt.TextFormat.MarkdownText)
         body.setStyleSheet(f"color:{T.TEXT}; font-size:13px; background:transparent;")
         bl.addWidget(who); bl.addWidget(body)
@@ -112,7 +114,7 @@ class MainWindow(QMainWindow):
         self.active_chat: Optional[str] = None
 
         ctx = RenderContext(emit=self._emit)
-        self.client = OrchestratorClient(url, token, device_caps())
+        self.client = OrchestratorClient(url, token, device_caps(supported_types=native_types()))
         self.client.message.connect(self._on_message)
         self.client.status.connect(self._on_status)
 
@@ -133,7 +135,8 @@ class MainWindow(QMainWindow):
         bottom = QHBoxLayout(); bottom.setContentsMargins(12, 8, 12, 12); bottom.setSpacing(8)
         bottom.addWidget(self._input, 1); bottom.addWidget(send)
 
-        root = QWidget(); rl = QVBoxLayout(root); rl.setContentsMargins(0, 0, 0, 0); rl.setSpacing(0)
+        root = QWidget(); root.setObjectName("root")
+        rl = QVBoxLayout(root); rl.setContentsMargins(0, 0, 0, 0); rl.setSpacing(0)
         rl.addWidget(self._status)
         rl.addWidget(split, 1)
         rl.addLayout(bottom)
@@ -177,7 +180,9 @@ class MainWindow(QMainWindow):
             target = msg.get("target") or "canvas"
             comps = msg.get("components") or []
             if target == "chat":
-                self.rail.add("assistant", _flatten_text(comps) or "(response)")
+                text = _flatten_text(comps)
+                if text.strip():
+                    self.rail.add("assistant", text)
             elif target == "history":
                 pass  # history surface — not shown in MVP
             else:
@@ -214,6 +219,18 @@ def _flatten_text(components: list) -> str:
     return "\n\n".join(x for x in out if x)
 
 
+def configure(app: QApplication) -> None:
+    """Apply the theme + a guaranteed-present UI font (Inter if installed, else
+    Segoe UI) so glyphs always render — the stylesheet family alone can fall back
+    to a glyph-less font under some platforms."""
+    from PySide6.QtGui import QFont, QFontDatabase
+    families = set(QFontDatabase.families())
+    family = next((f for f in ("Inter", "Segoe UI", "Arial") if f in families),
+                  app.font().family())
+    app.setFont(QFont(family, 10))
+    app.setStyleSheet(T.APP_STYLESHEET + T.ROOT_BG_STYLE)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="AstralBody native Windows client")
     ap.add_argument("--url", default=os.getenv("ASTRAL_WS_URL", "ws://127.0.0.1:8001/ws"))
@@ -221,7 +238,7 @@ def main() -> int:
     args = ap.parse_args()
 
     app = QApplication(sys.argv)
-    app.setStyleSheet(T.APP_STYLESHEET)
+    configure(app)
     win = MainWindow(args.url, args.token)
     win.show()
     return app.exec()

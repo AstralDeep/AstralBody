@@ -41,10 +41,12 @@ class RenderContext:
 def _label(text: str, *, color: str = T.TEXT, size: int = 14, bold: bool = False,
            markdown: bool = False, wrap: bool = True) -> QLabel:
     lab = QLabel()
+    lab.setFrameShape(QFrame.Shape.NoFrame)
     lab.setTextFormat(Qt.TextFormat.MarkdownText if markdown else Qt.TextFormat.PlainText)
     lab.setText(str(text))
     lab.setWordWrap(wrap)
-    lab.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+    lab.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse
+                                | Qt.TextInteractionFlag.LinksAccessibleByMouse)
     lab.setOpenExternalLinks(True)
     weight = "600" if bold else "400"
     lab.setStyleSheet(f"color:{color}; font-size:{size}px; font-weight:{weight}; background:transparent;")
@@ -58,9 +60,27 @@ def _vbox(spacing: int = 8, margins: tuple = (0, 0, 0, 0)) -> QVBoxLayout:
     return lay
 
 
+_box_counter = [0]
+
+
+def _scoped(widget: QWidget, css: str) -> QWidget:
+    """Apply ``css`` to ``widget`` ONLY, via an object-name selector.
+
+    A bare-property stylesheet (e.g. ``border: 1px solid``) set directly on a
+    container cascades that border onto every child widget in Qt — which is why
+    a card's border was bleeding onto its labels. Scoping to ``#name`` confines
+    it to the container itself.
+    """
+    _box_counter[0] += 1
+    name = f"abox{_box_counter[0]}"
+    widget.setObjectName(name)
+    widget.setStyleSheet(f"#{name} {{ {css} }}")
+    return widget
+
+
 def _card_frame(radius: int = 12, bg: str = T.SURFACE, border: str = T.BORDER) -> QFrame:
     f = QFrame()
-    f.setStyleSheet(f"background:{bg}; border:1px solid {border}; border-radius:{radius}px;")
+    _scoped(f, f"background:{bg}; border:1px solid {border}; border-radius:{radius}px;")
     f.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
     return f
 
@@ -134,7 +154,13 @@ def _r_grid(c, ctx):
 
 
 def _r_hero(c, ctx):
-    frame = _card_frame(radius=14, bg=T.SURFACE_2)
+    frame = QFrame()
+    gradient = c.get("variant") == "gradient"
+    bg = (T.GRAD if gradient else
+          "qlineargradient(x1:0,y1:0,x2:1,y2:1,"
+          "stop:0 rgba(99,102,241,0.14), stop:1 rgba(139,92,246,0.06))")
+    _scoped(frame, f"background:{bg}; border:1px solid {T.BORDER}; border-radius:14px;")
+    frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
     lay = _vbox(4, (20, 18, 20, 18)); frame.setLayout(lay)
     if c.get("eyebrow"):
         lab = _label(str(c["eyebrow"]).upper(), color=T.PRIMARY, size=11, bold=True)
@@ -161,7 +187,12 @@ def _r_badge(c, ctx):
 
 
 def _r_metric(c, ctx):
-    frame = _card_frame(bg=T.SURFACE_2)
+    frame = QFrame()
+    _scoped(frame,
+            "background:qlineargradient(x1:0,y1:0,x2:1,y2:1,"
+            "stop:0 rgba(99,102,241,0.18), stop:1 rgba(99,102,241,0.03));"
+            f"border:1px solid {T.BORDER}; border-radius:12px;")
+    frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
     lay = _vbox(2, (16, 14, 16, 14)); frame.setLayout(lay)
     lay.addWidget(_label(str(c.get("title", "")).upper(), color=T.MUTED, size=11, bold=True))
     row = QHBoxLayout(); row.setSpacing(8)
@@ -233,9 +264,10 @@ def _r_rating(c, ctx):
 
 
 def _r_alert(c, ctx):
-    color, bg = T.VARIANT_COLORS.get(c.get("variant", "info"), T.VARIANT_COLORS["info"])
+    color, _ = T.VARIANT_COLORS.get(c.get("variant", "info"), T.VARIANT_COLORS["info"])
     frame = QFrame()
-    frame.setStyleSheet(f"background:{bg}; border:1px solid {color}; border-radius:8px;")
+    _scoped(frame, f"background:{T.SURFACE}; border:1px solid {T.BORDER};"
+                  f"border-left:3px solid {color}; border-radius:8px;")
     lay = _vbox(4, (14, 12, 14, 12)); frame.setLayout(lay)
     if c.get("title"):
         lay.addWidget(_label(c["title"], color=color, size=14, bold=True))
