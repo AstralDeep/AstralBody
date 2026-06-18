@@ -9,7 +9,9 @@ from PyInstaller.utils.hooks import collect_submodules
 
 hiddenimports = (
     collect_submodules("PySide6.QtCharts")
-    + ["PySide6.QtCharts", "websockets", "websockets.legacy", "websockets.legacy.client"]
+    + collect_submodules("aiohttp")
+    + ["PySide6.QtCharts", "websockets", "websockets.legacy", "websockets.legacy.client",
+       "win_agent", "win_agent.agent", "win_agent.tools", "psutil", "pyperclip"]
 )
 
 # Trim heavy, unused Qt modules to keep the binary lean.

@@ -67,6 +67,21 @@ QT_QPA_PLATFORM=offscreen .venv/Scripts/python tests/e2e_live.py --prompt "roll 
   and relaxing the orchestrator's single-`azp` check to a configurable
   allow-list. (Not yet implemented — tracked as a follow-up.)
 
+## Windows tools agent (client-hosted)
+
+The app hosts a small **A2A agent in-process** (`win_agent/`) that exposes
+Windows-specific tools to the orchestrator, so the assistant can act on this PC:
+`get_system_info`, `read_clipboard`, `write_clipboard`, `notify` (native toast),
+`open_path` (file/folder/URL), `list_directory`. Results render natively.
+
+On connect, the client registers the agent at `http://host.docker.internal:8771`
+(the orchestrator runs in Docker and reaches the host that way). Override with
+`ASTRAL_AGENT_HOST` / `WIN_AGENT_PORT`; disable with `ASTRAL_WIN_AGENT=0`. The
+agent can also run standalone: `python -m win_agent.agent --port 8771`.
+
+The agent registers with the orchestrator's `AGENT_API_KEY` when set (required
+outside dev; dev mode is keyless).
+
 ## Scope / status
 
 MVP: chat → keyless agent → native SDUI canvas, in-place `ui_upsert` updates,
