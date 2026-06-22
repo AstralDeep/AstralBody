@@ -11,3 +11,9 @@ build/
 dist/
 *.manifest
 shot_*.png
+shots/
+
+# Local verification artifacts (NEVER commit — holds real OIDC tokens)
+.astral_token.json
+*.token.json
+_tmp_*.py
