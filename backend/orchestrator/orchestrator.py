@@ -8181,10 +8181,19 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 options={"verify_aud": False, "verify_at_hash": False}
             )
 
-            # Verify authorized party matches our client
+            # Verify authorized party is an accepted client. The web client
+            # (expected_client) is always accepted; additional first-party
+            # clients — notably the native desktop's dedicated public client
+            # astral-desktop — are accepted via the KEYCLOAK_ALLOWED_AZP
+            # allow-list (RFC 8252 native-app posture). Empty allow-list ⇒
+            # only the web client (identical to the legacy single-azp check).
             azp = payload.get("azp")
-            if azp and azp != expected_client:
-                logger.warning(f"Token azp '{azp}' does not match expected client '{expected_client}'")
+            from shared.auth_clients import is_azp_allowed, allowed_azps
+            if azp and not is_azp_allowed(azp):
+                logger.warning(
+                    f"Token azp '{azp}' is not an accepted client "
+                    f"(allowed: {sorted(allowed_azps())})"
+                )
                 return None
 
             # Extract Roles

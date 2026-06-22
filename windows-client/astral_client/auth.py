@@ -1,13 +1,19 @@
-"""Native desktop OIDC login that REUSES the web's `astral-frontend` client.
+"""Native desktop OIDC login (Authorization-Code + PKCE, loopback redirect).
 
-`astral-frontend` is a *confidential* Keycloak client (it has a client_secret),
-so the desktop can't exchange the auth code directly — it would have to embed the
-secret. Instead it does Authorization-Code + PKCE with a loopback redirect (RFC
-8252) for the browser step, then exchanges the code through the orchestrator's
-existing **BFF token proxy** (`POST {base}/auth/token`), which injects the secret
-server-side. No new Keycloak client and no azp change are needed; the only realm
-change is adding the loopback redirect URI (`http://127.0.0.1/*`) to
-`astral-frontend`'s allowed redirects.
+The production posture (default) uses a **dedicated public Keycloak client**
+(`astral-desktop`): the by-the-book native-app flow (RFC 8252 / OAuth 2.0 for
+Native Apps). The client is *public* (no client_secret), so the desktop
+exchanges the authorization code and refreshes tokens **directly against
+Keycloak's token endpoint** — it does not depend on the orchestrator, and the
+web/desktop auth surfaces stay isolated. The orchestrator accepts the desktop
+client's `azp` via its `KEYCLOAK_ALLOWED_AZP` allow-list.
+
+A legacy **BFF reuse** mode (`bff_base` set) is kept for environments that have
+not provisioned a dedicated client yet: it reuses the web's *confidential*
+`astral-frontend` client by proxying the code/refresh exchange through the
+orchestrator's `POST {bff}/auth/token` (which injects the secret server-side).
+
+See `docs/keycloak-windows-client-setup.md` for the one-time Keycloak setup.
 """
 from __future__ import annotations
 
@@ -44,8 +50,12 @@ def _post_form(url: str, fields: dict, timeout: int = 20) -> dict:
 
 @dataclass
 class Session:
-    """A logged-in session — current access token + silent refresh, both routed
-    through the orchestrator's BFF token proxy (``token_url``)."""
+    """A logged-in session — current access token + silent refresh.
+
+    ``token_url`` is where refreshes are POSTed: Keycloak's token endpoint
+    directly (dedicated public client) or the orchestrator's BFF proxy (legacy
+    reuse mode). A public client refreshes with just ``client_id`` (no secret);
+    the BFF injects the confidential secret server-side."""
     access_token: str
     refresh_token: Optional[str]
     token_url: str
@@ -66,18 +76,28 @@ class Session:
             return None
 
 
-def oidc_login(authority: str, bff_base: str, client_id: str = "astral-frontend",
-               scopes: str = _DEFAULT_SCOPES, timeout: int = 300) -> Session:
-    """Interactive PKCE loopback login that exchanges through the BFF.
+def oidc_login(authority: str, *, client_id: str = "astral-desktop",
+               bff_base: Optional[str] = None, scopes: str = _DEFAULT_SCOPES,
+               timeout: int = 300) -> Session:
+    """Interactive PKCE loopback login (RFC 8252).
 
-    ``authority`` — the Keycloak realm URL (used only to find the *authorize*
-    endpoint for the browser step). ``bff_base`` — the orchestrator HTTP origin
-    (e.g. ``http://127.0.0.1:8001``); the code/refresh exchange POSTs to
-    ``{bff_base}/auth/token``.
+    ``authority`` — the Keycloak realm URL (its discovery document supplies the
+    authorize + token endpoints). ``client_id`` — the OIDC client; the default
+    ``astral-desktop`` is the dedicated *public* client.
+
+    Token exchange mode:
+
+    * ``bff_base is None`` (default) — **direct**: the code/refresh exchange
+      POSTs to Keycloak's own ``token_endpoint``. Requires ``client_id`` to be a
+      *public* Keycloak client (no secret).
+    * ``bff_base`` set — **BFF reuse**: the exchange POSTs to
+      ``{bff_base}/auth/token`` (the orchestrator injects a confidential
+      client's secret server-side). Used to reuse the web's ``astral-frontend``.
     """
     conf = json.load(urlopen(f"{authority.rstrip('/')}/.well-known/openid-configuration", timeout=15))
     auth_ep = conf["authorization_endpoint"]
-    token_url = f"{bff_base.rstrip('/')}/auth/token"
+    token_url = (f"{bff_base.rstrip('/')}/auth/token" if bff_base
+                 else conf["token_endpoint"])
 
     verifier = _b64u(secrets.token_bytes(32))
     challenge = _b64u(hashlib.sha256(verifier.encode("ascii")).digest())
@@ -106,8 +126,15 @@ def oidc_login(authority: str, bff_base: str, client_id: str = "astral-frontend"
         "scope": scopes, "code_challenge": challenge, "code_challenge_method": "S256",
         "state": state,
     })
+    url = f"{auth_ep}?{params}"
     logger.info("opening browser for OIDC login (client=%s)", client_id)
-    webbrowser.open(f"{auth_ep}?{params}")
+    try:  # guarded: a windowed (no-console) PyInstaller build may have no stdout
+        print("\n[AstralBody] Opening your browser to sign in…\n"
+              "If it doesn't open automatically, paste this URL into your browser:\n"
+              f"  {url}\n", flush=True)
+    except Exception:
+        pass
+    webbrowser.open(url)
 
     t = threading.Thread(target=server.handle_request, daemon=True)
     t.start()
