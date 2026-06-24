@@ -255,3 +255,131 @@ def test_verify_sigstore_builds_identity_from_tag(monkeypatch):
     finally:
         os.remove(exe_path)
         os.remove(bundle_path)
+
+
+# --------------------------------------------------------------------------- #
+# verify_running_exe — verify the on-disk running binary (no exe re-download)
+# --------------------------------------------------------------------------- #
+
+def _rel(version="v0.2.0"):
+    return integrity.ReleaseAssets(
+        version=version, exe_url="e", sha_url="s", bundle_url="b",
+        html_url="h", tag=version,
+    )
+
+
+def test_verify_running_exe_happy(monkeypatch, tmp_path):
+    exe = tmp_path / "AstralBody.exe"
+    exe.write_bytes(b"running payload")
+    sha = hashlib.sha256(b"running payload").hexdigest()
+    monkeypatch.setattr(integrity, "_download_text", lambda url: f"{sha}  AstralBody.exe\n")
+    monkeypatch.setattr(
+        integrity, "_download", lambda url, dest, **k: (open(dest, "wb").write(b"{}"), True)[1]
+    )
+    monkeypatch.setattr(integrity, "_verify_sigstore", lambda e, b, **kw: (True, "verified"))
+    res = integrity.verify_running_exe(str(exe), workdir=str(tmp_path), _release=_rel)
+    assert res.ok, res.reason
+    assert res.exe_path == str(exe)
+    assert res.version == "v0.2.0"
+    # the tiny bundle is cleaned up; the running exe is NEVER deleted.
+    assert not os.path.exists(os.path.join(str(tmp_path), "cosign.bundle"))
+    assert os.path.exists(str(exe))
+
+
+def test_verify_running_exe_sha_mismatch_does_not_delete_exe(monkeypatch, tmp_path):
+    exe = tmp_path / "AstralBody.exe"
+    exe.write_bytes(b"running payload")
+    monkeypatch.setattr(integrity, "_download_text", lambda url: f"{'0' * 64}  AstralBody.exe\n")
+    monkeypatch.setattr(
+        integrity, "_download", lambda url, dest, **k: (open(dest, "wb").write(b"{}"), True)[1]
+    )
+    monkeypatch.setattr(integrity, "_verify_sigstore", lambda e, b, **kw: (True, "verified"))
+    res = integrity.verify_running_exe(str(exe), workdir=str(tmp_path), _release=_rel)
+    assert not res.ok and "SHA-256 mismatch" in res.reason
+    # never delete the user's running binary, even on mismatch.
+    assert os.path.exists(str(exe))
+
+
+def test_verify_running_exe_missing_file(tmp_path):
+    res = integrity.verify_running_exe(
+        str(tmp_path / "nope.exe"), workdir=str(tmp_path), _release=_rel
+    )
+    assert not res.ok and "running exe not found" in res.reason
+
+
+def test_verify_running_exe_offline(tmp_path):
+    exe = tmp_path / "AstralBody.exe"
+    exe.write_bytes(b"x")
+    res = integrity.verify_running_exe(
+        str(exe), workdir=str(tmp_path), _release=lambda: None
+    )
+    assert not res.ok and "release" in res.reason.lower()
+
+
+# --------------------------------------------------------------------------- #
+# check_at_launch — launch-time integrity/update decision (fully injected)
+# --------------------------------------------------------------------------- #
+
+def _verok(*a, **k):
+    return integrity.VerifyResult(ok=True, reason="verified", exe_path="e", version="v0.2.0")
+
+
+def _verbad(reason="bad sig"):
+    def _f(*a, **k):
+        return integrity.VerifyResult(ok=False, reason=reason)
+    return _f
+
+
+def test_check_at_launch_dev_not_frozen():
+    n = integrity.check_at_launch("0.2.0", "", frozen=False, workdir="/tmp")
+    assert n["status"] == "dev" and n["level"] == "muted"
+
+
+def test_check_at_launch_verified_same_version():
+    n = integrity.check_at_launch(
+        "0.2.0", "C:/AstralBody.exe", frozen=True, workdir="/tmp",
+        _release=lambda: _rel("v0.2.0"), _verify_running=_verok,
+    )
+    assert n["status"] == "verified" and n["level"] == "success"
+    assert "v0.2.0" in n["message"]
+
+
+def test_check_at_launch_unverified_same_version():
+    n = integrity.check_at_launch(
+        "0.2.0", "C:/AstralBody.exe", frozen=True, workdir="/tmp",
+        _release=lambda: _rel("v0.2.0"), _verify_running=_verbad("bad sig"),
+    )
+    assert n["status"] == "unverified" and n["level"] == "error"
+    assert "bad sig" in n["message"]
+
+
+def test_check_at_launch_offline():
+    n = integrity.check_at_launch(
+        "0.2.0", "C:/AstralBody.exe", frozen=True, workdir="/tmp", _release=lambda: None
+    )
+    assert n["status"] == "offline" and n["level"] == "muted"
+
+
+def test_check_at_launch_update_available():
+    n = integrity.check_at_launch(
+        "0.1.0", "C:/AstralBody.exe", frozen=True, workdir="/tmp",
+        _release=lambda: _rel("v0.2.0"), _verify_latest=_verok,
+    )
+    assert n["status"] == "update_available" and "v0.2.0" in n["message"]
+
+
+def test_check_at_launch_update_unverified_is_ignored():
+    n = integrity.check_at_launch(
+        "0.1.0", "C:/AstralBody.exe", frozen=True, workdir="/tmp",
+        _release=lambda: _rel("v0.2.0"), _verify_latest=_verbad("nope"),
+    )
+    assert n["status"] == "update_unverified" and n["level"] == "warning"
+
+
+def test_check_at_launch_never_raises_on_error():
+    def boom():
+        raise RuntimeError("net down")
+
+    n = integrity.check_at_launch("0.2.0", "C:/AstralBody.exe", frozen=True,
+                                  workdir="/tmp", _release=boom)
+    assert n["status"] == "error" and n["message"] == ""
