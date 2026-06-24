@@ -311,6 +311,57 @@ _MERGED_COLLIDING_VERBS = frozenset({
     "get_results", "delete_dataset",
 })
 
+
+# ── Feature 068 fix: static-asset cache control ──────────────────────────────
+# StaticFiles sends no Cache-Control, so browsers heuristically cache
+# /static/* and can serve a STALE client.js/astral.css after a rebuild — which
+# is exactly why the slash-command menu did not appear after rebuilding. Two
+# defenses: revalidate every static response (``no-cache`` → fast 304 when
+# unchanged), and version the shell's asset URLs by content hash so a changed
+# file is fetched under a new URL with no manual hard refresh.
+_ASSET_VERSION_CACHE: Dict[str, str] = {}
+
+
+def _static_asset_version(static_dir: str) -> str:
+    """Return a short content hash of the primary static assets.
+
+    Hashes ``client.js`` + ``astral.css`` so the shell can cache-bust their
+    ``<script>``/``<link>`` URLs; a changed asset yields a new version and is
+    fetched fresh. Memoized per directory (assets are baked, immutable for the
+    process lifetime).
+    """
+    cached = _ASSET_VERSION_CACHE.get(static_dir)
+    if cached:
+        return cached
+    import hashlib
+    import os as _o
+    h = hashlib.sha1()
+    for name in ("client.js", "astral.css"):
+        try:
+            with open(_o.path.join(static_dir, name), "rb") as fh:
+                h.update(fh.read())
+        except OSError:
+            pass
+    ver = h.hexdigest()[:12] or "dev"
+    _ASSET_VERSION_CACHE[static_dir] = ver
+    return ver
+
+
+class _NoCacheStaticFiles(StaticFiles):
+    """StaticFiles that asks browsers to revalidate every asset (``no-cache``).
+
+    Preserves the efficient ETag/Last-Modified 304 flow but stops heuristic
+    freshness from serving a stale ``client.js``/``astral.css`` after a rebuild.
+    """
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        try:
+            response.headers.setdefault("Cache-Control", "no-cache")
+        except Exception:
+            pass
+        return response
+
 # 030: per-tool dispatch ceilings for long-running verbs (everything else
 # keeps the 30 s default). research_brief legitimately performs one search
 # plus several 15 s-bounded page fetches — the default ceiling guaranteed
@@ -8136,9 +8187,20 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             except Exception:
                 logger.debug("attachment accept-list injection failed", exc_info=True)
             shell = shell.replace("%%ASTRAL_ACCEPT%%", accept_attr)
-            return _HTMLResponse(shell.replace("%%ASTRAL_TOPBAR%%", topbar))
+            # Feature 068 fix: cache-bust the shell's static asset URLs by
+            # content hash so a rebuilt client.js/astral.css is fetched fresh
+            # (no manual hard refresh required).
+            shell = shell.replace(
+                "%%ASTRAL_ASSET_VER%%",
+                _static_asset_version(_os.path.join(_webrender_dir, "static")),
+            )
+            resp = _HTMLResponse(shell.replace("%%ASTRAL_TOPBAR%%", topbar))
+            # The shell carries a per-session token and references versioned
+            # assets — never cache it (security + always-fresh asset URLs).
+            resp.headers["Cache-Control"] = "no-store"
+            return resp
 
-        app.mount("/static", StaticFiles(directory=_os.path.join(_webrender_dir, "static")), name="static")
+        app.mount("/static", _NoCacheStaticFiles(directory=_os.path.join(_webrender_dir, "static")), name="static")
 
         # Mount REST API routers
         from orchestrator.api import chat_router, component_router, agent_router, dashboard_router, draft_router, voice_router, task_router, async_task_router, user_router
