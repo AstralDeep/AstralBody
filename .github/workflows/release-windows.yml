@@ -54,19 +54,26 @@ jobs:
 
       - name: Keyless sign with sigstore (GitHub OIDC)
         working-directory: windows-client/dist
-        env:
-          SIGSTORE_IDENTITY: "https://github.com/AstralDeep/AstralBody/.github/workflows/release-windows.yml@refs/tags/${{ github.ref_name }}"
+        shell: bash
+        # Keyless signing uses the job's ambient GitHub OIDC credential
+        # (permissions.id-token: write) — no --identity/--oidc-issuer flags,
+        # which conflict with the ambient token. Fulcio issues a cert whose
+        # SAN is the token's `sub`:
+        #   https://github.com/AstralDeep/AstralBody/.github/workflows/release-windows.yml@refs/tags/<tag>
+        # The client verifier rebuilds that exact string from the release tag.
         run: |
-          sigstore sign AstralBody.exe --bundle cosign.bundle \
-            --oidc-issuer https://token.actions.githubusercontent.com \
-            --identity "$SIGSTORE_IDENTITY"
+          sigstore sign AstralBody.exe --bundle cosign.bundle
 
       - name: Verify the signature (self-check)
         working-directory: windows-client/dist
+        shell: bash
         env:
           SIGSTORE_IDENTITY: "https://github.com/AstralDeep/AstralBody/.github/workflows/release-windows.yml@refs/tags/${{ github.ref_name }}"
+        # sigstore 3.x merged verify-github into `verify` (same --cert-identity
+        # + --cert-oidc-issuer flags). The client verifier uses the equivalent
+        # sigstore-python Identity policy with the same exact-match string.
         run: |
-          sigstore verify-github AstralBody.exe --bundle cosign.bundle \
+          sigstore verify identity AstralBody.exe --bundle cosign.bundle \
             --cert-identity "$SIGSTORE_IDENTITY" \
             --cert-oidc-issuer https://token.actions.githubusercontent.com
 

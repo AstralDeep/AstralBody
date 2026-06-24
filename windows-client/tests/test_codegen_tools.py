@@ -11,6 +11,7 @@ Covers the safety rails that matter:
 Pure-Python — does NOT require PySide6 (the codegen tools + phi_gate +
 audit_log are Qt-free). Runs on the host interpreter.
 """
+
 from __future__ import annotations
 
 import os
@@ -27,11 +28,21 @@ from win_agent import agent, tools  # noqa: E402
 @pytest.fixture
 def workspace(tmp_path, monkeypatch):
     monkeypatch.setenv("ASTRAL_WORKSPACE_DIR", str(tmp_path))
+    # Clear any runtime workspace override leaked from a prior test (the override
+    # is module-global state in win_agent.tools).
+    tools.set_workspace_override(None)
     tools._ensure_workspace()
     # Point the audit log at the tmp workspace so tests don't touch real APPDATA.
     monkeypatch.setattr(audit_log, "_appdata_dir", lambda: str(tmp_path))
-    tools.set_context(actor="test-user", correlation_id="t1",
-                      audit=audit_log.AuditLogger(actor="test-user"))
+    # Auto-allow every per-action confirmation so the existing safety-rail suite
+    # stays green without a Qt display. Tests that exercise the deny path
+    # (test_*_user_denied) override this per-test.
+    monkeypatch.setattr(tools, "_confirm_action", lambda **kw: True)
+    tools.set_context(
+        actor="test-user",
+        correlation_id="t1",
+        audit=audit_log.AuditLogger(actor="test-user"),
+    )
     return tmp_path
 
 
@@ -42,6 +53,7 @@ def _last_audit():
 
 
 # --- workspace confinement ------------------------------------------------- #
+
 
 def test_write_then_read_inside_workspace(workspace):
     w = tools.write_file(path="hello.py", content="print('hi')")
@@ -73,11 +85,15 @@ def test_write_outside_refused(workspace):
 
 # --- edit_file ------------------------------------------------------------- #
 
+
 def test_edit_replaces_first_match(workspace):
     tools.write_file(path="a.txt", content="foo bar foo")
     e = tools.edit_file(path="a.txt", old="foo", new="FOO")
     assert e["_ui_components"][0]["variant"] == "success"
-    assert tools.read_file(path="a.txt")["_ui_components"][0]["content"][0]["code"] == "FOO bar foo"
+    assert (
+        tools.read_file(path="a.txt")["_ui_components"][0]["content"][0]["code"]
+        == "FOO bar foo"
+    )
     # The edit's audit row (not the subsequent read) carries the match detail.
     rows = tools._CTX["audit"].tail(3)
     edit_row = next(r for r in reversed(rows) if r["tool"] == "edit_file")
@@ -92,6 +108,7 @@ def test_edit_old_not_found_refused(workspace):
 
 
 # --- run_command whitelist ------------------------------------------------- #
+
 
 def test_run_command_nonwhitelisted_refused(workspace):
     r = tools.run_command(command="format C:")
@@ -108,6 +125,7 @@ def test_run_command_whitelisted_runs(workspace):
 
 
 # --- dangerous bypass ------------------------------------------------------ #
+
 
 def test_run_shell_refused_without_bypass(workspace, monkeypatch):
     monkeypatch.delenv("ASTRAL_DANGEROUS_BYPASS", raising=False)
@@ -143,13 +161,19 @@ def test_run_shell_advertised_when_bypass_on(monkeypatch):
 
 def test_dispatch_refuses_run_shell_when_bypass_off(monkeypatch):
     monkeypatch.delenv("ASTRAL_DANGEROUS_BYPASS", raising=False)
-    resp = agent.dispatch({"type": "mcp_request", "request_id": "9",
-                           "method": "tools/call",
-                           "params": {"name": "run_shell", "arguments": {"command": "echo x"}}})
+    resp = agent.dispatch(
+        {
+            "type": "mcp_request",
+            "request_id": "9",
+            "method": "tools/call",
+            "params": {"name": "run_shell", "arguments": {"command": "echo x"}},
+        }
+    )
     assert resp["error"]["code"] == -32601
 
 
 # --- PHI gate (fail-closed) ------------------------------------------------ #
+
 
 def test_read_file_phi_blocked(workspace):
     tools.write_file(path="phi.txt", content="SSN is 123-45-6789 here")
@@ -173,13 +197,18 @@ def test_phi_gate_clean_passes():
 
 def test_phi_gate_fail_closed(monkeypatch):
     import astral_client.phi_gate as pg
+
     def boom(_):
         raise RuntimeError("explode")
-    monkeypatch.setattr(pg, "_PREFILTER_PATTERNS", [__import__("types").SimpleNamespace(search=boom)])
+
+    monkeypatch.setattr(
+        pg, "_PREFILTER_PATTERNS", [__import__("types").SimpleNamespace(search=boom)]
+    )
     assert pg.looks_like_phi("anything") is True  # fail-closed
 
 
 # --- audit ----------------------------------------------------------------- #
+
 
 def test_every_action_audited(workspace):
     tools.write_file(path="x.txt", content="ok")
@@ -196,7 +225,10 @@ def test_every_action_audited(workspace):
 def test_audit_paths_redacted(workspace):
     tools.read_file(path="x.txt")
     row = _last_audit()
-    assert row["args"]["path"] in ("x.txt", "<outside-workspace>")  # relative, not absolute
+    assert row["args"]["path"] in (
+        "x.txt",
+        "<outside-workspace>",
+    )  # relative, not absolute
 
 
 def test_audit_chain_links(workspace):
@@ -209,6 +241,7 @@ def test_audit_chain_links(workspace):
 
 # --- tool registry / scopes ------------------------------------------------ #
 
+
 def test_codegen_tools_declare_scopes():
     scopes = {n: info["scope"] for n, info in tools.TOOL_REGISTRY.items()}
     assert scopes["read_file"] == "tools:read"
@@ -216,3 +249,66 @@ def test_codegen_tools_declare_scopes():
     assert scopes["edit_file"] == "tools:write"
     assert scopes["run_command"] == "tools:execute"
     assert scopes["run_shell"] == "tools:execute"
+
+
+# --- per-action confirmation (feature 067 UX) ------------------------------ #
+
+
+def test_write_file_user_denied_no_side_effect(workspace, monkeypatch):
+    """Denying the write confirmation writes nothing and audits user_denied."""
+    monkeypatch.setattr(tools, "_confirm_action", lambda **kw: False)
+    w = tools.write_file(path="deny.py", content="print('nope')")
+    assert w["_ui_components"][0]["variant"] == "info"
+    # No file was created.
+    assert not (workspace / "deny.py").exists()
+    assert _last_audit()["outcome"] == "user_denied"
+
+
+def test_edit_file_user_denied_no_side_effect(workspace, monkeypatch):
+    tools.write_file(path="e.txt", content="foo bar")
+    before = (workspace / "e.txt").read_text(encoding="utf-8")
+    monkeypatch.setattr(tools, "_confirm_action", lambda **kw: False)
+    e = tools.edit_file(path="e.txt", old="foo", new="FOO")
+    assert e["_ui_components"][0]["variant"] == "info"
+    # File is unchanged.
+    assert (workspace / "e.txt").read_text(encoding="utf-8") == before
+    assert _last_audit()["outcome"] == "user_denied"
+
+
+def test_run_command_user_denied_not_executed(workspace, monkeypatch):
+    monkeypatch.setattr(tools, "_confirm_action", lambda **kw: False)
+    r = tools.run_command(command="echo nope-astral")
+    assert r["_ui_components"][0]["variant"] == "info"
+    assert _last_audit()["outcome"] == "user_denied"
+
+
+def test_run_shell_user_denied_not_executed(workspace, monkeypatch):
+    monkeypatch.setenv("ASTRAL_DANGEROUS_BYPASS", "1")
+    monkeypatch.setattr(tools, "_confirm_action", lambda **kw: False)
+    r = tools.run_shell(command="echo bypassed")
+    assert r["_ui_components"][0]["variant"] == "info"
+    row = _last_audit()
+    assert row["outcome"] == "user_denied"
+    assert row["event_class"] == "dangerous_bypass"
+
+
+def test_confirm_action_fail_closed_without_gui(monkeypatch, workspace):
+    """With no bridge attached and no stub, mutating tools fail-closed (deny)."""
+
+    # A confirm gate that uses the real (unattached) bridge → declines.
+    def _deny(**kw):
+        import astral_client.confirm as _c
+
+        return _c.confirm_action(**kw)
+
+    monkeypatch.setattr(tools, "_confirm_action", _deny)
+    # Swap in a fresh, UNATTACHED bridge so request_confirm returns no_gui
+    # regardless of what other tests did to the module singleton.
+    import astral_client.confirm as _c
+
+    fresh = _c._Bridge()  # not attached
+    monkeypatch.setattr(_c, "BRIDGE", fresh)
+    w = tools.write_file(path="fc.py", content="x")
+    assert w["_ui_components"][0]["variant"] == "info"
+    assert not (workspace / "fc.py").exists()
+    assert _last_audit()["outcome"] == "user_denied"
