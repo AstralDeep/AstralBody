@@ -21,6 +21,7 @@ it never enters the orchestrator image (Constitution V preserved). If ``sigstore
 is unavailable, the verifier fail-closes (refuses) rather than skipping the
 signature check.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -39,6 +40,15 @@ _SHA_NAME = "SHA256SUMS"
 _BUNDLE_NAME = "cosign.bundle"
 # The OIDC identity the signing workflow MUST present (keyless sigstore).
 _EXPECTED_ISSUER = "https://token.actions.githubusercontent.com"
+# The signing workflow's OIDC subject (the SAN on the sigstore cert). The
+# keyless ``sigstore sign --identity <this>@refs/tags/<tag>`` in
+# release-windows.yml produces a SAN exactly equal to this path + the tag ref,
+# so the verifier rebuilds that exact string from the release's tag. Pinning the
+# workflow path means only THIS repo's release workflow can sign a binary the
+# client will accept.
+_SIGNING_WORKFLOW = (
+    "https://github.com/AstralDeep/AstralBody/.github/workflows/release-windows.yml"
+)
 _MAX_BYTES = 200 * 1024 * 1024  # 200 MB cap on the exe download
 
 
@@ -49,6 +59,7 @@ class ReleaseAssets:
     sha_url: str
     bundle_url: str
     html_url: str
+    tag: str = ""
 
 
 @dataclass
@@ -61,10 +72,13 @@ class VerifyResult:
 
 def _api_get(path: str) -> Optional[dict]:
     url = f"https://api.github.com/{path}"
-    req = urllib.request.Request(url, headers={
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    })
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
     token = os.getenv("GITHUB_TOKEN")
     if token:
         req.add_header("Authorization", f"Bearer {token}")
@@ -89,8 +103,12 @@ def latest_release() -> Optional[ReleaseAssets]:
         return None
     return ReleaseAssets(
         version=(data.get("name") or data.get("tag_name") or "").strip(),
-        exe_url=exe, sha_url=sha, bundle_url=bundle,
-        html_url=data.get("html_url", ""))
+        exe_url=exe,
+        sha_url=sha,
+        bundle_url=bundle,
+        html_url=data.get("html_url", ""),
+        tag=(data.get("tag_name") or "").strip(),
+    )
 
 
 def _download(url: str, dest: str, *, max_bytes: int = _MAX_BYTES) -> bool:
@@ -150,10 +168,17 @@ def _download_text(url: str) -> Optional[str]:
         return None
 
 
-def _verify_sigstore(exe_path: str, bundle_path: str) -> tuple[bool, str]:
+def _verify_sigstore(
+    exe_path: str, bundle_path: str, *, tag: str = ""
+) -> tuple[bool, str]:
     """Verify the cosign bundle against the exe; assert the OIDC identity.
 
     Returns (ok, reason). Fail-closed if sigstore isn't importable.
+
+    The expected SAN is the signing workflow's OIDC subject, rebuilt from the
+    release tag so it exactly matches the cert GitHub issued for that tag
+    (sigstore's Identity policy is an exact match, not a prefix). An explicit
+    ``DESKTOP_SIGSTORE_IDENTITY`` env override wins (for testing/branch builds).
     """
     try:
         from sigstore.verify import Verifier
@@ -161,22 +186,18 @@ def _verify_sigstore(exe_path: str, bundle_path: str) -> tuple[bool, str]:
         from sigstore.models import Bundle
     except Exception as exc:  # noqa: BLE001
         return False, f"sigstore not available: {exc}"
+    if tag:
+        expected = f"{_SIGNING_WORKFLOW}@refs/tags/{tag}"
+    else:
+        expected = _SIGNING_WORKFLOW
+    expected = os.getenv("DESKTOP_SIGSTORE_IDENTITY", expected)
     try:
         with open(bundle_path, "rb") as f:
             bundle = Bundle.from_json(f.read())
-        # The signing identity MUST be the AstralDeep/AstralBody workflow.
-        # ``expected_identity`` is the SAN (the workflow's OIDC subject, e.g.
-        # "repo:AstralDeep/AstralBuilder" — we accept any SAN whose issuer is
-        # the GitHub Actions issuer; the repo is pinned by the release source).
-        identity = Identity(
-            issuer=_EXPECTED_ISSUER,
-            identity=os.getenv("DESKTOP_SIGSTORE_IDENTITY",
-                               "https://github.com/AstralDeep/AstralBody/"),
-        )
+        identity = Identity(issuer=_EXPECTED_ISSUER, identity=expected)
         verifier = Verifier.production()
         with open(exe_path, "rb") as f:
-            verifier.verify_artifact(input_=f.read(), bundle=bundle,
-                                     policy=identity)
+            verifier.verify_artifact(input_=f.read(), bundle=bundle, policy=identity)
         return True, "verified"
     except Exception as exc:  # noqa: BLE001
         return False, f"sigstore verification failed: {exc}"
@@ -190,7 +211,9 @@ def verify_latest(workdir: str) -> VerifyResult:
     """
     rel = latest_release()
     if rel is None:
-        return VerifyResult(ok=False, reason="Could not resolve the latest GitHub release.")
+        return VerifyResult(
+            ok=False, reason="Could not resolve the latest GitHub release."
+        )
     exe_path = os.path.join(workdir, _EXE_NAME)
     bundle_path = os.path.join(workdir, _BUNDLE_NAME)
 
@@ -208,21 +231,26 @@ def verify_latest(workdir: str) -> VerifyResult:
     expected = _extract_sha_for_exe(sha_text)
     if not expected:
         _cleanup(exe_path, bundle_path)
-        return VerifyResult(ok=False, reason="SHA256SUMS has no hash for AstralBody.exe.")
+        return VerifyResult(
+            ok=False, reason="SHA256SUMS has no hash for AstralBody.exe."
+        )
     actual = _sha256_file(exe_path)
     if actual != expected:
         _cleanup(exe_path, bundle_path)
-        return VerifyResult(ok=False,
-                            reason=f"SHA-256 mismatch (expected {expected[:12]}…, got {actual[:12]}…).")
+        return VerifyResult(
+            ok=False,
+            reason=f"SHA-256 mismatch (expected {expected[:12]}…, got {actual[:12]}…).",
+        )
 
     # 2. sigstore
-    ok, reason = _verify_sigstore(exe_path, bundle_path)
+    ok, reason = _verify_sigstore(exe_path, bundle_path, tag=rel.tag)
     if not ok:
         _cleanup(exe_path, bundle_path)
         return VerifyResult(ok=False, reason=reason)
 
-    return VerifyResult(ok=True, reason="verified", exe_path=exe_path,
-                        version=rel.version)
+    return VerifyResult(
+        ok=True, reason="verified", exe_path=exe_path, version=rel.version
+    )
 
 
 def _cleanup(*paths: str) -> None:
