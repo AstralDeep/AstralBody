@@ -19,10 +19,11 @@ import sys
 import threading
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import Qt, QSettings, Signal
+from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt, QSettings, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QCompleter,
     QDialog,
     QFileDialog,
     QFrame,
@@ -45,6 +46,67 @@ from . import integrity as _integrity
 from . import __version__ as _APP_VERSION
 from .protocol import OrchestratorClient, device_caps
 from .renderer import RenderContext, render, supported_types as native_types, _scoped
+
+
+# Feature 068 (US5): slash-command discovery. Mirrors the web client's typeahead
+# and the server's orchestrator/slash_commands.COMMANDS registry — the server
+# expands a typed "/command" into a normal prompt; this popup just lets users
+# see the options as they type. Keep in sync with the web list.
+_SLASH_COMMANDS = [
+    ("/help", "show available commands"),
+    ("/agents", "list your enabled agents"),
+    ("/summarize", "summarize a link or text"),
+    ("/research", "research + cited brief"),
+    ("/weather", "weather + forecast"),
+]
+
+
+class _SlashCommandModel(QAbstractListModel):
+    """Completion model for slash commands.
+
+    Exposes the human-readable ``name  —  description`` under ``DisplayRole`` (so
+    the popup is discoverable) while ``EditRole`` is the clean ``/command ``
+    token QCompleter matches against and inserts. A ``QStandardItem`` cannot do
+    this — it unifies Display/Edit roles — hence this small dedicated model.
+    """
+
+    def __init__(self, commands, parent=None):
+        super().__init__(parent)
+        self._commands = list(commands)
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self._commands)
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid() or not (0 <= index.row() < len(self._commands)):
+            return None
+        name, desc = self._commands[index.row()]
+        if role == Qt.ItemDataRole.DisplayRole:
+            return f"{name}  —  {desc}"
+        if role == Qt.ItemDataRole.EditRole:
+            return name + " "
+        return None
+
+
+def build_slash_completer(parent=None):
+    """Build a QCompleter that pops up the available slash commands when the
+    user starts typing ``/``.
+
+    The popup DISPLAYS ``name  —  description`` (so options are discoverable) but
+    inserts only the clean ``/command `` token (``Qt.EditRole``) so the field is
+    ready for arguments. Filtering is case-insensitive prefix matching, so ``/``
+    surfaces every command and ``/sum`` narrows to ``/summarize``.
+    """
+    completer = QCompleter(parent)
+    # Parent the model to the completer so it survives past this function
+    # (PySide6 GCs an unparented model whose last Python reference is dropped).
+    model = _SlashCommandModel(_SLASH_COMMANDS, completer)
+    completer.setModel(model)
+    completer.setCompletionRole(Qt.ItemDataRole.EditRole)  # match/insert "/command "
+    completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+    completer.setFilterMode(Qt.MatchFlag.MatchStartsWith)
+    completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+    return completer
 
 
 def _user_from_token(token: str) -> str:
@@ -582,8 +644,10 @@ class MainWindow(QMainWindow):
         split.setSizes([380, 900])
 
         self._input = QLineEdit()
-        self._input.setPlaceholderText("Message AstralBody…")
+        self._input.setPlaceholderText("Message AstralBody…  (type / for commands)")
         self._input.returnPressed.connect(self._send)
+        # Feature 068 (US5): pop up the slash-command options as the user types "/".
+        self._input.setCompleter(build_slash_completer(self._input))
         send = QPushButton("Send")
         send.setObjectName("primary")
         send.clicked.connect(self._send)
