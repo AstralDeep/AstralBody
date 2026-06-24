@@ -3,13 +3,24 @@
 Each returns ``{"_ui_components": [<astralprims dicts>], "_data": {...}}`` — the
 same shape backend agents return — so results render natively in the desktop
 client (and as HTML on the web). These execute on the host the agent runs on.
+
+The coding tools (read_file / write_file / edit_file / run_command / run_shell)
+are **workspace-confined**, **per-tool permission-gated** (by the orchestrator's
+ToolPermissionManager via the declared scope), **PHI-gated client-side**
+(fail-closed — PHI never leaves the machine), and **audited** on every action
+(local hash-chained JSONL + the orchestrator's own tool audit event).
 """
 from __future__ import annotations
 
 import os
 import platform
+import shlex
 import subprocess
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+
+# Client-side PHI pre-filter + audit log (fail-closed / fail-open respectively).
+# Imported lazily-safe: these modules live alongside the agent in the bundle.
+from astral_client import audit_log, phi_gate
 
 
 def _alert(message: str, variant: str = "success", title: str = None) -> dict:
@@ -17,6 +28,246 @@ def _alert(message: str, variant: str = "success", title: str = None) -> dict:
     if title:
         a["title"] = title
     return a
+
+
+# --------------------------------------------------------------------------- #
+# Per-dispatch context (set by agent.dispatch before invoking a tool).
+# Holds the actor (from the token), the MCP request's correlation_id, and the
+# AuditLogger. Existing tools ignore it; the coding tools use it for audit.
+# --------------------------------------------------------------------------- #
+_CTX: Dict[str, Any] = {"actor": "unknown", "correlation_id": "", "audit": None}
+
+
+def set_context(*, actor: str = "unknown", correlation_id: str = "",
+                audit: Optional[audit_log.AuditLogger] = None) -> None:
+    _CTX["actor"] = actor or "unknown"
+    _CTX["correlation_id"] = correlation_id or ""
+    _CTX["audit"] = audit
+
+
+def _audit(tool: str, args: Any, outcome: str, *, event_class: str = "tool",
+           detail: str = "") -> None:
+    al = _CTX.get("audit")
+    if al is not None:
+        al.record(tool=tool, args=args, outcome=outcome,
+                  correlation_id=_CTX.get("correlation_id") or "",
+                  event_class=event_class, detail=detail)
+
+
+# --------------------------------------------------------------------------- #
+# Workspace confinement — the primary filesystem safety boundary.
+# --------------------------------------------------------------------------- #
+def workspace_root() -> str:
+    return os.path.realpath(os.path.expanduser(os.path.expandvars(
+        os.getenv("ASTRAL_WORKSPACE_DIR", os.path.join("~", "AstralWorkspace")))))
+
+
+def _ensure_workspace() -> str:
+    root = workspace_root()
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+def _confined(path: str) -> Optional[str]:
+    """Resolve ``path`` and return its realpath iff inside the workspace, else None.
+
+    Refuses traversal (``..``), absolute paths outside the workspace, and symlink
+    escape (realpath resolves symlinks before the prefix check).
+    """
+    if not path:
+        return None
+    root = workspace_root()
+    try:
+        rp = os.path.realpath(os.path.join(root, os.path.expandvars(os.path.expanduser(path))))
+    except Exception:  # noqa: BLE001
+        return None
+    if rp == root or rp.startswith(root + os.sep):
+        return rp
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# Coding tools
+# --------------------------------------------------------------------------- #
+
+_READ_CAP = int(os.getenv("WIN_READ_MAX_BYTES", str(2 * 1024 * 1024)))  # 2 MB
+
+
+def read_file(path: str = "", **kwargs) -> Dict[str, Any]:
+    """Read a text file inside the workspace (PHI-gated before return)."""
+    args = {"path": path}
+    rp = _confined(path)
+    if rp is None or not os.path.isfile(rp):
+        _audit("read_file", args, "refused", detail="outside workspace or not a file")
+        return _ok([_alert("That file isn't inside your Astral workspace "
+                           "(or doesn't exist). I can only read files there.", "error")])
+    try:
+        with open(rp, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read(_READ_CAP)
+        if phi_gate.looks_like_phi(text):
+            _audit("read_file", args, "phi_blocked", detail="PHI detected; not returned")
+            return _ok([_alert("That file appears to contain protected health "
+                               "information. For safety I won't read or send it.", "error")])
+        _audit("read_file", args, "success")
+        return _ok([{"type": "card", "title": os.path.relpath(rp, workspace_root()),
+                     "content": [{"type": "code", "code": text,
+                                  "language": _lang(rp)}]}], {"path": rp, "length": len(text)})
+    except Exception as exc:  # noqa: BLE001
+        _audit("read_file", args, "error", detail=str(exc))
+        return _ok([_alert(f"Couldn't read the file: {exc}", "error")])
+
+
+def write_file(path: str = "", content: str = "", **kwargs) -> Dict[str, Any]:
+    """Create or overwrite a file inside the workspace."""
+    args = {"path": path, "length": len(content or "")}
+    rp = _confined(path)
+    if rp is None:
+        _audit("write_file", args, "refused", detail="outside workspace")
+        return _ok([_alert("I can only write files inside your Astral workspace.", "error")])
+    try:
+        os.makedirs(os.path.dirname(rp), exist_ok=True)
+        with open(rp, "w", encoding="utf-8") as f:
+            f.write(content or "")
+        _audit("write_file", args, "success")
+        return _ok([_alert(f"Wrote {len(content or '')} characters to "
+                           f"{os.path.relpath(rp, workspace_root())}.", "success",
+                           "File saved")], {"path": rp, "length": len(content or "")})
+    except Exception as exc:  # noqa: BLE001
+        _audit("write_file", args, "error", detail=str(exc))
+        return _ok([_alert(f"Couldn't write the file: {exc}", "error")])
+
+
+def edit_file(path: str = "", old: str = "", new: str = "", **kwargs) -> Dict[str, Any]:
+    """Replace the first occurrence of ``old`` with ``new`` in a workspace file."""
+    args = {"path": path, "old_len": len(old or ""), "new_len": len(new or "")}
+    if not old:
+        _audit("edit_file", args, "refused", detail="empty old text")
+        return _ok([_alert("Tell me the exact text to replace.", "warning")])
+    rp = _confined(path)
+    if rp is None or not os.path.isfile(rp):
+        _audit("edit_file", args, "refused", detail="outside workspace or missing")
+        return _ok([_alert("That file isn't inside your workspace (or doesn't exist).", "error")])
+    try:
+        with open(rp, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        if old not in text:
+            _audit("edit_file", args, "refused", detail="old text not found")
+            return _ok([_alert("I couldn't find that exact text in the file — "
+                               "nothing was changed.", "warning")])
+        count = text.count(old)
+        text = text.replace(old, new or "", 1)
+        with open(rp, "w", encoding="utf-8") as f:
+            f.write(text)
+        _audit("edit_file", args, "success", detail=f"{count} match(es) present; replaced first")
+        return _ok([_alert(f"Edited {os.path.relpath(rp, workspace_root())} "
+                           f"(1 of {count} match replaced).", "success", "File edited")],
+                   {"path": rp, "matches": count})
+    except Exception as exc:  # noqa: BLE001
+        _audit("edit_file", args, "error", detail=str(exc))
+        return _ok([_alert(f"Couldn't edit the file: {exc}", "error")])
+
+
+# Whitelist of executables permitted for run_command (inside the workspace).
+# Anything else is refused unless the dangerous bypass (run_shell) is enabled.
+_CMD_WHITELIST = {
+    "git", "python", "python3", "py", "pip", "uv", "npm", "npx", "node",
+    "cargo", "rustc", "go", "dotnet", "dir", "ls", "type", "cat", "echo",
+    "mkdir", "rmdir", "copy", "del", "move", "ren", "test", "pytest",
+    "ruff", "black", "mypy",
+}
+_CMD_TIMEOUT = int(os.getenv("WIN_CMD_TIMEOUT", "60"))
+_CMD_MAX_BYTES = int(os.getenv("WIN_CMD_MAX_BYTES", str(1024 * 1024)))
+
+
+def _head(s: str, n: int) -> str:
+    return s if len(s) <= n else s[:n] + f"\n…[truncated {len(s) - n} chars]"
+
+
+def run_command(command: str = "", **kwargs) -> Dict[str, Any]:
+    """Run a whitelisted command inside the workspace (PHI-gated output)."""
+    args = {"command": command}
+    if not command or not command.strip():
+        _audit("run_command", args, "refused", detail="empty command")
+        return _ok([_alert("Give me a command to run.", "warning")])
+    try:
+        parts = shlex.split(command, posix=True)
+    except ValueError as exc:
+        _audit("run_command", args, "refused", detail=f"parse error: {exc}")
+        return _ok([_alert(f"I couldn't parse that command: {exc}", "error")])
+    if not parts:
+        _audit("run_command", args, "refused", detail="empty after parse")
+        return _ok([_alert("Give me a command to run.", "warning")])
+    exe = os.path.splitext(os.path.basename(parts[0]))[0].lower()
+    if exe not in _CMD_WHITELIST:
+        _audit("run_command", args, "refused", detail=f"non-whitelisted: {exe}")
+        return _ok([_alert(f"'{exe}' isn't on the allowed list. I can run common "
+                           "dev tools (git, python, pip, npm, cargo, go, …). For "
+                           "anything else, enable the dangerous bypass.", "warning")])
+    return _exec(command, args, cwd=workspace_root(), event_class="tool")
+
+
+def run_shell(command: str = "", **kwargs) -> Dict[str, Any]:
+    """DANGEROUS BYPASS — run an arbitrary shell command (full access).
+
+    Gated behind ASTRAL_DANGEROUS_BYPASS=1 (checked by the agent before it ever
+    advertises/calls this) AND a per-call native confirmation (the agent prompts
+    the user with the exact command). Always audited as ``dangerous_bypass``.
+    """
+    args = {"command": command}
+    if os.getenv("ASTRAL_DANGEROUS_BYPASS", "0") not in ("1", "true", "yes", "on"):
+        _audit("run_shell", args, "refused", detail="bypass flag not set")
+        return _ok([_alert("Full shell access is disabled. Enable it in Settings "
+                           "(dangerous bypass) and confirm each command.", "warning")])
+    if not command or not command.strip():
+        _audit("run_shell", args, "refused", detail="empty command")
+        return _ok([_alert("Give me a command to run.", "warning")])
+    # No cwd confinement for the bypass — that's the whole point. PHI still gated.
+    return _exec(command, args, cwd=None, event_class="dangerous_bypass")
+
+
+def _exec(command: str, args: dict, *, cwd: Optional[str], event_class: str) -> Dict[str, Any]:
+    try:
+        proc = subprocess.run(
+            command, shell=True, cwd=cwd, capture_output=True, text=True,
+            timeout=_CMD_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        _audit("run_shell" if event_class == "dangerous_bypass" else "run_command",
+               args, "error", detail="timeout", event_class=event_class)
+        return _ok([_alert(f"Command timed out after {_CMD_TIMEOUT}s and was killed.", "error")])
+    except Exception as exc:  # noqa: BLE001
+        _audit("run_shell" if event_class == "dangerous_bypass" else "run_command",
+               args, "error", detail=str(exc), event_class=event_class)
+        return _ok([_alert(f"Couldn't run the command: {exc}", "error")])
+    out = (proc.stdout or "") + (proc.stderr or "")
+    tool = "run_shell" if event_class == "dangerous_bypass" else "run_command"
+    if phi_gate.looks_like_phi(out):
+        _audit(tool, args, "phi_blocked", detail="PHI in output; not returned",
+               event_class=event_class)
+        return _ok([_alert("The command's output appears to contain protected "
+                           "health information. For safety I won't send it.", "error")])
+    _audit(tool, args, "success",
+           detail=f"rc={proc.returncode} out={len(proc.stdout or '')}B err={len(proc.stderr or '')}B",
+           event_class=event_class)
+    body = []
+    if proc.stdout:
+        body.append({"type": "code", "code": _head(proc.stdout, _CMD_MAX_BYTES),
+                     "language": "text"})
+    if proc.stderr:
+        body.append({"type": "code", "code": _head(proc.stderr, _CMD_MAX_BYTES),
+                     "language": "text"})
+    if not body:
+        body.append({"type": "text", "content": "(no output)", "variant": "markdown"})
+    return _ok([{"type": "card",
+                 "title": f"$ {command}  (exit {proc.returncode})",
+                 "content": body}],
+               {"returncode": proc.returncode})
+
+
+def _lang(path: str) -> str:
+    ext = os.path.splitext(path)[1].lower().lstrip(".")
+    return {"py": "python", "js": "javascript", "ts": "typescript", "sh": "bash",
+            "ps1": "powershell", "json": "json", "md": "markdown"}.get(ext, "text")
 
 
 def _ok(components: List[dict], data: dict = None) -> Dict[str, Any]:
@@ -161,22 +412,26 @@ def open_path(path: str = "", **kwargs) -> Dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 def list_directory(path: str = "", **kwargs) -> Dict[str, Any]:
-    """List the entries of a folder (defaults to the user's home)."""
-    target = os.path.expandvars(os.path.expanduser(path)) if path else os.path.expanduser("~")
-    if not os.path.isdir(target):
-        return _ok([_alert(f"Not a folder: {target}", "error")])
+    """List the entries of a folder inside the workspace (defaults to the workspace root)."""
+    args = {"path": path}
+    _ensure_workspace()
+    rp = _confined(path) if path else workspace_root()
+    if rp is None or not os.path.isdir(rp):
+        _audit("list_directory", args, "refused", detail="outside workspace or not a folder")
+        return _ok([_alert("That folder isn't inside your Astral workspace.", "error")])
     rows = []
-    for name in sorted(os.listdir(target))[:200]:
-        full = os.path.join(target, name)
+    for name in sorted(os.listdir(rp))[:200]:
+        full = os.path.join(rp, name)
         is_dir = os.path.isdir(full)
         try:
             size = "" if is_dir else f"{os.path.getsize(full):,} B"
         except OSError:
             size = ""
         rows.append([("📁 " if is_dir else "📄 ") + name, "folder" if is_dir else "file", size])
-    return _ok([{"type": "card", "title": f"{target}  ({len(rows)} items)",
+    _audit("list_directory", args, "success")
+    return _ok([{"type": "card", "title": f"{os.path.relpath(rp, workspace_root())}  ({len(rows)} items)",
                  "content": [{"type": "table", "headers": ["Name", "Type", "Size"], "rows": rows}]}],
-               {"path": target, "count": len(rows)})
+               {"path": rp, "count": len(rows)})
 
 
 TOOL_REGISTRY: Dict[str, dict] = {
@@ -200,8 +455,38 @@ TOOL_REGISTRY: Dict[str, dict] = {
                   "input_schema": {"type": "object", "properties": {
                       "path": {"type": "string", "description": "Path or URL"}},
                       "required": ["path"]}},
-    "list_directory": {"function": list_directory, "scope": "tools:system",
-                       "description": "List the contents of a folder.",
+    "list_directory": {"function": list_directory, "scope": "tools:read",
+                       "description": "List the contents of a folder inside the Astral workspace.",
                        "input_schema": {"type": "object", "properties": {
-                           "path": {"type": "string", "description": "Folder path (default: home)"}}}},
+                           "path": {"type": "string", "description": "Folder path (default: workspace root)"}}}},
+    # --- coding tools (feature 067) --- #
+    "read_file": {"function": read_file, "scope": "tools:read",
+                  "description": "Read a text file inside the Astral workspace.",
+                  "input_schema": {"type": "object", "properties": {
+                      "path": {"type": "string", "description": "Workspace-relative file path"}},
+                      "required": ["path"]}},
+    "write_file": {"function": write_file, "scope": "tools:write",
+                   "description": "Create or overwrite a file inside the Astral workspace.",
+                   "input_schema": {"type": "object", "properties": {
+                       "path": {"type": "string", "description": "Workspace-relative file path"},
+                       "content": {"type": "string", "description": "File contents"}},
+                       "required": ["path", "content"]}},
+    "edit_file": {"function": edit_file, "scope": "tools:write",
+                  "description": "Replace the first occurrence of `old` with `new` in a workspace file.",
+                  "input_schema": {"type": "object", "properties": {
+                      "path": {"type": "string"}, "old": {"type": "string"},
+                      "new": {"type": "string"}},
+                      "required": ["path", "old"]}},
+    "run_command": {"function": run_command, "scope": "tools:execute",
+                    "description": "Run a whitelisted dev command (git, python, pip, npm, cargo, "
+                                   "go, …) inside the Astral workspace.",
+                    "input_schema": {"type": "object", "properties": {
+                        "command": {"type": "string", "description": "Command line"}},
+                        "required": ["command"]}},
+    "run_shell": {"function": run_shell, "scope": "tools:execute",
+                  "description": "DANGEROUS: run an arbitrary shell command with full access "
+                                 "(requires the dangerous-bypass setting + per-call confirmation).",
+                  "input_schema": {"type": "object", "properties": {
+                      "command": {"type": "string", "description": "Arbitrary command line"}},
+                      "required": ["command"]}},
 }

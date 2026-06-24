@@ -3200,6 +3200,20 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 tool_to_unqualified[_mem_name] = _mem_name
             memory_tool_injected = True
 
+        # Feature 067 — desktop codegen download: the offer_desktop_codegen
+        # meta-tool surfaces a download card for the Windows coding-agent .exe
+        # (GitHub-released, SHA-256 + sigstore verified) when a user asks for
+        # code that runs on their machine. Same exclusions as the 027/030 tools.
+        from orchestrator import desktop_codegen
+        desktop_codegen_injected = False
+        if desktop_codegen.should_inject(draft_agent_id) and not is_text_only:
+            for _dc_def in desktop_codegen.meta_tool_definitions():
+                _dc_name = _dc_def["function"]["name"]
+                tools_desc.append(_dc_def)
+                tool_to_agent[_dc_name] = desktop_codegen.META_AGENT_ID
+                tool_to_unqualified[_dc_name] = _dc_name
+            desktop_codegen_injected = True
+
         if not tools_desc and draft_agent_id:
             await self.send_ui_render(websocket, [
                 Alert(
@@ -3281,7 +3295,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             # Meta-tools (orchestrator/scheduler/memory pseudo-agents) are
             # excluded — they are not user "skills".
             personalization_skill_lines: List[str] = []
-            _meta_agent_ids = {"__orchestrator__", "__scheduler__", "__memory__"}
+            _meta_agent_ids = {"__orchestrator__", "__scheduler__", "__memory__",
+                               "__desktop_codegen__"}
             for _td in tools_desc:
                 try:
                     _fn = _td.get("function") or {}
@@ -3323,6 +3338,11 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             # Memory guidance accompanies the memory meta-tools.
             if memory_tool_injected:
                 system_prompt += memory_chat.SYSTEM_PROMPT_ADDENDUM
+
+            # Feature 067 — desktop codegen guidance accompanies the
+            # offer_desktop_codegen meta-tool.
+            if desktop_codegen_injected:
+                system_prompt += desktop_codegen.SYSTEM_PROMPT_ADDENDUM
 
             # Mint one unguessable sentinel for this turn and tell the model
             # that anything wrapped in its markers is untrusted DATA, never
@@ -5028,6 +5048,13 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             # 030 — memory meta-tools: execute immediately (PHI-gated), no card.
             from orchestrator import memory_chat
             return await memory_chat.handle_meta_tool(
+                self, tool_name, args, user_id=user_id, chat_id=chat_id, websocket=websocket
+            )
+        if agent_id == "__desktop_codegen__":
+            # 067 — desktop codegen: surface the generated code + a verified
+            # download card for the Windows coding-agent .exe.
+            from orchestrator import desktop_codegen
+            return await desktop_codegen.handle_meta_tool(
                 self, tool_name, args, user_id=user_id, chat_id=chat_id, websocket=websocket
             )
 

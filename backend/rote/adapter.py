@@ -300,6 +300,9 @@ class ComponentAdapter:
         if comp_type == "chat_history":
             return cls._adapt_chat_history(comp, profile)
 
+        if comp_type == "download_card":
+            return cls._adapt_download_card(comp, profile)
+
         # Recurse into known container types
         if comp_type in ("container", "card"):
             return cls._adapt_container(comp, profile)
@@ -518,6 +521,28 @@ class ComponentAdapter:
         return {**comp, "items": trimmed}
 
     @classmethod
+    def _adapt_download_card(cls, comp: Dict, profile: DeviceProfile) -> Optional[Dict]:
+        """Adapt the desktop-app download card per surface.
+
+        browser/tablet/TV — full card (button + integrity block).
+        mobile — compact card (button + version; drop the collapsible note +
+                 the SHA block — the link still carries the verified asset).
+        watch — collapse to a single text + link (version only).
+        VOICE is handled earlier by text collapse (``_extract_text``).
+        """
+        if profile.device_type == DeviceType.MOBILE:
+            trimmed = {k: v for k, v in comp.items()
+                       if k not in ("description", "sha256", "sigstore_bundle_url")}
+            return trimmed
+        if profile.device_type == DeviceType.WATCH:
+            version = comp.get("version") or ""
+            url = comp.get("download_url") or comp.get("html_url") or ""
+            label = f"Download Astral desktop v{version}" if version else "Download Astral desktop"
+            return {"type": "button", "label": label, "url": url} if url else {
+                "type": "text", "content": label, "variant": "body"}
+        return comp
+
+    @classmethod
     def _adapt_container(cls, comp: Dict, profile: DeviceProfile) -> Dict:
         """Recurse into card.content or container.children."""
         if comp.get("type") == "card":
@@ -586,6 +611,14 @@ class ComponentAdapter:
 
         elif comp_type == "badge":
             parts.append(comp.get("label", ""))
+
+        elif comp_type == "download_card":
+            title = comp.get("title") or "Astral desktop app"
+            version = comp.get("version") or ""
+            ver = f", version {version}" if version else ""
+            parts.append(
+                f"{title}{ver}. Download it from GitHub. Integrity is verified "
+                "with a SHA-256 hash and a sigstore signature.")
 
         elif comp_type == "hero":
             for key in ("eyebrow", "title", "subtitle"):

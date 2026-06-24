@@ -4,5 +4,8 @@ websockets>=12.0
 aiohttp>=3.9
 psutil>=5.9
 pyperclip>=1.8
+# Integrity verification (CLIENT-ONLY — frozen into the PyInstaller bundle;
+# never a backend/orchestrator runtime dependency, Constitution V preserved):
+sigstore>=3.0
 # build only:
 # pyinstaller>=6.0
