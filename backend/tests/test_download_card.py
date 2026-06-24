@@ -221,3 +221,250 @@ def test_handle_meta_tool_unavailable_when_no_release(monkeypatch):
     types = [c["type"] for c in res.ui_components]
     assert "download_card" in types
     assert res.result["status"] == "unavailable"
+
+
+def test_handle_meta_tool_unknown_tool():
+    import asyncio
+    res = asyncio.run(dc.handle_meta_tool(
+        None, "no_such_tool", {}, user_id="u1", chat_id="c1", websocket=None))
+    assert res.error is not None
+    assert "Unknown meta-tool" in res.error["message"]
+
+
+def test_handle_meta_tool_exception_returns_error_card(monkeypatch):
+    import asyncio
+    async def boom(*a, **k):
+        raise RuntimeError("explode")
+    monkeypatch.setattr(dc, "_offer", boom)
+    res = asyncio.run(dc.handle_meta_tool(
+        None, "offer_desktop_codegen", {"language": "python", "code": "x"},
+        user_id="u1", chat_id="c1", websocket=None))
+    assert res.result["status"] == "error"
+    assert res.ui_components and res.ui_components[0]["variant"] == "error"
+
+
+# --------------------------------------------------------------------------- #
+# Real fetch-path coverage (requests + egress mocked)
+# --------------------------------------------------------------------------- #
+
+_GH_RELEASE = {
+    "name": "v2.0.0", "tag_name": "v2.0.0", "html_url": "https://github.com/AstralDeep/AstralBody/releases/latest",
+    "assets": [
+        {"name": "AstralBody.exe", "browser_download_url": "https://github.com/AstralDeep/AstralBody/releases/download/v2.0.0/AstralBody.exe", "size": 12345},
+        {"name": "SHA256SUMS", "browser_download_url": "https://github.com/AstralDeep/AstralBody/releases/download/v2.0.0/SHA256SUMS"},
+        {"name": "cosign.bundle", "browser_download_url": "https://github.com/AstralDeep/AstralBody/releases/download/v2.0.0/cosign.bundle"},
+    ],
+}
+
+
+class _FakeResp:
+    def __init__(self, status=200, body=b"", chunks=None):
+        self.status_code = status
+        self._body = body
+        self._chunks = chunks if chunks is not None else [body]
+
+    def iter_content(self, chunk_size=0):
+        for c in self._chunks:
+            yield c
+
+    def close(self):
+        pass
+
+
+def test_fetch_release_info_success(monkeypatch):
+    import json
+    import requests
+    body = json.dumps(_GH_RELEASE).encode()
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResp(200, body))
+    info = dc._fetch_release_info()
+    assert info is not None
+    assert info["version"] == "v2.0.0"
+    assert info["exe_url"].endswith("AstralBody.exe")
+    assert info["sha_url"].endswith("SHA256SUMS")
+    assert info["bundle_url"].endswith("cosign.bundle")
+
+
+def test_fetch_release_info_with_token(monkeypatch):
+    import json
+    import requests
+    captured = {}
+    def fake_get(url, headers=None, **k):
+        captured["headers"] = headers
+        return _FakeResp(200, json.dumps(_GH_RELEASE).encode())
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+    assert dc._fetch_release_info() is not None
+    assert captured["headers"]["Authorization"] == "Bearer ghp_test"
+
+
+def test_fetch_release_info_non200(monkeypatch):
+    import requests
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResp(404, b"{}"))
+    assert dc._fetch_release_info() is None
+
+
+def test_fetch_release_info_transport_error(monkeypatch):
+    import requests
+    def boom(*a, **k):
+        raise requests.ConnectionError("down")
+    monkeypatch.setattr(requests, "get", boom)
+    assert dc._fetch_release_info() is None
+
+
+def test_fetch_release_info_oversize(monkeypatch):
+    import requests
+    big = b"x" * (3 * 1024 * 1024)
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResp(200, big, chunks=[big]))
+    assert dc._fetch_release_info() is None
+
+
+def test_fetch_release_info_no_exe_asset(monkeypatch):
+    import json
+    import requests
+    payload = {"name": "v1", "tag_name": "v1", "html_url": "h",
+               "assets": [{"name": "other", "browser_download_url": "u"}]}
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResp(200, json.dumps(payload).encode()))
+    assert dc._fetch_release_info() is None
+
+
+def test_fetch_sha256_non200_and_exception(monkeypatch):
+    import requests
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResp(500))
+    assert dc._fetch_sha256("https://github.com/x/SHA256SUMS") is None
+    def boom(*a, **k):
+        raise requests.Timeout("slow")
+    monkeypatch.setattr(requests, "get", boom)
+    assert dc._fetch_sha256("https://github.com/x/SHA256SUMS") is None
+
+
+def test_fetch_sha256_fallback_single_hash(monkeypatch):
+    import requests
+    monkeypatch.setattr(requests, "get",
+                        lambda *a, **k: _FakeResp(200, ("f" * 64).encode()))
+    assert dc._fetch_sha256("https://github.com/x/SHA256SUMS") == "f" * 64
+
+
+def test_fetch_sha256_no_valid_hash(monkeypatch):
+    import requests
+    monkeypatch.setattr(requests, "get",
+                        lambda *a, **k: _FakeResp(200, b"not a hash here\n"))
+    assert dc._fetch_sha256("https://github.com/x/SHA256SUMS") is None
+
+
+def test_get_release_info_refresh_fetches_sha(monkeypatch):
+    """On a cache miss/refresh, get_release_info fetches the release then the SHA."""
+    dc._CACHE.clear()
+    import json
+    import requests
+    body = json.dumps(_GH_RELEASE).encode()
+    sha_body = ("a" * 64 + "  AstralBody.exe\n").encode()
+    calls = {"n": 0}
+
+    def fake_get(url, **k):
+        calls["n"] += 1
+        if "SHA256SUMS" in url:
+            return _FakeResp(200, sha_body)
+        return _FakeResp(200, body)
+    monkeypatch.setattr(requests, "get", fake_get)
+    info = dc.get_release_info()
+    assert info["sha256"] == "a" * 64
+    assert calls["n"] == 2  # release + sha
+
+
+def test_get_release_info_cache_hit_skips_fetch(monkeypatch):
+    """Within TTL, a second call does not re-fetch."""
+    dc._CACHE.clear()
+    import requests
+    calls = {"n": 0}
+
+    def fake_get(url, **k):
+        calls["n"] += 1
+        import json
+        if "SHA256SUMS" in url:
+            return _FakeResp(200, ("a" * 64 + "  AstralBody.exe\n").encode())
+        return _FakeResp(200, json.dumps(_GH_RELEASE).encode())
+    monkeypatch.setattr(requests, "get", fake_get)
+    dc.get_release_info()
+    first = calls["n"]
+    dc.get_release_info()  # cached
+    assert calls["n"] == first  # no new fetches
+
+
+def test_get_release_info_refresh_failure_keeps_last_good(monkeypatch):
+    dc._CACHE.clear()
+    import json
+    import requests
+    body = json.dumps(_GH_RELEASE).encode()
+    seq = {"i": 0}
+
+    def fake_get(url, **k):
+        seq["i"] += 1
+        if "SHA256SUMS" in url:
+            return _FakeResp(200, ("a" * 64 + "  AstralBody.exe\n").encode())
+        return _FakeResp(200, body)
+    monkeypatch.setattr(requests, "get", fake_get)
+    first = dc.get_release_info()
+    assert first is not None
+    # Force a TTL expiry + a failing fetcher; last-good must survive.
+    dc._CACHE[dc._repo()] = (0.0, first)
+    monkeypatch.setattr(dc, "_fetch_release_info", lambda: None)
+    again = dc.get_release_info()
+    assert again is first  # fail-open last-good
+
+
+def test_offer_includes_summary_text(monkeypatch):
+    import asyncio
+    _mock_release(monkeypatch)
+    dc._CACHE.clear()
+    res = asyncio.run(dc.handle_meta_tool(
+        None, "offer_desktop_codegen",
+        {"language": "python", "code": "x", "summary": "sorts your downloads"},
+        user_id="u1", chat_id="c1", websocket=None))
+    types = [c["type"] for c in res.ui_components]
+    assert "text" in types  # summary text present
+    assert res.result["status"] == "offered"
+
+
+# --------------------------------------------------------------------------- #
+# Orchestrator dispatch wiring (the __desktop_codegen__ branch in
+# Orchestrator.execute_single_tool)
+# --------------------------------------------------------------------------- #
+
+def test_execute_single_tool_dispatches_desktop_codegen(monkeypatch):
+    """execute_single_tool routes a __desktop_codegen__-mapped tool call to the
+    desktop_codegen meta-tool handler (covers the orchestrator dispatch branch)."""
+    import asyncio
+    import json
+    from orchestrator import orchestrator as orch_mod
+    from orchestrator import desktop_codegen
+
+    captured = {}
+
+    async def fake_handle(orch, tool_name, args, *, user_id, chat_id, websocket):
+        captured["tool"] = tool_name
+        captured["args"] = args
+        captured["user_id"] = user_id
+        from shared.protocol import MCPResponse
+        return MCPResponse(result={"status": "offered"})
+
+    monkeypatch.setattr(desktop_codegen, "handle_meta_tool", fake_handle)
+
+    class _Fn:
+        name = "offer_desktop_codegen"
+        arguments = json.dumps({"language": "python", "code": "x"})
+
+    class _TC:
+        function = _Fn()
+
+    # execute_single_tool dispatches to the meta-tool before touching self beyond
+    # the dispatch, so a bare instance (no DB/agents) is enough to reach the branch.
+    orch = orch_mod.Orchestrator.__new__(orch_mod.Orchestrator)
+    tool_to_agent = {"offer_desktop_codegen": "__desktop_codegen__"}
+
+    res = asyncio.run(orch.execute_single_tool(
+        websocket=None, tool_call=_TC(), tool_to_agent=tool_to_agent,
+        chat_id="c1", user_id="u1"))
+    assert captured["tool"] == "offer_desktop_codegen"
+    assert captured["args"] == {"language": "python", "code": "x"}
+    assert res.result["status"] == "offered"
+
