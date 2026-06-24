@@ -52,6 +52,20 @@ class OrchestratorClient(QObject):
         self._stop = False
 
     # --- lifecycle ------------------------------------------------------- #
+    def _safe_status(self, s: str) -> None:
+        """Emit a status signal, tolerating teardown (the C++ QObject may be
+        deleted while this daemon thread is still running)."""
+        try:
+            self.status.emit(s)
+        except RuntimeError:
+            pass
+
+    def _safe_message(self, m: dict) -> None:
+        try:
+            self.message.emit(m)
+        except RuntimeError:
+            pass
+
     def start(self) -> None:
         self._thread.start()
 
@@ -66,10 +80,11 @@ class OrchestratorClient(QObject):
         try:
             self._loop.run_until_complete(self._main())
         except Exception as exc:  # surface connection failures to the UI
-            self.status.emit(f"closed:{exc}")
+            if not self._stop:
+                self._safe_status(f"closed:{exc}")
 
     async def _main(self) -> None:
-        self.status.emit("connecting")
+        self._safe_status("connecting")
         async with websockets.connect(self.url, max_size=16 * 1024 * 1024,
                                       ping_interval=20) as ws:
             self._ws = ws
@@ -81,7 +96,7 @@ class OrchestratorClient(QObject):
                 "device": self.device,
                 "resumed": False,
             }))
-            self.status.emit("connected")
+            self._safe_status("connected")
             async for raw in ws:
                 if self._stop:
                     break
@@ -91,9 +106,10 @@ class OrchestratorClient(QObject):
                     continue
                 if isinstance(msg, dict):
                     if msg.get("type") == "auth_required":
-                        self.status.emit(f"auth_required:{msg.get('reason', '')}")
-                    self.message.emit(msg)
-        self.status.emit("closed:server")
+                        self._safe_status(f"auth_required:{msg.get('reason', '')}")
+                    self._safe_message(msg)
+        if not self._stop:
+            self._safe_status("closed:server")
 
     # --- outbound -------------------------------------------------------- #
     def _send(self, obj: dict) -> None:

@@ -68,30 +68,33 @@ QT_QPA_PLATFORM=offscreen .venv/Scripts/python tests/e2e_live.py --prompt "roll 
   `register_ui`; it silently refreshes on expiry. An explicit `--token` always
   wins.
 
-It **reuses the web's `astral-frontend` client** (no new Keycloak client): the
-browser does PKCE, then the auth-code/refresh exchange is proxied through the
-orchestrator's BFF (`POST {base}/auth/token`), which injects the client secret
-server-side — so the desktop never holds it. Override the client with
-`--client-id` / `ASTRAL_CLIENT_ID`.
+By default the desktop uses its own **dedicated public Keycloak client**,
+`astral-desktop` (the by-the-book native-app posture, RFC 8252 / OAuth 2.0 for
+Native Apps): the browser does PKCE, then the app exchanges the auth code and
+refreshes tokens **directly against Keycloak** — it holds no secret and does not
+depend on the orchestrator's BFF, and the web/desktop auth surfaces stay
+isolated. The orchestrator accepts the desktop client's `azp` via its
+`KEYCLOAK_ALLOWED_AZP` allow-list. Override the client id with `--client-id` /
+`ASTRAL_CLIENT_ID`.
 
-One-time Keycloak change: add a **loopback redirect URI** `http://127.0.0.1/*`
-to the existing `astral-frontend` client's allowed redirects.
+**One-time Keycloak setup** (create the public client + add it to the
+allow-list): see [`docs/keycloak-windows-client-setup.md`](../docs/keycloak-windows-client-setup.md).
 
 ```bash
 .venv/Scripts/python main.py --authority https://iam.example.com/realms/Astral
+# (uses client astral-desktop, direct token exchange)
 ```
 
-> **TODO (production hardening): switch to a dedicated public client, don't reuse
-> the BFF.** Reusing `astral-frontend` via the orchestrator's BFF token proxy is
-> the pragmatic choice for now (no new Keycloak client to manage), but the
-> by-the-book native-app posture (RFC 8252 / OAuth 2.0 for Native Apps) is a
-> **dedicated public Keycloak client** (e.g. `astral-desktop`: Client
-> authentication OFF, Standard Flow + PKCE `S256`, loopback redirect) that does
-> the token exchange **directly against Keycloak** — so the desktop doesn't
-> depend on the orchestrator's BFF and the web/desktop auth surfaces are isolated.
-> That requires: (1) creating the public client, and (2) accepting its `azp` on
-> the orchestrator (a configurable allow-list rather than the current single-`azp`
-> check). Migrate to this before shipping the desktop app to real users.
+**Legacy BFF reuse** (no dedicated client): pass `--bff` (or `ASTRAL_AUTH_BFF=1`)
+to reuse the web's confidential `astral-frontend` client by proxying the token
+exchange through the orchestrator's `POST /auth/token`. This requires the
+`http://127.0.0.1/*` loopback redirect on the `astral-frontend` client and is
+kept only for environments that have not provisioned `astral-desktop` yet.
+
+```bash
+.venv/Scripts/python main.py --authority https://iam.example.com/realms/Astral \
+    --client-id astral-frontend --bff
+```
 
 ## Windows tools agent (client-hosted)
 
@@ -110,7 +113,23 @@ outside dev; dev mode is keyless).
 
 ## Scope / status
 
-MVP: chat → keyless agent → native SDUI canvas, in-place `ui_upsert` updates,
-button/history interactions. **Not yet**: app *chrome* (settings/modals/agent
-management) — those are server-rendered HTML (`chrome_render`) and would need an
-embedded WebView2 or native reimplementation; native OIDC; streaming primitives.
+Working: real Keycloak OIDC (dedicated public client, silent refresh) → chat →
+agents → native SDUI canvas, in-place `ui_upsert` updates, button/history
+interactions, client-hosted Windows tools agent. **In progress**: app *chrome*
+(settings/modals/agent management). The web app renders these as server HTML
+(`chrome_render`); this client reimplements them as **native Qt widgets** —
+see "Native-only" below. Streaming primitives are still TODO.
+
+## Native-only (no embedded web browser)
+
+This client is 100% native: every surface is a Qt widget. There is **no
+WebView2 / QtWebEngine** anywhere (the PyInstaller build even excludes those
+modules), and we do not embed the web app's HTML.
+
+- **SDUI canvas + chat** → native widgets via `renderer.py`.
+- **App chrome** (settings, agent management, modals) → native Qt
+  reimplementation driven by the same WS events as the web chrome — *not* an
+  embedded HTML view.
+- **OIDC login** → the **system** browser (RFC 8252 external user-agent), which
+  is the correct, more secure native pattern; it is the OS browser, **not** an
+  in-app embedded web view. The app never sees your Keycloak password.
