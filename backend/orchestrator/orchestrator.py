@@ -292,6 +292,10 @@ RETIRED_AGENT_IDS = frozenset({
     "email_tracker", "email-tracker-1", "grant_budgets", "grant-budgets-1",
     "grants", "grants-1", "linkedin", "linkedin-1",
     "nefarious", "nefarious-1", "nocodb", "nocodb-1",
+    # Feature 068: etf_tracker_1 retired (agent removed). Both the hyphenated
+    # agent id and the legacy underscore directory-name form route through the
+    # runtime retirement handling so old transcripts degrade gracefully.
+    "etf_tracker_1", "etf-tracker-1-1",
 })
 _MERGED_AGENT_REMAP = {
     "classify": "ml-services-1", "classify-1": "ml-services-1",
@@ -341,6 +345,11 @@ class Orchestrator:
         from orchestrator.async_tasks import BackgroundTaskManager
         self.async_task_manager = BackgroundTaskManager()
         self.agents: Dict[str, websockets.WebSocketServerProtocol] = {}
+        # Feature 068 (US1): bundled first-party agents running IN-PROCESS
+        # (agent_id -> live BaseA2AAgent instance). Dispatch selects the
+        # in-process path by a positive membership check here; external A2A and
+        # draft-subprocess agents are unaffected.
+        self.local_agents: Dict[str, Any] = {}
         self.ui_clients: List[websockets.WebSocketServerProtocol] = []
         self.ui_sessions: Dict[websockets.WebSocketServerProtocol, Dict] = {}
         self.agent_cards: Dict[str, AgentCard] = {}
@@ -2888,6 +2897,22 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             logger.warning("Empty message received")
             return
 
+        # Feature 068 (US5): expand a user-typed /slash-command into a normal
+        # prompt BEFORE any processing, so the rewritten turn flows through the
+        # exact same permission / audit / PHI gates (no privileged bypass). The
+        # user still sees their original "/command" via display_message. Pure
+        # prompt-shaping; fail-open to today's behavior on any error.
+        if flags.is_enabled("slash_commands"):
+            try:
+                from orchestrator import slash_commands
+                _expanded = slash_commands.expand_message(message)
+                if _expanded != message:
+                    if display_message is None:
+                        display_message = message  # preserve what the user typed
+                    message = _expanded
+            except Exception:
+                logger.debug("slash_commands: expansion skipped (fail-open)", exc_info=True)
+
         # 030 FR-009 (025 T021): intercept deterministic onboarding ParamPicker
         # submits before the LLM/history path and persist them directly. These
         # are fixed templates ("Save my personalization profile — ...") posted by
@@ -3298,6 +3323,21 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 routing_hints = self.knowledge_index.get_routing_hints()
                 if routing_hints:
                     system_prompt += f"\n{routing_hints}\n"
+
+            # Feature 068 (US4): inject authored skill packs for the agents in
+            # play THIS turn only (progressive disclosure — not every agent
+            # every turn). Wires the previously-dormant get_techniques_for_agent.
+            # Bounded + fail-open: any error leaves the turn unchanged.
+            if flags.is_enabled("skill_packs") and hasattr(self, 'knowledge_index'):
+                try:
+                    from orchestrator import skill_packs
+                    _meta = {"__orchestrator__", "__scheduler__", "__memory__", "__desktop_codegen__"}
+                    _agents_in_play = {a for a in tool_to_agent.values() if a and a not in _meta}
+                    _digest = skill_packs.build_skill_digest(self.knowledge_index, _agents_in_play)
+                    if _digest:
+                        system_prompt += f"\n{_digest}\n"
+                except Exception:
+                    logger.debug("skill_packs.fallback: injection skipped", exc_info=True)
 
             # 030 FR-010 (025 T028): populate enabled-skill guidance from the
             # tools actually available to the user this turn. Previously
@@ -5464,6 +5504,39 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
     _PARALLEL_SAFE_SCOPES = frozenset({"tools:read", "tools:search"})
     _MAX_PARALLEL_CONCURRENCY = 10
 
+    async def _execute_with_retry_audited(self, websocket, agent_id, tool_name, args, chat_id=None):
+        """Dispatch a tool with the SAME ToolDispatchAudit start/end events as the
+        single-tool path (feature 068 / FR-032).
+
+        The parallel-tool path historically called ``_execute_with_retry``
+        directly, emitting no ``agent_tool_call`` audit rows — so parallel
+        batches were unaudited. Routing them through this wrapper makes every
+        tool call auditable regardless of dispatch path, and propagates the
+        correlation_id onto the response (component-feedback parity).
+        """
+        from audit.hooks import ToolDispatchAudit
+        claims = self.ui_sessions.get(websocket) if websocket is not None else None
+        async with ToolDispatchAudit(
+            claims=claims,
+            agent_id=agent_id,
+            tool_name=tool_name,
+            chat_id=chat_id,
+            args_meta={k: v for k, v in (args or {}).items() if not (isinstance(k, str) and k.startswith("_"))},
+        ) as _audit_ctx:
+            result = await self._execute_with_retry(websocket, agent_id, tool_name, args)
+            if result and result.error:
+                _audit_ctx.set_outcome("failure", str(result.error.get("message", ""))[:1000])
+            elif result is None:
+                _audit_ctx.set_outcome("interrupted", "no result returned")
+            else:
+                _audit_ctx.set_outputs_meta({"has_ui_components": bool(result.ui_components)})
+            if result is not None:
+                try:
+                    result.correlation_id = _audit_ctx.correlation_id
+                except Exception:
+                    pass
+            return result
+
     async def execute_parallel_tools(self, websocket, tool_calls, tool_to_agent: Dict, chat_id: str = None, user_id: str = None, tool_to_unqualified: Optional[Dict[str, str]] = None) -> List[Optional[MCPResponse]]:
         """Execute multiple tool calls with concurrency safety.
 
@@ -5535,7 +5608,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 prepared.append((idx, tc, tool_name, agent_id, None, _perm_err()))
                 continue
 
-            if not agent_id or (agent_id not in self.agents and agent_id not in self.a2a_clients):
+            if not agent_id or (agent_id not in self.agents and agent_id not in self.a2a_clients and agent_id not in self.local_agents):
                 async def _no_agent(tn=tool_name):
                     return MCPResponse(error={"message": f"No agent for {tn}"})
                 prepared.append((idx, tc, tool_name, agent_id, None, _no_agent()))
@@ -5559,7 +5632,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             elif use_concurrency_safety:
                 scope = self.tool_permissions.get_tool_scope(agent_id, tool_name)
                 if scope in self._PARALLEL_SAFE_SCOPES:
-                    parallel_items.append((idx, tool_name, self._execute_with_retry(websocket, agent_id, tool_name, args)))
+                    parallel_items.append((idx, tool_name, self._execute_with_retry_audited(websocket, agent_id, tool_name, args, chat_id)))
                 else:
                     serial_items.append((idx, tool_name, agent_id, args))
             else:
@@ -5588,7 +5661,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # Execute serial (write/system) tools one at a time
         for idx, tool_name, agent_id, args in serial_items:
             try:
-                results_by_idx[idx] = await self._execute_with_retry(websocket, agent_id, tool_name, args)
+                results_by_idx[idx] = await self._execute_with_retry_audited(websocket, agent_id, tool_name, args, chat_id)
             except Exception as e:
                 results_by_idx[idx] = e
 
@@ -5764,7 +5837,13 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             raise
 
     async def _dispatch_tool_call(self, agent_id: str, tool_name: str, args: Dict, timeout: float, ui_websocket) -> Optional[MCPResponse]:
-        """Internal: actually dispatch the tool call (WebSocket → A2A fallback)."""
+        """Internal: actually dispatch the tool call (in-process → WebSocket → A2A)."""
+        # Feature 068 (US1): bundled first-party agents run IN-PROCESS — no
+        # network hop. Selected by a positive registry check; external A2A
+        # agents and draft subprocesses fall through to the paths below.
+        if agent_id in self.local_agents:
+            return await self._execute_in_process(
+                agent_id, tool_name, args, timeout, ui_websocket=ui_websocket)
         # Try WebSocket first
         if agent_id in self.agents:
             result = await self._execute_via_websocket(agent_id, tool_name, args, timeout, ui_websocket=ui_websocket)
@@ -5837,6 +5916,65 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                                error={"message": "Tool call timed out", "retryable": True})
         except Exception as e:
             logger.error(f"Tool execution error: {e}")
+            return MCPResponse(request_id=request_id,
+                               error={"message": str(e), "retryable": True})
+        finally:
+            self.pending_requests.pop(request_id, None)
+            self.pending_ui_sockets.pop(request_id, None)
+
+    async def _execute_in_process(self, agent_id: str, tool_name: str, args: Dict, timeout: float = 30.0, ui_websocket=None) -> Optional[MCPResponse]:
+        """Execute a tool call against a built-in agent running IN-PROCESS (feature 068).
+
+        Runs the agent's own ``handle_mcp_request`` with a
+        :class:`~shared.local_transport.LoopbackSocket` whose frames route back
+        through ``handle_agent_message`` — so the same request-id↔future
+        correlation, progress fan-out, streaming, in-agent credential
+        decryption (orchestrator never sees plaintext), and ``_runtime``
+        injection all apply with no network hop. The whole gate stack
+        (permission/policy/taint/audit/concurrency) wraps this call upstream in
+        ``execute_single_tool`` and is unchanged.
+        """
+        from shared.local_transport import LoopbackSocket
+        request_id = f"req_{tool_name}_{int(time.time() * 1000)}"
+        request = MCPRequest(
+            request_id=request_id,
+            method="tools/call",
+            params={"name": tool_name, "arguments": args},
+        )
+        future = asyncio.get_event_loop().create_future()
+        self.pending_requests[request_id] = future
+        if ui_websocket and flags.is_enabled("progress_streaming"):
+            self.pending_ui_sockets[request_id] = ui_websocket
+
+        def _on_handler_done(task: "asyncio.Task"):
+            # The agent handler resolves the future itself via the loopback's
+            # MCPResponse frame. If it raised before sending one (it should not —
+            # mcp_server.process_request catches tool errors and returns an
+            # error response), resolve with a retryable error so the awaiter
+            # never hangs until timeout.
+            try:
+                exc = task.exception()
+            except asyncio.CancelledError:
+                exc = RuntimeError("in-process tool task cancelled")
+            if exc is not None and not future.done():
+                logger.error("In-process tool handler crashed for %s: %s", tool_name, exc)
+                future.set_result(MCPResponse(
+                    request_id=request_id,
+                    error={"message": str(exc), "retryable": True}))
+
+        try:
+            agent = self.local_agents[agent_id]
+            loopback = LoopbackSocket(self, agent_id)
+            task = asyncio.create_task(agent.handle_mcp_request(loopback, request))
+            task.add_done_callback(_on_handler_done)
+            logger.info(f"Dispatched tool call (in-process): {tool_name} → {agent_id}")
+            return await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.error(f"In-process tool call timed out: {tool_name}")
+            return MCPResponse(request_id=request_id,
+                               error={"message": "Tool call timed out", "retryable": True})
+        except Exception as e:
+            logger.error(f"In-process tool execution error: {e}")
             return MCPResponse(request_id=request_id,
                                error={"message": str(e), "retryable": True})
         finally:
@@ -7235,7 +7373,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         Feature 030: an explicitly PUBLIC agent is never treated as a draft.
         Lifecycle drafts are always private, so a public ownership row means
         the slug-reverse draft match was a stale-row false positive — e.g.
-        the live bundled ``etf-tracker-1-1`` agent, whose directory name
+        a live bundled agent (such as ``weather-1``) whose directory name
         collides with an old draft slug and was silently hidden from the
         agent list and Public tab (verified walkthrough finding).
         """
@@ -7692,6 +7830,29 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # misconfiguration — refuse to serve rather than run open.
         from orchestrator.session_store import assert_production_posture
         assert_production_posture()
+
+        # Feature 068 (US2): mark the bundled first-party fleet owner-safe so
+        # their tools are usable out of the box (audited; idempotent — already-
+        # safe agents are skipped on re-boot). Gated by FF_SAFE_AGENTS.
+        try:
+            from shared.feature_flags import flags
+            if flags.is_enabled("safe_agents"):
+                from orchestrator import agent_trust
+                await agent_trust.seed_safe(
+                    self.history.db, self.history.db._FIRST_PARTY_PUBLIC_AGENT_IDS)
+        except Exception:
+            logger.debug("Feature 068 safe seed failed (non-fatal)", exc_info=True)
+
+        # Feature 068 (US1): register the bundled first-party agents IN-PROCESS
+        # (no per-agent uvicorn port). start.py skips spawning them as
+        # subprocesses when this flag is on; the networked path remains for any
+        # agent not registered locally. Default ON; kill-switch falls back to WS.
+        try:
+            if flags.is_enabled("inprocess_agents"):
+                from orchestrator import local_agents
+                await local_agents.register_built_ins(self)
+        except Exception:
+            logger.exception("Feature 068: in-process agent registration failed")
 
         # Feature 028 (FR-013): drain queued offline sign-out revocations.
         async def _revocation_queue_loop():

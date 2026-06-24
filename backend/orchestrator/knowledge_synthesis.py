@@ -33,12 +33,20 @@ logger = logging.getLogger("Orchestrator.Knowledge")
 RETIRED_KNOWLEDGE_STEMS = frozenset({
     "grants", "grant_budgets", "nefarious", "email_tracker", "linkedin", "nocodb",
     "classify", "forecaster", "llm_factory",
+    "etf_tracker",  # Feature 068: etf_tracker_1 retired.
 })
 
 # ─── Defaults ───────────────────────────────────────────────────────────
 
 DEFAULT_KNOWLEDGE_DIR = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "knowledge"
+)
+# Feature 068 (US4): authored, version-controlled skill packs live here,
+# SEPARATE from the gitignored, auto-synthesized DEFAULT_KNOWLEDGE_DIR so the
+# synthesizer can never overwrite hand-authored guidance. Authored packs take
+# precedence in get_techniques_for_agent.
+AUTHORED_KNOWLEDGE_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)), "knowledge_packs"
 )
 DEFAULT_SYNTHESIS_INTERVAL = 1800   # 30 minutes
 DEFAULT_MIN_INTERACTIONS = 20
@@ -509,8 +517,17 @@ class KnowledgeIndex:
         self._mtimes.clear()
 
     def get_techniques_for_agent(self, agent_id: str) -> str:
-        """Return technique markdown for a specific agent."""
+        """Return technique markdown for a specific agent.
+
+        Feature 068 (US4): an AUTHORED pack (committed under knowledge_packs/,
+        which the synthesizer never writes) takes precedence over the
+        auto-synthesized file, so hand-curated guidance is never clobbered.
+        """
         slug = agent_id.replace("-", "_").rstrip("_1234567890")
+        authored = os.path.join(AUTHORED_KNOWLEDGE_DIR, "techniques", f"{slug}.md")
+        content = self._read_content(authored)
+        if content:
+            return content
         filepath = os.path.join(self.knowledge_dir, "techniques", f"{slug}.md")
         return self._read_content(filepath)
 

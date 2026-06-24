@@ -67,6 +67,9 @@ class ToolPermissionManager:
         # In-memory tool→scope mapping populated by orchestrator on agent registration
         # Structure: { agent_id: { tool_name: scope_string } }
         self._tool_scope_map: Dict[str, Dict[str, str]] = {}
+        # Feature 068: short-TTL cache of agent_trust.is_safe so the
+        # safe-baseline check stays off the per-call DB hot path.
+        self._safe_cache: Dict[str, tuple] = {}
         self._migrate_from_json()
 
     def _migrate_from_json(self):
@@ -268,8 +271,46 @@ class ToolPermissionManager:
         )
         if legacy_row is not None and not bool(legacy_row["enabled"]):
             return False
-        # 3. Fall back to scope
-        return self.is_scope_enabled(user_id, agent_id, required_scope)
+        # 3. Fall back to the agent-wide scope. Feature 068: an owner-approved
+        # "safe" agent flips this baseline from deny→allow — but ONLY when the
+        # user has no explicit scope row. An explicit grant OR opt-out (a stored
+        # agent_scopes row, including enabled=False) always wins. Hard
+        # security-flag blocks are an independent upstream gate (orchestrator
+        # dispatch), unaffected here.
+        scope_row = self.db.fetch_one(
+            "SELECT enabled FROM agent_scopes WHERE user_id = ? AND agent_id = ? AND scope = ?",
+            (user_id, agent_id, required_scope),
+        )
+        if scope_row is not None:
+            return bool(scope_row["enabled"])
+        if self._is_safe_agent(agent_id):
+            return True
+        return False
+
+    def _is_safe_agent(self, agent_id: str) -> bool:
+        """Whether ``agent_id`` is an owner-approved 'safe' agent (feature 068).
+
+        Gated by ``FF_SAFE_AGENTS``; cached briefly (30s) to avoid a DB hit on
+        the per-call permission path. Fails closed (returns False) on any error,
+        so a lookup failure can never widen access.
+        """
+        try:
+            from shared.feature_flags import flags
+            if not flags.is_enabled("safe_agents"):
+                return False
+        except Exception:
+            return False
+        import time
+        now = time.time()
+        cached = self._safe_cache.get(agent_id)
+        if cached is not None and cached[1] > now:
+            return cached[0]
+        try:
+            val = bool(self.db.get_agent_is_safe(agent_id))
+        except Exception:
+            val = False
+        self._safe_cache[agent_id] = (val, now + 30.0)
+        return val
 
     def set_skill_enabled(self, user_id: str, agent_id: str, tool_name: str,
                           enabled: bool) -> None:
