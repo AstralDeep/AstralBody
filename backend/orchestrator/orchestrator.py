@@ -850,6 +850,17 @@ class Orchestrator:
 
         # Step 2: Fall back to A2A JSON-RPC
         try:
+            # C-2: never register a second, A2A-derived identity for a host that
+            # a WebSocket-discovered agent already owns. The win_agent registers
+            # over WS with its real id (e.g. windows-tools-1); without this guard
+            # the A2A fallback would slug its display name into a phantom
+            # duplicate ("windows-tools-(code-&-system)") and create stray
+            # ownership/scope rows. The WS path is authoritative for these hosts.
+            if base_url in self.agent_urls.values():
+                logger.debug(
+                    "A2A fallback skipped: an agent is already registered at %s", base_url
+                )
+                return
             import httpx
             from a2a.client import A2ACardResolver
             from shared.a2a_bridge import a2a_card_to_custom

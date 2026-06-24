@@ -960,6 +960,9 @@ class Database:
         # ── Feature 029: agent catalog migrations (data-model.md) ───────────
         self._migrate_agent_catalog_029(cursor)
 
+        # ── Feature 067 (C-2): purge phantom Windows-tools agent rows ───────
+        self._cleanup_phantom_windows_tools_ids(cursor)
+
         # ── Feature 030: first-party agent visibility backfill ──────────────
         self._migrate_agent_visibility_030(cursor)
 
@@ -988,6 +991,26 @@ class Database:
                           'linkedin', 'linkedin-1',
                           'nefarious', 'nefarious-1',
                           'nocodb', 'nocodb-1')
+
+    def _cleanup_phantom_windows_tools_ids(self, cursor):
+        """Feature 067 (C-2): delete phantom Windows-tools agent rows.
+
+        The A2A discovery fallback used to slugify the agent's display name
+        ("Windows Tools (code & system)") into an id instead of its real id
+        ``windows-tools-1`` — leaving stray rows under ``windows-tools`` and
+        ``windows-tools-(code-&-system)``. This deletes those rows. Targeted +
+        idempotent: a real agent id never equals the bare ``windows-tools`` nor
+        starts with ``windows-tools-(`` (no real id contains a parenthesis), so
+        ``windows-tools-1`` is never touched. Safe at every boot.
+        """
+        for table in ('agent_scopes', 'agent_ownership', 'tool_overrides'):
+            try:
+                cursor.execute(
+                    f"DELETE FROM {table} WHERE agent_id = %s OR agent_id LIKE %s",
+                    ('windows-tools', 'windows-tools-(%'),
+                )
+            except Exception:  # noqa: BLE001 — table may be absent on older schema
+                pass
 
     def _migrate_agent_catalog_029(self, cursor):
         """Feature 029 one-time (idempotent) catalog migrations.
