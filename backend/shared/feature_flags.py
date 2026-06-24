@@ -50,6 +50,12 @@ class FeatureFlags:
             # actively use cross-session memory on request, mirroring
             # scheduling_chat. Passive prompt recall is unaffected. Default ON.
             "memory_chat": self._read("FF_MEMORY_CHAT", True),
+            # 067-desktop-codegen-download: injects the offer_desktop_codegen
+            # meta-tool so the assistant can surface a download card for the
+            # Windows coding-agent .exe (GitHub-released, integrity-checked)
+            # when a user asks for code that runs on their machine. Default ON;
+            # surfacing a verified download link is safe.
+            "desktop_codegen": self._read("FF_DESKTOP_CODEGEN", True),
             # 031-attachment-upload-parsing: when an accepted-but-unparseable
             # file type is uploaded, eagerly draft a safe backend parser by
             # reusing the 027 agentic-creation lifecycle (security gate +

@@ -1,0 +1,81 @@
+# Feature 067 — build, sign (keyless sigstore), and release the Windows desktop
+# client as a GitHub Release. Fires only on version tags (v*) so it does not
+# gate PRs or slow the main CI. Separate from ci.yml by design.
+#
+# Produces three assets per release:
+#   AstralBody.exe   — the PyInstaller-built native client
+#   SHA256SUMS       — the SHA-256 of the exe (the client's primary integrity check)
+#   cosign.bundle    — the sigstore bundle (keyless, signed with the workflow's
+#                      GitHub OIDC identity; verified client-side against the
+#                      AstralDeep/AstralBody workflow identity)
+#
+# No long-lived signing secret: sigstore keyless signing uses the job's OIDC
+# token (permissions.id-token: write). The client verifies both the hash and
+# the sigstore signature before it ever runs a downloaded binary.
+
+name: Release Windows client
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # create the GitHub Release + upload assets
+  id-token: write   # sigstore keyless signing (OIDC)
+
+jobs:
+  build-sign-release:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install build + runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r windows-client/requirements.txt
+          pip install pyinstaller sigstore
+
+      - name: Build the exe (PyInstaller)
+        working-directory: windows-client
+        run: pyinstaller --noconfirm AstralBody.spec
+
+      - name: Create SHA256SUMS
+        working-directory: windows-client/dist
+        shell: bash
+        run: |
+          sha256sum AstralBody.exe > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Keyless sign with sigstore (GitHub OIDC)
+        working-directory: windows-client/dist
+        env:
+          SIGSTORE_IDENTITY: "https://github.com/AstralDeep/AstralBody/.github/workflows/release-windows.yml@refs/tags/${{ github.ref_name }}"
+        run: |
+          sigstore sign AstralBody.exe --bundle cosign.bundle \
+            --oidc-issuer https://token.actions.githubusercontent.com \
+            --identity "$SIGSTORE_IDENTITY"
+
+      - name: Verify the signature (self-check)
+        working-directory: windows-client/dist
+        env:
+          SIGSTORE_IDENTITY: "https://github.com/AstralDeep/AstralBody/.github/workflows/release-windows.yml@refs/tags/${{ github.ref_name }}"
+        run: |
+          sigstore verify-github AstralBody.exe --bundle cosign.bundle \
+            --cert-identity "$SIGSTORE_IDENTITY" \
+            --cert-oidc-issuer https://token.actions.githubusercontent.com
+
+      - name: Create / update the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            windows-client/dist/AstralBody.exe
+            windows-client/dist/SHA256SUMS
+            windows-client/dist/cosign.bundle
+          generate_release_notes: true
+          fail_on_unmatched_files: true
