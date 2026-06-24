@@ -717,6 +717,10 @@ class MainWindow(QMainWindow):
         )
         if s.startswith("closed"):
             nice = "Disconnected"
+            # C-3: a dropped connection (e.g. orchestrator restart) must re-send
+            # register_external_agent on the next 'connected', or the win_agent
+            # stays unreachable to the orchestrator until the app is relaunched.
+            self._win_agent_registered = False
         elif s.startswith("auth_required"):
             nice = "Re-authenticating…"
         self.topbar.set_status(nice, color)
@@ -925,6 +929,20 @@ class MainWindow(QMainWindow):
     def _settings(self) -> QSettings:
         return QSettings("AstralBody", "WindowsClient")
 
+    def _gui_pick_directory(self, title: str, default: str = "") -> Optional[str]:
+        """Pick a folder on the GUI thread directly (C-1 fix).
+
+        ``QFileDialog.getExistingDirectory`` spins its own modal loop, so it works
+        on the GUI thread even during ``__init__`` (before ``app.exec()``). The
+        cross-thread confirm **bridge** must NOT be used here: it is driven by a
+        ``QTimer`` poller that only ticks inside the running event loop, so calling
+        ``BRIDGE.request_confirm`` from the GUI thread blocks that same thread and
+        the poller can never service it — the first-launch workspace prompt would
+        hang until the confirm timeout. The bridge is for the win_agent thread only.
+        """
+        chosen = QFileDialog.getExistingDirectory(self, title, default or "")
+        return os.path.realpath(chosen) if chosen else None
+
     def _init_workspace(self) -> None:
         """Resolve the coding-agent workspace: persisted choice > env > prompt.
 
@@ -936,9 +954,9 @@ class MainWindow(QMainWindow):
         chosen = persisted or env_dir
         if not chosen:
             chosen = (
-                _confirm.pick_directory(
-                    title="Choose the folder where Astral may read & write files",
-                    default=os.path.expanduser("~"),
+                self._gui_pick_directory(
+                    "Choose the folder where Astral may read & write files",
+                    os.path.expanduser("~"),
                 )
                 or ""
             )
@@ -967,9 +985,9 @@ class MainWindow(QMainWindow):
 
     def _change_workspace(self) -> None:
         """Reopen the directory picker; persist + apply the new choice live."""
-        chosen = _confirm.pick_directory(
-            title="Choose a new workspace folder",
-            default=self._settings().value("workspace_dir", "", type=str)
+        chosen = self._gui_pick_directory(
+            "Choose a new workspace folder",
+            self._settings().value("workspace_dir", "", type=str)
             or os.path.expanduser("~"),
         )
         if not chosen:
