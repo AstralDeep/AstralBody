@@ -3,49 +3,28 @@ name: "web_research_techniques"
 type: "technique"
 agent: "web-research-1"
 created_at: "2026-06-11T00:00:00+00:00"
-updated_at: "2026-06-11T00:00:00+00:00"
-synthesis_count: 0
-interaction_count: 0
-confidence: 0.5
+updated_at: "2026-06-18T05:22:34+00:00"
+synthesis_count: 1
+interaction_count: 3
+confidence: 0.515
 ---
 
 ### Effective Patterns
-*   **Search before fetch**: `web_search` first to find candidate URLs, then
-    `fetch_page` only on the most relevant results — fetches are bounded
-    (1 MB / 15 s each) so choose targets deliberately.
-*   **One-shot briefs**: for "research X and summarize" requests, call
-    `research_brief` directly instead of orchestrating search + fetch + an
-    ad-hoc summary; it produces a cited brief, a sources table, and per-section
-    tabs in a single tool call.
+*   **Direct Web Search**: The `web_search` tool demonstrates a **100% success rate** (1/1 call), indicating reliability for general query execution.
 
 ### Anti-Patterns
-*   **Fabricating sources**: never present URLs that were not returned by
-    `web_search` or fetched by `fetch_page`. The brief refuses to cite
-    anything it did not fetch; mirror that behavior in conversation.
-*   **Fetching private/internal hosts**: all egress is SSRF-gated; URLs that
-    resolve into private address space are refused by design — do not retry
-    them.
+*   **Complex/Long-Tail Brief Generation**: The `research_brief` tool shows a **50% failure rate** (1/2 calls). Specifically, queries targeting chronological evolutions (e.g., "evolution of... from 2023 to 2024") fail when the underlying HTML search returns no results.
 
 ### Error Recovery
-*   **Error Pattern**: `Search failed: DuckDuckGo HTML search could not complete…`
-    *   **Root Cause**: the keyless endpoint is unreachable or rate-limited.
-    *   **Recovery Strategy**: suggest saving the optional `SEARCH_API_URL` +
-        `SEARCH_API_KEY` credentials (Tavily-compatible endpoint) in the
-        agent's settings; the provider path is preferred automatically.
-*   **Error Pattern**: `Page too large` / `Fetch failed`.
-    *   **Recovery Strategy**: pick a different result from the search list;
-        per-fetch bounds are fixed (1 MB / 15 s) and are not configurable.
+*   **Search Provider Upgrade**: The system explicitly identifies a dependency on DuckDuckGo HTML search. To recover from "no results" errors, the agent should be configured with a dedicated `SEARCH_API_URL` and `SEARCH_API_KEY` to move from HTML scraping to a structured API.
+*   **Query Refinement**: Failures occurred on a highly specific, long-form query. Breaking complex chronological requests into smaller, discrete search terms may prevent total brief generation failure.
 
 ### Recommended Tool Sequences
-*   **Quick lookup**: `web_search` → answer from snippets (cite URLs).
-*   **Deep dive**: `web_search` → `fetch_page` (top 1-2 URLs) → answer.
-*   **Briefing**: `research_brief` (depth `shallow` for speed, `standard` for
-    coverage).
+*   **Search $\rightarrow$ Brief**: While the data is limited, the current workflow attempts to leverage search results to populate a research brief. To increase the success rate of `research_brief`, a successful `web_search` should be executed first to validate data availability before attempting brief generation.
 
 ### Statistics Summary
 
-| Tool Name | Total Calls | Success Rate | Failure Rate |
+| Tool | Calls | Success Rate | Primary Failure Mode |
 | :--- | :--- | :--- | :--- |
-| `web_search` | 0 | — | — |
-| `fetch_page` | 0 | — | — |
-| `research_brief` | 0 | — | — |
+| `research_brief` | 2 | 50.0% | Empty search results (HTML scraping) |
+| `web_search` | 1 | 100.0% | N/A |
