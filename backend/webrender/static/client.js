@@ -856,3 +856,61 @@
   }
   setTimeout(connect, 200);
 })();
+
+/* Feature 068 (US5): slash-command typeahead. Discovery only — the server
+   rewrites a "/command" into a normal prompt; nothing here invokes a tool. The
+   curated list mirrors orchestrator/slash_commands.COMMANDS. */
+(function () {
+  var COMMANDS = [
+    { name: "/help", desc: "show available commands" },
+    { name: "/agents", desc: "list your enabled agents" },
+    { name: "/summarize", desc: "summarize a link or text" },
+    { name: "/research", desc: "research + cited brief" },
+    { name: "/weather", desc: "weather + forecast" }
+  ];
+  var input = document.getElementById("astral-input");
+  var menu = document.getElementById("astral-slash-menu");
+  if (!input || !menu) return;
+
+  function hide() { menu.classList.add("hidden"); menu.innerHTML = ""; }
+
+  function render(matches) {
+    if (!matches.length) { hide(); return; }
+    menu.innerHTML = "";
+    matches.forEach(function (c) {
+      var item = document.createElement("button");
+      item.type = "button";
+      item.className = "astral-slash-item";
+      item.setAttribute("role", "option");
+      var n = document.createElement("span");
+      n.className = "astral-slash-name";
+      n.textContent = c.name;
+      var d = document.createElement("span");
+      d.className = "astral-slash-desc";
+      d.textContent = c.desc;
+      item.appendChild(n);
+      item.appendChild(d);
+      // mousedown (not click) fires before the input blur that would hide us.
+      item.addEventListener("mousedown", function (e) {
+        e.preventDefault();
+        input.value = c.name + " ";
+        hide();
+        input.focus();
+      });
+      menu.appendChild(item);
+    });
+    menu.classList.remove("hidden");
+  }
+
+  function update() {
+    var trimmed = (input.value || "").replace(/^\s+/, "");
+    // Only while typing the command NAME: a leading "/" and no space yet.
+    if (trimmed.charAt(0) !== "/" || trimmed.indexOf(" ") !== -1) { hide(); return; }
+    var prefix = trimmed.toLowerCase();
+    render(COMMANDS.filter(function (c) { return c.name.indexOf(prefix) === 0; }));
+  }
+
+  input.addEventListener("input", update);
+  input.addEventListener("blur", function () { setTimeout(hide, 120); });
+  input.addEventListener("keydown", function (e) { if (e.key === "Escape") hide(); });
+})();

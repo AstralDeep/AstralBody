@@ -32,7 +32,6 @@ _HEADING = {"type": "text", "content": "Recent chats", "variant": "h3"}
 #: Unknown/None agents fall back to a neutral speech-bubble.
 _AGENT_ICONS = {
     "weather": "\U0001F324️",
-    "etf_tracker_1": "\U0001F4C8",
     "summarizer": "\U0001F4DD",
     "dice_roller": "\U0001F3B2",
     "medical": "\U0001FA7A",
