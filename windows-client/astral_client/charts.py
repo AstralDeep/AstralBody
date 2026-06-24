@@ -1,14 +1,21 @@
 """QtCharts renderers for the bar/line/pie SDUI chart primitives. Plotly specs
 (`plotly_chart`) are web-only and fall back to a placeholder in renderer.py."""
+
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtCharts import (
-    QChart, QChartView, QBarSeries, QBarSet, QBarCategoryAxis, QValueAxis,
-    QLineSeries, QPieSeries,
+    QChart,
+    QChartView,
+    QBarSeries,
+    QBarSet,
+    QBarCategoryAxis,
+    QValueAxis,
+    QLineSeries,
+    QPieSeries,
 )
 
 from . import theme as T
@@ -25,7 +32,9 @@ def _style(chart: QChart, title: str) -> QChartView:
     view = QChartView(chart)
     view.setRenderHint(QPainter.RenderHint.Antialiasing)
     view.setMinimumHeight(260)
-    view.setStyleSheet(f"background:{T.SURFACE_2}; border:1px solid {T.BORDER}; border-radius:12px;")
+    view.setStyleSheet(
+        f"background:{T.SURFACE_2}; border:1px solid {T.BORDER}; border-radius:12px;"
+    )
     return view
 
 
@@ -47,14 +56,16 @@ def build_chart(c: dict) -> Optional[QChartView]:
             sl = series.append(f"{label} ({v})", float(v))
             sl.setColor(QColor(_PALETTE[i % len(_PALETTE)]))
             sl.setLabelColor(QColor(T.TEXT))
-        chart = QChart(); chart.addSeries(series)
+        chart = QChart()
+        chart.addSeries(series)
         return _style(chart, title)
 
     datasets = c.get("datasets") or []
     if kind == "line_chart":
         chart = QChart()
         for di, ds in enumerate(datasets):
-            line = QLineSeries(); line.setName(str(ds.get("label", f"series {di + 1}")))
+            line = QLineSeries()
+            line.setName(str(ds.get("label", f"series {di + 1}")))
             line.setColor(QColor(_PALETTE[di % len(_PALETTE)]))
             for i, v in enumerate(ds.get("data") or []):
                 line.append(float(i), float(v))
@@ -69,13 +80,19 @@ def build_chart(c: dict) -> Optional[QChartView]:
     for di, ds in enumerate(datasets):
         bs = QBarSet(str(ds.get("label", f"series {di + 1}")))
         bs.setColor(QColor(_PALETTE[di % len(_PALETTE)]))
-        for v in (ds.get("data") or []):
+        for v in ds.get("data") or []:
             bs.append(float(v))
         series.append(bs)
-    chart = QChart(); chart.addSeries(series)
+    chart = QChart()
+    chart.addSeries(series)
     if labels:
-        ax = QBarCategoryAxis(); ax.append(labels); _axis_color(ax)
-        chart.addAxis(ax, Qt.AlignmentFlag.AlignBottom); series.attachAxis(ax)
-    ay = QValueAxis(); _axis_color(ay)
-    chart.addAxis(ay, Qt.AlignmentFlag.AlignLeft); series.attachAxis(ay)
+        ax = QBarCategoryAxis()
+        ax.append(labels)
+        _axis_color(ax)
+        chart.addAxis(ax, Qt.AlignmentFlag.AlignBottom)
+        series.attachAxis(ax)
+    ay = QValueAxis()
+    _axis_color(ay)
+    chart.addAxis(ay, Qt.AlignmentFlag.AlignLeft)
+    series.attachAxis(ay)
     return _style(chart, title)
