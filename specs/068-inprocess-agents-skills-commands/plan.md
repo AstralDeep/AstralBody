@@ -39,7 +39,7 @@ Collapse the nine bundled first-party agents from per-agent OS processes (each a
 
 **Gate result: PASS.**
 
-**Tracked posture notes (deliberate, audited, not violations):**
+**Posture notes (now codified in Principle VII as of constitution v2.2.0; deliberate, audited, not violations):**
 
 1. **In-process agents bypass the WebSocket `AGENT_API_KEY` handshake.** That key authenticates *external* agent transport connections (028 fail-closed). The nine built-ins are first-party code executing inside the orchestrator's own trust boundary, so there is no transport to authenticate; every *runtime* control (per-user permission gate, security-flag blocks, taint, policy, egress gating, PHI, audit) and the RFC 8693 delegated-authority attribution are preserved on the in-process path. External A2A agents still require their api_key.
 2. **Safe agents flip the per-call permission baseline from deny to allow.** This is an owner-approved posture change (Clarifications Session 2026-06-24), recorded in `agent_trust`, applied only at check time (no per-user rows written), and strictly bounded: an explicit user opt-out always wins and hard security-flag blocks are never cleared by "safe." It changes a default, not a control.
