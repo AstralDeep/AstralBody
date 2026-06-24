@@ -54,6 +54,7 @@ jobs:
 
       - name: Keyless sign with sigstore (GitHub OIDC)
         working-directory: windows-client/dist
+        shell: bash
         env:
           SIGSTORE_IDENTITY: "https://github.com/AstralDeep/AstralBody/.github/workflows/release-windows.yml@refs/tags/${{ github.ref_name }}"
         run: |
@@ -63,6 +64,7 @@ jobs:
 
       - name: Verify the signature (self-check)
         working-directory: windows-client/dist
+        shell: bash
         env:
           SIGSTORE_IDENTITY: "https://github.com/AstralDeep/AstralBody/.github/workflows/release-windows.yml@refs/tags/${{ github.ref_name }}"
         run: |
