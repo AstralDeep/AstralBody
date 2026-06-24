@@ -622,7 +622,7 @@ async def get_agent_permissions(
     "/{agent_id}/permissions",
     response_model=AgentPermissionsResponse,
     summary="Update agent scope permissions",
-    description="Update the current user's scope-based permissions for the specified agent. Scopes: tools:read, tools:write, tools:search, tools:system.",
+    description="Update the current user's scope-based permissions for the specified agent. Scopes: tools:read, tools:write, tools:search, tools:system, tools:files, tools:execute.",
 )
 async def set_agent_permissions(
     request: Request,

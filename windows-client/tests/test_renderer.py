@@ -2,11 +2,18 @@
 widgets (offscreen). Mirrors the structured payloads the orchestrator sends."""
 from __future__ import annotations
 
-from PySide6.QtWidgets import (
+import pytest
+
+# These tests exercise the PySide6 native renderer; skip the whole module when
+# PySide6 isn't installed (the codegen/integrity tests are Qt-free and run
+# without it). In CI with PySide6 present, the suite runs in full.
+pytest.importorskip("PySide6")
+
+from PySide6.QtWidgets import (  # noqa: E402
     QFrame, QLabel, QPushButton, QTableWidget, QTabWidget, QWidget,
 )
 
-from astral_client.renderer import RenderContext, render, supported_types
+from astral_client.renderer import RenderContext, render, supported_types  # noqa: E402
 
 
 def _ctx(sink=None):

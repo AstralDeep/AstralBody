@@ -23,15 +23,34 @@ from typing import Any, Dict
 
 from aiohttp import web
 
-from .tools import TOOL_REGISTRY
+from astral_client.audit_log import AuditLogger
+from .tools import TOOL_REGISTRY, set_context
 
 logger = logging.getLogger("win_agent")
 
 AGENT_ID = "windows-tools-1"
-AGENT_NAME = "Windows Tools"
-AGENT_DESC = ("Windows-specific tools that run on the user's PC: system info, "
-              "clipboard read/write, native notifications, open file/folder/URL, "
-              "and list a directory.")
+AGENT_NAME = "Windows Tools (code & system)"
+AGENT_DESC = ("Windows tools that run on the user's PC: read/write/edit files and "
+              "run commands inside an approved workspace, plus system info, clipboard, "
+              "notifications, and open. Every action is permission-gated, PHI-gated "
+              "(fail-closed), and audited.")
+
+
+def _bypass_enabled() -> bool:
+    return os.getenv("ASTRAL_DANGEROUS_BYPASS", "0") in ("1", "true", "yes", "on")
+
+
+def _advertised_tools() -> Dict[str, dict]:
+    """The tool registry, minus the dangerous bypass when it isn't enabled.
+
+    ``run_shell`` (full shell) is only advertised — and thus only routable by the
+    orchestrator — when the local ``ASTRAL_DANGEROUS_BYPASS`` flag is set. The
+    tool also re-checks the flag at call time (defense-in-depth), so a stale
+    card can never grant shell access the user hasn't opted into.
+    """
+    if _bypass_enabled():
+        return TOOL_REGISTRY
+    return {k: v for k, v in TOOL_REGISTRY.items() if k != "run_shell"}
 
 
 def build_card() -> Dict[str, Any]:
@@ -39,14 +58,15 @@ def build_card() -> Dict[str, Any]:
         "name": AGENT_NAME,
         "description": AGENT_DESC,
         "agent_id": AGENT_ID,
-        "version": "0.1.0",
+        "version": "0.2.0",
         "skills": [{
             "id": name, "name": name, "description": info["description"],
             "input_schema": info.get("input_schema", {"type": "object", "properties": {}}),
             "output_schema": None, "tags": ["windows", "desktop"],
             "scope": info.get("scope", "tools:system"), "metadata": {},
-        } for name, info in TOOL_REGISTRY.items()],
-        "metadata": {"host": "windows-client", "platform": "windows"},
+        } for name, info in _advertised_tools().items()],
+        "metadata": {"host": "windows-client", "platform": "windows",
+                     "dangerous_bypass": _bypass_enabled()},
     }
 
 
@@ -58,23 +78,46 @@ def _register_message() -> str:
     })
 
 
+def _actor_from_req(req: Dict[str, Any]) -> str:
+    """Best-effort actor identity for the audit trail.
+
+    The MCPRequest carries ``request_id`` (correlation) and an optional ``meta``
+    map the orchestrator may forward (user_id / sub). Falls back to the local
+    USERNAME so every action is attributable even when no user is forwarded.
+    """
+    meta = req.get("meta") or {}
+    return (meta.get("user_id") or meta.get("sub")
+            or os.getenv("USERNAME") or "unknown")
+
+
+# One audit logger per process; the actor is refined per-dispatch via context.
+_AUDIT = AuditLogger(actor=os.getenv("USERNAME") or "unknown")
+
+
 def dispatch(req: Dict[str, Any]) -> Dict[str, Any]:
     """Process one MCPRequest dict -> MCPResponse dict (mirrors the backend MCPServer)."""
     rid = req.get("request_id", "")
     method = req.get("method", "")
+    set_context(actor=_actor_from_req(req), correlation_id=str(rid), audit=_AUDIT)
+    tools = _advertised_tools()
 
     if method == "tools/list":
         return {"type": "mcp_response", "request_id": rid, "result": {"tools": [
             {"name": n, "description": i["description"],
              "input_schema": i.get("input_schema", {"type": "object", "properties": {}})}
-            for n, i in TOOL_REGISTRY.items()]}}
+            for n, i in tools.items()]}}
 
     if method == "tools/call":
         params = req.get("params") or {}
         name = params.get("name", "")
         args = params.get("arguments", {}) or {}
-        info = TOOL_REGISTRY.get(name)
+        info = tools.get(name)
         if not info:
+            # run_shell with bypass off lands here — audit the refused attempt.
+            if name == "run_shell":
+                _AUDIT.record(tool="run_shell", args=args, outcome="refused",
+                              correlation_id=str(rid), event_class="dangerous_bypass",
+                              detail="bypass flag not set (call rejected)")
             return {"type": "mcp_response", "request_id": rid,
                     "error": {"code": -32601, "message": f"Unknown tool: {name}", "retryable": False}}
         try:
