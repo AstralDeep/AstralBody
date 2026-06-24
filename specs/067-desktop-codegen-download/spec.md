@@ -2,7 +2,7 @@
 
 **Feature Branch**: `067-desktop-codegen-download`
 **Created**: 2026-06-23
-**Status**: In progress
+**Status**: DONE — merged via PR #84 (lint fix) + PR #85 (feature) + PR #86 (telemetry follow-up). Re-verified 2026-06-23: 52 backend tests pass, ruff clean repo-wide, windows-client byte-compiles clean.
 **Input**: User request — (1) verify the work of the latest merged PR (#83, feature 066 — Windows-client production auth + native chrome), and if problems are found, implement fixes and push a new PR; (2) add logic so that when a user asks Astral to *generate code for them* (in the browser), the system outputs a **download link to a Windows `.exe`** that ships a **coding agent able to access the user's directories (with permission)**; the `.exe` must be **packaged by GitHub Actions**, **downloaded directly from GitHub**, and its **integrity checked before the app runs**.
 
 ---
