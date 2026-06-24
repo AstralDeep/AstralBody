@@ -16,9 +16,10 @@ import base64
 import json
 import os
 import sys
+import threading
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import Qt, QSettings
+from PySide6.QtCore import Qt, QSettings, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -40,6 +41,8 @@ from PySide6.QtWidgets import (
 
 from . import theme as T
 from . import confirm as _confirm
+from . import integrity as _integrity
+from . import __version__ as _APP_VERSION
 from .protocol import OrchestratorClient, device_caps
 from .renderer import RenderContext, render, supported_types as native_types, _scoped
 
@@ -280,10 +283,12 @@ class AgentsDialog(QDialog):
     granted by the consent flow, so the user grants them explicitly here) and a
     workspace-folder chooser (the directory the coding agent is confined to)."""
 
-    def __init__(self, parent, emit, on_change_workspace=None):
+    def __init__(self, parent, emit, on_change_workspace=None,
+                 on_verify_integrity=None):
         super().__init__(parent)
         self._emit = emit
         self._on_change_workspace = on_change_workspace
+        self._on_verify_integrity = on_verify_integrity
         self.setWindowTitle("Agents & permissions")
         self.setMinimumSize(600, 640)
         self.setStyleSheet(f"QDialog {{ background:{T.BG}; }}")
@@ -313,6 +318,11 @@ class AgentsDialog(QDialog):
         ws_btn.clicked.connect(self._change_ws)
         ws_row.addWidget(self._ws_label, 1)
         ws_row.addWidget(ws_btn)
+        if self._on_verify_integrity is not None:
+            verify_btn = QPushButton("Verify integrity")
+            verify_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            verify_btn.clicked.connect(self._verify_integrity)
+            ws_row.addWidget(verify_btn)
         root.addLayout(ws_row)
 
         enable_all = QPushButton("Enable recommended agents (read-only)")
@@ -354,6 +364,10 @@ class AgentsDialog(QDialog):
             self._on_change_workspace()
         # Refresh the label after the picker closes.
         self._ws_label.setText(self._workspace_label())
+
+    def _verify_integrity(self) -> None:
+        if self._on_verify_integrity is not None:
+            self._on_verify_integrity()
 
     def _enable_one(self, agent_id: str) -> None:
         self._emit(
@@ -517,6 +531,10 @@ class HistoryDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
+    # Launch-time integrity verdict, marshalled from the worker thread to the
+    # GUI thread (level, message). Qt queues the emit across threads safely.
+    _integrity_notice = Signal(str, str)
+
     def __init__(self, url: str, token: str, session=None):
         super().__init__()
         self.setWindowTitle("AstralBody — Windows")
@@ -598,6 +616,14 @@ class MainWindow(QMainWindow):
 
         self.client.start()
 
+        # Launch-time integrity / update check (feature 067 B.5). Verifies the
+        # running build's SHA-256 + sigstore signature against the GitHub release
+        # before the binary is trusted — runs on a background thread so it never
+        # delays the GUI, and fails open (offline ⇒ keep running) so it can never
+        # block launch. The verdict is surfaced in the top-bar status line.
+        self._integrity_notice.connect(self._on_integrity_notice)
+        self._start_integrity_check()
+
     def _wrap(self, inner: QWidget, title: str) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
@@ -623,7 +649,9 @@ class MainWindow(QMainWindow):
     def _open_agents(self) -> None:
         if self._agents_dialog is None:
             self._agents_dialog = AgentsDialog(
-                self, self._emit_chrome, on_change_workspace=self._change_workspace
+                self, self._emit_chrome,
+                on_change_workspace=self._change_workspace,
+                on_verify_integrity=self._verify_integrity_now,
             )
         self._agents_dialog.set_agents(self._agents)
         self.client.send_event("discover_agents", {})  # refresh
@@ -957,6 +985,53 @@ class MainWindow(QMainWindow):
         self._settings().setValue("workspace_dir", chosen)
         self._apply_workspace(chosen)
         QMessageBox.information(self, "Workspace", f"Workspace set to:\n{chosen}")
+
+    # --- launch-time integrity / update check (feature 067 B.5) ------------- #
+
+    def _start_integrity_check(self) -> None:
+        """Verify the running build off the GUI thread (non-blocking, fail-open).
+
+        Packaged builds hash ``sys.executable`` and verify it against the signed
+        release manifest + sigstore bundle; the verdict is posted to the GUI
+        thread via ``_integrity_notice``. Any failure to *reach* GitHub leaves
+        the current build running (offline tolerance) — only a real signature
+        mismatch surfaces as an error. Never blocks or crashes launch.
+        """
+
+        def _work() -> None:
+            import shutil
+            import tempfile
+
+            frozen = bool(getattr(sys, "frozen", False))
+            exe_path = sys.executable if frozen else ""
+            workdir = tempfile.mkdtemp(prefix="astral_integrity_")
+            try:
+                notice = _integrity.check_at_launch(
+                    _APP_VERSION, exe_path, frozen=frozen, workdir=workdir
+                )
+            except Exception:  # noqa: BLE001 — worker must never crash the app
+                notice = {"level": "muted", "message": ""}
+            finally:
+                shutil.rmtree(workdir, ignore_errors=True)
+            msg = notice.get("message") or ""
+            if msg:
+                self._integrity_notice.emit(notice.get("level", "muted"), msg)
+
+        threading.Thread(target=_work, name="astral-integrity", daemon=True).start()
+
+    def _on_integrity_notice(self, level: str, message: str) -> None:
+        """GUI-thread slot: surface the integrity verdict in the top-bar status."""
+        color = {
+            "success": T.VARIANT_COLORS["success"][0],
+            "warning": T.VARIANT_COLORS["warning"][0],
+            "error": T.VARIANT_COLORS["error"][0],
+        }.get(level, T.MUTED)
+        self.topbar.set_status(message, color)
+
+    def _verify_integrity_now(self) -> None:
+        """Manual 'Verify integrity' action (Agents dialog) — re-runs the check."""
+        self.topbar.set_status("Checking integrity…", T.MUTED)
+        self._start_integrity_check()
 
 
 def _flatten_text(components: list) -> str:

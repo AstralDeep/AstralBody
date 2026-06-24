@@ -253,6 +253,141 @@ def verify_latest(workdir: str) -> VerifyResult:
     )
 
 
+def verify_running_exe(exe_path: str, *, workdir: str, _release=None) -> VerifyResult:
+    """Verify an already-installed exe (e.g. ``sys.executable``) against the
+    latest release's ``SHA256SUMS`` + ``cosign.bundle`` — WITHOUT re-downloading
+    the 68 MB exe. The launch-time check uses this to confirm the binary the user
+    is *actually running* is the signed one. Only the tiny manifest + bundle are
+    fetched; the local exe is hashed in place. Fail-closed; never raises.
+    """
+    if not exe_path or not os.path.exists(exe_path):
+        return VerifyResult(ok=False, reason="running exe not found")
+    rel = (_release or latest_release)()
+    if rel is None:
+        return VerifyResult(
+            ok=False, reason="Could not resolve the latest GitHub release."
+        )
+    bundle_path = os.path.join(workdir, _BUNDLE_NAME)
+    try:
+        sha_text = _download_text(rel.sha_url)
+        if not sha_text:
+            return VerifyResult(ok=False, reason="Download of SHA256SUMS failed.")
+        if not _download(rel.bundle_url, bundle_path):
+            return VerifyResult(ok=False, reason="Download of cosign.bundle failed.")
+        expected = _extract_sha_for_exe(sha_text)
+        if not expected:
+            return VerifyResult(
+                ok=False, reason="SHA256SUMS has no hash for AstralBody.exe."
+            )
+        actual = _sha256_file(exe_path)
+        if actual != expected:
+            return VerifyResult(
+                ok=False,
+                reason=f"SHA-256 mismatch (expected {expected[:12]}…, got {actual[:12]}…).",
+            )
+        ok, reason = _verify_sigstore(exe_path, bundle_path, tag=rel.tag)
+        if not ok:
+            return VerifyResult(ok=False, reason=reason)
+        return VerifyResult(
+            ok=True, reason="verified", exe_path=exe_path, version=rel.version
+        )
+    finally:
+        _cleanup(bundle_path)
+
+
+def _norm_version(v: str) -> str:
+    return (v or "").strip().lstrip("vV")
+
+
+def check_at_launch(
+    current_version: str,
+    exe_path: str,
+    *,
+    frozen: bool,
+    workdir: str,
+    _release=None,
+    _verify_running=None,
+    _verify_latest=None,
+) -> dict:
+    """Launch-time integrity + update check. **Never raises; offline-tolerant.**
+
+    Returns a notice dict ``{status, level, message, version}`` for a status
+    line. When the app is a packaged build (``frozen``), the running exe is
+    verified against the signed release manifest + sigstore bundle on *every*
+    launch — the honest realisation of the spec's "integrity checked before run"
+    (B.5). In a source/dev run there is no signed artifact on disk, so the check
+    is a benign no-op notice. A newer signed release surfaces as a verified
+    update notice; an unverifiable update is ignored (never offered).
+
+    All I/O is injectable (``_release``/``_verify_running``/``_verify_latest``)
+    so the decision logic is unit-testable without network or a real exe.
+    """
+    release = _release or latest_release
+    verify_running = _verify_running or verify_running_exe
+    verify_latest_fn = _verify_latest or verify_latest
+    try:
+        if not (frozen and exe_path):
+            return {
+                "status": "dev",
+                "level": "muted",
+                "version": current_version,
+                "message": (
+                    f"Astral {current_version} (dev) — integrity verification "
+                    "runs on the packaged app"
+                ),
+            }
+        rel = release()
+        if rel is None:
+            return {
+                "status": "offline",
+                "level": "muted",
+                "version": current_version,
+                "message": f"Astral {current_version} — integrity check skipped (offline)",
+            }
+        latest = rel.version or rel.tag or ""
+        if _norm_version(latest) == _norm_version(current_version):
+            res = verify_running(exe_path, workdir=workdir)
+            if res.ok:
+                return {
+                    "status": "verified",
+                    "level": "success",
+                    "version": latest,
+                    "message": f"✓ Integrity verified — {latest} (SHA-256 + sigstore)",
+                }
+            return {
+                "status": "unverified",
+                "level": "error",
+                "version": latest,
+                "message": f"⚠ This build's signature did not verify ({res.reason})",
+            }
+        # Running build differs from the latest release → a newer release exists.
+        # Verify that release's artifact before offering it as an update.
+        res = verify_latest_fn(workdir)
+        if res.ok:
+            return {
+                "status": "update_available",
+                "level": "success",
+                "version": rel.version,
+                "message": f"A verified update is available: {rel.version}",
+            }
+        return {
+            "status": "update_unverified",
+            "level": "warning",
+            "version": rel.version,
+            "message": (
+                f"Update {rel.version} found but its signature did not verify — ignored."
+            ),
+        }
+    except Exception as exc:  # noqa: BLE001 — launch must never crash here
+        logger.info("launch integrity check failed: %s", exc)
+        return {
+            "status": "error",
+            "level": "muted",
+            "version": current_version,
+            "message": "",
+        }
+
+
 def _cleanup(*paths: str) -> None:
     for p in paths:
         if p and os.path.exists(p):
