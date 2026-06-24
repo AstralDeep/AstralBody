@@ -1115,6 +1115,99 @@ def resolve_auth(args):
     return "dev-token", None
 
 
+def _prompt_config(authority: str = "", ws_url: str = "", agent_key: str = ""):
+    """First-run configuration dialog (C-6).
+
+    A bare exe downloaded from GitHub has no `KEYCLOAK_AUTHORITY`/`AGENT_API_KEY`
+    in its environment, so it used to silently fall back to a dev token the
+    real-auth orchestrator rejects — the app "did nothing". This captures the
+    deployment settings once (persisted to QSettings). Returns
+    ``(authority, ws_url, agent_key)`` or ``None`` if skipped.
+    """
+    dlg = QDialog()
+    dlg.setWindowTitle("Configure AstralBody")
+    dlg.setMinimumWidth(540)
+    dlg.setStyleSheet(f"QDialog {{ background:{T.BG}; }}")
+    lay = QVBoxLayout(dlg)
+    lay.setContentsMargins(20, 18, 20, 16)
+    lay.setSpacing(8)
+    intro = QLabel(
+        "Point this app at your AstralBody deployment. These are saved on this "
+        "PC, so you'll only be asked once."
+    )
+    intro.setWordWrap(True)
+    intro.setStyleSheet(f"color:{T.MUTED}; font-size:12px;")
+    lay.addWidget(intro)
+
+    def _field(label: str, value: str, placeholder: str) -> QLineEdit:
+        lbl = QLabel(label)
+        lbl.setStyleSheet(f"color:{T.TEXT}; font-size:12px; font-weight:600;")
+        lay.addWidget(lbl)
+        edit = QLineEdit(value)
+        edit.setPlaceholderText(placeholder)
+        lay.addWidget(edit)
+        return edit
+
+    auth_e = _field("Keycloak realm URL", authority,
+                    "https://iam.example.edu/realms/Astral")
+    url_e = _field("Orchestrator WebSocket URL", ws_url or "ws://127.0.0.1:8001/ws",
+                   "ws://127.0.0.1:8001/ws")
+    key_e = _field("Agent API key (optional)", agent_key,
+                   "leave blank if your deployment doesn't require one")
+    key_e.setEchoMode(QLineEdit.EchoMode.Password)
+
+    row = QHBoxLayout()
+    row.addStretch(1)
+    skip = QPushButton("Skip")
+    skip.setCursor(Qt.CursorShape.PointingHandCursor)
+    skip.clicked.connect(lambda: dlg.done(0))
+    save = QPushButton("Save")
+    save.setObjectName("primary")
+    save.setCursor(Qt.CursorShape.PointingHandCursor)
+    save.clicked.connect(lambda: dlg.done(1))
+    row.addWidget(skip)
+    row.addWidget(save)
+    lay.addLayout(row)
+
+    if dlg.exec() != 1:
+        return None
+    return (
+        auth_e.text().strip(),
+        url_e.text().strip() or "ws://127.0.0.1:8001/ws",
+        key_e.text().strip(),
+    )
+
+
+def _resolve_config(args, *, settings, prompt) -> None:
+    """C-6: resolve deployment config with precedence env > QSettings > prompt.
+
+    Mutates ``args`` (authority/url) and ``os.environ['AGENT_API_KEY']`` so the
+    rest of startup (OIDC login + the win_agent registration) works for a bare
+    download. Prompts (once, persisting) only when there's no authority and no
+    explicit token. ``settings``/``prompt`` are injected for testability.
+    """
+    authority = (os.getenv("KEYCLOAK_AUTHORITY")
+                 or settings.value("config/authority", "", type=str) or "")
+    ws_url = (os.getenv("ASTRAL_WS_URL")
+              or settings.value("config/ws_url", "", type=str)
+              or "ws://127.0.0.1:8001/ws")
+    agent_key = (os.getenv("AGENT_API_KEY")
+                 or settings.value("config/agent_key", "", type=str) or "")
+
+    if not authority and not args.token:
+        vals = prompt(authority, ws_url, agent_key)
+        if vals:
+            authority, ws_url, agent_key = vals
+            settings.setValue("config/authority", authority)
+            settings.setValue("config/ws_url", ws_url)
+            settings.setValue("config/agent_key", agent_key)
+
+    args.authority = authority
+    args.url = ws_url
+    if agent_key:
+        os.environ["AGENT_API_KEY"] = agent_key
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="AstralBody native Windows client")
     ap.add_argument(
@@ -1143,6 +1236,11 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     configure(app)
+    # C-6: resolve/capture deployment config (authority, ws url, agent key) so a
+    # bare-downloaded exe is usable without env vars instead of silently failing.
+    _resolve_config(
+        args, settings=QSettings("AstralBody", "WindowsClient"), prompt=_prompt_config
+    )
     token, session = resolve_auth(args)
     win = MainWindow(args.url, token, session=session)
     win.show()

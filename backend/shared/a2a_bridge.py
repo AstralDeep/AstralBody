@@ -6,6 +6,7 @@ Maps:
 - MCPRequest/MCPResponse <-> a2a.types.Message with text/data Parts
 """
 import os
+import re
 import uuid
 import logging
 from typing import Optional, Dict, Any, List
@@ -143,22 +144,43 @@ def a2a_skill_to_custom(skill: A2AAgentSkill) -> CustomAgentSkill:
     )
 
 
-def a2a_card_to_custom(a2a_card: A2AAgentCard) -> CustomAgentCard:
+def _slugify_agent_id(name: str) -> str:
+    """Sanitize a display name into a safe agent_id slug (``[a-z0-9-]`` only).
+
+    Plain ``name.lower().replace(" ", "-")`` leaked punctuation into ids — e.g.
+    "Windows Tools (code & system)" → ``windows-tools-(code-&-system)`` — which
+    then diverged from the agent's real id and created phantom permission rows
+    (C-2). Collapsing every non-alphanumeric run to a single hyphen keeps ids
+    clean and stable.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", (name or "agent").strip().lower()).strip("-")
+    return slug or "agent"
+
+
+def a2a_card_to_custom(a2a_card: A2AAgentCard, agent_id: str = "") -> CustomAgentCard:
     """Convert an official A2A AgentCard to our custom AgentCard.
 
-    The agent_id is derived from the first supported interface URL (slugified)
-    if available, otherwise from the card name.
+    ``agent_id`` — when the caller already knows the agent's real id (e.g. from
+    the agent's own card JSON, which the A2A protobuf representation drops), pass
+    it so the conversion does not invent a phantom id. Otherwise the id comes
+    from the interface URL's last path segment (ignoring a bare port number such
+    as ``8771``) or a sanitized slug of the display name — never the raw name.
     """
     skills = [a2a_skill_to_custom(s) for s in a2a_card.skills]
 
     iface_url = ""
     if a2a_card.supported_interfaces:
         iface_url = a2a_card.supported_interfaces[0].url or ""
-    agent_id = (
-        iface_url.rstrip("/").split("/")[-1]
-        if iface_url
-        else a2a_card.name.lower().replace(" ", "-")
-    )
+    if not agent_id:
+        candidate = iface_url.rstrip("/").split("/")[-1] if iface_url else ""
+        # Accept the URL's last segment only when it's a clean slug id. A bare
+        # base URL (``http://host:8771``) yields ``host:8771`` (or a port) as the
+        # last segment — reject anything that isn't ``[a-z0-9][a-z0-9-]*`` and
+        # slug the display name instead.
+        if re.fullmatch(r"[a-z0-9][a-z0-9-]*", candidate or ""):
+            agent_id = candidate
+        else:
+            agent_id = _slugify_agent_id(a2a_card.name)
 
     metadata: Dict[str, Any] = {}
     if a2a_card.HasField("provider"):
