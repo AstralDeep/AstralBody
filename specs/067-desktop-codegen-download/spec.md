@@ -253,3 +253,70 @@ All new in `.env.example` with safe defaults; flags are additive and default to 
 - No new DB tables; no schema breaks; `tools:execute` added additively to
   `VALID_SCOPES` (no CHECK constraint). New flag `FF_DESKTOP_CODEGEN` default on.
 - **Part B PR: opened on branch `067-desktop-codegen`** (this branch).
+
+---
+
+### Part C — Live end-to-end (2026-06-24, branch `067-desktop-codegen-e2e`)
+
+Driven against the live stack (real Keycloak `iam.ai.uky.edu`, `USE_MOCK_AUTH=false`).
+Models exercised: `gemma-4-31B` then `zai-org/GLM-5.2-FP8`. Release under test: the
+signed **v0.1.0** then **v0.2.0** GitHub releases (3 assets each, workflow self-verify
+green).
+
+**Proven this session ✅**
+
+- **Backend live download card (Part 1.3).** In-container `get_release_info()` →
+  real `v0.2.0` exe URL + 64-hex `sha256` + bundle URL; `build_download_card` →
+  `variant=available`; `webrender.render_download_card` → a real
+  `<a href="…/releases/download/v0.2.0/AstralBody.exe">⬇ Download for Windows</a>`
+  with the sha shown (B-1 render half, B-2).
+- **Integrity verifier vs the REAL releases (B-8).** A probe ran the *actual*
+  client code (`integrity.verify_running_exe` / `verify_latest`) with the frozen
+  `sigstore 4.3.0` against v0.1.0 **and** v0.2.0: legit exe → `verified`, tampered
+  exe → refused, sigstore 3.x→4.x API surface intact.
+- **Gap 5 fixed + proven LIVE.** The integrity verifier was implemented but never
+  called at launch (spec B.5 unmet — dead code at runtime). Fixed in `92d114d`
+  (`verify_running_exe` + `check_at_launch`, wired non-blocking into `app.py`,
+  manual "Verify integrity" button, `__version__→0.2.0`; +11 tests, suite 90 pass,
+  ruff clean, local PyInstaller smoke OK). **Confirmed live:** the running v0.2.0
+  exe's top bar shows **"✓ Integrity verified — v0.2.0 (SHA-256 + sigstore)"**.
+- **Native desktop OIDC login (066).** After provisioning the `astral-desktop`
+  public client (loopback `http://127.0.0.1/*`, PKCE S256) and setting
+  `KEYCLOAK_ALLOWED_AZP=astral-desktop`: `UI registered: oidc.sam.armstrong@uky.edu`
+  (azp gate passed). Desktop + browser resolve to the same Keycloak `sub`.
+- **win_agent registration + dispatch reachability.** `windows-tools-1` registered
+  (10 tools) and `Connected to agent: windows-tools-1 at http://host.docker.internal:8771`.
+- **Per-tool permission grant (Part 2.4, gap-4 fix).** `tools:write` enabled for
+  `windows-tools-1` via the desktop Agents dialog, persisted in `agent_scopes`,
+  audited (`Scopes updated … tools:write: True`).
+
+**Defects surfaced (the point of the e2e) — to fix/triage**
+
+- **C-1 (CONFIRMED) — first-launch workspace picker hangs the UI.** `_init_workspace`
+  calls `_confirm.pick_directory`, which routes through the cross-thread confirm
+  bridge (`BRIDGE.request_confirm`). On first launch this runs on the GUI thread
+  *during* `MainWindow.__init__`, before the Qt event loop starts, so the bridge's
+  `QTimer` poller can never service the request → the GUI thread blocks until the
+  confirm timeout (300 s) then falls back. Symptom: a freshly double-clicked exe
+  "does nothing". `_change_workspace` shares the same GUI-thread-via-bridge hazard.
+  Fix: GUI-thread directory picks must call `QFileDialog.getExistingDirectory`
+  directly (bridge is for the agent thread only).
+- **C-2 (CONFIRMED) — malformed agent ids in the permission flow.** The desktop
+  consent/permission path created `agent_scopes`/`agent_ownership` rows under
+  `windows-tools` and `windows-tools-(code-&-system)` (the agent *name* slugified)
+  alongside the correct `windows-tools-1`.
+- **C-3 (CONFIRMED) — win_agent does not re-register after an orchestrator restart.**
+  `_win_agent_registered` is set once and not reset on an auto-reconnect, so
+  `register_external_agent` is never re-sent; `windows-tools-1` stays disconnected
+  until the desktop is relaunched.
+- **C-4 (OBSERVED) — desktop chat messages did not reach the orchestrator.** Two
+  attempts produced no `chat_message` ui_event frame on the wire (`_send` silently
+  drops when the WS is mid-reconnect, and the WS thread does not self-reconnect).
+  Root cause (reconnect-window drop vs. send defect) to isolate in a clean run.
+- **C-5 (model limitation, not a defect) — weak LLM won't call the tools.**
+  `gemma-4-31B` declined `offer_desktop_codegen` and `write_file`; the tool/card/
+  render path was proven by direct dispatch. Retrying the LLM path on `glm-5.2`.
+
+**Not yet demonstrated live:** `write_file` with the native Allow dialog writing a
+file (the desktop process exited during the attempt); an LLM electing to call the
+tools end-to-end. Pending the C-1/C-4 fixes + a clean run on `glm-5.2`.
