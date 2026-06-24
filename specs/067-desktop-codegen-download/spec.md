@@ -351,12 +351,21 @@ chat model to `zai-org/GLM-5.2-FP8`, the full user journey ran clean:
   no-self-reconnect note).
 - **C-5 — resolved by `glm-5.2`** (it reliably called `offer_desktop_codegen` and
   `write_file`; the gemma misses were a weak-model limitation, not a wiring defect).
-- **C-2 (open)** — malformed agent ids in the consent/permission flow
-  (`windows-tools` / `windows-tools-(code-&-system)`) — follow-up cleanup.
-- **C-6 (open, config)** — the shipped exe has no embedded `KEYCLOAK_AUTHORITY`
-  default, so a bare double-click can't authenticate against a real-Keycloak
-  deployment; it needs `KEYCLOAK_AUTHORITY` + `AGENT_API_KEY` in the environment
-  (or `--authority`). Documented for operators; a launcher/installer is a follow-up.
+- **C-2 — FIXED** (PR #88). Root cause: `a2a_bridge.a2a_card_to_custom` derived
+  the agent_id from the card's display name / base-URL host:port (the A2A protobuf
+  drops the explicit id), so the A2A discovery *fallback* minted a phantom
+  `windows-tools-(code-&-system)` for an agent already registered over WS as
+  `windows-tools-1`. Fix: (a) sanitize the slug + accept a clean URL path segment
+  only + an explicit `agent_id` override; (b) a base-URL dedup guard in
+  `discover_a2a_agent` so the A2A fallback never registers a duplicate for a host
+  the WS path already owns; (c) an idempotent `_init_db` cleanup of the stray
+  rows. +5 backend tests; orchestrator suite 79 pass.
+- **C-6 — FIXED** (PR #88). The desktop client now resolves deployment config
+  (Keycloak authority / orchestrator URL / agent key) with precedence
+  env > persisted QSettings > a one-time first-run dialog (`_resolve_config` /
+  `_prompt_config`), so a bare-downloaded exe is configurable instead of silently
+  falling back to a rejected dev token. +4 client tests. (Reaches downloaders in
+  the next signed release.)
 
 **Net:** every Part-B acceptance criterion (B-1…B-8) demonstrated live end-to-end on
 the signed v0.2.1 release; spec B.5's "integrity checked before run" is now real
