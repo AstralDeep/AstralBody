@@ -30,7 +30,6 @@ if BACKEND not in sys.path:
 AGENT_TOOL_MODULES = [
     "agents.general.mcp_tools",
     "agents.weather.mcp_tools",
-    "agents.etf_tracker_1.mcp_tools",
     "agents.journal_review.mcp_tools",
     # 029: classify + forecaster + llm_factory consolidated into ml_services.
     "agents.ml_services.mcp_tools",

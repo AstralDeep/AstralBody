@@ -1,6 +1,31 @@
 <!--
   Sync Impact Report
   ==================
+  Version change: 2.1.0 → 2.2.0 (MINOR — Principle VII expanded: in-process
+    first-party agents + owner-safe marking)
+
+  Amendment (2026-06-24, v2.2.0):
+    VII. Security — added two clauses sanctioning feature 068
+        (068-inprocess-agents-skills-commands):
+      (a) First-party agents bundled with the system MAY run IN-PROCESS within
+          the orchestrator trust boundary, exempt from the per-agent transport
+          AGENT_API_KEY handshake, PROVIDED every runtime authorization control
+          and the audit trail remain fully in force and per-user secrets are
+          decrypted only inside the agent boundary (never materialized in
+          orchestrator plaintext). External + user-created agents still
+          authenticate their transport.
+      (b) An owner/admin MAY mark a first-party agent "safe", flipping its
+          per-call permission baseline deny→allow at evaluation time — bounded
+          by an always-winning explicit user opt-out, never-cleared
+          security-flag hard-blocks, full audit of every transition, and a
+          reset whenever the agent's code is revised.
+    Templates requiring updates:
+      ✅ .specify/templates/plan-template.md — generic Constitution Check, compatible
+      ✅ .specify/templates/spec-template.md — generic, compatible
+      ✅ .specify/templates/tasks-template.md — generic, compatible
+    Follow-up TODOs: None
+
+  -- Prior amendment (2026-06-11, v2.1.0) --------------------------------
   Version change: 2.0.1 → 2.1.0 (MINOR — Principle XI added; III, IX clarified)
 
   Amendment (2026-06-11, v2.1.0):
@@ -204,6 +229,25 @@ system boundaries.
 - Agents MUST use RFC 8693 delegated tokens with attenuated
   scopes. Scopes are automatically set by the system for
   security; users MAY override or set scopes explicitly.
+- First-party agents bundled with the system MAY run in-process
+  within the orchestrator's trust boundary. Such agents are
+  exempt from the per-agent transport-authentication handshake
+  (the shared agent API key), BUT every runtime authorization
+  control — per-user scope/permission gates, security-flag
+  blocks, the policy engine, taint, PHI handling, and egress
+  gating — and the audit trail MUST remain fully in force, and
+  per-user secrets MUST be decrypted only inside the agent's own
+  boundary, never materialized in orchestrator plaintext.
+  Externally-hosted and user-created agents MUST still
+  authenticate their transport.
+- An owner or admin MAY mark a first-party agent "safe", which
+  flips that agent's per-call permission baseline from deny to
+  allow at evaluation time. This is bounded and never a runtime
+  bypass: an explicit per-user opt-out MUST always override it,
+  security-flag hard-blocks MUST never be cleared by it, the
+  marking and every transition MUST be recorded in the audit
+  log, and the marking MUST be reset when the agent's code is
+  revised (re-approval required).
 - Secrets MUST NOT be committed to version control.
 
 ### VIII. User Experience
@@ -390,4 +434,4 @@ guidance when conflicts arise.
   adherence to these principles. Violations MUST be resolved
   before merge.
 
-**Version**: 2.1.0 | **Ratified**: 2026-03-11 | **Last Amended**: 2026-06-11
+**Version**: 2.2.0 | **Ratified**: 2026-03-11 | **Last Amended**: 2026-06-24

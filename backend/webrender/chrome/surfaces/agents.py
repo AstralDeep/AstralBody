@@ -359,6 +359,27 @@ def _render_visibility(agent_id: str, is_public: bool, tab: str = "mine") -> str
     )
 
 
+def _render_safe(agent_id: str, is_safe: bool, tab: str = "mine") -> str:
+    """Feature 068 (US2): owner/admin control to mark an agent 'safe'.
+
+    The handler (``handle_safe_set`` → ``agent_trust.mark_safe``) enforces the
+    admin/owner gate server-side; this just renders the toggle + current state.
+    """
+    state = "owner-approved safe" if is_safe else "not marked safe"
+    action_label = "Unmark safe" if is_safe else "Mark safe"
+    pl = _payload({"agent_id": agent_id, "is_safe": not is_safe, "tab": tab})
+    return (
+        f'<div class="astral-safe bg-white/5 border border-white/10 rounded-lg p-4 '
+        f'flex items-center justify-between gap-3">'
+        f'<div><h3 class="text-sm font-semibold text-astral-text">Trust</h3>'
+        f'<div class="text-xs text-astral-muted mt-0.5">This agent is currently '
+        f'<span class="text-astral-text">{esc(state)}</span>. Safe agents&#39; tools '
+        f"work without per-user enabling; runtime security still applies.</div></div>"
+        f'<button type="button" class="{_BTN_GHOST}" data-ui-action="chrome_safe_set" '
+        f"data-ui-payload='{pl}'>{esc(action_label)}</button></div>"
+    )
+
+
 def _normalize_credential_entries(raw) -> "tuple[list, dict]":
     """Normalize ``required_credentials`` declarations to (keys, labels).
 
@@ -443,7 +464,7 @@ def _render_credentials(orch, user_id, agent_id: str, card, tab: str = "mine") -
     return "".join(parts)
 
 
-def _render_detail(orch, user_id, agent_id: str, tab: str) -> str:
+def _render_detail(orch, user_id, roles, agent_id: str, tab: str) -> str:
     card = orch.agent_cards.get(agent_id)
     if not card:
         return (
@@ -481,6 +502,12 @@ def _render_detail(orch, user_id, agent_id: str, tab: str) -> str:
         agent_id, tool_scope_map, per_tool, scope_state, tool_descriptions, tab)]
     if is_owner:
         sections.append(_render_visibility(agent_id, bool(ownership.get("is_public", False)), tab))
+    # Feature 068 (US2): owner/admin safe-marking control.
+    if is_owner or "admin" in (roles or []):
+        try:
+            sections.append(_render_safe(agent_id, bool(db.get_agent_is_safe(agent_id)), tab))
+        except Exception:
+            logger.debug("safe-marking control render skipped", exc_info=True)
     sections.append(_render_credentials(orch, user_id, agent_id, card, tab))
     return (
         f'<div class="astral-agent-detail space-y-4" data-agent-id="{esc(agent_id)}">'
@@ -507,7 +534,7 @@ async def render(orch, user_id, roles, params) -> str:
         tab = "mine"
     agent_id = params.get("agent_id")
     if agent_id:
-        return _render_detail(orch, user_id, str(agent_id), tab)
+        return _render_detail(orch, user_id, roles, str(agent_id), tab)
     return _render_list(orch, user_id, tab)
 
 
@@ -640,6 +667,33 @@ async def handle_visibility_set(orch, websocket, user_id, roles, payload):
     return ("agents", params, notice_block("success", f"Agent is now {state}."))
 
 
+async def handle_safe_set(orch, websocket, user_id, roles, payload):
+    """``chrome_safe_set {agent_id, is_safe}`` — admin/owner-gated safe toggle (feature 068).
+
+    Delegates the gate + audit to ``agent_trust.mark_safe``. The agent's own
+    owner may toggle their agent; admins may toggle any. The marker flips the
+    permission baseline (deny→allow) for the agent at check time — runtime
+    per-call security is unaffected.
+    """
+    payload = payload or {}
+    agent_id = str(payload.get("agent_id") or "")
+    params = _detail_params(agent_id, payload)
+    db = orch.history.db
+    from orchestrator import agent_trust
+    eff_roles = list(roles or [])
+    ownership = db.get_agent_ownership(agent_id) or {}
+    user_email = _user_email(orch, user_id)
+    if user_email and ownership.get("owner_email") == user_email and "owner" not in eff_roles:
+        eff_roles.append("owner")
+    res = await agent_trust.mark_safe(
+        db, agent_id, bool(payload.get("is_safe")), user_id, eff_roles, chat_id=None)
+    if not res.get("ok"):
+        return ("agents", params, notice_block(
+            "error", "Only an admin or the agent owner can change safe status."))
+    state = "safe" if res.get("is_safe") else "not safe"
+    return ("agents", params, notice_block("success", f"Agent is now marked {state}."))
+
+
 async def handle_credentials_save(orch, websocket, user_id, roles, payload):
     """``chrome_credentials_save {agent_id, fields}`` → credentials internals.
 
@@ -746,6 +800,7 @@ async def handle_agent_enabled(orch, websocket, user_id, roles, payload):
 HANDLERS = {
     "chrome_perms_save": handle_perms_save,
     "chrome_visibility_set": handle_visibility_set,
+    "chrome_safe_set": handle_safe_set,
     "chrome_credentials_save": handle_credentials_save,
     "chrome_credential_delete": handle_credential_delete,
     "chrome_agent_enabled": handle_agent_enabled,

@@ -957,11 +957,29 @@ class Database:
         if not self._column_exists(cursor, 'workspace_snapshot', 'layouts'):
             cursor.execute("ALTER TABLE workspace_snapshot ADD COLUMN layouts TEXT NULL")
 
+        # ── Feature 068: per-agent owner-approved "safe" trust record ───────
+        # Distinct from agent_ownership.is_public (visibility). Drives the
+        # check-time safe permission baseline (orchestrator/agent_trust.py).
+        # Rollback: DROP TABLE IF EXISTS agent_trust;
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS agent_trust (
+                agent_id TEXT PRIMARY KEY,
+                is_safe BOOLEAN NOT NULL DEFAULT FALSE,
+                marked_by TEXT,
+                marked_at TIMESTAMPTZ,
+                prior_state BOOLEAN,
+                revised_reset_at TIMESTAMPTZ
+            )
+        ''')
+
         # ── Feature 029: agent catalog migrations (data-model.md) ───────────
         self._migrate_agent_catalog_029(cursor)
 
         # ── Feature 067 (C-2): purge phantom Windows-tools agent rows ───────
         self._cleanup_phantom_windows_tools_ids(cursor)
+
+        # ── Feature 068: retire etf_tracker_1 (orphan row purge) ────────────
+        self._cleanup_retired_agents_068(cursor)
 
         # ── Feature 030: first-party agent visibility backfill ──────────────
         self._migrate_agent_visibility_030(cursor)
@@ -992,6 +1010,11 @@ class Database:
                           'nefarious', 'nefarious-1',
                           'nocodb', 'nocodb-1')
 
+    # Feature 068: etf_tracker_1 retired (agent directory + code removed). Both
+    # the hyphenated agent id and the legacy underscore directory-name row may
+    # exist in deployed databases — cover both.
+    _RETIRED_AGENT_IDS_068 = ('etf-tracker-1-1', 'etf_tracker_1')
+
     def _cleanup_phantom_windows_tools_ids(self, cursor):
         """Feature 067 (C-2): delete phantom Windows-tools agent rows.
 
@@ -1008,6 +1031,28 @@ class Database:
                 cursor.execute(
                     f"DELETE FROM {table} WHERE agent_id = %s OR agent_id LIKE %s",
                     ('windows-tools', 'windows-tools-(%'),
+                )
+            except Exception:  # noqa: BLE001 — table may be absent on older schema
+                pass
+
+    def _cleanup_retired_agents_068(self, cursor):
+        """Feature 068: purge permission/credential/ownership/trust rows for the
+        retired ``etf_tracker_1`` agent.
+
+        Idempotent: each DELETE matches nothing on re-run, so it is safe at
+        every boot. Chats and saved_components are intentionally preserved and
+        route through the runtime retired-agent handling
+        (``orchestrator.RETIRED_AGENT_IDS``) so old transcripts degrade
+        gracefully rather than dangling. Lead-approved destructive removal per
+        ``specs/068-inprocess-agents-skills-commands/data-model.md``.
+        """
+        retired = self._RETIRED_AGENT_IDS_068
+        ph = ", ".join(["%s"] * len(retired))
+        for table in ('agent_ownership', 'agent_scopes', 'tool_overrides',
+                      'tool_permissions', 'user_credentials', 'agent_trust'):
+            try:
+                cursor.execute(
+                    f"DELETE FROM {table} WHERE agent_id IN ({ph})", retired
                 )
             except Exception:  # noqa: BLE001 — table may be absent on older schema
                 pass
@@ -1112,7 +1157,7 @@ class Database:
     # (visibility ≠ authorization — scopes stay fail-closed per user).
     # Drafts and user-created agents are never listed here.
     _FIRST_PARTY_PUBLIC_AGENT_IDS = (
-        'connectors-1', 'dice-roller-1', 'etf-tracker-1-1', 'general-1',
+        'connectors-1', 'dice-roller-1', 'general-1',
         'journal-review-1', 'medical-1', 'ml-services-1', 'summarizer-1',
         'weather-1', 'web-research-1',
     )
@@ -1284,6 +1329,56 @@ class Database:
         """Get ownership info for all agents."""
         rows = self.fetch_all("SELECT agent_id, owner_email, is_public FROM agent_ownership")
         return [dict(r) for r in rows]
+
+    # ── Feature 068: agent "safe" trust marker (agent_trust) ─────────────
+
+    def get_agent_is_safe(self, agent_id: str) -> bool:
+        """Return True if the agent carries the owner-approved 'safe' marker.
+
+        Distinct from ``agent_ownership.is_public`` (visibility). Drives the
+        check-time safe permission baseline in ``tool_permissions``.
+        """
+        row = self.fetch_one(
+            "SELECT is_safe FROM agent_trust WHERE agent_id = ?", (agent_id,)
+        )
+        return bool(row["is_safe"]) if row else False
+
+    def upsert_agent_safe(self, agent_id: str, is_safe: bool, marked_by: str) -> bool:
+        """Set the safe marker for an agent. Returns the prior ``is_safe`` state.
+
+        Records ``marked_by``/``marked_at`` and the ``prior_state`` for the
+        audit trail. Admin/owner gating is enforced by the caller
+        (``orchestrator/agent_trust.py``); this is the storage primitive.
+        """
+        prior = self.get_agent_is_safe(agent_id)
+        self.execute(
+            """INSERT INTO agent_trust (agent_id, is_safe, marked_by, marked_at, prior_state)
+               VALUES (?, ?, ?, now(), ?)
+               ON CONFLICT (agent_id) DO UPDATE SET
+                 is_safe = EXCLUDED.is_safe,
+                 marked_by = EXCLUDED.marked_by,
+                 marked_at = EXCLUDED.marked_at,
+                 prior_state = ?""",
+            (agent_id, bool(is_safe), marked_by, prior, prior),
+        )
+        return prior
+
+    def reset_agent_safe(self, agent_id: str, marked_by: str) -> bool:
+        """Clear the safe marker (revision reset, feature 068). Returns prior state."""
+        prior = self.get_agent_is_safe(agent_id)
+        self.execute(
+            """INSERT INTO agent_trust
+                 (agent_id, is_safe, marked_by, marked_at, prior_state, revised_reset_at)
+               VALUES (?, FALSE, ?, now(), ?, now())
+               ON CONFLICT (agent_id) DO UPDATE SET
+                 is_safe = FALSE,
+                 marked_by = EXCLUDED.marked_by,
+                 marked_at = EXCLUDED.marked_at,
+                 prior_state = ?,
+                 revised_reset_at = now()""",
+            (agent_id, marked_by, prior, prior),
+        )
+        return prior
 
     # ── Chat ↔ Agent Binding (Feature 013) ───────────────────────────────
 
