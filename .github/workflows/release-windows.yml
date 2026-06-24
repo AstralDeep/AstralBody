@@ -73,7 +73,7 @@ jobs:
         # + --cert-oidc-issuer flags). The client verifier uses the equivalent
         # sigstore-python Identity policy with the same exact-match string.
         run: |
-          sigstore verify AstralBody.exe --bundle cosign.bundle \
+          sigstore verify identity AstralBody.exe --bundle cosign.bundle \
             --cert-identity "$SIGSTORE_IDENTITY" \
             --cert-oidc-issuer https://token.actions.githubusercontent.com
 
