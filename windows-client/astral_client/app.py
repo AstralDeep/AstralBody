@@ -18,16 +18,19 @@ import os
 import sys
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSettings
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QDialog,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSplitter,
@@ -36,6 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import theme as T
+from . import confirm as _confirm
 from .protocol import OrchestratorClient, device_caps
 from .renderer import RenderContext, render, supported_types as native_types, _scoped
 
@@ -271,14 +275,17 @@ class AgentsDialog(QDialog):
     """Native 'Agents & permissions' — one-click enable + per-agent state.
 
     Drives the same WS actions as the web chrome (`enable_recommended_agents`,
-    scoped per-agent enable). Advanced per-tool/credential config stays in the
-    web app; this covers the everyday need: turn agents on so chats can act."""
+    scoped per-agent enable). For the Windows coding agent it additionally
+    exposes per-scope Read/Write/Execute toggles (write/execute are never
+    granted by the consent flow, so the user grants them explicitly here) and a
+    workspace-folder chooser (the directory the coding agent is confined to)."""
 
-    def __init__(self, parent, emit):
+    def __init__(self, parent, emit, on_change_workspace=None):
         super().__init__(parent)
         self._emit = emit
+        self._on_change_workspace = on_change_workspace
         self.setWindowTitle("Agents & permissions")
-        self.setMinimumSize(560, 600)
+        self.setMinimumSize(600, 640)
         self.setStyleSheet(f"QDialog {{ background:{T.BG}; }}")
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 18, 18, 16)
@@ -287,14 +294,26 @@ class AgentsDialog(QDialog):
         title = QLabel("Agents & permissions")
         title.setStyleSheet(f"color:{T.TEXT}; font-size:18px; font-weight:700;")
         sub = QLabel(
-            "Enabling grants read-only permissions for the built-in agents — "
-            "search, data, file and system reads, never write access. "
-            "Each agent can be turned on individually below."
+            "Enable agents to let chats use them. The Windows coding agent "
+            "reads/writes files and runs commands only inside the workspace "
+            "folder you choose — grant Read/Write/Execute per scope, and each "
+            "action asks for your confirmation before it runs."
         )
         sub.setWordWrap(True)
         sub.setStyleSheet(f"color:{T.MUTED}; font-size:12px;")
         root.addWidget(title)
         root.addWidget(sub)
+
+        ws_row = QHBoxLayout()
+        self._ws_label = QLabel(self._workspace_label())
+        self._ws_label.setStyleSheet(f"color:{T.MUTED}; font-size:11px;")
+        self._ws_label.setWordWrap(True)
+        ws_btn = QPushButton("Change workspace…")
+        ws_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        ws_btn.clicked.connect(self._change_ws)
+        ws_row.addWidget(self._ws_label, 1)
+        ws_row.addWidget(ws_btn)
+        root.addLayout(ws_row)
 
         enable_all = QPushButton("Enable recommended agents (read-only)")
         enable_all.setObjectName("primary")
@@ -324,9 +343,34 @@ class AgentsDialog(QDialog):
     def _enable_all(self) -> None:
         self._emit("enable_recommended_agents", {"source": "desktop"})
 
+    def _workspace_label(self) -> str:
+        import win_agent.tools as _tools
+
+        root = _tools.workspace_root()
+        return f"Workspace: {root}"
+
+    def _change_ws(self) -> None:
+        if self._on_change_workspace is not None:
+            self._on_change_workspace()
+        # Refresh the label after the picker closes.
+        self._ws_label.setText(self._workspace_label())
+
     def _enable_one(self, agent_id: str) -> None:
         self._emit(
             "enable_recommended_agents", {"source": "desktop", "agent_ids": [agent_id]}
+        )
+
+    def _set_scope(self, agent_id: str, scope: str, enabled: bool) -> None:
+        """Grant/revoke a single scope on an agent (audited server-side).
+
+        This is the path that grants ``tools:write`` — the recommended-agents
+        consent flow deliberately never grants write, so the desktop client
+        must call the granular ``set_agent_permissions`` ui_event for the
+        coding agent's write/execute scopes.
+        """
+        self._emit(
+            "set_agent_permissions",
+            {"agent_id": agent_id, "scopes": {scope: bool(enabled)}},
         )
 
     def set_agents(self, agents: List[dict]) -> None:
@@ -342,6 +386,11 @@ class AgentsDialog(QDialog):
         scopes = a.get("scopes") or {}
         on = any(bool(v) for v in scopes.values())
         public = bool(a.get("is_public"))
+        aid = a.get("id", "")
+        # The Windows coding agent exposes write/execute scopes the user must
+        # grant explicitly (the consent flow never grants write). Give it
+        # per-scope toggles instead of a single Enable button.
+        is_win_agent = aid == "windows-tools-1"
         card = QFrame()
         _scoped(
             card,
@@ -362,7 +411,9 @@ class AgentsDialog(QDialog):
         col.addWidget(name)
         col.addWidget(desc)
         lay.addLayout(col, 1)
-        if on:
+        if is_win_agent:
+            lay.addLayout(self._scope_toggles(aid, scopes))
+        elif on:
             badge = QLabel("✓ Enabled")
             c = T.VARIANT_COLORS["success"][0]
             badge.setStyleSheet(
@@ -373,7 +424,7 @@ class AgentsDialog(QDialog):
             btn = QPushButton("Enable")
             btn.setObjectName("primary")
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.clicked.connect(lambda _=False, x=a.get("id"): self._enable_one(x))
+            btn.clicked.connect(lambda _=False, x=aid: self._enable_one(x))
             lay.addWidget(btn)
         else:
             tag = QLabel("Private")
@@ -382,6 +433,36 @@ class AgentsDialog(QDialog):
             )
             lay.addWidget(tag)
         return card
+
+    def _scope_toggles(self, aid: str, scopes: dict) -> QHBoxLayout:
+        """Per-scope Read/Write/Execute checkboxes for the Windows coding agent.
+
+        Execute is only enabled when the local ``ASTRAL_DANGEROUS_BYPASS`` flag
+        is set (mirrors the agent's own advertisement of ``run_shell``).
+        """
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        bypass = os.getenv("ASTRAL_DANGEROUS_BYPASS", "0") in ("1", "true", "yes", "on")
+        for scope, label, needs_bypass in (
+            ("tools:read", "Read", False),
+            ("tools:write", "Write", False),
+            ("tools:execute", "Execute", True),
+        ):
+            cb = QCheckBox(label)
+            cb.setCursor(Qt.CursorShape.PointingHandCursor)
+            cb.setChecked(bool(scopes.get(scope, False)))
+            if needs_bypass and not bypass:
+                cb.setEnabled(False)
+                cb.setToolTip("Enable the dangerous-bypass setting to grant Execute.")
+            else:
+                cb.stateChanged.connect(
+                    lambda st, s=scope, a=aid: self._set_scope(
+                        a, s, st == Qt.Checked.value
+                    )
+                )
+            cb.setStyleSheet(f"color:{T.TEXT}; font-size:12px; background:transparent;")
+            row.addWidget(cb)
+        return row
 
 
 class HistoryDialog(QDialog):
@@ -505,6 +586,16 @@ class MainWindow(QMainWindow):
         rl.addLayout(bottom)
         self.setCentralWidget(root)
         self._input.setFocus()  # cursor ready in the message box on launch
+
+        # Attach the cross-thread confirmation bridge so the win_agent thread
+        # can ask the GUI thread to show a native Allow/Deny (or directory
+        # picker) modal. Must happen on the GUI thread, before any tool call.
+        _confirm.BRIDGE.attach(self._show_confirm_dialog)
+
+        # Resolve the coding-agent workspace: a persisted QSettings choice wins,
+        # else an ASTRAL_WORKSPACE_DIR env, else prompt the user to pick one.
+        self._init_workspace()
+
         self.client.start()
 
     def _wrap(self, inner: QWidget, title: str) -> QWidget:
@@ -531,7 +622,9 @@ class MainWindow(QMainWindow):
 
     def _open_agents(self) -> None:
         if self._agents_dialog is None:
-            self._agents_dialog = AgentsDialog(self, self._emit_chrome)
+            self._agents_dialog = AgentsDialog(
+                self, self._emit_chrome, on_change_workspace=self._change_workspace
+            )
         self._agents_dialog.set_agents(self._agents)
         self.client.send_event("discover_agents", {})  # refresh
         self._agents_dialog.show()
@@ -692,6 +785,178 @@ class MainWindow(QMainWindow):
                 shown = True
         if not shown:
             self.rail.show_empty_hint()
+
+    # --- cross-thread confirmation + workspace (feature 067 UX) ------------- #
+
+    def _show_confirm_dialog(self, req: dict) -> dict:
+        """GUI-thread callback for the confirm bridge. Shows the right native
+        modal for an ``action`` (Allow/Deny) or ``directory`` (folder pick)
+        request and returns ``{"accepted": bool, "choice": <str|None>}``.
+
+        Runs on the GUI thread (called from the QTimer poller), so Qt is safe.
+        """
+        kind = req.get("kind")
+        if kind == "directory":
+            start = req.get("default") or ""
+            chosen = QFileDialog.getExistingDirectory(
+                self, req.get("title") or "Choose a folder", start
+            )
+            if not chosen:
+                return {"accepted": False, "choice": None}
+            return {"accepted": True, "choice": os.path.realpath(chosen)}
+        # default: action confirm
+        return self._action_dialog(req)
+
+    def _action_dialog(self, req: dict) -> dict:
+        """A native Allow/Deny modal for a mutating/exec tool call.
+
+        Shows the tool, the workspace-relative target path / command, and a
+        scrollable preview of the content to write or the command to run.
+        """
+        tool = req.get("tool", "tool")
+        path = req.get("path") or ""
+        command = req.get("command") or ""
+        preview = req.get("preview") or ""
+        summary = req.get("summary") or ""
+        dangerous = tool in ("run_shell",) or bool(req.get("dangerous"))
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Astral wants to act on your PC")
+        dlg.setMinimumSize(560, 420)
+        dlg.setStyleSheet(f"QDialog {{ background:{T.BG}; }}")
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(18, 16, 18, 14)
+        lay.setSpacing(10)
+
+        title_txt = (
+            "⚠ DANGEROUS — full shell access" if dangerous else "Allow this action?"
+        )
+        title = QLabel(title_txt)
+        title.setStyleSheet(
+            f"color:{T.VARIANT_COLORS['error'][0] if dangerous else T.TEXT};"
+            f"font-size:15px; font-weight:700;"
+        )
+        lay.addWidget(title)
+
+        if summary:
+            s = QLabel(summary)
+            s.setWordWrap(True)
+            s.setStyleSheet(f"color:{T.TEXT}; font-size:13px;")
+            lay.addWidget(s)
+
+        meta_lines = [f"Tool: {tool}"]
+        if path:
+            meta_lines.append(f"Path: {path}")
+        if command:
+            meta_lines.append(f"Command: {command}")
+        meta = QLabel("\n".join(meta_lines))
+        meta.setStyleSheet(
+            f"color:{T.MUTED}; font-size:12px; font-family:{T.MONO};"
+            f"background:{T.SURFACE}; padding:8px; border-radius:6px;"
+        )
+        meta.setWordWrap(True)
+        lay.addWidget(meta)
+
+        if preview:
+            pt = QPlainTextEdit()
+            pt.setReadOnly(True)
+            pt.setPlainText(preview[:8000])
+            pt.setStyleSheet(
+                f"background:{T.SURFACE_2}; color:{T.TEXT};"
+                f"font-family:{T.MONO}; font-size:12px; border:1px solid {T.BORDER};"
+            )
+            lay.addWidget(pt, 1)
+
+        warn = QLabel(
+            "A file on your computer will be changed."
+            if not dangerous
+            else "This runs an ARBITRARY command with full access. Approve only if you trust it."
+        )
+        warn.setWordWrap(True)
+        warn.setStyleSheet(f"color:{T.VARIANT_COLORS['warning'][0]}; font-size:11px;")
+        lay.addWidget(warn)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        deny = QPushButton("Deny")
+        deny.setCursor(Qt.CursorShape.PointingHandCursor)
+        deny.clicked.connect(lambda: dlg.done(0))
+        allow = QPushButton("Allow" if not dangerous else "Allow (dangerous)")
+        allow.setObjectName("primary")
+        allow.setCursor(Qt.CursorShape.PointingHandCursor)
+        allow.clicked.connect(lambda: dlg.done(1))
+        row.addWidget(deny)
+        row.addWidget(allow)
+        lay.addLayout(row)
+
+        accepted = dlg.exec() == 1
+        return {"accepted": accepted, "choice": None}
+
+    # --- workspace directory (the coding agent's confinement root) --------- #
+
+    def _settings(self) -> QSettings:
+        return QSettings("AstralBody", "WindowsClient")
+
+    def _init_workspace(self) -> None:
+        """Resolve the coding-agent workspace: persisted choice > env > prompt.
+
+        Sets the in-process override on the tools + audit modules so every
+        file/command tool is confined to the chosen folder for this session.
+        """
+        env_dir = os.getenv("ASTRAL_WORKSPACE_DIR", "").strip()
+        persisted = self._settings().value("workspace_dir", "", type=str) or ""
+        chosen = persisted or env_dir
+        if not chosen:
+            chosen = (
+                _confirm.pick_directory(
+                    title="Choose the folder where Astral may read & write files",
+                    default=os.path.expanduser("~"),
+                )
+                or ""
+            )
+        if not chosen:
+            chosen = os.path.join(os.path.expanduser("~"), "AstralWorkspace")
+        chosen = os.path.realpath(chosen)
+        try:
+            os.makedirs(chosen, exist_ok=True)
+        except OSError:
+            chosen = os.path.join(os.path.expanduser("~"), "AstralWorkspace")
+            os.makedirs(chosen, exist_ok=True)
+        self._settings().setValue("workspace_dir", chosen)
+        self._apply_workspace(chosen)
+
+    def _apply_workspace(self, path: str) -> None:
+        """Push the chosen workspace into the tools + audit modules + env."""
+        path = os.path.realpath(path)
+        os.environ["ASTRAL_WORKSPACE_DIR"] = path
+        try:
+            import win_agent.tools as _tools
+
+            _tools.set_workspace_override(path)
+        except Exception:  # noqa: BLE001
+            pass
+        self.topbar.set_status(f"Workspace: {path}", T.MUTED)
+
+    def _change_workspace(self) -> None:
+        """Reopen the directory picker; persist + apply the new choice live."""
+        chosen = _confirm.pick_directory(
+            title="Choose a new workspace folder",
+            default=self._settings().value("workspace_dir", "", type=str)
+            or os.path.expanduser("~"),
+        )
+        if not chosen:
+            return
+        chosen = os.path.realpath(chosen)
+        try:
+            os.makedirs(chosen, exist_ok=True)
+        except OSError:
+            QMessageBox.warning(
+                self, "Workspace", f"Couldn't use that folder:\n{chosen}"
+            )
+            return
+        self._settings().setValue("workspace_dir", chosen)
+        self._apply_workspace(chosen)
+        QMessageBox.information(self, "Workspace", f"Workspace set to:\n{chosen}")
 
 
 def _flatten_text(components: list) -> str:
