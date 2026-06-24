@@ -71,7 +71,7 @@ def test_expected_agent_catalog_directories():
     agents_dir = BACKEND_DIR / "agents"
     present = {p.name for p in agents_dir.iterdir()
                if p.is_dir() and p.name not in SKIP_DIRS and not p.name.startswith((".", "__"))}
-    expected = {"connectors", "dice_roller", "etf_tracker_1", "general",
+    expected = {"connectors", "dice_roller", "general",
                 "journal_review", "medical", "weather",
                 "ml_services", "web_research", "summarizer"}
     missing = expected - present

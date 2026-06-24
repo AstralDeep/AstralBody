@@ -1,0 +1,114 @@
+"""Feature 068 (US2) — owner-safe marking + permission baseline.
+
+Covers: the safe baseline flips deny→allow for a fresh user, an explicit
+opt-out wins over the safe default, a non-safe agent stays default-deny,
+admin/owner gating on mark_safe, and reset-on-revision. Audited transitions are
+exercised through the real ``agent_trust`` storage path.
+"""
+from __future__ import annotations
+
+import sys
+import uuid
+from pathlib import Path
+
+import pytest
+
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
+
+def _can_connect_to_db() -> bool:
+    try:
+        import psycopg2
+        from shared.database import _build_database_url
+
+        conn = psycopg2.connect(_build_database_url())
+        conn.close()
+        return True
+    except Exception:
+        return False
+
+
+pytestmark = pytest.mark.skipif(
+    not _can_connect_to_db(), reason="Postgres unavailable in this environment"
+)
+
+
+@pytest.fixture(scope="module")
+def db():
+    from orchestrator.history import HistoryManager
+
+    history = HistoryManager(data_dir=f"/tmp/trust-test-{uuid.uuid4().hex[:8]}")
+    return history.db
+
+
+@pytest.fixture
+def pm(db):
+    from orchestrator.tool_permissions import ToolPermissionManager
+
+    return ToolPermissionManager(db=db)
+
+
+def _fresh_ids():
+    suffix = uuid.uuid4().hex[:10]
+    return f"pytest-user-{suffix}", f"pytest-safe-agent-{suffix}"
+
+
+def test_safe_agent_allows_fresh_user(db, pm):
+    user_id, agent_id = _fresh_ids()
+    db.upsert_agent_safe(agent_id, True, marked_by="pytest")
+    # Fresh user, no scope rows: the safe baseline allows.
+    assert pm.is_tool_allowed(user_id, agent_id, "some_tool") is True
+
+
+def test_non_safe_agent_defaults_deny(db, pm):
+    user_id, agent_id = _fresh_ids()
+    # Never marked safe → legacy default-deny for a fresh user.
+    assert pm.is_tool_allowed(user_id, agent_id, "some_tool") is False
+
+
+def test_explicit_optout_wins_over_safe(db, pm):
+    user_id, agent_id = _fresh_ids()
+    db.upsert_agent_safe(agent_id, True, marked_by="pytest")
+    # User explicitly disables the tool's scope → opt-out must win.
+    pm.set_agent_scopes(user_id, agent_id, {"tools:read": False})
+    assert pm.is_tool_allowed(user_id, agent_id, "some_tool") is False
+
+
+@pytest.mark.asyncio
+async def test_mark_safe_requires_admin(db):
+    from orchestrator import agent_trust
+
+    _, agent_id = _fresh_ids()
+    denied = await agent_trust.mark_safe(db, agent_id, True, "alice", roles=[])
+    assert denied["ok"] is False and denied["error"] == "forbidden"
+    assert db.get_agent_is_safe(agent_id) is False
+
+    ok = await agent_trust.mark_safe(db, agent_id, True, "admin-user", roles=["admin"])
+    assert ok["ok"] is True and ok["is_safe"] is True
+    assert db.get_agent_is_safe(agent_id) is True
+
+
+@pytest.mark.asyncio
+async def test_reset_on_revision_clears_marker(db):
+    from orchestrator import agent_trust
+
+    _, agent_id = _fresh_ids()
+    await agent_trust.mark_safe(db, agent_id, True, "admin-user", roles=["admin"])
+    assert db.get_agent_is_safe(agent_id) is True
+
+    res = await agent_trust.reset_on_revision(db, agent_id, actor_user="reviser")
+    assert res["reset"] is True
+    assert db.get_agent_is_safe(agent_id) is False
+
+
+@pytest.mark.asyncio
+async def test_seed_safe_idempotent(db):
+    from orchestrator import agent_trust
+
+    _, agent_id = _fresh_ids()
+    first = await agent_trust.seed_safe(db, [agent_id])
+    assert agent_id in first
+    second = await agent_trust.seed_safe(db, [agent_id])
+    assert agent_id not in second  # already safe → not re-seeded

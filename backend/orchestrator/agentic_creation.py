@@ -786,6 +786,13 @@ async def apply_revision(orch, rev: Dict[str, Any], user_id: str) -> Dict[str, A
         await lifecycle.delete_draft(rev["id"])
     except Exception:
         logger.warning("agentic: revision cleanup failed for %s", rev["id"], exc_info=True)
+    # Feature 068 (US2): a revision reintroduces (possibly un-reviewed) code, so
+    # reset any owner-safe marker on the live agent — re-approval is required.
+    try:
+        from orchestrator import agent_trust
+        await agent_trust.reset_on_revision(db, agent_id, actor_user=user_id)
+    except Exception:
+        logger.debug("agentic: safe-marker reset failed for %s", agent_id, exc_info=True)
     await _audit(user_id, "lifecycle.revision_applied",
                  f"Revision applied to {agent_id}",
                  correlation_id=rev["id"], agent_id=agent_id)

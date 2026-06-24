@@ -766,3 +766,35 @@ details > summary::-webkit-details-marker { display: none; }
 .astral-history-empty-icon { font-size: 22px; opacity: 0.7; }
 .astral-history-empty-text { font-size: 13px; font-weight: var(--weight-medium); color: var(--text-secondary); }
 .astral-history-empty-hint { font-size: 11px; color: var(--text-muted); }
+
+/* Feature 068 (US5): slash-command typeahead menu (chat input discovery). */
+.astral-slash-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(20, 22, 30, 0.96);
+  padding: 4px;
+}
+.astral-slash-menu.hidden { display: none; }
+.astral-slash-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--astral-text, #e6e6e6);
+  font-size: 13px;
+  cursor: pointer;
+}
+.astral-slash-item:hover,
+.astral-slash-item:focus { background: rgba(255, 255, 255, 0.08); }
+.astral-slash-name { font-weight: 600; }
+.astral-slash-desc { opacity: 0.7; font-size: 12px; }

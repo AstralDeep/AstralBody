@@ -84,6 +84,16 @@ def main():
         processes.append(p_orch)
         time.sleep(2)
 
+        # Feature 068 (US1): when in-process agents are enabled (default), the
+        # orchestrator runs the bundled first-party agents itself — don't spawn
+        # a separate process/port for them. Drafts + any non-built-in agent are
+        # unaffected.
+        inprocess_enabled = os.environ.get("FF_INPROCESS_AGENTS", "True").lower() in ("true", "1", "yes")
+        try:
+            from orchestrator.local_agents import BUILT_IN_AGENT_DIRS
+        except Exception:
+            BUILT_IN_AGENT_DIRS = ()
+
         next_port = int(os.environ.get("AGENT_PORT", 8003))
         for item in os.listdir(agents_dir):
             item_path = os.path.join(agents_dir, item)
@@ -91,6 +101,10 @@ def main():
                 # Skip draft agents — they are started on-demand via the UI
                 if os.path.exists(os.path.join(item_path, ".draft")):
                     print(f"Skipping draft agent: {item}")
+                    continue
+                # Feature 068: bundled built-ins run in-process — no subprocess.
+                if inprocess_enabled and item in BUILT_IN_AGENT_DIRS:
+                    print(f"Running {item} in-process (no port)")
                     continue
                 agent_scripts = [f for f in os.listdir(item_path) if f.endswith("_agent.py")]
                 if agent_scripts:
