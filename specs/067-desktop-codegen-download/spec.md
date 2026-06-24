@@ -317,6 +317,47 @@ green).
   `gemma-4-31B` declined `offer_desktop_codegen` and `write_file`; the tool/card/
   render path was proven by direct dispatch. Retrying the LLM path on `glm-5.2`.
 
-**Not yet demonstrated live:** `write_file` with the native Allow dialog writing a
-file (the desktop process exited during the attempt); an LLM electing to call the
-tools end-to-end. Pending the C-1/C-4 fixes + a clean run on `glm-5.2`.
+#### Part C.2 — happy path COMPLETED end-to-end (v0.2.1 + glm-5.2) ✅
+
+After fixing C-1/C-3 (commit `d0dbcc4`, released as **v0.2.1**) and switching the
+chat model to `zai-org/GLM-5.2-FP8`, the full user journey ran clean:
+
+1. **Browser → download card (B-1/B-2).** "Write me a Python script that creates a
+   greeting file on my computer" → glm-5.2 called `offer_desktop_codegen` → a real
+   **⬇ Download for Windows** button rendered, `href` =
+   `…/releases/download/v0.2.1/AstralBody.exe` + the generated code.
+2. **Download + run the signed exe → integrity on launch (B-8 LIVE).** The v0.2.1
+   exe's top bar showed **"✓ Integrity verified — v0.2.1 (SHA-256 + sigstore)"**.
+3. **First-launch workspace picker (C-1 fix, LIVE).** The picker appeared (no hang)
+   and the user chose `C:\Users\Sam\Desktop\test`.
+4. **Native OIDC login** (`astral-desktop`) + **per-tool grant** (read + write via
+   the Agents dialog) ✓.
+5. **Chat → `write_file` → native confirm → file (B-3/B-5).** "Use your write_file
+   tool to create greeting.py…" → orchestrator `Sent tool call (WS): write_file →
+   windows-tools-1` → the native **"Astral wants to act on your PC"** dialog → user
+   clicked **Allow** → `Desktop\test\greeting.py` written (326 bytes).
+6. **Dual audit (B-7).** Orchestrator: `tool.write_file.start`→`.end success`
+   (corr `0c6f9418…`). Client JSONL: `seq 18 tool write_file success` (hash-chained).
+   Bonus: the client log also shows `run_shell` `refused` `dangerous_bypass`
+   ("bypass flag not set") — the B-5 shell gate + audit.
+
+**Finding status updates:**
+- **C-1 — FIXED (`d0dbcc4`, v0.2.1) + verified live.** GUI-thread dir picks now call
+  `QFileDialog` directly; first-launch picker fires instead of hanging.
+- **C-3 — fixed** (`_win_agent_registered` reset on disconnect).
+- **C-4 — was a reconnect-window artifact, not a send defect.** A clean fresh launch
+  chats fine (the `chat_message` frame reached the orchestrator and glm-5.2 called
+  `write_file`); the earlier misses were post-restart drops (mitigated by C-3 + the
+  no-self-reconnect note).
+- **C-5 — resolved by `glm-5.2`** (it reliably called `offer_desktop_codegen` and
+  `write_file`; the gemma misses were a weak-model limitation, not a wiring defect).
+- **C-2 (open)** — malformed agent ids in the consent/permission flow
+  (`windows-tools` / `windows-tools-(code-&-system)`) — follow-up cleanup.
+- **C-6 (open, config)** — the shipped exe has no embedded `KEYCLOAK_AUTHORITY`
+  default, so a bare double-click can't authenticate against a real-Keycloak
+  deployment; it needs `KEYCLOAK_AUTHORITY` + `AGENT_API_KEY` in the environment
+  (or `--authority`). Documented for operators; a launcher/installer is a follow-up.
+
+**Net:** every Part-B acceptance criterion (B-1…B-8) demonstrated live end-to-end on
+the signed v0.2.1 release; spec B.5's "integrity checked before run" is now real
+(gap-5 fix). Remaining items C-2/C-6 are tracked follow-ups, not blockers.
