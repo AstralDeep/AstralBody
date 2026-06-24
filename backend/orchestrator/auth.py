@@ -190,8 +190,12 @@ async def get_current_user_payload(request: Request, credentials: HTTPAuthorizat
             token, jwks, algorithms=["RS256"],
             options={"verify_aud": False, "verify_at_hash": False}
         )
+        # Accept the web client (client_id) plus any first-party clients in the
+        # KEYCLOAK_ALLOWED_AZP allow-list (e.g. the native desktop's dedicated
+        # public client astral-desktop). Empty allow-list ⇒ web client only.
         azp = payload.get("azp")
-        if azp and azp != client_id:
+        from shared.auth_clients import is_azp_allowed
+        if azp and not is_azp_allowed(azp):
              raise HTTPException(status_code=401, detail="Invalid client")
         try:
             request.state.audit_claims = payload

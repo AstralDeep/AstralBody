@@ -29,7 +29,7 @@ def pump(app: QApplication, seconds: float) -> None:
 
 def grab(win: MainWindow, path: str) -> None:
     win.grab().save(path)
-    status = win._status.text().encode("ascii", "replace").decode()
+    status = win.topbar._status.text().encode("ascii", "replace").decode()
     print("saved", path, "| status:", status)
 
 
