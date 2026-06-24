@@ -2,8 +2,6 @@
 SDUI components, and the A2A dispatch mirrors the backend MCPServer contract."""
 from __future__ import annotations
 
-import os
-
 from win_agent import agent, tools
 
 
@@ -17,8 +15,12 @@ def test_system_info_components():
     assert "OS" in r["_data"]
 
 
-def test_list_directory(tmp_path=None):
-    r = tools.list_directory(path=os.path.dirname(__file__))
+def test_list_directory(tmp_path, monkeypatch):
+    # list_directory is workspace-confined (feature 067); set the workspace to
+    # a tmp dir with a file in it.
+    monkeypatch.setenv("ASTRAL_WORKSPACE_DIR", str(tmp_path))
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    r = tools.list_directory()
     assert _types(r) == ["card"]
     assert r["_data"]["count"] >= 1
 
@@ -44,10 +46,20 @@ def test_open_path_requires_arg():
 
 # --- A2A dispatch contract ------------------------------------------------- #
 
-def test_card_lists_all_tools():
+def test_card_lists_all_tools(monkeypatch):
+    # The dangerous run_shell tool is only advertised when the bypass flag is on;
+    # with it off (default) the card lists every tool EXCEPT run_shell.
+    monkeypatch.delenv("ASTRAL_DANGEROUS_BYPASS", raising=False)
     card = agent.build_card()
     assert card["agent_id"] == "windows-tools-1"
-    assert {s["name"] for s in card["skills"]} == set(tools.TOOL_REGISTRY)
+    expected = set(tools.TOOL_REGISTRY) - {"run_shell"}
+    assert {s["name"] for s in card["skills"]} == expected
+
+
+def test_card_lists_run_shell_when_bypass_on(monkeypatch):
+    monkeypatch.setenv("ASTRAL_DANGEROUS_BYPASS", "1")
+    card = agent.build_card()
+    assert "run_shell" in {s["name"] for s in card["skills"]}
 
 
 def test_dispatch_tools_list():

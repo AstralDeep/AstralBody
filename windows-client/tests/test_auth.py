@@ -7,6 +7,8 @@ import io
 import json
 import types
 
+import pytest
+
 from astral_client import auth
 
 
@@ -38,12 +40,14 @@ def test_session_refresh_without_token_is_none():
 
 
 def test_resolve_auth_explicit_token_wins():
+    pytest.importorskip("PySide6")  # astral_client.app imports Qt
     from astral_client.app import resolve_auth
     args = types.SimpleNamespace(token="dev-token", authority="", client_id="astral-desktop")
     assert resolve_auth(args) == ("dev-token", None)
 
 
 def test_resolve_auth_defaults_to_devtoken_without_authority():
+    pytest.importorskip("PySide6")  # astral_client.app imports Qt
     from astral_client.app import resolve_auth
     args = types.SimpleNamespace(token="", authority="", client_id="astral-desktop")
     assert resolve_auth(args) == ("dev-token", None)

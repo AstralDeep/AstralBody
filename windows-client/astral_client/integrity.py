@@ -1,0 +1,234 @@
+"""Integrity verifier for the Windows desktop client (feature 067).
+
+Before a freshly-downloaded ``AstralBody.exe`` is ever executed, this module:
+
+  1. resolves the latest GitHub Release (api.github.com/repos/<repo>/releases/latest),
+  2. downloads the exe + ``SHA256SUMS`` + ``cosign.bundle`` assets,
+  3. verifies ``sha256(exe) ==`` the manifest entry for the exe,
+  4. verifies the sigstore ``cosign.bundle`` against the exe — asserting the
+     signing certificate's OIDC identity is the AstralDeep/AstralBody GitHub
+     Actions workflow (issuer https://token.actions.githubusercontent.com),
+  5. only then returns the verified exe path for the caller to launch/replace.
+
+**Fail-closed:** any mismatch or unverifiable signature ⇒ ``VerifyResult(ok=False)``
+and the downloaded binary is deleted. **Offline-tolerant:** an unreachable GitHub
+on an *update check* keeps the current already-verified binary (the caller never
+runs an unverified download); integrity is checked before every run of a
+freshly-downloaded binary, not just on first install.
+
+``sigstore`` is a CLIENT-ONLY dependency (frozen into the PyInstaller bundle) —
+it never enters the orchestrator image (Constitution V preserved). If ``sigstore``
+is unavailable, the verifier fail-closes (refuses) rather than skipping the
+signature check.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+import urllib.request
+from dataclasses import dataclass
+from typing import Optional
+
+logger = logging.getLogger("astral.integrity")
+
+_REPO = os.getenv("DESKTOP_RELEASE_REPO", "AstralDeep/AstralBody")
+_EXE_NAME = "AstralBody.exe"
+_SHA_NAME = "SHA256SUMS"
+_BUNDLE_NAME = "cosign.bundle"
+# The OIDC identity the signing workflow MUST present (keyless sigstore).
+_EXPECTED_ISSUER = "https://token.actions.githubusercontent.com"
+_MAX_BYTES = 200 * 1024 * 1024  # 200 MB cap on the exe download
+
+
+@dataclass
+class ReleaseAssets:
+    version: str
+    exe_url: str
+    sha_url: str
+    bundle_url: str
+    html_url: str
+
+
+@dataclass
+class VerifyResult:
+    ok: bool
+    reason: str = ""
+    exe_path: str = ""
+    version: str = ""
+
+
+def _api_get(path: str) -> Optional[dict]:
+    url = f"https://api.github.com/{path}"
+    req = urllib.request.Request(url, headers={
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    })
+    token = os.getenv("GITHUB_TOKEN")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.loads(r.read(2 * 1024 * 1024).decode("utf-8", "replace"))
+    except Exception as exc:  # noqa: BLE001
+        logger.info("github API %s failed: %s", path, exc)
+        return None
+
+
+def latest_release() -> Optional[ReleaseAssets]:
+    data = _api_get(f"repos/{_REPO}/releases/latest")
+    if not data:
+        return None
+    assets = {a.get("name"): a for a in (data.get("assets") or [])}
+    exe = assets.get(_EXE_NAME, {}).get("browser_download_url", "")
+    sha = assets.get(_SHA_NAME, {}).get("browser_download_url", "")
+    bundle = assets.get(_BUNDLE_NAME, {}).get("browser_download_url", "")
+    if not exe or not sha or not bundle:
+        logger.info("release missing required assets (exe/sha/bundle)")
+        return None
+    return ReleaseAssets(
+        version=(data.get("name") or data.get("tag_name") or "").strip(),
+        exe_url=exe, sha_url=sha, bundle_url=bundle,
+        html_url=data.get("html_url", ""))
+
+
+def _download(url: str, dest: str, *, max_bytes: int = _MAX_BYTES) -> bool:
+    try:
+        with urllib.request.urlopen(url, timeout=60) as r, open(dest, "wb") as f:
+            total = 0
+            while True:
+                chunk = r.read(64 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    f.close()
+                    os.remove(dest)
+                    logger.warning("download exceeded %d bytes: %s", max_bytes, url)
+                    return False
+                f.write(chunk)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("download failed %s: %s", url, exc)
+        if os.path.exists(dest):
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
+        return False
+
+
+def _sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(64 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _extract_sha_for_exe(sha_text: str) -> Optional[str]:
+    for line in sha_text.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[-1].endswith(_EXE_NAME):
+            h = parts[0].lower()
+            if len(h) == 64:
+                return h
+    for line in sha_text.splitlines():
+        h = line.strip().lower()
+        if len(h) == 64:
+            return h
+    return None
+
+
+def _download_text(url: str) -> Optional[str]:
+    try:
+        with urllib.request.urlopen(url, timeout=20) as r:
+            return r.read(64 * 1024).decode("utf-8", "replace")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("text download failed %s: %s", url, exc)
+        return None
+
+
+def _verify_sigstore(exe_path: str, bundle_path: str) -> tuple[bool, str]:
+    """Verify the cosign bundle against the exe; assert the OIDC identity.
+
+    Returns (ok, reason). Fail-closed if sigstore isn't importable.
+    """
+    try:
+        from sigstore.verify import Verifier
+        from sigstore.verify.policy import Identity
+        from sigstore.models import Bundle
+    except Exception as exc:  # noqa: BLE001
+        return False, f"sigstore not available: {exc}"
+    try:
+        with open(bundle_path, "rb") as f:
+            bundle = Bundle.from_json(f.read())
+        # The signing identity MUST be the AstralDeep/AstralBody workflow.
+        # ``expected_identity`` is the SAN (the workflow's OIDC subject, e.g.
+        # "repo:AstralDeep/AstralBuilder" — we accept any SAN whose issuer is
+        # the GitHub Actions issuer; the repo is pinned by the release source).
+        identity = Identity(
+            issuer=_EXPECTED_ISSUER,
+            identity=os.getenv("DESKTOP_SIGSTORE_IDENTITY",
+                               "https://github.com/AstralDeep/AstralBody/"),
+        )
+        verifier = Verifier.production()
+        with open(exe_path, "rb") as f:
+            verifier.verify_artifact(input_=f.read(), bundle=bundle,
+                                     policy=identity)
+        return True, "verified"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"sigstore verification failed: {exc}"
+
+
+def verify_latest(workdir: str) -> VerifyResult:
+    """Download + verify the latest released exe into ``workdir``.
+
+    Returns a :class:`VerifyResult`; on failure the downloaded files are
+    deleted. The caller launches ``exe_path`` only when ``ok`` is True.
+    """
+    rel = latest_release()
+    if rel is None:
+        return VerifyResult(ok=False, reason="Could not resolve the latest GitHub release.")
+    exe_path = os.path.join(workdir, _EXE_NAME)
+    bundle_path = os.path.join(workdir, _BUNDLE_NAME)
+
+    if not _download(rel.exe_url, exe_path):
+        return VerifyResult(ok=False, reason="Download of AstralBody.exe failed.")
+    sha_text = _download_text(rel.sha_url)
+    if not sha_text:
+        _cleanup(exe_path)
+        return VerifyResult(ok=False, reason="Download of SHA256SUMS failed.")
+    if not _download(rel.bundle_url, bundle_path):
+        _cleanup(exe_path)
+        return VerifyResult(ok=False, reason="Download of cosign.bundle failed.")
+
+    # 1. SHA-256
+    expected = _extract_sha_for_exe(sha_text)
+    if not expected:
+        _cleanup(exe_path, bundle_path)
+        return VerifyResult(ok=False, reason="SHA256SUMS has no hash for AstralBody.exe.")
+    actual = _sha256_file(exe_path)
+    if actual != expected:
+        _cleanup(exe_path, bundle_path)
+        return VerifyResult(ok=False,
+                            reason=f"SHA-256 mismatch (expected {expected[:12]}…, got {actual[:12]}…).")
+
+    # 2. sigstore
+    ok, reason = _verify_sigstore(exe_path, bundle_path)
+    if not ok:
+        _cleanup(exe_path, bundle_path)
+        return VerifyResult(ok=False, reason=reason)
+
+    return VerifyResult(ok=True, reason="verified", exe_path=exe_path,
+                        version=rel.version)
+
+
+def _cleanup(*paths: str) -> None:
+    for p in paths:
+        if p and os.path.exists(p):
+            try:
+                os.remove(p)
+            except OSError:
+                pass

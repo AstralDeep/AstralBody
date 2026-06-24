@@ -990,6 +990,92 @@ def skeleton_component(variant: str = "list", count: int = 4, label: str = "Load
     return {"type": "skeleton", "variant": str(variant), "count": n, "label": str(label)}
 
 
+def _is_github_release_url(url: str) -> bool:
+    """Only a real GitHub Release asset/release URL may render as a download link.
+
+    Defense-in-depth: the card is built from the GitHub Releases API, but the
+    renderer never trusts an arbitrary URL — anything else renders as a disabled
+    'unavailable' button so a malformed/crafted value can't become a clickable
+    link to an attacker host.
+    """
+    s = str(url or "").strip()
+    return s.startswith("https://github.com/")
+
+
+def render_download_card(c: Dict[str, Any]) -> str:
+    """Render a desktop-app download card with an integrity block.
+
+    The primary button links to the GitHub Release asset (validated). A
+    monospace block shows the version, platform and SHA-256 so the user can
+    verify integrity; a collapsible note explains SHA-256 + sigstore. When the
+    download URL is absent/unavailable, a disabled button + a link to the
+    releases page is rendered instead — never a fabricated link.
+    """
+    title = c.get("title") or "Astral desktop app"
+    description = c.get("description") or ""
+    download_url = c.get("download_url") or ""
+    sha256 = (c.get("sha256") or "").lower()
+    bundle_url = c.get("sigstore_bundle_url") or ""
+    version = c.get("version") or ""
+    platform = c.get("platform") or "windows-x64"
+    html_url = c.get("html_url") or ""
+    variant = c.get("variant") or ("available" if download_url else "unavailable")
+
+    desc_html = f'<p class="text-xs text-white/60 mt-1 mb-3">{esc(description)}</p>' if description else ""
+    ver_html = (f'<span class="inline-block text-[11px] px-2 py-0.5 rounded-full '
+                f'bg-white/10 text-white/70 mr-2">v{esc(version)}</span>'
+                if version else "")
+    plat_html = (f'<span class="inline-block text-[11px] px-2 py-0.5 rounded-full '
+                 f'bg-white/10 text-white/70">{esc(platform)}</span>')
+
+    # Integrity block (only meaningful when we have a hash).
+    sha_html = ""
+    if sha256:
+        sha_html = (
+            '<div class="mt-3 rounded-md bg-black/30 border border-white/10 p-2">'
+            '<div class="text-[10px] uppercase tracking-wide text-white/40 mb-1">SHA-256</div>'
+            f'<code class="text-[11px] text-astral-secondary break-all">{esc(sha256)}</code></div>'
+        )
+
+    note_html = (
+        '<details class="mt-2"><summary class="text-[11px] text-white/40 cursor-pointer '
+        'hover:text-white/60">How integrity is verified</summary>'
+        '<p class="text-[11px] text-white/50 mt-1">The app is built and signed by GitHub '
+        'Actions. The desktop client checks the SHA-256 against a published checksum file '
+        'and verifies a sigstore signature before it ever runs the downloaded binary.</p></details>'
+    )
+
+    if variant == "available" and _is_github_release_url(download_url):
+        btn = (
+            f'<a href="{_attr(safe_url(download_url))}" '
+            f'class="astral-btn inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm '
+            f'font-medium bg-astral-secondary/20 hover:bg-astral-secondary/30 text-astral-secondary '
+            f'border border-astral-secondary/30">⬇ Download for Windows</a>'
+        )
+    else:
+        btn = ('<button disabled class="inline-flex items-center gap-2 px-4 py-2 bg-gray-500/20 '
+               'text-gray-400 border border-gray-500/30 rounded-lg text-sm font-medium '
+               'cursor-not-allowed opacity-50">Download temporarily unavailable</button>')
+
+    releases_link = ""
+    if _is_github_release_url(html_url):
+        releases_link = (f'<a href="{_attr(safe_url(html_url))}" target="_blank" rel="noopener" '
+                         'class="text-[11px] text-astral-secondary/80 hover:text-astral-secondary '
+                         'underline ml-3">GitHub Releases ↗</a>')
+
+    bundle_attr = f' data-bundle-url="{_attr(bundle_url)}"' if bundle_url else ""
+    return (
+        f'<div{_base_attrs(c)} class="astral-download-card rounded-xl border border-white/10 '
+        f'bg-white/5 p-4"{bundle_attr}>'
+        f'<div class="flex items-center justify-between gap-3">'
+        f'<h4 class="text-sm font-semibold text-white/90">{esc(title)}</h4>'
+        f'<div>{ver_html}{plat_html}</div></div>'
+        f'{desc_html}'
+        f'<div class="flex items-center">{btn}{releases_link}</div>'
+        f'{sha_html}{note_html}</div>'
+    )
+
+
 PRIMITIVE_RENDERERS.update({
     "container": render_container, "text": render_text, "button": render_button, "input": render_input,
     "param_picker": render_param_picker, "card": render_card, "table": render_table, "list": render_list,
@@ -1002,6 +1088,7 @@ PRIMITIVE_RENDERERS.update({
     "badge": render_badge, "hero": render_hero, "keyvalue": render_keyvalue,
     "timeline": render_timeline, "rating": render_rating,
     "skeleton": render_skeleton, "chat_history": render_chat_history,
+    "download_card": render_download_card,
 })
 
 

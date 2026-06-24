@@ -101,7 +101,9 @@ kept only for environments that have not provisioned `astral-desktop` yet.
 The app hosts a small **A2A agent in-process** (`win_agent/`) that exposes
 Windows-specific tools to the orchestrator, so the assistant can act on this PC:
 `get_system_info`, `read_clipboard`, `write_clipboard`, `notify` (native toast),
-`open_path` (file/folder/URL), `list_directory`. Results render natively.
+`open_path` (file/folder/URL), `list_directory`, plus the **coding tools**
+(`read_file`, `write_file`, `edit_file`, `run_command`, `run_shell`). Results
+render natively.
 
 On connect, the client registers the agent at `http://host.docker.internal:8771`
 (the orchestrator runs in Docker and reaches the host that way). Override with
@@ -110,6 +112,71 @@ agent can also run standalone: `python -m win_agent.agent --port 8771`.
 
 The agent registers with the orchestrator's `AGENT_API_KEY` when set (required
 outside dev; dev mode is keyless).
+
+### Coding agent (feature 067)
+
+The coding tools let the assistant **generate, write, edit, and run code on your
+machine**. They are gated by three independent safety layers:
+
+1. **Workspace confinement.** Every file tool operates only inside
+   `ASTRAL_WORKSPACE_DIR` (default `~/AstralWorkspace`). Path traversal
+   (`../`) and absolute paths outside the workspace are refused; symlinks that
+   escape are resolved and refused.
+2. **Per-tool permissions.** Each tool declares a scope (`tools:read`,
+   `tools:write`, `tools:execute`); you enable them one-by-one under
+   **Agents & permissions**, exactly like every other agent. With nothing
+   enabled, every coding tool is refused.
+   - `read_file` / `list_directory` → `tools:read`
+   - `write_file` / `edit_file` → `tools:write`
+   - `run_command` → `tools:execute` — runs a **whitelisted** dev command
+     (`git`, `python`, `pip`, `npm`, `cargo`, `go`, …) inside the workspace,
+     bounded timeout + output cap.
+3. **Dangerous bypass (off by default).** `run_shell` gives **full arbitrary
+   shell access** (any command, any directory). It is only advertised when
+   `ASTRAL_DANGEROUS_BYPASS=1` is set, and each call still requires a native
+   confirmation showing the exact command. It is always audited as
+   `dangerous_bypass`.
+
+**PHI safety (fail-closed).** Every `read_file` / `list_directory` / `run_command`
+/ `run_shell` result is run through a client-side PHI pre-filter
+(`astral_client/phi_gate.py`, the same patterns as the orchestrator's gate)
+**before** it is returned to the orchestrator/model. If PHI is detected, the
+result is refused — it never leaves your machine. If the check itself errors,
+the result is treated as PHI and refused (fail-closed).
+
+**Audit (every action).** Each tool call is recorded in an append-only,
+hash-chained JSONL log at `%APPDATA%/AstralBody/audit.log` (`astral_client/
+audit_log.py`): timestamp, actor, tool, redacted args, outcome
+(`success`/`refused`/`phi_blocked`/`error`), and correlation id. The
+orchestrator records its own `tool` audit event too, so actions are double-
+audited.
+
+### Integrity verification (feature 067)
+
+When you download the app from a GitHub Release, the client verifies it **before
+it ever runs** (`astral_client/integrity.py`):
+
+1. resolves the latest release, downloads `AstralBody.exe` + `SHA256SUMS` +
+   `cosign.bundle`;
+2. checks `sha256(exe) ==` the manifest entry;
+3. verifies the **sigstore** (keyless) signature, asserting the signing
+   identity is the `AstralDeep/AstralBody` GitHub Actions workflow;
+4. only then launches/replaces the binary.
+
+A tampered exe, a bad hash, or an unverifiable signature ⇒ the download is
+deleted and refused. Offline on an update check, the current already-verified
+binary keeps running (an unverified download is never executed).
+
+Releases are built and signed by [`.github/workflows/release-windows.yml`](../.github/workflows/release-windows.yml)
+(fires on `v*` tags).
+
+| Env | Default | Purpose |
+|-----|---------|---------|
+| `ASTRAL_WORKSPACE_DIR` | `~/AstralWorkspace` | Workspace confinement root |
+| `WIN_CMD_TIMEOUT` | `60` | `run_command` timeout (s) |
+| `WIN_CMD_MAX_BYTES` | `1048576` | `run_command` output cap |
+| `ASTRAL_DANGEROUS_BYPASS` | unset | Enables `run_shell` (full shell) |
+| `DESKTOP_RELEASE_REPO` | `AstralDeep/AstralBody` | GitHub repo for releases |
 
 ## Scope / status
 

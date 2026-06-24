@@ -28,7 +28,10 @@ logger = logging.getLogger("ToolPermissions")
 # but missing here, leaving those tools without any permission control surface
 # (027 click-through finding) — agent_scopes has no scope CHECK constraint, so
 # adding it is purely additive.
-VALID_SCOPES = ["tools:read", "tools:write", "tools:search", "tools:system", "tools:files"]
+# "tools:execute" (feature 067) governs command-execution tools — the Windows
+# coding agent's run_command/run_shell declare it. Additive for the same reason.
+VALID_SCOPES = ["tools:read", "tools:write", "tools:search", "tools:system",
+                "tools:files", "tools:execute"]
 
 
 class ToolPermissionManager:
