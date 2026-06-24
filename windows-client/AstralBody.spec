@@ -14,6 +14,7 @@ hiddenimports = (
     + ["PySide6.QtCharts", "websockets", "websockets.legacy", "websockets.legacy.client",
        "win_agent", "win_agent.agent", "win_agent.tools",
        "astral_client.phi_gate", "astral_client.audit_log", "astral_client.integrity",
+       "astral_client.confirm",
        "psutil", "pyperclip", "sigstore"]
 )
 

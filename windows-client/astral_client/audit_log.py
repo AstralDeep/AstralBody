@@ -16,6 +16,7 @@ Fail-open for the *product* (an audit-write failure must not block a user
 action that the permission gate already allowed), but every write failure is
 logged to stderr so it is visible.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -143,7 +144,12 @@ class AuditLogger:
             with open(self._path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry) + "\n")
         except Exception:  # noqa: BLE001 — fail-open
-            logger.warning("audit log write failed (tool=%s outcome=%s)", tool, outcome, exc_info=True)
+            logger.warning(
+                "audit log write failed (tool=%s outcome=%s)",
+                tool,
+                outcome,
+                exc_info=True,
+            )
 
     def tail(self, n: int = 50) -> list:
         """Return the last ``n`` entries (for the native 'View audit log' dialog)."""
@@ -176,13 +182,31 @@ def _redact_args(tool: str, args: Any) -> Any:
 
 
 def _workspace_root() -> str:
-    return os.path.realpath(os.path.expanduser(os.path.expandvars(
-        os.getenv("ASTRAL_WORKSPACE_DIR", os.path.join("~", "AstralWorkspace")))))
+    # Honor the desktop GUI's runtime override (the user's chosen folder) so
+    # audit path-redaction is relative to the active workspace, not the launch
+    # default. Falls back to the env var when no override is set.
+    try:
+        from win_agent import tools as _tools
+
+        override = getattr(_tools, "_WORKSPACE_OVERRIDE", None)
+        if override:
+            return override
+    except Exception:  # noqa: BLE001 — tools module optional in some test contexts
+        pass
+    return os.path.realpath(
+        os.path.expanduser(
+            os.path.expandvars(
+                os.getenv("ASTRAL_WORKSPACE_DIR", os.path.join("~", "AstralWorkspace"))
+            )
+        )
+    )
 
 
 def _rel(root: str, path: str) -> str:
     try:
-        rp = os.path.realpath(os.path.join(root, os.path.expandvars(os.path.expanduser(path))))
+        rp = os.path.realpath(
+            os.path.join(root, os.path.expandvars(os.path.expanduser(path)))
+        )
         rel = os.path.relpath(rp, root)
         if rel.startswith(".."):
             return "<outside-workspace>"
