@@ -58,7 +58,7 @@ def build_card() -> Dict[str, Any]:
         "name": AGENT_NAME,
         "description": AGENT_DESC,
         "agent_id": AGENT_ID,
-        "version": "0.2.0",
+        "version": "0.2.2",
         "skills": [{
             "id": name, "name": name, "description": info["description"],
             "input_schema": info.get("input_schema", {"type": "object", "properties": {}}),
