@@ -2,7 +2,6 @@
 widgets (offscreen). Mirrors the structured payloads the orchestrator sends."""
 from __future__ import annotations
 
-import pytest
 from PySide6.QtWidgets import (
     QFrame, QLabel, QPushButton, QTableWidget, QTabWidget, QWidget,
 )
