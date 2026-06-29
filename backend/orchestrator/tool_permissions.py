@@ -283,7 +283,7 @@ class ToolPermissionManager:
         )
         if scope_row is not None:
             return bool(scope_row["enabled"])
-        if self._is_safe_agent(agent_id):
+        if self._is_safe_agent(agent_id) and self._safe_flip_allowed(agent_id):
             return True
         return False
 
@@ -310,6 +310,32 @@ class ToolPermissionManager:
         except Exception:
             val = False
         self._safe_cache[agent_id] = (val, now + 30.0)
+        return val
+
+    def _safe_flip_allowed(self, agent_id: str) -> bool:
+        """Whether a safe agent's deny→allow baseline flip may apply for any user.
+
+        Feature 068's safe marker auto-allows tools for ALL users. To stop an
+        owner from fleet-exposing a PRIVATE agent by marking it safe, only honor
+        the flip for a PUBLIC agent — or one with no ownership record at all
+        (built-in/system/test agents). A private agent (ownership row with
+        ``is_public = False``) still requires an explicit grant. Cached 30s like
+        the safe lookup; fails closed on a lookup error.
+        """
+        import time
+        now = time.time()
+        cache = getattr(self, "_public_flip_cache", None)
+        if cache is None:
+            cache = self._public_flip_cache = {}
+        cached = cache.get(agent_id)
+        if cached is not None and cached[1] > now:
+            return cached[0]
+        try:
+            own = self.db.get_agent_ownership(agent_id)
+        except Exception:
+            return False  # fail closed on lookup error (do not cache)
+        val = True if own is None else bool(own.get("is_public"))
+        cache[agent_id] = (val, now + 30.0)
         return val
 
     def set_skill_enabled(self, user_id: str, agent_id: str, tool_name: str,

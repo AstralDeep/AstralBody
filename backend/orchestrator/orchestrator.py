@@ -698,8 +698,23 @@ class Orchestrator:
                 "description": skill.description,
                 "input_schema": skill.input_schema
             })
-            # Store tool→scope mapping from agent-declared scopes
-            tool_scope_map[skill.id] = getattr(skill, 'scope', '') or 'tools:read'
+            # Store tool→scope mapping from agent-declared scopes. Validate the
+            # declared scope so a typo'd or missing scope is surfaced rather than
+            # silently inheriting the weakest kind.
+            from orchestrator.tool_permissions import VALID_SCOPES as _VALID_SCOPES
+            declared_scope = getattr(skill, 'scope', '') or ''
+            if declared_scope and declared_scope not in _VALID_SCOPES:
+                logger.warning(
+                    "Agent %s tool %s declares unknown scope %r (not in VALID_SCOPES) — "
+                    "it has no grantable permission surface and will be denied.",
+                    card.agent_id, skill.id, declared_scope,
+                )
+            elif not declared_scope:
+                logger.debug(
+                    "Agent %s tool %s declares no scope — defaulting to tools:read.",
+                    card.agent_id, skill.id,
+                )
+            tool_scope_map[skill.id] = declared_scope or 'tools:read'
         self.agent_capabilities[card.agent_id] = caps
 
         # Register tool→scope mapping in the permission manager
@@ -4902,7 +4917,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             try:
                 allowed = self.tool_permissions.is_tool_allowed(user_id, agent_id, tool_name)
             except Exception:  # pragma: no cover — defensive
-                allowed = True
+                # Fail closed: a permission-check error must not report the tool
+                # as effectively allowed in the disabled-tool diagnostic.
+                allowed = False
             if not allowed:
                 return ToolDiagnostic(
                     status=ToolDiagnosticStatus.PERMISSION_DENIED,
@@ -5980,17 +5997,29 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         :class:`~shared.local_transport.LoopbackSocket` whose frames route back
         through ``handle_agent_message`` — so the same request-id↔future
         correlation, progress fan-out, streaming, in-agent credential
-        decryption (orchestrator never sees plaintext), and ``_runtime``
-        injection all apply with no network hop. The whole gate stack
-        (permission/policy/taint/audit/concurrency) wraps this call upstream in
-        ``execute_single_tool`` and is unchanged.
+        decryption, and ``_runtime`` injection all apply with no network hop.
+
+        NOTE on confidentiality: for an in-process built-in the agent handler
+        runs inside the orchestrator OS process, so decrypted ECIES plaintext
+        DOES transiently exist in this process's memory — the confidentiality
+        boundary here is encryption-at-rest in the DB, not a separate process
+        (unlike the networked A2A path). To keep that plaintext from leaking
+        back into the orchestrator-owned argument dict, the request is built
+        against a deep copy of ``args`` and the copy is scrubbed afterwards.
+
+        The whole gate stack (permission/policy/taint/audit/concurrency) wraps
+        this call upstream in ``execute_single_tool`` and is unchanged.
         """
+        import copy
         from shared.local_transport import LoopbackSocket
         request_id = f"req_{tool_name}_{int(time.time() * 1000)}"
+        # Private copy so in-agent credential decryption never writes plaintext
+        # back into the caller's args dict (callers may retain/audit it).
+        call_args = copy.deepcopy(args)
         request = MCPRequest(
             request_id=request_id,
             method="tools/call",
-            params={"name": tool_name, "arguments": args},
+            params={"name": tool_name, "arguments": call_args},
         )
         future = asyncio.get_event_loop().create_future()
         self.pending_requests[request_id] = future
@@ -6029,6 +6058,12 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             return MCPResponse(request_id=request_id,
                                error={"message": str(e), "retryable": True})
         finally:
+            # Scrub decrypted credential plaintext from the private copy.
+            try:
+                if isinstance(call_args, dict):
+                    call_args.pop("_credentials", None)
+            except Exception:
+                pass
             self.pending_requests.pop(request_id, None)
             self.pending_ui_sockets.pop(request_id, None)
 
@@ -6294,6 +6329,15 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         except Exception as e:
             logger.warning(f"_cancel_stream_request failed: {e}")
 
+    def _tool_security_blocked(self, agent_id: Optional[str], tool_name: str) -> bool:
+        """True when a hard security-flag block is set for (agent, tool).
+
+        Mirrors the dispatch-path block in ``_dispatch_tool_call`` so the
+        streaming paths (subscribe / loop) cannot bypass a system-blocked tool.
+        """
+        flags = self.security_flags.get(agent_id, {}) if agent_id else {}
+        return bool(agent_id and tool_name in flags and flags[tool_name].get("blocked"))
+
     async def _handle_push_stream_subscribe(
         self, websocket, session_id: Optional[str], payload: Dict, user_id: str
     ) -> None:
@@ -6341,6 +6385,21 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             return
 
         agent_id = tool_cfg["agent_id"]
+
+        # Hard security-flag block (mirror the dispatch gate) — a system-blocked
+        # tool must never be streamable, even when permissions would allow it.
+        if self._tool_security_blocked(agent_id, tool_name):
+            await self._safe_send(websocket, json.dumps({
+                "type": "stream_error",
+                "request_action": "stream_subscribe",
+                "session_id": session_id,
+                "payload": {
+                    "tool_name": tool_name,
+                    "code": "blocked",
+                    "message": "tool is system-blocked by security review",
+                },
+            }))
+            return
 
         # Permission check (mirrors legacy poll path)
         if not self.tool_permissions.is_tool_allowed(user_id, agent_id, tool_name):
@@ -6443,6 +6502,14 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         tool_cfg = self._streamable_tools[tool_name]
         agent_id = tool_cfg["agent_id"]
 
+        # Hard security-flag block (mirror the dispatch gate).
+        if self._tool_security_blocked(agent_id, tool_name):
+            await self._safe_send(websocket, json.dumps({
+                "type": "stream_error", "tool_name": tool_name,
+                "error": "Tool is system-blocked by security review"
+            }))
+            return
+
         # Permission check
         user_id = self._get_user_id(websocket)
         if not self.tool_permissions.is_tool_allowed(user_id, agent_id, tool_name):
@@ -6522,6 +6589,14 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         user_id = self._get_user_id(websocket)
         while True:
             try:
+                # A tool blocked mid-stream by security review must stop the loop.
+                if self._tool_security_blocked(agent_id, tool_name):
+                    await self._safe_send(websocket, json.dumps({
+                        "type": "stream_error", "tool_name": tool_name,
+                        "error": "Tool is system-blocked by security review"
+                    }))
+                    break
+
                 # Re-check permission each iteration (user may revoke mid-stream)
                 if not self.tool_permissions.is_tool_allowed(user_id, agent_id, tool_name):
                     await self._safe_send(websocket, json.dumps({
@@ -8441,6 +8516,14 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 algorithms=["RS256"],
                 options={"verify_aud": False, "verify_at_hash": False}
             )
+
+            # Bind the token to our realm: reject when the issuer claim is
+            # present and does not match the configured authority (defense
+            # beyond the signature alone; tolerant of a trailing-slash diff).
+            iss = payload.get("iss")
+            if iss and authority and iss.rstrip("/") != authority.rstrip("/"):
+                logger.warning("Token 'iss' does not match the configured authority — rejecting")
+                return None
 
             # Verify authorized party is an accepted client. The web client
             # (expected_client) is always accepted; additional first-party

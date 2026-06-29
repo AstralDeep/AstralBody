@@ -637,11 +637,37 @@ def render_pie_chart(c):
     return _chart_div(c, "pie", {"labels": c.get("labels", []), "data": data, "colors": c.get("colors", [])})
 
 
+def _scrub_plotly_html(obj):
+    """Defang HTML in agent-supplied Plotly text fields before it reaches
+    ``Plotly.newPlot`` on the client.
+
+    Plotly renders some text (titles, ticktext, annotations, hovertext) as
+    HTML, so the agent-emitted spec is a trust boundary that bypasses the
+    renderer's escape-by-default discipline. Strip script/embed tags, inline
+    event handlers, and ``javascript:`` URIs while preserving the benign
+    formatting tags Plotly legitimately uses (``<br>``/``<b>``/``<i>``)."""
+    if isinstance(obj, dict):
+        return {k: _scrub_plotly_html(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_scrub_plotly_html(v) for v in obj]
+    if isinstance(obj, str):
+        s = _re.sub(r"(?is)<\s*script.*?>.*?<\s*/\s*script\s*>", "", obj)
+        s = _re.sub(r"(?is)<\s*/?\s*(script|iframe|object|embed|svg|img|link|meta|style)\b[^>]*>", "", s)
+        s = _re.sub(r"(?i)\son\w+\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", "", s)
+        s = _re.sub(r"(?i)javascript:", "", s)
+        return s
+    return obj
+
+
 def render_plotly_chart(c):
     data = c.get("data") or []
     if not data:
         return ""
-    return _chart_div(c, "plotly", {"data": data, "layout": c.get("layout", {}), "config": c.get("config", {})})
+    return _chart_div(c, "plotly", {
+        "data": _scrub_plotly_html(data),
+        "layout": _scrub_plotly_html(c.get("layout", {})),
+        "config": c.get("config", {}),
+    })
 
 
 def render_color_picker(c):
