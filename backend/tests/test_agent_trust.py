@@ -76,6 +76,25 @@ def test_explicit_optout_wins_over_safe(db, pm):
     assert pm.is_tool_allowed(user_id, agent_id, "some_tool") is False
 
 
+def test_safe_public_agent_allows_fresh_user(db, pm):
+    user_id, agent_id = _fresh_ids()
+    db.upsert_agent_safe(agent_id, True, marked_by="pytest")
+    db.set_agent_ownership(agent_id, "o@e.com", is_public=True)
+    # Safe + PUBLIC: the deny→allow baseline flip applies for a fresh user.
+    assert pm.is_tool_allowed(user_id, agent_id, "some_tool") is True
+    # Call again to hit the 30s _safe_flip_allowed cache.
+    assert pm.is_tool_allowed(user_id, agent_id, "some_tool") is True
+
+
+def test_safe_private_agent_denies_fresh_user(db, pm):
+    user_id, agent_id = _fresh_ids()
+    db.upsert_agent_safe(agent_id, True, marked_by="pytest")
+    db.set_agent_ownership(agent_id, "o@e.com", is_public=False)
+    # Safe but PRIVATE: an owner cannot fleet-expose by marking safe — the flip
+    # is withheld, so a fresh user without an explicit grant is still denied.
+    assert pm.is_tool_allowed(user_id, agent_id, "some_tool") is False
+
+
 @pytest.mark.asyncio
 async def test_mark_safe_requires_admin(db):
     from orchestrator import agent_trust

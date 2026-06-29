@@ -133,6 +133,13 @@ def main():
             time.sleep(1)
             if p_orch.poll() is not None:
                 print(" Orchestrator died!")
+                # Propagate the orchestrator's exit code (e.g. EX_CONFIG 78 from
+                # the fail-closed boot gate) instead of masking it as a clean
+                # supervisor exit. The finally block still runs (process cleanup)
+                # before this SystemExit propagates to the container exit code.
+                _rc = p_orch.returncode
+                if _rc:
+                    raise SystemExit(_rc)
                 break
 
     except KeyboardInterrupt:
