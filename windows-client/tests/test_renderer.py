@@ -110,3 +110,48 @@ def test_bad_component_does_not_crash(qapp):
 def test_supported_types_published(qapp):
     types = supported_types()
     assert "card" in types and "hero" in types and "table" in types
+
+
+# Drift guard: the backend's published primitive vocabulary is
+# `webrender.allowed_primitive_types()` (PRIMITIVE_RENDERERS.keys()). We embed a
+# checked-in snapshot of it here so this test breaks when a backend primitive is
+# added without either a native desktop renderer OR an explicit degradation
+# entry below. Refresh BACKEND_TYPES from backend/webrender/registry.py /
+# renderer.py when the vocabulary legitimately changes.
+BACKEND_TYPES = frozenset({
+    "container", "text", "button", "input", "param_picker", "card", "table",
+    "list", "alert", "progress", "metric", "code", "image", "grid", "tabs",
+    "divider", "collapsible", "bar_chart", "line_chart", "pie_chart",
+    "plotly_chart", "color_picker", "theme_apply", "file_upload",
+    "file_download", "audio", "badge", "hero", "keyvalue", "timeline",
+    "rating", "skeleton", "chat_history", "download_card", "generative",
+})
+
+# Backend primitives intentionally NOT rendered natively on the desktop target
+# (they fall back to a labeled placeholder). Each must have a deliberate reason;
+# adding a type here is an explicit decision to degrade it on desktop.
+KNOWN_DEGRADED = frozenset({
+    "image",         # no native image fetch/decode pipeline yet
+    "audio",         # no native audio playback widget yet
+    "plotly_chart",  # Plotly is web/JS-only; native uses QtCharts bar/line/pie
+    "color_picker",  # theme-editing control, web-chrome only
+    "theme_apply",   # web theme-application acknowledgement, web-chrome only
+    "generative",    # flag-gated web-only generative grammar renderer
+})
+
+
+def test_no_silent_backend_vocabulary_drift():
+    # Every backend primitive must be either natively rendered on desktop or
+    # explicitly listed as degraded — nothing silently degrades.
+    missing = BACKEND_TYPES - set(supported_types())
+    assert missing <= KNOWN_DEGRADED, (
+        f"backend primitives with no desktop renderer and not in KNOWN_DEGRADED: "
+        f"{sorted(missing - KNOWN_DEGRADED)}"
+    )
+
+
+def test_known_degraded_are_real_backend_types():
+    # Guard the guard: a stale degradation entry (type no longer in the backend
+    # vocabulary, or one we since added a renderer for) should be cleaned up.
+    assert KNOWN_DEGRADED <= BACKEND_TYPES
+    assert not (KNOWN_DEGRADED & set(supported_types()))

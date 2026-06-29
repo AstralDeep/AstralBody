@@ -21,6 +21,7 @@ from orchestrator.session_store import assert_production_posture, is_dev_mode
 def _configure_production_secrets(monkeypatch):
     """Minimal valid production config for the extended boot gate."""
     monkeypatch.setenv("WEB_SESSION_ENC_KEY", "x" * 44)
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", "y" * 44)
     monkeypatch.setenv("AUDIT_HMAC_SECRET", f"high-entropy-{uuid.uuid4()}")
     monkeypatch.setenv("KEYCLOAK_AUTHORITY", "https://idp.example/realms/r")
     monkeypatch.setenv("KEYCLOAK_CLIENT_ID", "astral-frontend")
@@ -123,6 +124,31 @@ def test_dev_mode_skips_production_secret_checks(monkeypatch):
                 "AUDIT_HMAC_SECRET", "KEYCLOAK_AUTHORITY"):
         monkeypatch.delenv(var, raising=False)
     assert_production_posture()  # must not raise
+
+
+def test_production_without_credential_key_refuses(monkeypatch):
+    """Hardening: a production boot without CREDENTIAL_ENCRYPTION_KEY is refused
+    — OAuth/Fernet credentials must not fall back to an auto-generated key that
+    is lost on an ephemeral volume (silent fail-open)."""
+    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "false")
+    monkeypatch.setenv("ASTRAL_ENV", "production")
+    _configure_production_secrets(monkeypatch)
+    monkeypatch.delenv("CREDENTIAL_ENCRYPTION_KEY", raising=False)
+    with pytest.raises(SystemExit) as exc:
+        assert_production_posture()
+    assert exc.value.code == 78
+
+
+def test_production_with_weak_agent_key_refuses(monkeypatch):
+    """Hardening: a shipped-placeholder or too-short AGENT_API_KEY is refused in
+    production (a forgeable agent registration secret)."""
+    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "false")
+    monkeypatch.setenv("ASTRAL_ENV", "production")
+    _configure_production_secrets(monkeypatch)
+    monkeypatch.setenv("AGENT_API_KEY", "short")
+    with pytest.raises(SystemExit) as exc:
+        assert_production_posture()
+    assert exc.value.code == 78
 
 
 # ---------------------------------------------------------------------------
