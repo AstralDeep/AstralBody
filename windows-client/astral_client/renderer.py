@@ -16,15 +16,21 @@ history rows, param-picker / table-pagination submits) so the app can post a
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QSizePolicy,
     QTableWidget,
@@ -372,6 +378,244 @@ def _r_button(c, ctx):
     return btn
 
 
+def _to_number(text: str):
+    """Mirror the web client's ``Number(value)`` coercion for number fields."""
+    try:
+        f = float(text)
+    except (TypeError, ValueError):
+        return text
+    return int(f) if f.is_integer() else f
+
+
+def _fill_template(template: str, state: dict) -> str:
+    """Build a submit message from a template + collected field values.
+
+    Mirrors client.js ``submitParamPicker``: ``{__values_json__}`` expands to the
+    pretty-printed state, then ``{field}`` tokens are substituted (strings inline,
+    other values as JSON); unknown tokens are left untouched.
+    """
+    msg = (template or "").replace("{__values_json__}", json.dumps(state, indent=2))
+
+    def _repl(m):
+        k = m.group(1)
+        if k not in state:
+            return m.group(0)
+        v = state[k]
+        return v if isinstance(v, str) else json.dumps(v)
+
+    return re.sub(r"\{(\w+)\}", _repl, msg)
+
+
+def _r_param_picker(c, ctx):
+    """A field form + Submit; on submit emit a ``chat_message`` built from the
+    field values and ``submit_message_template`` (parity with the web target)."""
+    frame = _card_frame()
+    lay = _vbox(10, (16, 14, 16, 14))
+    frame.setLayout(lay)
+    if c.get("title"):
+        lay.addWidget(_label(c["title"], size=16, bold=True))
+    if c.get("description"):
+        lay.addWidget(_label(c["description"], color=T.MUTED, size=13))
+    getters: Dict[str, Callable[[], Any]] = {}
+    for field in c.get("fields", []) or []:
+        if not isinstance(field, dict):
+            continue
+        name = field.get("name", "")
+        label = field.get("label") or name
+        kind = field.get("kind", "text")
+        default = field.get("default")
+        if kind == "boolean":
+            box = QCheckBox(str(label))
+            box.setChecked(bool(default))
+            getters[name] = lambda b=box: b.isChecked()
+            lay.addWidget(box)
+        elif kind == "select":
+            lay.addWidget(_label(label, color=T.MUTED, size=12))
+            combo = QComboBox()
+            opts = [str(o) for o in (field.get("options") or [])]
+            combo.addItems(opts)
+            if default is not None and str(default) in opts:
+                combo.setCurrentText(str(default))
+            getters[name] = lambda cb=combo: cb.currentText()
+            lay.addWidget(combo)
+        elif kind == "checklist":
+            lay.addWidget(_label(label, color=T.MUTED, size=12))
+            sel = set(default) if isinstance(default, list) else set()
+            chips: List = []
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            for opt in field.get("options") or []:
+                btn = QPushButton(str(opt))
+                btn.setCheckable(True)
+                btn.setChecked(opt in sel)
+                row.addWidget(btn)
+                chips.append((opt, btn))
+            row.addStretch(1)
+            lay.addLayout(row)
+            getters[name] = lambda ch=chips: [o for o, b in ch if b.isChecked()]
+        elif kind == "number":
+            lay.addWidget(_label(label, color=T.MUTED, size=12))
+            edit = QLineEdit()
+            if default is not None:
+                edit.setText(str(default))
+            getters[name] = lambda e=edit: None if e.text() == "" else _to_number(e.text())
+            lay.addWidget(edit)
+        else:  # text (default)
+            lay.addWidget(_label(label, color=T.MUTED, size=12))
+            edit = QLineEdit()
+            if default is not None:
+                edit.setText(str(default))
+            getters[name] = lambda e=edit: e.text()
+            lay.addWidget(edit)
+        if field.get("help"):
+            lay.addWidget(_label(field["help"], color=T.MUTED, size=11))
+    template = c.get("submit_message_template", "")
+    submit = QPushButton(str(c.get("submit_label", "Submit")))
+    submit.setObjectName("primary")
+    submit.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+
+    def _submit():
+        state = {k: g() for k, g in getters.items()}
+        ctx.emit("chat_message", {"message": _fill_template(template, state)})
+
+    submit.clicked.connect(_submit)
+    row = QHBoxLayout()
+    row.addStretch(1)
+    row.addWidget(submit)
+    lay.addLayout(row)
+    return frame
+
+
+def _r_input(c, ctx):
+    """A labeled single-line text field + Submit (emits a ``chat_message``)."""
+    w = QWidget()
+    lay = _vbox(6)
+    w.setLayout(lay)
+    name = c.get("name") or "value"
+    label = c.get("label") or c.get("name")
+    if label:
+        lay.addWidget(_label(label, color=T.MUTED, size=12))
+    edit = QLineEdit()
+    edit.setText(str(c.get("value", "")))
+    if c.get("placeholder"):
+        edit.setPlaceholderText(str(c["placeholder"]))
+    template = c.get("submit_message_template", "")
+    submit = QPushButton(str(c.get("submit_label", "Submit")))
+    submit.setObjectName("primary")
+    submit.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+
+    def _submit():
+        val = edit.text()
+        msg = _fill_template(template, {name: val}) if template else val
+        ctx.emit("chat_message", {"message": msg})
+
+    submit.clicked.connect(_submit)
+    edit.returnPressed.connect(_submit)
+    row = QHBoxLayout()
+    row.setSpacing(8)
+    row.addWidget(edit, 1)
+    row.addWidget(submit)
+    lay.addLayout(row)
+    return w
+
+
+def _accept_to_filter(accept: str) -> str:
+    """Turn an HTML ``accept`` string into a Qt file dialog filter."""
+    accept = (accept or "").strip()
+    if not accept or accept == "*/*":
+        return "All files (*)"
+    pats = []
+    for tok in accept.split(","):
+        tok = tok.strip()
+        if tok.startswith("."):
+            pats.append("*" + tok)
+        elif tok and "/" not in tok:
+            pats.append("*." + tok)
+    if not pats:
+        return "All files (*)"
+    return f"Accepted ({' '.join(pats)});;All files (*)"
+
+
+def _r_file_upload(c, ctx):
+    """A native file-picker button. When the component carries an ``action`` the
+    chosen path is emitted with its payload (mirrors ``_r_button`` wiring)."""
+    w = QWidget()
+    lay = _vbox(6)
+    w.setLayout(lay)
+    label = c.get("label", "Upload File")
+    accept = c.get("accept", "")
+    action = c.get("action")
+    payload = c.get("payload") or {}
+    btn = QPushButton(str(label))
+    btn.setObjectName("primary")
+    btn.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+    chosen = _label("", color=T.MUTED, size=12)
+
+    def _pick():
+        path, _sel = QFileDialog.getOpenFileName(
+            btn, str(label), "", _accept_to_filter(accept)
+        )
+        if not path:
+            return
+        chosen.setText(path)
+        if action:
+            data = dict(payload)
+            data["path"] = path
+            ctx.emit(action, data)
+
+    btn.clicked.connect(_pick)
+    row = QHBoxLayout()
+    row.setSpacing(8)
+    row.addWidget(btn)
+    row.addWidget(chosen, 1)
+    lay.addLayout(row)
+    return w
+
+
+def _r_file_download(c, ctx):
+    """A download button/link showing the filename, opening the URL externally,
+    plus a SHA-256 integrity block when present. Serves both ``file_download``
+    and the richer ``download_card``."""
+    frame = _card_frame()
+    lay = _vbox(8, (16, 12, 16, 12))
+    frame.setLayout(lay)
+    if c.get("title"):
+        lay.addWidget(_label(c["title"], size=14, bold=True))
+    if c.get("description"):
+        lay.addWidget(_label(c["description"], color=T.MUTED, size=12))
+    version = c.get("version")
+    platform = c.get("platform")
+    meta = " · ".join(
+        x for x in [f"v{version}" if version else "", platform or ""] if x
+    )
+    if meta:
+        lay.addWidget(_label(meta, color=T.MUTED, size=11))
+    # file_download uses `url`; download_card uses `download_url`.
+    url = c.get("url") or c.get("download_url") or ""
+    filename = c.get("filename") or c.get("title")
+    label = c.get("label") or (f"Download {filename}" if filename else "Download File")
+    valid = bool(url) and url != "#" and str(url).startswith(("http", "/"))
+    btn = QPushButton(str(label))
+    btn.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+    if valid:
+        btn.setObjectName("primary")
+        btn.clicked.connect(lambda u=url: QDesktopServices.openUrl(QUrl(str(u))))
+    else:
+        btn.setEnabled(False)
+        btn.setText(str(label) + " (unavailable)")
+    lay.addWidget(btn)
+    sha = str(c.get("sha256") or c.get("sha") or "").lower()
+    if sha:
+        lay.addWidget(_label("SHA-256", color=T.MUTED, size=11, bold=True))
+        sha_lab = _label(sha, color=T.MUTED, size=11)
+        sha_lab.setStyleSheet(
+            f"color:{T.MUTED}; font-family:Consolas,monospace; font-size:11px;"
+            "background:transparent;"
+        )
+        lay.addWidget(sha_lab)
+    return frame
+
+
 def _r_code(c, ctx):
     edit = QPlainTextEdit()
     edit.setReadOnly(True)
@@ -580,6 +824,11 @@ REGISTRY: Dict[str, Callable[[dict, RenderContext], QWidget]] = {
     "rating": _r_rating,
     "alert": _r_alert,
     "button": _r_button,
+    "param_picker": _r_param_picker,
+    "input": _r_input,
+    "file_upload": _r_file_upload,
+    "file_download": _r_file_download,
+    "download_card": _r_file_download,
     "code": _r_code,
     "divider": _r_divider,
     "progress": _r_progress,

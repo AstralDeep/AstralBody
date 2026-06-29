@@ -78,9 +78,26 @@ def _is_mock() -> bool:
 def _secret() -> bytes:
     """Cookie-signing key. Must be identical across workers/restarts (FR-008):
     falls back through every documented session key before the per-process
-    random secret (which only suits single-process dev)."""
-    return (os.getenv("WEB_SESSION_SECRET") or os.getenv("WEB_SESSION_ENC_KEY")
-            or os.getenv("OFFLINE_GRANT_ENC_KEY") or _PROCESS_SECRET).encode()
+    random secret (which only suits single-process dev).
+
+    A dedicated ``WEB_SESSION_SECRET`` is used verbatim. When only an
+    *encryption* key is available (``WEB_SESSION_ENC_KEY`` /
+    ``OFFLINE_GRANT_ENC_KEY``), it is NOT used raw for signing — it is run
+    through HKDF so the cookie-signing key is cryptographically separated from
+    the at-rest encryption key (key separation)."""
+    explicit = os.getenv("WEB_SESSION_SECRET")
+    if explicit:
+        return explicit.encode()
+    enc = os.getenv("WEB_SESSION_ENC_KEY") or os.getenv("OFFLINE_GRANT_ENC_KEY")
+    if enc:
+        try:
+            from cryptography.hazmat.primitives import hashes
+            from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+            return HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
+                        info=b"astral-web-cookie-hmac").derive(enc.encode())
+        except Exception:
+            return enc.encode()
+    return _PROCESS_SECRET.encode()
 
 
 def _sign(sid: str) -> str:
@@ -434,6 +451,15 @@ async def auth_login(request: Request):
                                 "Please try again in a moment.", status=503)
     verifier, challenge = _pkce_pair()
     state = secrets.token_urlsafe(24)
+    # Bound the pending-auth table: expire stale CSRF/PKCE states (a login that
+    # was started but never returned to the callback) and cap total size so a
+    # flood of /auth/login hits can't grow it without limit.
+    _now = time.time()
+    for _stale in [k for k, v in _PENDING.items() if _now - v.get("created_at", 0) > 600]:
+        _PENDING.pop(_stale, None)
+    if len(_PENDING) > 4096:
+        for _old in sorted(_PENDING, key=lambda k: _PENDING[k].get("created_at", 0))[: len(_PENDING) - 4096]:
+            _PENDING.pop(_old, None)
     _PENDING[state] = {"code_verifier": verifier, "created_at": time.time(), "next": nxt}
     from urllib.parse import urlencode
     params = urlencode({
@@ -713,7 +739,11 @@ def _establish_session(request: Request, payload: Dict[str, Any], nxt: str) -> R
                                exc_info=True)
     safe_next = _validate_next(nxt)
     resp = RedirectResponse(safe_next, status_code=303)
-    secure = str(request.base_url).startswith("https")
+    # Production posture: always mark the session cookie Secure, even if the
+    # request scheme reads as http behind a TLS-terminating proxy. Development
+    # keeps the scheme-derived value so http://localhost still works.
+    from orchestrator.session_store import is_dev_mode
+    secure = (not is_dev_mode()) or str(request.base_url).startswith("https")
     resp.set_cookie(COOKIE_NAME, _sign(sid), httponly=True, samesite="lax",
                     secure=secure, max_age=HARD_MAX_SECONDS, path="/")
     return resp

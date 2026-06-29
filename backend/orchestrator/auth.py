@@ -313,8 +313,11 @@ async def verify_user(user_data: dict = Depends(get_current_user_payload)):
 
 async def verify_admin(user_data: dict = Depends(get_current_user_payload)):
     if not user_data:
-        logger.warning("verify_admin: user_data is empty")
-        return {}
+        # Fail closed: an empty principal must be denied, not allowed through
+        # with an empty dict (a 403 here is the same shape callers already
+        # handle for the missing-admin-role case below).
+        logger.warning("verify_admin: empty principal — denying (fail closed)")
+        raise HTTPException(status_code=403, detail="Not authorized (Requires 'admin' role)")
     roles = _extract_roles(user_data)
     logger.debug(f"verify_admin: extracted roles = {roles}")
     if "admin" not in roles:
@@ -402,4 +405,8 @@ def validate_agent_api_key(api_key: str) -> bool:
             "refusing unauthenticated agent connection (fail closed, 028 FR-016)"
         )
         return False
-    return api_key == configured_key
+    import hmac
+    # Constant-time comparison so a timing side-channel can't reveal the key
+    # byte-by-byte. configured_key is guaranteed non-empty here; coerce a
+    # possibly-None presented key to "" so compare_digest never sees None.
+    return hmac.compare_digest(api_key or "", configured_key)

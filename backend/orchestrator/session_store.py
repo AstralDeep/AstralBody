@@ -66,6 +66,13 @@ def assert_production_posture() -> None:
             "web sessions cannot be encrypted at rest. Generate one: python -c "
             "\"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
         )
+    if not os.getenv("CREDENTIAL_ENCRYPTION_KEY", "").strip():
+        problems.append(
+            "CREDENTIAL_ENCRYPTION_KEY is unset — OAuth/Fernet credentials would be "
+            "encrypted under an auto-generated key that is lost on an ephemeral "
+            "volume (silent fail-open). Generate one: python -c \"from "
+            "cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+        )
     audit_secret = os.getenv("AUDIT_HMAC_SECRET", "").strip()
     if not audit_secret or audit_secret in _DEV_PLACEHOLDER_SECRETS:
         problems.append(
@@ -80,6 +87,12 @@ def assert_production_posture() -> None:
         ):
             if not any(os.getenv(name, "").strip() for name in (var, *aliases)):
                 problems.append(f"{var} is unset — the OIDC flow cannot operate.")
+    agent_key = os.getenv("AGENT_API_KEY", "").strip()
+    if agent_key and (agent_key in _DEV_PLACEHOLDER_SECRETS or len(agent_key) < 16):
+        problems.append(
+            "AGENT_API_KEY is a shipped placeholder or too short (<16 chars) — "
+            "set a high-entropy value so agent registrations cannot be forged."
+        )
     if problems:
         logger.critical(
             "REFUSING TO START (production posture, ASTRAL_ENV != development) — "

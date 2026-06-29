@@ -680,18 +680,27 @@ async def handle_safe_set(orch, websocket, user_id, roles, payload):
     params = _detail_params(agent_id, payload)
     db = orch.history.db
     from orchestrator import agent_trust
-    eff_roles = list(roles or [])
+    # Never trust a literal "owner" role from the token — the safe-marking
+    # "owner" privilege must derive ONLY from verified ownership of THIS agent
+    # (otherwise a Keycloak realm role literally named "owner" would grant
+    # blanket safe-marking of any agent).
+    eff_roles = [r for r in (roles or []) if r != "owner"]
     ownership = db.get_agent_ownership(agent_id) or {}
     user_email = _user_email(orch, user_id)
-    if user_email and ownership.get("owner_email") == user_email and "owner" not in eff_roles:
+    if user_email and ownership.get("owner_email") == user_email:
         eff_roles.append("owner")
     res = await agent_trust.mark_safe(
         db, agent_id, bool(payload.get("is_safe")), user_id, eff_roles, chat_id=None)
     if not res.get("ok"):
         return ("agents", params, notice_block(
             "error", "Only an admin or the agent owner can change safe status."))
-    state = "safe" if res.get("is_safe") else "not safe"
-    return ("agents", params, notice_block("success", f"Agent is now marked {state}."))
+    if res.get("is_safe"):
+        msg = ("Agent is now marked safe. Note: this auto-enables ALL of this "
+               "agent's tools — including any write/system tools — for every "
+               "user who has not set an explicit per-tool preference.")
+    else:
+        msg = "Agent is now marked not safe."
+    return ("agents", params, notice_block("success", msg))
 
 
 async def handle_credentials_save(orch, websocket, user_id, roles, payload):

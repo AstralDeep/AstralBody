@@ -211,7 +211,7 @@
     var htmlStr = msg.html || "";
     if (msg.error) {
       htmlStr = '<div class="text-xs text-red-400 border border-red-500/20 rounded p-2">' +
-        (msg.error.message || "stream error") + "</div>";
+        escapeText(msg.error.message || "stream error") + "</div>";
     }
     if (!htmlStr && !msg.terminal) return;
     if (node) { node.innerHTML = htmlStr; processSideEffects(node); }
