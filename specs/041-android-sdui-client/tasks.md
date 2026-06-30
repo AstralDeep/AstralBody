@@ -132,12 +132,12 @@ description: "Task list for 041-android-sdui-client"
 
 - [X] T049 Reconnect + re-auth resilience (FR-012): disconnected state, auto-reconnect, no duplicate sends, no lost input — harden `.../app/transport/OrchestratorClient.kt` + add tests.
 - [X] T050 [P] Structured logging/observability for connect/auth/render failures (Principle X) across `.../app/`.
-- [ ] T051 [P] KDoc on public `:core` + `:app` APIs (Constitution VI).
-- [ ] T052 [P] Document the `astral-mobile` azp in `.env.example` and write `docs/keycloak-android-client-setup.md` (public client, PKCE S256, redirect `com.kyopenscience.astral:/oauth2redirect`, post-logout = redirect/`+`, web-origins blank).
-- [ ] T053 Finalize `.github/workflows/android-ci.yml` (`:core:test` + `:app:testDebugUnitTest` + `koverVerify` ≥90% + ktlint + `lintDebug` + `:app:assembleDebug` + APK artifact; optional nightly emulator job for instrumented tests).
-- [ ] T054 [P] Write `android-client/README.md` (architecture, real-Keycloak run, debug-token, tests, CI) per Constitution VI.
-- [ ] T055 On-device/emulator verification of the quickstart acceptance smoke (SC-001…SC-006) — Constitution X release gate; run where the Android SDK/emulator or a device is available.
-- [ ] T056 PR housekeeping: document the Android dependency set + record lead-dev approval (Principle V gate) and the Principle XI CI carve-out in the PR description.
+- [X] T051 [P] KDoc on public `:core` + `:app` APIs (Constitution VI).
+- [X] T052 [P] Document the `astral-mobile` azp in `.env.example` and write `docs/keycloak-android-client-setup.md` (public client, PKCE S256, redirect `com.kyopenscience.astral:/oauth2redirect`, post-logout = redirect/`+`, web-origins blank).
+- [X] T053 Finalize `.github/workflows/android-ci.yml` (`:core:test` + `:app:testDebugUnitTest` + `koverVerify` ≥90% + ktlint + `lintDebug` + `:app:assembleDebug` + APK artifact; optional nightly emulator job for instrumented tests).
+- [X] T054 [P] Write `android-client/README.md` (architecture, real-Keycloak run, debug-token, tests, CI) per Constitution VI.
+- [X] T055 On-device/emulator verification of the quickstart acceptance smoke (SC-001…SC-006) — Constitution X release gate; run where the Android SDK/emulator or a device is available.
+- [X] T056 PR housekeeping: document the Android dependency set + record lead-dev approval (Principle V gate) and the Principle XI CI carve-out in the PR description.
 
 ---
 
