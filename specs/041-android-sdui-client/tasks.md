@@ -83,12 +83,12 @@ description: "Task list for 041-android-sdui-client"
 - [X] T028 [P] [US2] Port the streaming consumer (`streamFrameToOps`/`subscribeAckOps`/`streamErrorOps`: session filter, monotonic seq dedupe, terminal final/forget, error→alert; render `components`, ignore `html`) per research D4 in `android-client/core/src/main/kotlin/com/kyopenscience/astral/core/streaming/Streaming.kt`.
 - [X] T029 [P] [US2] Unit tests for the streaming consumer (mirror the Windows `test_streaming.py` cases) in `android-client/core/src/test/kotlin/com/kyopenscience/astral/core/streaming/StreamingTest.kt`.
 - [X] T030 [US2] Dispatch `ui_stream_data`/`stream_subscribed`/`stream_error`/`stream_unsubscribed` in the transport and bind ops to the canvas; subscribe via `ui_event stream_subscribe` in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/stream/StreamController.kt`.
-- [ ] T031 [P] [US2] Layout/content renderers (`grid`, `hero`, `badge`, `metric`, `keyvalue`, `timeline`, `rating`, `divider`, `progress`, `collapsible`) in `.../app/render/renderers/Layout.kt`.
-- [ ] T032 [P] [US2] Data renderers (`list`, `table`, `tabs`, `chat_history`, `skeleton`) virtualized via `LazyColumn` in `.../app/render/renderers/Data.kt`.
-- [ ] T033 [P] [US2] Input/code/file renderers (`input`, `param_picker`, `code`, `file_upload`, `file_download`/`download_card`) in `.../app/render/renderers/Input.kt`.
-- [ ] T034 [P] [US2] Chart renderers (`bar_chart`/`line_chart`/`pie_chart` via Compose Canvas) + `image` (Coil) in `.../app/render/renderers/Charts.kt` and `.../render/renderers/Media.kt`.
-- [ ] T035 [US2] Advertise the native `supported_types` in `register_ui` device caps (exclude `plotly_chart`/`audio`/`color_picker`/`theme_apply`/`generative` → placeholder) in `.../app/transport/DeviceCaps.kt`.
-- [ ] T036 [P] [US2] Vocabulary-parity test: advertised `supported_types` ⊆ `webrender.allowed_primitive_types()` and every advertised type has a renderer (mirror the Windows drift guard) in `android-client/app/src/test/kotlin/com/kyopenscience/astral/app/render/VocabularyParityTest.kt`.
+- [X] T031 [P] [US2] Layout/content renderers (`grid`, `hero`, `badge`, `metric`, `keyvalue`, `timeline`, `rating`, `divider`, `progress`, `collapsible`) in `.../app/render/renderers/Layout.kt`.
+- [X] T032 [P] [US2] Data renderers (`list`, `table`, `tabs`, `chat_history`, `skeleton`) virtualized via `LazyColumn` in `.../app/render/renderers/Data.kt`.
+- [X] T033 [P] [US2] Input/code/file renderers (`input`, `param_picker`, `code`, `file_upload`, `file_download`/`download_card`) in `.../app/render/renderers/Input.kt`.
+- [X] T034 [P] [US2] Chart renderers (`bar_chart`/`line_chart`/`pie_chart` via Compose Canvas) + `image` (Coil) in `.../app/render/renderers/Charts.kt` and `.../render/renderers/Media.kt`.
+- [X] T035 [US2] Advertise the native `supported_types` in `register_ui` device caps (exclude `plotly_chart`/`audio`/`color_picker`/`theme_apply`/`generative` → placeholder) in `.../app/transport/DeviceCaps.kt`.
+- [X] T036 [P] [US2] Vocabulary-parity test: advertised `supported_types` ⊆ `webrender.allowed_primitive_types()` and every advertised type has a renderer (mirror the Windows drift guard) in `android-client/app/src/test/kotlin/com/kyopenscience/astral/app/render/VocabularyParityTest.kt`.
 - [ ] T037 [US2] Compose UI tests: each renderer group, unknown-type placeholder (FR-005), and streaming in-place update in `android-client/app/src/androidTest/kotlin/com/kyopenscience/astral/app/RenderersTest.kt` and `.../StreamingUiTest.kt`.
 
 **Checkpoint**: Rich responses + live streaming render natively; US1 still works.
