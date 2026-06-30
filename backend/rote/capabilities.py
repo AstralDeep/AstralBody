@@ -25,6 +25,7 @@ logger = logging.getLogger("rote.capabilities")
 class DeviceType(str, Enum):
     BROWSER = "browser"  # Full desktop browser
     WINDOWS = "windows"  # Native Windows desktop app (renders structured components natively)
+    ANDROID = "android"  # Native Android app (phone/tablet/foldable; renders structured components natively)
     TABLET  = "tablet"   # iPad / Android tablet (~768-1024px)
     MOBILE  = "mobile"   # Phone (<=480px viewport)
     WATCH   = "watch"    # Smartwatch (<=200px viewport, or explicit)
@@ -46,6 +47,17 @@ _BASE_HOST_CONFIG: Dict[str, dict] = {
     # a `supported_types` set so ROTE substitutes the web-only primitives
     # (e.g. plotly_chart) it can't draw natively.
     "windows": dict(max_grid_columns=6, supports_charts=True, supports_tables=True,
+                    supports_code=True, supports_file_io=True, supports_tabs=True,
+                    max_text_chars=0, max_table_rows=0, max_table_cols=0,
+                    max_actions=0, supports_interactivity=True),
+    # Native Android app (phone/tablet/foldable): a full-capability native surface
+    # like `windows`. It renders structured components with native Compose widgets
+    # (not HTML) and reports a `supported_types` set so ROTE substitutes only the
+    # primitives it can't draw natively. The client does its OWN responsive layout
+    # (WindowSizeClass), so ROTE applies content substitution here — NOT the
+    # web-oriented mobile/tablet density limits (which would, e.g., strip code on
+    # a phone). Operators can still tune it via the ROTE_HOST_CONFIG env override.
+    "android": dict(max_grid_columns=6, supports_charts=True, supports_tables=True,
                     supports_code=True, supports_file_io=True, supports_tabs=True,
                     max_text_chars=0, max_table_rows=0, max_table_cols=0,
                     max_actions=0, supports_interactivity=True),
