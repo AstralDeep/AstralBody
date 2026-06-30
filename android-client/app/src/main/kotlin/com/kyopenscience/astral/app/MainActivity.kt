@@ -44,6 +44,7 @@ import com.kyopenscience.astral.app.transport.OrchestratorClient
 import com.kyopenscience.astral.app.transport.deviceCapabilities
 import com.kyopenscience.astral.app.ui.AppViewModel
 import com.kyopenscience.astral.app.ui.theme.AstralTheme
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
@@ -57,7 +58,7 @@ class MainActivity : ComponentActivity() {
     private val authLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             val data = result.data ?: return@registerForActivityResult
-            lifecycleScope.launch {
+            lifecycleScope.launch(Dispatchers.IO) {
                 runCatching {
                     val state = oidc.exchange(data)
                     store.save(state)
