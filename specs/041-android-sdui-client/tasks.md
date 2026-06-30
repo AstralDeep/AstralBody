@@ -80,9 +80,9 @@ description: "Task list for 041-android-sdui-client"
 
 **Independent Test**: Trigger rich + streaming responses; each renders natively, streams update in place, an unknown type shows a placeholder.
 
-- [ ] T028 [P] [US2] Port the streaming consumer (`streamFrameToOps`/`subscribeAckOps`/`streamErrorOps`: session filter, monotonic seq dedupe, terminal final/forget, error→alert; render `components`, ignore `html`) per research D4 in `android-client/core/src/main/kotlin/com/kyopenscience/astral/core/streaming/Streaming.kt`.
-- [ ] T029 [P] [US2] Unit tests for the streaming consumer (mirror the Windows `test_streaming.py` cases) in `android-client/core/src/test/kotlin/com/kyopenscience/astral/core/streaming/StreamingTest.kt`.
-- [ ] T030 [US2] Dispatch `ui_stream_data`/`stream_subscribed`/`stream_error`/`stream_unsubscribed` in the transport and bind ops to the canvas; subscribe via `ui_event stream_subscribe` in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/stream/StreamController.kt`.
+- [X] T028 [P] [US2] Port the streaming consumer (`streamFrameToOps`/`subscribeAckOps`/`streamErrorOps`: session filter, monotonic seq dedupe, terminal final/forget, error→alert; render `components`, ignore `html`) per research D4 in `android-client/core/src/main/kotlin/com/kyopenscience/astral/core/streaming/Streaming.kt`.
+- [X] T029 [P] [US2] Unit tests for the streaming consumer (mirror the Windows `test_streaming.py` cases) in `android-client/core/src/test/kotlin/com/kyopenscience/astral/core/streaming/StreamingTest.kt`.
+- [X] T030 [US2] Dispatch `ui_stream_data`/`stream_subscribed`/`stream_error`/`stream_unsubscribed` in the transport and bind ops to the canvas; subscribe via `ui_event stream_subscribe` in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/stream/StreamController.kt`.
 - [ ] T031 [P] [US2] Layout/content renderers (`grid`, `hero`, `badge`, `metric`, `keyvalue`, `timeline`, `rating`, `divider`, `progress`, `collapsible`) in `.../app/render/renderers/Layout.kt`.
 - [ ] T032 [P] [US2] Data renderers (`list`, `table`, `tabs`, `chat_history`, `skeleton`) virtualized via `LazyColumn` in `.../app/render/renderers/Data.kt`.
 - [ ] T033 [P] [US2] Input/code/file renderers (`input`, `param_picker`, `code`, `file_upload`, `file_download`/`download_card`) in `.../app/render/renderers/Input.kt`.

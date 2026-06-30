@@ -10,6 +10,9 @@ import com.kyopenscience.astral.core.protocol.DeviceCapabilities
 import com.kyopenscience.astral.core.protocol.Inbound
 import com.kyopenscience.astral.core.sdui.Canvas
 import com.kyopenscience.astral.core.sdui.Component
+import com.kyopenscience.astral.core.streaming.streamErrorOps
+import com.kyopenscience.astral.core.streaming.streamFrameToOps
+import com.kyopenscience.astral.core.streaming.subscribeAckOps
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -42,10 +45,12 @@ class AppViewModel(private val client: OrchestratorClient) : ViewModel() {
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     private var session: Job? = null
+    private val seqState = mutableMapOf<String, Int>()
 
     /** Begin (or restart) the session with a bearer token + device caps. */
     fun start(token: String, device: DeviceCapabilities) {
         session?.cancel()
+        seqState.clear()
         session =
             viewModelScope.launch {
                 launch {
@@ -91,6 +96,12 @@ class AppViewModel(private val client: OrchestratorClient) : ViewModel() {
                     turns = msg.chat.messages.map { ChatTurn(it.role, it.content) },
                 )
             is Inbound.ChatStatus -> s.copy(statusText = msg.message ?: msg.status)
+            is Inbound.UiStreamData ->
+                s.copy(canvas = Canvas.apply(s.canvas, streamFrameToOps(msg, s.activeChatId, seqState)))
+            is Inbound.StreamSubscribed ->
+                s.copy(canvas = Canvas.apply(s.canvas, subscribeAckOps(msg)))
+            is Inbound.StreamErrorMsg ->
+                s.copy(canvas = Canvas.apply(s.canvas, streamErrorOps(msg)))
             else -> s
         }
 
