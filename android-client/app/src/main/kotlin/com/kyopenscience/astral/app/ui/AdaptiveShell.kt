@@ -14,7 +14,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.adaptive.currentWindowAdaptiveInfo
@@ -54,15 +53,14 @@ fun AdaptiveShell(vm: AppViewModel, renderer: Renderer) {
 
 @Composable
 private fun StackedShell(state: UiState, renderer: Renderer, onSend: (String) -> Unit) {
-    Scaffold(bottomBar = { InputBar(onSend) }) { padding ->
-        Column(modifier = Modifier.fillMaxSize().padding(padding)) {
-            StatusLine(state.statusText)
-            if (state.turns.isNotEmpty()) {
-                ChatList(state.turns, Modifier.fillMaxWidth().weight(0.4f))
-                HorizontalDivider()
-            }
-            CanvasHost(components = state.canvas, renderer = renderer, modifier = Modifier.weight(1f))
+    Column(modifier = Modifier.fillMaxSize()) {
+        StatusLine(state.statusText)
+        if (state.turns.isNotEmpty()) {
+            ChatList(state.turns, Modifier.fillMaxWidth().weight(0.4f))
+            HorizontalDivider()
         }
+        CanvasHost(components = state.canvas, renderer = renderer, modifier = Modifier.weight(1f))
+        InputBar(onSend)
     }
 }
 

@@ -115,13 +115,13 @@ description: "Task list for 041-android-sdui-client"
 
 **Independent Test**: Toggle an agent + a permission, reopen a past chat, page/filter the personal audit log.
 
-- [ ] T041 [P] [US4] Port REST shaping (`auditUrl`, `parseAuditResponse`, `RestError`) per contracts/rest-endpoints.md in `android-client/core/src/main/kotlin/com/kyopenscience/astral/core/rest/Audit.kt`.
-- [ ] T042 [P] [US4] Unit tests for REST shaping (mirror the Windows `test_rest.py` cases) in `android-client/core/src/test/kotlin/com/kyopenscience/astral/core/rest/AuditTest.kt`.
-- [ ] T043 [P] [US4] Authenticated REST client (OkHttp + `Bearer`) with background fetch → UI state in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/rest/RestClient.kt`.
-- [ ] T044 [US4] Agents screen (`discover_agents`→`agent_list`; `enable_recommended_agents`; `set_agent_permissions`; per-tool toggles) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/ui/AgentsScreen.kt`.
-- [ ] T045 [US4] History screen (`get_history`→`history_list`; `load_chat`→`chat_loaded` replay) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/ui/HistoryScreen.kt`.
-- [ ] T046 [US4] Audit screen (GET `/api/audit`; `event_class`/`outcome`/`q` filters; cursor "load more"; outcome colour; user-scoped) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/ui/AuditScreen.kt`.
-- [ ] T047 [P] [US4] `chrome_render` acknowledge (no web embed; native notice — FR-013) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/stream/ChromeRender.kt`.
+- [X] T041 [P] [US4] Port REST shaping (`auditUrl`, `parseAuditResponse`, `RestError`) per contracts/rest-endpoints.md in `android-client/core/src/main/kotlin/com/kyopenscience/astral/core/rest/Audit.kt`.
+- [X] T042 [P] [US4] Unit tests for REST shaping (mirror the Windows `test_rest.py` cases) in `android-client/core/src/test/kotlin/com/kyopenscience/astral/core/rest/AuditTest.kt`.
+- [X] T043 [P] [US4] Authenticated REST client (OkHttp + `Bearer`) with background fetch → UI state in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/rest/RestClient.kt`.
+- [X] T044 [US4] Agents screen (`discover_agents`→`agent_list`; `enable_recommended_agents`; `set_agent_permissions`; per-tool toggles) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/ui/AgentsScreen.kt`.
+- [X] T045 [US4] History screen (`get_history`→`history_list`; `load_chat`→`chat_loaded` replay) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/ui/HistoryScreen.kt`.
+- [X] T046 [US4] Audit screen (GET `/api/audit`; `event_class`/`outcome`/`q` filters; cursor "load more"; outcome colour; user-scoped) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/ui/AuditScreen.kt`.
+- [X] T047 [P] [US4] `chrome_render` acknowledge (no web embed; native notice — FR-013) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/stream/ChromeRender.kt`.
 - [ ] T048 [US4] Compose UI tests: agent toggle, history reopen, audit list + filter + paging in `android-client/app/src/androidTest/kotlin/com/kyopenscience/astral/app/SurfacesTest.kt`.
 
 **Checkpoint**: All four stories independently functional.
