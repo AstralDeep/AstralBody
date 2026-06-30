@@ -8,6 +8,9 @@ object AppConfig {
     /** Orchestrator WebSocket endpoint. */
     const val WS_URL: String = "wss://sandbox.ai.uky.edu/ws"
 
+    /** REST base (audit, etc.) — same origin as [WS_URL]. */
+    const val API_BASE: String = "https://sandbox.ai.uky.edu"
+
     /** Keycloak realm authority (OIDC discovery base) — used by US1 auth. */
     const val KEYCLOAK_AUTHORITY: String = "https://iam.ai.uky.edu/realms/Astral"
 

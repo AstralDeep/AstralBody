@@ -4,8 +4,12 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import com.kyopenscience.astral.app.rest.AstralRest
+import com.kyopenscience.astral.app.rest.AuditEvent
 import com.kyopenscience.astral.app.transport.ConnectionState
 import com.kyopenscience.astral.app.transport.OrchestratorClient
+import com.kyopenscience.astral.core.protocol.Agent
+import com.kyopenscience.astral.core.protocol.ChatSummary
 import com.kyopenscience.astral.core.protocol.DeviceCapabilities
 import com.kyopenscience.astral.core.protocol.Inbound
 import com.kyopenscience.astral.core.sdui.Canvas
@@ -20,35 +24,47 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.put
 
 data class ChatTurn(val role: String, val text: String)
 
+/** The top-level navigable surfaces (US4). */
+enum class Screen { Chat, Agents, History, Audit }
+
 data class UiState(
     val connection: ConnectionState = ConnectionState.Disconnected,
+    val screen: Screen = Screen.Chat,
     val activeChatId: String? = null,
     val turns: List<ChatTurn> = emptyList(),
     val canvas: List<Component> = emptyList(),
     val statusText: String? = null,
+    val agents: List<Agent> = emptyList(),
+    val history: List<ChatSummary> = emptyList(),
+    val audit: List<AuditEvent> = emptyList(),
 )
 
 /**
- * Owns the connection + derived UI state. Collects the transport's inbound flow
- * and folds each [Inbound] into [state]; sends chat/events out. The bearer token
- * is supplied by [start] (US1 wires real OIDC); the ViewModel is auth-agnostic.
- *
- * Streaming (`ui_stream_data`) and the management surfaces (agents/history/audit)
- * are folded in by their own stories (US2/US4); foundational handles chat + canvas.
+ * Owns the connection + derived UI state. Folds each [Inbound] into [state] and
+ * sends chat/events out; the management surfaces (agents/history) ride the
+ * existing WS data actions, and audit reads `GET /api/audit` via [rest]. The
+ * bearer token from [start] authorizes both.
  */
-class AppViewModel(private val client: OrchestratorClient) : ViewModel() {
+class AppViewModel(
+    private val client: OrchestratorClient,
+    private val rest: AstralRest,
+) : ViewModel() {
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     private var session: Job? = null
+    private var token: String? = null
     private val seqState = mutableMapOf<String, Int>()
 
     /** Begin (or restart) the session with a bearer token + device caps. */
     fun start(token: String, device: DeviceCapabilities) {
+        this.token = token
         session?.cancel()
         seqState.clear()
         session =
@@ -70,8 +86,50 @@ class AppViewModel(private val client: OrchestratorClient) : ViewModel() {
         client.sendChat(text, _state.value.activeChatId)
     }
 
-    fun sendEvent(action: String, payload: JsonObject) {
+    fun sendEvent(action: String, payload: JsonObject = JsonObject(emptyMap())) {
         client.sendEvent(action, _state.value.activeChatId, payload)
+    }
+
+    // --- US4 surfaces -------------------------------------------------------
+
+    /** Switch surface and lazily fetch its data. */
+    fun goTo(screen: Screen) {
+        _state.value = _state.value.copy(screen = screen)
+        when (screen) {
+            Screen.Agents -> sendEvent("discover_agents")
+            Screen.History -> sendEvent("get_history")
+            Screen.Audit -> loadAudit()
+            Screen.Chat -> Unit
+        }
+    }
+
+    fun openChat(chatId: String) {
+        sendEvent("load_chat", buildJsonObject { put("chat_id", chatId) })
+        _state.value = _state.value.copy(screen = Screen.Chat)
+    }
+
+    fun setAgentEnabled(agent: Agent, enabled: Boolean) {
+        sendEvent(
+            "set_agent_permissions",
+            buildJsonObject {
+                put("agent_id", agent.id)
+                put("enabled", enabled)
+            },
+        )
+        sendEvent("discover_agents")
+    }
+
+    fun enableRecommended() {
+        sendEvent("enable_recommended_agents")
+        sendEvent("discover_agents")
+    }
+
+    private fun loadAudit() {
+        val t = token ?: return
+        viewModelScope.launch {
+            val events = runCatching { rest.audit(t) }.getOrDefault(emptyList())
+            _state.value = _state.value.copy(audit = events)
+        }
     }
 
     private fun reduce(s: UiState, msg: Inbound): UiState =
@@ -96,6 +154,8 @@ class AppViewModel(private val client: OrchestratorClient) : ViewModel() {
                     turns = msg.chat.messages.map { ChatTurn(it.role, it.content) },
                 )
             is Inbound.ChatStatus -> s.copy(statusText = msg.message ?: msg.status)
+            is Inbound.AgentList -> s.copy(agents = msg.agents)
+            is Inbound.HistoryList -> s.copy(history = msg.chats)
             is Inbound.UiStreamData ->
                 s.copy(canvas = Canvas.apply(s.canvas, streamFrameToOps(msg, s.activeChatId, seqState)))
             is Inbound.StreamSubscribed ->
@@ -115,9 +175,9 @@ class AppViewModel(private val client: OrchestratorClient) : ViewModel() {
         }.trim()
 
     companion object {
-        fun factory(client: OrchestratorClient) =
+        fun factory(client: OrchestratorClient, rest: AstralRest) =
             viewModelFactory {
-                initializer { AppViewModel(client) }
+                initializer { AppViewModel(client, rest) }
             }
     }
 }

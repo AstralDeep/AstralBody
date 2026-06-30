@@ -30,10 +30,11 @@ import com.kyopenscience.astral.app.auth.TokenStore
 import com.kyopenscience.astral.app.render.Emit
 import com.kyopenscience.astral.app.render.Renderer
 import com.kyopenscience.astral.app.render.renderers.registerAllRenderers
+import com.kyopenscience.astral.app.rest.AstralRest
 import com.kyopenscience.astral.app.transport.OrchestratorClient
 import com.kyopenscience.astral.app.transport.deviceCapabilities
-import com.kyopenscience.astral.app.ui.AdaptiveShell
 import com.kyopenscience.astral.app.ui.AppViewModel
+import com.kyopenscience.astral.app.ui.RootScaffold
 import com.kyopenscience.astral.app.ui.theme.AstralTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -41,6 +42,7 @@ import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private val client by lazy { OrchestratorClient(AppConfig.WS_URL) }
+    private val rest by lazy { AstralRest(AppConfig.API_BASE) }
     private val oidc by lazy { OidcAuth(this) }
     private val store by lazy { TokenStore(this) }
     private val authToken = MutableStateFlow<String?>(null)
@@ -71,7 +73,7 @@ class MainActivity : ComponentActivity() {
         }
         setContent {
             AstralTheme {
-                val vm: AppViewModel = viewModel(factory = AppViewModel.factory(client))
+                val vm: AppViewModel = viewModel(factory = AppViewModel.factory(client, rest))
                 val renderer = remember(vm) { Renderer(Emit { a, p -> vm.sendEvent(a, p) }).registerAllRenderers() }
                 val token by authToken.collectAsStateWithLifecycle()
                 val error by signInError.collectAsStateWithLifecycle()
@@ -97,7 +99,7 @@ class MainActivity : ComponentActivity() {
                                 ),
                         )
                     }
-                    AdaptiveShell(vm, renderer)
+                    RootScaffold(vm, renderer)
                 }
             }
         }
