@@ -101,9 +101,9 @@ description: "Task list for 041-android-sdui-client"
 
 **Independent Test**: Run the same build on phone + tablet/foldable (or resize); layout adapts with no clipping/horizontal scroll, state preserved.
 
-- [ ] T038 [US3] Adaptive scaffold via `WindowSizeClass`: Compact → stacked/navigable (chat ↔ canvas); Medium/Expanded → two-pane (chat rail + canvas) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/ui/AdaptiveScaffold.kt`.
-- [ ] T039 [US3] Preserve conversation + scroll position across rotation/fold/split (`rememberSaveable` + ViewModel) in `.../app/ui/AdaptiveScaffold.kt` and `.../ui/AppViewModel.kt`.
-- [ ] T040 [P] [US3] Compose UI tests: Compact vs Expanded layout selection + state preserved across a configuration change in `android-client/app/src/androidTest/kotlin/com/kyopenscience/astral/app/AdaptiveLayoutTest.kt`.
+- [X] T038 [US3] Adaptive scaffold via `WindowSizeClass`: Compact → stacked/navigable (chat ↔ canvas); Medium/Expanded → two-pane (chat rail + canvas) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/ui/AdaptiveScaffold.kt`.
+- [X] T039 [US3] Preserve conversation + scroll position across rotation/fold/split (`rememberSaveable` + ViewModel) in `.../app/ui/AdaptiveScaffold.kt` and `.../ui/AppViewModel.kt`.
+- [X] T040 [P] [US3] Compose UI tests: Compact vs Expanded layout selection + state preserved across a configuration change in `android-client/app/src/androidTest/kotlin/com/kyopenscience/astral/app/AdaptiveLayoutTest.kt`.
 
 **Checkpoint**: The same build adapts across screen sizes; US1/US2 still work.
 
