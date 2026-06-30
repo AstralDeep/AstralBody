@@ -197,7 +197,7 @@ class HistoryManager:
                         preview = content_obj
                     else:
                         preview = str(content_obj)
-                except:
+                except (json.JSONDecodeError, TypeError):
                     preview = str(content)
             
             # Check if chat has saved components

@@ -1,0 +1,19 @@
+# Ruff configuration for AstralBody backend
+# https://docs.astral.sh/ruff/configuration/
+
+target-version = "py311"
+line-length = 120
+
+[lint]
+# Enable: pyflakes (F), pycodestyle (E/W), isort (I), bugbear (B)
+select = ["F", "E", "W", "I", "B"]
+ignore = [
+    "E501",   # line too long — handled by formatter
+    "B008",   # do not perform function call in argument defaults (FastAPI pattern)
+]
+
+[lint.isort]
+known-first-party = ["shared", "agents", "orchestrator"]
+
+[format]
+quote-style = "double"

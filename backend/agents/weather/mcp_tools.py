@@ -912,7 +912,7 @@ def get_weather_alerts(
             try:
                 effective_dt = datetime.fromisoformat(effective.replace('Z', '+00:00')) if effective else datetime.now()
                 expires_dt = datetime.fromisoformat(expires.replace('Z', '+00:00')) if expires else datetime.now()
-            except:
+            except (ValueError, TypeError):
                 effective_dt = datetime.now()
                 expires_dt = datetime.now()
             

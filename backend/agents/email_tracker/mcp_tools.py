@@ -350,7 +350,7 @@ def fetch_recent_emails(days: int = 7, limit: int = 20, **kwargs) -> Dict[str, A
                 try:
                     dt = datetime.fromisoformat(received.replace('Z', '+00:00'))
                     received = dt.strftime("%Y-%m-%d %H:%M")
-                except:
+                except (ValueError, TypeError):
                     pass
             
             email_rows.append([
@@ -518,7 +518,7 @@ def get_current_todo_tasks(list_name: str = "Tasks", **kwargs) -> Dict[str, Any]
                 try:
                     dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
                     created = dt.strftime("%Y-%m-%d")
-                except:
+                except (ValueError, TypeError):
                     pass
             
             body_content = task.get("body", {}).get("content", "")

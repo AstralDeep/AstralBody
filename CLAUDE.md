@@ -19,14 +19,30 @@ Auto-generated from all feature plans. Last updated: 2026-04-13
 ## Project Structure
 
 ```text
-backend/
-frontend/
-tests/
+backend/        # Python FastAPI backend (orchestrator, agents, tests)
+frontend/       # Vite + React 18 + TypeScript frontend
+specs/          # Feature specification documents (speckit)
+docs/           # Additional documentation
 ```
 
 ## Commands
 
-cd src; pytest; ruff check .
+```bash
+# Backend tests (run from backend/ dir)
+cd backend && pytest
+
+# Lint backend (runs ruff inside the Docker container)
+make lint-backend
+
+# Frontend dev server
+cd frontend && npm run dev
+
+# Frontend build
+cd frontend && npm run build
+
+# Frontend tests
+cd frontend && npm run test:run
+```
 
 ## Code Style
 
