@@ -130,8 +130,8 @@ description: "Task list for 041-android-sdui-client"
 
 ## Phase 7: Polish & Cross-Cutting Concerns
 
-- [ ] T049 Reconnect + re-auth resilience (FR-012): disconnected state, auto-reconnect, no duplicate sends, no lost input — harden `.../app/transport/OrchestratorClient.kt` + add tests.
-- [ ] T050 [P] Structured logging/observability for connect/auth/render failures (Principle X) across `.../app/`.
+- [X] T049 Reconnect + re-auth resilience (FR-012): disconnected state, auto-reconnect, no duplicate sends, no lost input — harden `.../app/transport/OrchestratorClient.kt` + add tests.
+- [X] T050 [P] Structured logging/observability for connect/auth/render failures (Principle X) across `.../app/`.
 - [ ] T051 [P] KDoc on public `:core` + `:app` APIs (Constitution VI).
 - [ ] T052 [P] Document the `astral-mobile` azp in `.env.example` and write `docs/keycloak-android-client-setup.md` (public client, PKCE S256, redirect `com.kyopenscience.astral:/oauth2redirect`, post-logout = redirect/`+`, web-origins blank).
 - [ ] T053 Finalize `.github/workflows/android-ci.yml` (`:core:test` + `:app:testDebugUnitTest` + `koverVerify` ≥90% + ktlint + `lintDebug` + `:app:assembleDebug` + APK artifact; optional nightly emulator job for instrumented tests).
