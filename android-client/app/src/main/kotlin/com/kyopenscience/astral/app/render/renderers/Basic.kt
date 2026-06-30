@@ -14,6 +14,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.kyopenscience.astral.app.render.Emit
+import com.kyopenscience.astral.app.render.MarkdownText
 import com.kyopenscience.astral.app.render.Renderer
 import com.kyopenscience.astral.core.sdui.Component
 
@@ -32,7 +33,7 @@ fun Renderer.registerBasicRenderers(): Renderer =
 
 @Composable
 private fun TextPrimitive(c: Component) {
-    Text(text = c.str("content") ?: c.str("text").orEmpty(), style = MaterialTheme.typography.bodyMedium)
+    MarkdownText(text = c.str("content") ?: c.str("text").orEmpty())
 }
 
 @Composable

@@ -1,6 +1,7 @@
 package com.kyopenscience.astral.app.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -8,12 +9,15 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.adaptive.currentWindowAdaptiveInfo
@@ -28,6 +32,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.window.core.layout.WindowWidthSizeClass
 import com.kyopenscience.astral.app.render.CanvasHost
+import com.kyopenscience.astral.app.render.MarkdownText
 import com.kyopenscience.astral.app.render.Renderer
 
 /** How the chat + canvas are arranged for the current window width. */
@@ -90,12 +95,35 @@ private fun StatusLine(text: String?) {
 
 @Composable
 private fun ChatList(turns: List<ChatTurn>, modifier: Modifier) {
-    LazyColumn(modifier = modifier.padding(horizontal = 16.dp)) {
-        items(turns) { turn ->
-            Text(
-                text = (if (turn.role == "user") "You: " else "Assistant: ") + turn.text,
-                modifier = Modifier.padding(vertical = 4.dp),
-            )
+    val visible = turns.filter { it.text.isNotBlank() }
+    LazyColumn(
+        modifier = modifier.padding(horizontal = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        items(visible) { turn -> ChatBubble(turn) }
+    }
+}
+
+@Composable
+private fun ChatBubble(turn: ChatTurn) {
+    val isUser = turn.role == "user"
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
+    ) {
+        Surface(
+            color = if (isUser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+            contentColor = if (isUser) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
+            shape = RoundedCornerShape(16.dp),
+            modifier = if (isUser) Modifier.widthIn(max = 300.dp) else Modifier.fillMaxWidth(0.96f),
+        ) {
+            Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                if (isUser) {
+                    Text(turn.text, style = MaterialTheme.typography.bodyMedium)
+                } else {
+                    MarkdownText(turn.text)
+                }
+            }
         }
     }
 }
