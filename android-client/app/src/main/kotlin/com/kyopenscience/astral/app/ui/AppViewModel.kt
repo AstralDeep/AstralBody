@@ -111,6 +111,7 @@ class AppViewModel(
 
     /** Enable/disable a single tool of an agent (REST per-(tool,kind) write), then refresh. */
     fun setToolEnabled(agent: Agent, tool: String, enabled: Boolean) {
+        patchAgent(agent.id) { it.copy(permissions = it.permissions + (tool to enabled)) } // optimistic
         val t = token ?: return
         val kind = agent.toolScopeMap[tool] ?: "tools:read"
         viewModelScope.launch {
@@ -121,6 +122,7 @@ class AppViewModel(
 
     /** Master toggle: enable/disable all of an agent's tools at once (WS scopes + overrides). */
     fun setAgentEnabled(agent: Agent, enabled: Boolean) {
+        patchAgent(agent.id) { a -> a.copy(permissions = a.tools.associateWith { enabled }) } // optimistic
         val kinds = agent.toolScopeMap.values.toSet().ifEmpty { agent.scopes.keys }
         sendEvent(
             "set_agent_permissions",
@@ -131,6 +133,17 @@ class AppViewModel(
             },
         )
         sendEvent("discover_agents")
+    }
+
+    /**
+     * Optimistically update one agent so a toggle responds instantly; the
+     * subsequent discover_agents refresh reconciles with the server truth.
+     */
+    private fun patchAgent(agentId: String, transform: (Agent) -> Agent) {
+        _state.value =
+            _state.value.copy(
+                agents = _state.value.agents.map { if (it.id == agentId) transform(it) else it },
+            )
     }
 
     fun enableRecommended() {
