@@ -181,11 +181,16 @@ Releases are built and signed by [`.github/workflows/release-windows.yml`](../.g
 ## Scope / status
 
 Working: real Keycloak OIDC (dedicated public client, silent refresh) → chat →
-agents → native SDUI canvas, in-place `ui_upsert` updates, button/history
-interactions, client-hosted Windows tools agent. **In progress**: app *chrome*
-(settings/modals/agent management). The web app renders these as server HTML
-(`chrome_render`); this client reimplements them as **native Qt widgets** —
-see "Native-only" below. Streaming primitives are still TODO.
+agents → native SDUI canvas, in-place `ui_upsert` updates, **live push
+streaming** (`ui_stream_data` frames rendered in place on the canvas),
+button/history interactions, client-hosted Windows tools agent, and native app
+*chrome* dialogs: Agents & permissions, History, and the **Audit log** (a
+read-only `/api/audit` viewer with event-class / outcome / keyword filters and
+cursor pagination). The web app renders chrome as server HTML (`chrome_render`,
+which this client acknowledges but never embeds — there is no web view); the
+native Qt reimplementations are the parity path (see "Native-only" below).
+**In progress**: the remaining settings surfaces (LLM, personalization, theme,
+attachments, drafts), each driven by its existing REST/WS data action.
 
 ## Native-only (no embedded web browser)
 
