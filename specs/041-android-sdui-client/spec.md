@@ -20,7 +20,7 @@ A person installs the AstralBody app on their Android phone, signs in securely w
 1. **Given** a fresh install on a phone, **When** the user opens the app, **Then** they are guided through a secure organizational sign-in and land in a chat view.
 2. **Given** a signed-in user, **When** they send a message, **Then** the assistant's response appears as native UI within the conversation, with no embedded web page anywhere.
 3. **Given** an expired session, **When** the app next needs to act, **Then** it silently renews the session without forcing a re-login, up to a defined renewal limit.
-4. **Given** a development build pointed at a test server, **When** no organizational login is configured, **Then** a developer-token path allows sign-in for testing.
+4. **Given** a **debug** build pointed at a **mock-auth** test server, **When** real Keycloak login is not configured, **Then** a debug-only developer-token path allows sign-in for local testing (this path is absent from release builds).
 5. **Given** an account without access, **When** sign-in completes, **Then** the user sees a clear "no access" message rather than a broken or blank screen.
 
 ---
@@ -89,7 +89,7 @@ Users can manage which agents/tools are enabled and their permissions, browse an
 ### Functional Requirements
 
 - **FR-001**: The app MUST authenticate users with their existing organizational identity via the platform's secure native sign-in pattern (system browser), and MUST silently renew the session until a defined limit, after which it prompts re-sign-in.
-- **FR-002**: The app MUST support a separate development sign-in path (developer token) against a test/mock server, distinct from production sign-in.
+- **FR-002**: Authentication MUST be **real Keycloak** in all shipped builds — there is no mock/dev auth in the product. Any developer-token shortcut, if present, MUST be gated to debug builds against a mock-auth server and MUST NOT exist in release builds.
 - **FR-003**: The app MUST connect to the orchestrator and register as a device target, declaring its form factor (phone/tablet) and screen characteristics so the server adapts output to the device.
 - **FR-004**: The app MUST render the assistant's structured UI outputs as native Android UI — never an embedded web page — for the established component vocabulary (text, card, container, grid, hero, badge, metric, key-value, timeline, rating, alert, button, input, parameter picker, file upload, file download, code, divider, progress, list, table, tabs, collapsible, bar/line/pie charts, chat history, skeleton/loading).
 - **FR-005**: When the app receives a component type it does not support, it MUST display a clearly labeled placeholder and continue rendering the rest of the screen.
@@ -132,6 +132,7 @@ Users can manage which agents/tools are enabled and their permissions, browse an
 - **On-device tools agent is a follow-on**: a client-hosted capability for share/notifications/clipboard/location (the Android analog of the desktop tools agent), gated by permissions, privacy filtering, and audit, is out of v1.
 - **Reuse, don't extend, the protocol**: the existing message/streaming protocol and existing data endpoints are reused unchanged; the only server-side changes are additive — an auth allow-list entry for the new client, and confirming/defining a phone/tablet device profile in the adaptation layer.
 - **Parity is scoped to shipped desktop surfaces**: chat, rich canvas, agents/permissions, history, and audit. The remaining settings surfaces (LLM, personalization, theme, attachments, drafts) are a documented roadmap, each following the same native-screen pattern.
+- **Real authentication is mandated**: the implementation authenticates via real Keycloak OIDC (Authorization-Code + PKCE) — no reliance on mock/dev auth for the product. It uses the dedicated **`astral-mobile`** public client, **already provisioned and added to `KEYCLOAK_ALLOWED_AZP`** by the operator. Because `astral-mobile` was cloned from the desktop client (loopback redirect), its Valid Redirect URIs must include an Android **custom-scheme/app-link** redirect (e.g. `com.astralbody.mobile:/oauth2redirect`) — Android cannot use a loopback redirect.
 - **Distribution**: v1 produces an internal/sideloadable build artifact; store distribution and release signing are later concerns.
 - **Out of scope (v1)**: offline use and push notifications.
 - **Verification loop**: the primary engineering environment cannot build or run the mobile app directly, so automated unit tests for device-independent logic plus a CI build are the verification backbone, with on-device/emulator checks performed where the platform SDK is available.
