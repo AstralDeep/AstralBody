@@ -1,6 +1,7 @@
 package com.kyopenscience.astral.app
 
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -31,6 +32,7 @@ import com.kyopenscience.astral.app.render.Emit
 import com.kyopenscience.astral.app.render.Renderer
 import com.kyopenscience.astral.app.render.renderers.registerAllRenderers
 import com.kyopenscience.astral.app.rest.AstralRest
+import com.kyopenscience.astral.app.transport.ConnectionState
 import com.kyopenscience.astral.app.transport.OrchestratorClient
 import com.kyopenscience.astral.app.transport.deviceCapabilities
 import com.kyopenscience.astral.app.ui.AppViewModel
@@ -39,6 +41,7 @@ import com.kyopenscience.astral.app.ui.theme.AstralTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     private val client by lazy { OrchestratorClient(AppConfig.WS_URL) }
@@ -59,7 +62,10 @@ class MainActivity : ComponentActivity() {
                 }.onSuccess {
                     authToken.value = it
                     signInError.value = null
-                }.onFailure { signInError.value = it.message ?: "sign-in failed" }
+                }.onFailure {
+                    Log.w("MainActivity", "sign-in exchange failed: ${it.message}")
+                    signInError.value = it.message ?: "sign-in failed"
+                }
             }
         }
 
@@ -86,6 +92,7 @@ class MainActivity : ComponentActivity() {
                         onDevSignIn = ::devSignIn,
                     )
                 } else {
+                    val uiState by vm.state.collectAsStateWithLifecycle()
                     LaunchedEffect(token) {
                         val dm = resources.displayMetrics
                         vm.start(
@@ -98,6 +105,16 @@ class MainActivity : ComponentActivity() {
                                     supportedTypes = renderer.supportedTypes.toList(),
                                 ),
                         )
+                    }
+                    // Mid-session token expiry: silently refresh and reconnect; if the
+                    // refresh fails, drop to the sign-in screen (FR-012).
+                    LaunchedEffect(uiState.connection) {
+                        if (uiState.connection == ConnectionState.AuthRequired) {
+                            authToken.value =
+                                withContext(Dispatchers.IO) {
+                                    runCatching { store.load()?.let { oidc.freshToken(it) } }.getOrNull()
+                                }
+                        }
                     }
                     RootScaffold(vm, renderer)
                 }
