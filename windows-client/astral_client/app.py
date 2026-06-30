@@ -21,13 +21,16 @@ from typing import Dict, List, Optional
 
 from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt, QSettings, Signal
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
+    QComboBox,
     QCompleter,
     QDialog,
     QFileDialog,
     QFrame,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -36,9 +39,12 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
+from PySide6.QtGui import QBrush, QColor
 
 from . import theme as T
 from . import confirm as _confirm
@@ -48,6 +54,7 @@ from .protocol import OrchestratorClient, device_caps
 from .renderer import RenderContext, render, supported_types as native_types, _scoped
 from .streaming import stream_error_ops, stream_frame_to_ops, subscribe_ack_ops
 from .chrome import chrome_render_notice
+from . import rest
 
 
 # Feature 068 (US5): slash-command discovery. Mirrors the web client's typeahead
@@ -260,7 +267,7 @@ class Canvas(QScrollArea):
 class TopBar(QFrame):
     """Native app chrome header: brand, connection status, identity + actions."""
 
-    def __init__(self, user: str, on_new_chat, on_history, on_agents, on_sign_out):
+    def __init__(self, user: str, on_new_chat, on_history, on_agents, on_audit, on_sign_out):
         super().__init__()
         self.setObjectName("topbar")
         self.setStyleSheet(
@@ -291,9 +298,11 @@ class TopBar(QFrame):
         self.history_btn.clicked.connect(on_history)
         self.agents_btn = QPushButton("Agents")
         self.agents_btn.clicked.connect(on_agents)
+        self.audit_btn = QPushButton("Audit")
+        self.audit_btn.clicked.connect(on_audit)
         self.signout_btn = QPushButton("Sign out")
         self.signout_btn.clicked.connect(on_sign_out)
-        for b in (self.new_btn, self.history_btn, self.agents_btn, self.signout_btn):
+        for b in (self.new_btn, self.history_btn, self.agents_btn, self.audit_btn, self.signout_btn):
             b.setCursor(Qt.CursorShape.PointingHandCursor)
 
         lay.addWidget(brand)
@@ -305,6 +314,7 @@ class TopBar(QFrame):
         lay.addWidget(self.new_btn)
         lay.addWidget(self.history_btn)
         lay.addWidget(self.agents_btn)
+        lay.addWidget(self.audit_btn)
         lay.addWidget(self.signout_btn)
 
     def _dot(self) -> QLabel:
@@ -594,10 +604,157 @@ class HistoryDialog(QDialog):
         self.accept()
 
 
+class AuditDialog(QDialog):
+    """Native, read-only audit-log viewer (parity with the web ``audit`` chrome
+    surface), backed by ``GET /api/audit``.
+
+    A filter bar (event class / outcome / keyword) over a reverse-chronological
+    table — time, class, action, outcome, description — with cursor-based
+    "Load more" pagination. The MainWindow fetches pages on a background thread
+    and feeds them in via ``begin_load`` / ``add_page`` / ``set_error``; this
+    dialog owns no I/O and no token.
+    """
+
+    _COLUMNS = ("Time", "Class", "Action", "Outcome", "Description")
+    _ROW_KEYS = ("recorded_at", "event_class", "action_type", "outcome", "description")
+    # Map an outcome to a theme variant for the cell colour (parity with the web badges).
+    _OUTCOME_VARIANT = {
+        "success": "success", "failure": "error",
+        "in_progress": "accent", "interrupted": "warning",
+    }
+
+    def __init__(self, parent, on_query):
+        super().__init__(parent)
+        self._on_query = on_query  # callable(filters: dict, reset: bool) -> None
+        self._next_cursor: Optional[str] = None
+        self.setWindowTitle("Audit log")
+        self.resize(940, 580)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(10)
+
+        head = QLabel("Audit log")
+        head.setStyleSheet(f"color:{T.TEXT}; font-size:16px; font-weight:700;")
+        root.addWidget(head)
+
+        bar = QHBoxLayout()
+        bar.setSpacing(8)
+        self._class = QComboBox()
+        self._class.addItem("All classes", "")
+        for c in rest.EVENT_CLASSES:
+            self._class.addItem(c, c)
+        self._outcome = QComboBox()
+        self._outcome.addItem("All outcomes", "")
+        for o in rest.OUTCOMES:
+            self._outcome.addItem(o, o)
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Search description or action…")
+        self._search.returnPressed.connect(self._apply)
+        apply_btn = QPushButton("Apply")
+        apply_btn.setObjectName("primary")
+        apply_btn.clicked.connect(self._apply)
+        for w in (self._class, self._outcome, apply_btn):
+            w.setCursor(Qt.CursorShape.PointingHandCursor)
+        bar.addWidget(self._class)
+        bar.addWidget(self._outcome)
+        bar.addWidget(self._search, 1)
+        bar.addWidget(apply_btn)
+        root.addLayout(bar)
+
+        self._table = QTableWidget(0, len(self._COLUMNS))
+        self._table.setHorizontalHeaderLabels(list(self._COLUMNS))
+        self._table.verticalHeader().setVisible(False)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._table.setWordWrap(False)
+        header = self._table.horizontalHeader()
+        for i in range(len(self._COLUMNS) - 1):
+            header.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(len(self._COLUMNS) - 1, QHeaderView.ResizeMode.Stretch)
+        self._table.setStyleSheet(
+            f"QTableWidget {{ background:{T.SURFACE}; color:{T.TEXT}; "
+            f"border:1px solid {T.BORDER}; border-radius:8px; gridline-color:{T.BORDER}; }}"
+            f"QHeaderView::section {{ background:{T.SURFACE_2}; color:{T.MUTED}; "
+            f"border:none; padding:6px 8px; font-weight:600; }}"
+        )
+        root.addWidget(self._table, 1)
+
+        foot = QHBoxLayout()
+        self._status_lbl = QLabel("")
+        self._status_lbl.setStyleSheet(f"color:{T.MUTED}; font-size:12px;")
+        self._more_btn = QPushButton("Load more")
+        self._more_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._more_btn.clicked.connect(self._load_more)
+        self._more_btn.setVisible(False)
+        foot.addWidget(self._status_lbl, 1)
+        foot.addWidget(self._more_btn)
+        root.addLayout(foot)
+
+    # --- filter state --- #
+    def filters(self) -> dict:
+        return {
+            "event_class": self._class.currentData() or "",
+            "outcome": self._outcome.currentData() or "",
+            "q": self._search.text().strip(),
+        }
+
+    def _apply(self) -> None:
+        self._on_query(self.filters(), True)
+
+    def _load_more(self) -> None:
+        if self._next_cursor:
+            f = self.filters()
+            f["cursor"] = self._next_cursor
+            self._on_query(f, False)
+
+    # --- population (called on the GUI thread) --- #
+    def begin_load(self, reset: bool) -> None:
+        if reset:
+            self._table.setRowCount(0)
+            self._next_cursor = None
+        self._status_lbl.setText("Loading…")
+        self._more_btn.setEnabled(False)
+
+    def add_page(self, rows: list, next_cursor: Optional[str]) -> None:
+        for r in rows or []:
+            self._append_row(r)
+        self._next_cursor = next_cursor
+        self._more_btn.setVisible(bool(next_cursor))
+        self._more_btn.setEnabled(bool(next_cursor))
+        n = self._table.rowCount()
+        if n == 0:
+            self._status_lbl.setText("No audit entries match the current filters.")
+        else:
+            suffix = " (more available)" if next_cursor else ""
+            self._status_lbl.setText(f"{n} event{'s' if n != 1 else ''}{suffix}")
+
+    def set_error(self, message: str) -> None:
+        self._status_lbl.setText(f"Could not load audit log: {message}")
+        self._more_btn.setEnabled(bool(self._next_cursor))
+
+    def _append_row(self, r: dict) -> None:
+        row = self._table.rowCount()
+        self._table.insertRow(row)
+        for col, key in enumerate(self._ROW_KEYS):
+            text = str(r.get(key, ""))
+            item = QTableWidgetItem(text)
+            if key == "outcome":
+                variant = self._OUTCOME_VARIANT.get(r.get("outcome"))
+                if variant:
+                    item.setForeground(QBrush(QColor(T.VARIANT_COLORS[variant][0])))
+            elif key == "description":
+                item.setToolTip(text)
+            self._table.setItem(row, col, item)
+
+
 class MainWindow(QMainWindow):
     # Launch-time integrity verdict, marshalled from the worker thread to the
     # GUI thread (level, message). Qt queues the emit across threads safely.
     _integrity_notice = Signal(str, str)
+    # Audit-log page fetched off-thread -> GUI thread (dict payload).
+    _audit_loaded = Signal(object)
 
     def __init__(self, url: str, token: str, session=None):
         super().__init__()
@@ -613,6 +770,9 @@ class MainWindow(QMainWindow):
         # Live-stream seq tracker (stream-key -> last seq) for the push
         # streaming consumer; reset when the active conversation changes.
         self._stream_seq: Dict[str, int] = {}
+        # Bearer token for REST surfaces (audit log); kept current on reconnect.
+        self._token = token
+        self._audit_dialog: Optional[AuditDialog] = None
 
         ctx = RenderContext(emit=self._emit)
         self.client = OrchestratorClient(
@@ -637,6 +797,7 @@ class MainWindow(QMainWindow):
             self._new_chat,
             self._open_history,
             self._open_agents,
+            self._open_audit,
             self._sign_out,
         )
 
@@ -691,6 +852,7 @@ class MainWindow(QMainWindow):
         # delays the GUI, and fails open (offline ⇒ keep running) so it can never
         # block launch. The verdict is surfaced in the top-bar status line.
         self._integrity_notice.connect(self._on_integrity_notice)
+        self._audit_loaded.connect(self._on_audit_loaded)
         self._start_integrity_check()
 
     def _wrap(self, inner: QWidget, title: str) -> QWidget:
@@ -734,6 +896,53 @@ class MainWindow(QMainWindow):
         self.client.send_event("get_history", {})
         self._history_dialog.show()
         self._history_dialog.raise_()
+
+    def _open_audit(self) -> None:
+        if self._audit_dialog is None:
+            self._audit_dialog = AuditDialog(self, self._query_audit)
+        self._audit_dialog.show()
+        self._audit_dialog.raise_()
+        self._query_audit({}, True)  # initial page (no filters)
+
+    def _current_token(self) -> str:
+        """The freshest bearer token: the OIDC session's (refreshed) access
+        token when present, else the launch/dev token."""
+        if self._auth_session is not None and getattr(self._auth_session, "access_token", ""):
+            return self._auth_session.access_token
+        return self._token
+
+    def _query_audit(self, filters: dict, reset: bool) -> None:
+        """Fetch a page of /api/audit on a background thread and marshal the
+        result back to the GUI thread via the _audit_loaded signal."""
+        if self._audit_dialog is not None:
+            self._audit_dialog.begin_load(reset)
+        url = rest.audit_url(
+            _http_base(self._url),
+            event_class=filters.get("event_class", ""),
+            outcome=filters.get("outcome", ""),
+            q=filters.get("q", ""),
+            cursor=filters.get("cursor", ""),
+        )
+        token = self._current_token()
+
+        def _work() -> None:
+            try:
+                data = rest.fetch_json(url, token)
+                rows, nxt = rest.parse_audit_response(data)
+                self._audit_loaded.emit({"rows": rows, "next_cursor": nxt, "error": None})
+            except Exception as exc:  # noqa: BLE001 — surfaced in the dialog
+                self._audit_loaded.emit({"rows": [], "next_cursor": None, "error": str(exc)})
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _on_audit_loaded(self, result: object) -> None:
+        """GUI-thread handler for a loaded audit page."""
+        if self._audit_dialog is None or not isinstance(result, dict):
+            return
+        if result.get("error"):
+            self._audit_dialog.set_error(str(result["error"]))
+        else:
+            self._audit_dialog.add_page(result.get("rows") or [], result.get("next_cursor"))
 
     def _load_chat(self, chat_id: str) -> None:
         self.rail.clear()
@@ -819,6 +1028,7 @@ class MainWindow(QMainWindow):
             self.client.stop()
         except Exception:
             pass
+        self._token = token
         self._win_agent_registered = False
         self.client = OrchestratorClient(
             self._url, token, device_caps(supported_types=native_types())
