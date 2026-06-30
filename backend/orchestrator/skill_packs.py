@@ -1,4 +1,4 @@
-"""Feature 068 (US4) — on-demand skill-pack injection (progressive disclosure).
+"""Feature 040 (US4) — on-demand skill-pack injection (progressive disclosure).
 
 Builds a bounded, relevance-selected digest of capability/technique guidance for
 ONLY the agents in play on a given turn (not every agent every turn), wiring the

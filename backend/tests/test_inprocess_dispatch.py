@@ -1,4 +1,4 @@
-"""Feature 068 (US1) — in-process built-in agent dispatch.
+"""Feature 040 (US1) — in-process built-in agent dispatch.
 
 Verifies the bundled-agent set excludes the retired etf_tracker_1, that a
 built-in agent instantiates without uvicorn, and that the in-process executor

@@ -857,7 +857,7 @@
   setTimeout(connect, 200);
 })();
 
-/* Feature 068 (US5): slash-command typeahead. Discovery only — the server
+/* Feature 040 (US5): slash-command typeahead. Discovery only — the server
    rewrites a "/command" into a normal prompt; nothing here invokes a tool. The
    curated list mirrors orchestrator/slash_commands.COMMANDS. */
 (function () {

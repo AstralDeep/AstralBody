@@ -1,6 +1,6 @@
 # Feature Specification: In-Process Built-In Agents, Owner-Safe Marking, and Skills + Slash Commands
 
-**Feature Branch**: `068-inprocess-agents-skills-commands`
+**Feature Branch**: `040-inprocess-agents-skills-commands`
 **Created**: 2026-06-24
 **Status**: Draft
 **Input**: User description: "Mark the agents that ship with the system as safe (owner-approved), keep them fully auditable with security paramount, cut the network overhead of running each shipped agent on its own host and port by building them into the system and making them as performant as possible, investigate skills and slash commands like Claude Code and implement/improve what fits, remove the etf_tracker_1 agent, and keep + review the rest."

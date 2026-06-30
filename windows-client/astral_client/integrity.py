@@ -1,4 +1,4 @@
-"""Integrity verifier for the Windows desktop client (feature 067).
+"""Integrity verifier for the Windows desktop client (feature 039).
 
 Before a freshly-downloaded ``AstralBody.exe`` is ever executed, this module:
 

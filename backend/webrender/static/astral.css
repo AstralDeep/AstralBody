@@ -767,7 +767,7 @@ details > summary::-webkit-details-marker { display: none; }
 .astral-history-empty-text { font-size: 13px; font-weight: var(--weight-medium); color: var(--text-secondary); }
 .astral-history-empty-hint { font-size: 11px; color: var(--text-muted); }
 
-/* Feature 068 (US5): slash-command typeahead menu (chat input discovery). */
+/* Feature 040 (US5): slash-command typeahead menu (chat input discovery). */
 .astral-slash-menu {
   display: flex;
   flex-direction: column;

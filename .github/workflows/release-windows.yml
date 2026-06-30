@@ -1,4 +1,4 @@
-# Feature 067 — build, sign (keyless sigstore), and release the Windows desktop
+# Feature 039 — build, sign (keyless sigstore), and release the Windows desktop
 # client as a GitHub Release. Fires only on version tags (v*) so it does not
 # gate PRs or slow the main CI. Separate from ci.yml by design.
 #

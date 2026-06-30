@@ -1,4 +1,4 @@
-"""Feature 068 — in-process loopback transport for built-in agents.
+"""Feature 040 — in-process loopback transport for built-in agents.
 
 Lets a :class:`~shared.base_agent.BaseA2AAgent` run *inside* the orchestrator
 process with no network hop. The agent's normal ``handle_mcp_request`` writes

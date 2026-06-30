@@ -1,4 +1,4 @@
-"""Feature 068 (US2) — owner-approved "safe" agent trust marker.
+"""Feature 040 (US2) — owner-approved "safe" agent trust marker.
 
 A safe marker is a per-agent, owner-approved provenance record (stored in the
 ``agent_trust`` table) that flips the per-call permission baseline from
@@ -86,7 +86,7 @@ async def seed_safe(db, agent_ids: Sequence[str], marked_by: str = "system") -> 
         except Exception:  # noqa: BLE001 — never block boot on a seed failure
             logger.debug("seed_safe failed for %s", aid, exc_info=True)
     if seeded:
-        logger.info("Feature 068: seeded %d built-in agent(s) safe: %s", len(seeded), seeded)
+        logger.info("Feature 040: seeded %d built-in agent(s) safe: %s", len(seeded), seeded)
     return seeded
 
 

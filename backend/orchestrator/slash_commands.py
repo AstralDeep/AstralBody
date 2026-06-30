@@ -1,4 +1,4 @@
-"""Feature 068 (US5) — user-typed /slash-commands.
+"""Feature 040 (US5) — user-typed /slash-commands.
 
 A curated, first-party command set. A leading ``/command`` typed in chat is
 expanded into a normal prompt BEFORE any processing, so the rewritten turn flows

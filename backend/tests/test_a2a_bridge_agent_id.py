@@ -1,4 +1,4 @@
-"""Feature 067 (C-2): a2a_card_to_custom must not invent phantom agent ids.
+"""Feature 039 (C-2): a2a_card_to_custom must not invent phantom agent ids.
 
 The A2A discovery fallback used to slugify an agent's display name into an id
 (e.g. "Windows Tools (code & system)" -> "windows-tools-(code-&-system)") or use

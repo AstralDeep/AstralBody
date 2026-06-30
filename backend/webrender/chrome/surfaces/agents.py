@@ -360,7 +360,7 @@ def _render_visibility(agent_id: str, is_public: bool, tab: str = "mine") -> str
 
 
 def _render_safe(agent_id: str, is_safe: bool, tab: str = "mine") -> str:
-    """Feature 068 (US2): owner/admin control to mark an agent 'safe'.
+    """Feature 040 (US2): owner/admin control to mark an agent 'safe'.
 
     The handler (``handle_safe_set`` → ``agent_trust.mark_safe``) enforces the
     admin/owner gate server-side; this just renders the toggle + current state.
@@ -502,7 +502,7 @@ def _render_detail(orch, user_id, roles, agent_id: str, tab: str) -> str:
         agent_id, tool_scope_map, per_tool, scope_state, tool_descriptions, tab)]
     if is_owner:
         sections.append(_render_visibility(agent_id, bool(ownership.get("is_public", False)), tab))
-    # Feature 068 (US2): owner/admin safe-marking control.
+    # Feature 040 (US2): owner/admin safe-marking control.
     if is_owner or "admin" in (roles or []):
         try:
             sections.append(_render_safe(agent_id, bool(db.get_agent_is_safe(agent_id)), tab))
@@ -668,7 +668,7 @@ async def handle_visibility_set(orch, websocket, user_id, roles, payload):
 
 
 async def handle_safe_set(orch, websocket, user_id, roles, payload):
-    """``chrome_safe_set {agent_id, is_safe}`` — admin/owner-gated safe toggle (feature 068).
+    """``chrome_safe_set {agent_id, is_safe}`` — admin/owner-gated safe toggle (feature 040).
 
     Delegates the gate + audit to ``agent_trust.mark_safe``. The agent's own
     owner may toggle their agent; admins may toggle any. The marker flips the

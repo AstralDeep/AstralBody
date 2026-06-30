@@ -1,4 +1,4 @@
-"""Feature 068 (US5) — user-typed /slash-commands.
+"""Feature 040 (US5) — user-typed /slash-commands.
 
 Covers: known commands expand into a prompt (not a tool call — no privileged
 bypass), unknown commands produce a friendly relay (never an error), ordinary
