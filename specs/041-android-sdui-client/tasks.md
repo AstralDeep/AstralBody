@@ -68,7 +68,7 @@ description: "Task list for 041-android-sdui-client"
 - [X] T024 [US1] Chat screen: input + send (`ui_event chat_message`), user/assistant text turns, `chat_status` indicator, `chat_created` active-chat in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/ui/ChatScreen.kt`.
 - [X] T025 [US1] Render `ui_render` (target canvas/chat) + `ui_upsert` into the canvas with the basic vocabulary in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/ui/CanvasView.kt`.
 - [X] T026 [P] [US1] JVM unit tests: token store + auth config; the `register_ui` device-caps builder (`device_type=android`, screen, `supported_types`) in `android-client/app/src/test/kotlin/com/kyopenscience/astral/app/auth/TokenStoreTest.kt` and `.../transport/DeviceCapsTest.kt`.
-- [ ] T027 [US1] Compose UI test: a signed-in chat round-trip renders a basic response natively in `android-client/app/src/androidTest/kotlin/com/kyopenscience/astral/app/ChatRenderTest.kt`.
+- [X] T027 [US1] Compose UI test: a signed-in chat round-trip renders a basic response natively in `android-client/app/src/androidTest/kotlin/com/kyopenscience/astral/app/ChatRenderTest.kt`.
 
 **Checkpoint**: MVP — sign in, chat, basic native rendering all work independently.
 
@@ -89,7 +89,7 @@ description: "Task list for 041-android-sdui-client"
 - [X] T034 [P] [US2] Chart renderers (`bar_chart`/`line_chart`/`pie_chart` via Compose Canvas) + `image` (Coil) in `.../app/render/renderers/Charts.kt` and `.../render/renderers/Media.kt`.
 - [X] T035 [US2] Advertise the native `supported_types` in `register_ui` device caps (exclude `plotly_chart`/`audio`/`color_picker`/`theme_apply`/`generative` → placeholder) in `.../app/transport/DeviceCaps.kt`.
 - [X] T036 [P] [US2] Vocabulary-parity test: advertised `supported_types` ⊆ `webrender.allowed_primitive_types()` and every advertised type has a renderer (mirror the Windows drift guard) in `android-client/app/src/test/kotlin/com/kyopenscience/astral/app/render/VocabularyParityTest.kt`.
-- [ ] T037 [US2] Compose UI tests: each renderer group, unknown-type placeholder (FR-005), and streaming in-place update in `android-client/app/src/androidTest/kotlin/com/kyopenscience/astral/app/RenderersTest.kt` and `.../StreamingUiTest.kt`.
+- [X] T037 [US2] Compose UI tests: each renderer group, unknown-type placeholder (FR-005), and streaming in-place update in `android-client/app/src/androidTest/kotlin/com/kyopenscience/astral/app/RenderersTest.kt` and `.../StreamingUiTest.kt`.
 
 **Checkpoint**: Rich responses + live streaming render natively; US1 still works.
 
@@ -122,7 +122,7 @@ description: "Task list for 041-android-sdui-client"
 - [X] T045 [US4] History screen (`get_history`→`history_list`; `load_chat`→`chat_loaded` replay) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/ui/HistoryScreen.kt`.
 - [X] T046 [US4] Audit screen (GET `/api/audit`; `event_class`/`outcome`/`q` filters; cursor "load more"; outcome colour; user-scoped) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/ui/AuditScreen.kt`.
 - [X] T047 [P] [US4] `chrome_render` acknowledge (no web embed; native notice — FR-013) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/stream/ChromeRender.kt`.
-- [ ] T048 [US4] Compose UI tests: agent toggle, history reopen, audit list + filter + paging in `android-client/app/src/androidTest/kotlin/com/kyopenscience/astral/app/SurfacesTest.kt`.
+- [X] T048 [US4] Compose UI tests: agent toggle, history reopen, audit list + filter + paging in `android-client/app/src/androidTest/kotlin/com/kyopenscience/astral/app/SurfacesTest.kt`.
 
 **Checkpoint**: All four stories independently functional.
 
