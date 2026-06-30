@@ -91,7 +91,7 @@ private fun CodeBlock(code: String) {
     }
 }
 
-/** Parse inline **bold**, *italic*/_italic_, and `code` into an AnnotatedString. */
+/** Parse inline **bold**, *italic*, _italic_, and `code` into an AnnotatedString. */
 fun inlineMarkdown(text: String): AnnotatedString =
     buildAnnotatedString {
         var i = 0
