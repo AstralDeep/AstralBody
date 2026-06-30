@@ -271,7 +271,7 @@ def test_shell_injects_token_and_resumed_placeholders(shell_html):
     assert m is not None, "no inline bootstrap script found"
     assert "__ASTRAL_RESUMED__" in m.group(1)
     # …which precedes the client so the globals exist before client.js runs.
-    # The client.js URL now carries a ?v=<hash> cache-busting query (feature 068),
+    # The client.js URL now carries a ?v=<hash> cache-busting query (feature 040),
     # so match the tag prefix rather than the exact (now stale) quoted URL.
     assert shell_html.index("%%ASTRAL_RESUMED%%") < shell_html.index(
         'src="/static/client.js'

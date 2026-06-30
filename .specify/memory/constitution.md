@@ -5,8 +5,8 @@
     first-party agents + owner-safe marking)
 
   Amendment (2026-06-24, v2.2.0):
-    VII. Security — added two clauses sanctioning feature 068
-        (068-inprocess-agents-skills-commands):
+    VII. Security — added two clauses sanctioning feature 040
+        (040-inprocess-agents-skills-commands):
       (a) First-party agents bundled with the system MAY run IN-PROCESS within
           the orchestrator trust boundary, exempt from the per-agent transport
           AGENT_API_KEY handshake, PROVIDED every runtime authorization control

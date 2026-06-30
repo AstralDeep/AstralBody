@@ -1,6 +1,6 @@
 # Feature Specification: Verify Windows-client PR + Desktop Codegen Download
 
-**Feature Branch**: `067-desktop-codegen-download`
+**Feature Branch**: `039-desktop-codegen-download`
 **Created**: 2026-06-23
 **Status**: DONE — merged via PR #84 (lint fix) + PR #85 (feature) + PR #86 (telemetry follow-up). Re-verified 2026-06-23: 52 backend tests pass, ruff clean repo-wide, windows-client byte-compiles clean.
 **Input**: User request — (1) verify the work of the latest merged PR (#83, feature 066 — Windows-client production auth + native chrome), and if problems are found, implement fixes and push a new PR; (2) add logic so that when a user asks Astral to *generate code for them* (in the browser), the system outputs a **download link to a Windows `.exe`** that ships a **coding agent able to access the user's directories (with permission)**; the `.exe` must be **packaged by GitHub Actions**, **downloaded directly from GitHub**, and its **integrity checked before the app runs**.
@@ -38,7 +38,7 @@ PR #83 (`300a1b4`, branch `066-windows-client-production-auth`, merged to `main`
 4. **Static review** — security/correctness pass over the diff: the azp gate, the desktop OIDC flow, the WS teardown fix, the empty-state fix, the `win_agent` tool surfaces.
 5. **Smoke** — boot the orchestrator with `ASTRAL_ENV=development` and confirm `/healthz` + `/readyz`.
 
-Findings + fixes are recorded in **§A.2** and shipped as a PR off `main` (branch `067-pr83-fixes`). Any finding that is a real defect is fixed; non-defects are noted and left. **If no real defects are found, no fix PR is opened** — Part A then consists of the verification record alone (honesty over ceremony).
+Findings + fixes are recorded in **§A.2** and shipped as a PR off `main` (branch `039-pr83-fixes`). Any finding that is a real defect is fixed; non-defects are noted and left. **If no real defects are found, no fix PR is opened** — Part A then consists of the verification record alone (honesty over ceremony).
 
 ### A.2 Findings & fixes
 
@@ -54,7 +54,7 @@ Findings + fixes are recorded in **§A.2** and shipped as a PR off `main` (branc
 **Finding A-3 (NONE) — desktop OIDC + WS teardown + empty-state fixes are sound.**
 - The dedicated public-client flow (`astral-desktop`, direct token exchange, no secret) is RFC 8252-compliant; `oidc_login` PKCE/state checks are correct; `Session.refresh` handles the public-client (no-secret) refresh. The WS teardown crash fix (`_safe_status`/`_safe_message` tolerating a deleted QObject) and the empty-state hint `_drop_hint` on first message are correct. No defect. (Client unit tests require PySide6, not installable on the host; the PR's 29-test claim is trusted + the formatted files byte-compile and the renderer test corpus is unchanged in semantics.)
 
-**Outcome:** one real defect (A-1) → fixed; fix PR opened on branch `067-pr83-fixes`.
+**Outcome:** one real defect (A-1) → fixed; fix PR opened on branch `039-pr83-fixes`.
 
 ---
 
@@ -227,7 +227,7 @@ All new in `.env.example` with safe defaults; flags are additive and default to 
   → `ruff check .` = **All checks passed!** All four files byte-compile.
 - azp gate, desktop OIDC, WS-teardown, empty-state fixes: reviewed, **no defect**
   (Findings A-2 / A-3).
-- **Fix PR: [#84](https://github.com/AstralDeep/AstralBody/pull/84)** (branch `067-pr83-fixes`).
+- **Fix PR: [#84](https://github.com/AstralDeep/AstralBody/pull/84)** (branch `039-pr83-fixes`).
 
 ### Part B — implementation log  ✅
 
@@ -252,11 +252,11 @@ All new in `.env.example` with safe defaults; flags are additive and default to 
   preserved — never an orchestrator runtime dep).
 - No new DB tables; no schema breaks; `tools:execute` added additively to
   `VALID_SCOPES` (no CHECK constraint). New flag `FF_DESKTOP_CODEGEN` default on.
-- **Part B PR: opened on branch `067-desktop-codegen`** (this branch).
+- **Part B PR: opened on branch `039-desktop-codegen`** (this branch).
 
 ---
 
-### Part C — Live end-to-end (2026-06-24, branch `067-desktop-codegen-e2e`)
+### Part C — Live end-to-end (2026-06-24, branch `039-desktop-codegen-e2e`)
 
 Driven against the live stack (real Keycloak `iam.ai.uky.edu`, `USE_MOCK_AUTH=false`).
 Models exercised: `gemma-4-31B` then `zai-org/GLM-5.2-FP8`. Release under test: the

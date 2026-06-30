@@ -113,7 +113,7 @@ agent can also run standalone: `python -m win_agent.agent --port 8771`.
 The agent registers with the orchestrator's `AGENT_API_KEY` when set (required
 outside dev; dev mode is keyless).
 
-### Coding agent (feature 067)
+### Coding agent (feature 039)
 
 The coding tools let the assistant **generate, write, edit, and run code on your
 machine**. They are gated by three independent safety layers:
@@ -151,7 +151,7 @@ audit_log.py`): timestamp, actor, tool, redacted args, outcome
 orchestrator records its own `tool` audit event too, so actions are double-
 audited.
 
-### Integrity verification (feature 067)
+### Integrity verification (feature 039)
 
 When you download the app from a GitHub Release, the client verifies it **before
 it ever runs** (`astral_client/integrity.py`):

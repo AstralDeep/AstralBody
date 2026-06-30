@@ -292,7 +292,7 @@ RETIRED_AGENT_IDS = frozenset({
     "email_tracker", "email-tracker-1", "grant_budgets", "grant-budgets-1",
     "grants", "grants-1", "linkedin", "linkedin-1",
     "nefarious", "nefarious-1", "nocodb", "nocodb-1",
-    # Feature 068: etf_tracker_1 retired (agent removed). Both the hyphenated
+    # Feature 040: etf_tracker_1 retired (agent removed). Both the hyphenated
     # agent id and the legacy underscore directory-name form route through the
     # runtime retirement handling so old transcripts degrade gracefully.
     "etf_tracker_1", "etf-tracker-1-1",
@@ -312,7 +312,7 @@ _MERGED_COLLIDING_VERBS = frozenset({
 })
 
 
-# ── Feature 068 fix: static-asset cache control ──────────────────────────────
+# ── Feature 040 fix: static-asset cache control ──────────────────────────────
 # StaticFiles sends no Cache-Control, so browsers heuristically cache
 # /static/* and can serve a STALE client.js/astral.css after a rebuild — which
 # is exactly why the slash-command menu did not appear after rebuilding. Two
@@ -396,7 +396,7 @@ class Orchestrator:
         from orchestrator.async_tasks import BackgroundTaskManager
         self.async_task_manager = BackgroundTaskManager()
         self.agents: Dict[str, websockets.WebSocketServerProtocol] = {}
-        # Feature 068 (US1): bundled first-party agents running IN-PROCESS
+        # Feature 040 (US1): bundled first-party agents running IN-PROCESS
         # (agent_id -> live BaseA2AAgent instance). Dispatch selects the
         # in-process path by a positive membership check here; external A2A and
         # draft-subprocess agents are unaffected.
@@ -2963,7 +2963,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             logger.warning("Empty message received")
             return
 
-        # Feature 068 (US5): expand a user-typed /slash-command into a normal
+        # Feature 040 (US5): expand a user-typed /slash-command into a normal
         # prompt BEFORE any processing, so the rewritten turn flows through the
         # exact same permission / audit / PHI gates (no privileged bypass). The
         # user still sees their original "/command" via display_message. Pure
@@ -3302,7 +3302,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 tool_to_unqualified[_mem_name] = _mem_name
             memory_tool_injected = True
 
-        # Feature 067 — desktop codegen download: the offer_desktop_codegen
+        # Feature 039 — desktop codegen download: the offer_desktop_codegen
         # meta-tool surfaces a download card for the Windows coding-agent .exe
         # (GitHub-released, SHA-256 + sigstore verified) when a user asks for
         # code that runs on their machine. Same exclusions as the 027/030 tools.
@@ -3390,7 +3390,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 if routing_hints:
                     system_prompt += f"\n{routing_hints}\n"
 
-            # Feature 068 (US4): inject authored skill packs for the agents in
+            # Feature 040 (US4): inject authored skill packs for the agents in
             # play THIS turn only (progressive disclosure — not every agent
             # every turn). Wires the previously-dormant get_techniques_for_agent.
             # Bounded + fail-open: any error leaves the turn unchanged.
@@ -3456,7 +3456,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             if memory_tool_injected:
                 system_prompt += memory_chat.SYSTEM_PROMPT_ADDENDUM
 
-            # Feature 067 — desktop codegen guidance accompanies the
+            # Feature 039 — desktop codegen guidance accompanies the
             # offer_desktop_codegen meta-tool.
             if desktop_codegen_injected:
                 system_prompt += desktop_codegen.SYSTEM_PROMPT_ADDENDUM
@@ -5170,7 +5170,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 self, tool_name, args, user_id=user_id, chat_id=chat_id, websocket=websocket
             )
         if agent_id == "__desktop_codegen__":
-            # 067 — desktop codegen: surface the generated code + a verified
+            # 039 — desktop codegen: surface the generated code + a verified
             # download card for the Windows coding-agent .exe.
             from orchestrator import desktop_codegen
             return await desktop_codegen.handle_meta_tool(
@@ -5574,7 +5574,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
     async def _execute_with_retry_audited(self, websocket, agent_id, tool_name, args, chat_id=None):
         """Dispatch a tool with the SAME ToolDispatchAudit start/end events as the
-        single-tool path (feature 068 / FR-032).
+        single-tool path (feature 040 / FR-032).
 
         The parallel-tool path historically called ``_execute_with_retry``
         directly, emitting no ``agent_tool_call`` audit rows — so parallel
@@ -5906,7 +5906,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
     async def _dispatch_tool_call(self, agent_id: str, tool_name: str, args: Dict, timeout: float, ui_websocket) -> Optional[MCPResponse]:
         """Internal: actually dispatch the tool call (in-process → WebSocket → A2A)."""
-        # Feature 068 (US1): bundled first-party agents run IN-PROCESS — no
+        # Feature 040 (US1): bundled first-party agents run IN-PROCESS — no
         # network hop. Selected by a positive registry check; external A2A
         # agents and draft subprocesses fall through to the paths below.
         if agent_id in self.local_agents:
@@ -5991,7 +5991,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             self.pending_ui_sockets.pop(request_id, None)
 
     async def _execute_in_process(self, agent_id: str, tool_name: str, args: Dict, timeout: float = 30.0, ui_websocket=None) -> Optional[MCPResponse]:
-        """Execute a tool call against a built-in agent running IN-PROCESS (feature 068).
+        """Execute a tool call against a built-in agent running IN-PROCESS (feature 040).
 
         Runs the agent's own ``handle_mcp_request`` with a
         :class:`~shared.local_transport.LoopbackSocket` whose frames route back
@@ -7957,7 +7957,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         from orchestrator.session_store import assert_production_posture
         assert_production_posture()
 
-        # Feature 068 (US2): mark the bundled first-party fleet owner-safe so
+        # Feature 040 (US2): mark the bundled first-party fleet owner-safe so
         # their tools are usable out of the box (audited; idempotent — already-
         # safe agents are skipped on re-boot). Gated by FF_SAFE_AGENTS.
         try:
@@ -7967,9 +7967,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 await agent_trust.seed_safe(
                     self.history.db, self.history.db._FIRST_PARTY_PUBLIC_AGENT_IDS)
         except Exception:
-            logger.debug("Feature 068 safe seed failed (non-fatal)", exc_info=True)
+            logger.debug("Feature 040 safe seed failed (non-fatal)", exc_info=True)
 
-        # Feature 068 (US1): register the bundled first-party agents IN-PROCESS
+        # Feature 040 (US1): register the bundled first-party agents IN-PROCESS
         # (no per-agent uvicorn port). start.py skips spawning them as
         # subprocesses when this flag is on; the networked path remains for any
         # agent not registered locally. Default ON; kill-switch falls back to WS.
@@ -7978,7 +7978,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 from orchestrator import local_agents
                 await local_agents.register_built_ins(self)
         except Exception:
-            logger.exception("Feature 068: in-process agent registration failed")
+            logger.exception("Feature 040: in-process agent registration failed")
 
         # Feature 028 (FR-013): drain queued offline sign-out revocations.
         async def _revocation_queue_loop():
@@ -8262,7 +8262,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             except Exception:
                 logger.debug("attachment accept-list injection failed", exc_info=True)
             shell = shell.replace("%%ASTRAL_ACCEPT%%", accept_attr)
-            # Feature 068 fix: cache-bust the shell's static asset URLs by
+            # Feature 040 fix: cache-bust the shell's static asset URLs by
             # content hash so a rebuilt client.js/astral.css is fetched fresh
             # (no manual hard refresh required).
             shell = shell.replace(

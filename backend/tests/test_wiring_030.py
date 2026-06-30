@@ -234,7 +234,7 @@ def _draft_fake(draft, ownership):
 
 def test_public_agent_never_hidden_by_stale_draft_row():
     fake = _draft_fake({"status": "error"}, {"is_public": True})
-    # weather-1 is a surviving bundled public agent (068 retired etf-tracker-1-1).
+    # weather-1 is a surviving bundled public agent (040 retired etf-tracker-1-1).
     assert fake._is_draft_agent("weather-1") is False
 
 

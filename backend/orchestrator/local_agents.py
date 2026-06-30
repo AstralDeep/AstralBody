@@ -1,4 +1,4 @@
-"""Feature 068 (US1) — in-process registry of the bundled first-party agents.
+"""Feature 040 (US1) — in-process registry of the bundled first-party agents.
 
 The nine first-party agents that ship with the product run *inside* the
 orchestrator process (no per-agent uvicorn port) when ``FF_INPROCESS_AGENTS`` is
@@ -22,7 +22,7 @@ from typing import List, Optional
 logger = logging.getLogger("LocalAgents")
 
 #: The nine bundled first-party agent directory names. ``etf_tracker_1`` was
-#: retired in feature 068. This is the canonical built-in set (BUILT_IN_AGENT_IDS
+#: retired in feature 040. This is the canonical built-in set (BUILT_IN_AGENT_IDS
 #: equivalent) referenced by the in-process registry.
 BUILT_IN_AGENT_DIRS = (
     "connectors",
@@ -77,7 +77,7 @@ async def register_built_ins(orch) -> List[str]:
         try:
             cls = _load_agent_class(dir_name)
             if cls is None:
-                logger.warning("Feature 068: no BaseA2AAgent subclass found in '%s'", dir_name)
+                logger.warning("Feature 040: no BaseA2AAgent subclass found in '%s'", dir_name)
                 continue
             agent = cls()  # builds the MCP server + ECIES keys; does NOT start uvicorn
             await orch.register_agent(
@@ -87,8 +87,8 @@ async def register_built_ins(orch) -> List[str]:
             orch.local_agents[agent.card.agent_id] = agent
             registered.append(agent.card.agent_id)
         except Exception:  # noqa: BLE001 — a bad agent must not break the others or boot
-            logger.exception("Feature 068: failed to load built-in agent '%s' in-process", dir_name)
+            logger.exception("Feature 040: failed to load built-in agent '%s' in-process", dir_name)
     if registered:
-        logger.info("Feature 068: %d built-in agents registered in-process: %s",
+        logger.info("Feature 040: %d built-in agents registered in-process: %s",
                     len(registered), registered)
     return registered

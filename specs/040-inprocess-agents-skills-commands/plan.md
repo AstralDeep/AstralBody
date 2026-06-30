@@ -1,7 +1,7 @@
 # Implementation Plan: In-Process Built-In Agents, Owner-Safe Marking, and Skills + Slash Commands
 
-**Branch**: `068-inprocess-agents-skills-commands` | **Date**: 2026-06-24 | **Spec**: [spec.md](spec.md)
-**Input**: Feature specification from `specs/068-inprocess-agents-skills-commands/spec.md`
+**Branch**: `040-inprocess-agents-skills-commands` | **Date**: 2026-06-24 | **Spec**: [spec.md](spec.md)
+**Input**: Feature specification from `specs/040-inprocess-agents-skills-commands/spec.md`
 
 ## Summary
 
@@ -49,7 +49,7 @@ Collapse the nine bundled first-party agents from per-agent OS processes (each a
 ### Documentation (this feature)
 
 ```text
-specs/068-inprocess-agents-skills-commands/
+specs/040-inprocess-agents-skills-commands/
 ├── plan.md              # This file
 ├── spec.md              # Feature specification (with Clarifications)
 ├── research.md          # Phase 0 — design decisions & alternatives
