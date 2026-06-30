@@ -1,5 +1,6 @@
 package com.kyopenscience.astral.app.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -7,6 +8,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -60,12 +62,42 @@ fun AdaptiveShell(vm: AppViewModel, renderer: Renderer) {
 private fun StackedShell(state: UiState, renderer: Renderer, onSend: (String) -> Unit) {
     Column(modifier = Modifier.fillMaxSize()) {
         StatusLine(state.statusText)
-        if (state.turns.isNotEmpty()) {
-            ChatList(state.turns, Modifier.fillMaxWidth().weight(0.4f))
-            HorizontalDivider()
-        }
+        CollapsibleChatPanel(state.turns)
+        HorizontalDivider()
+        // The canvas (server-driven UI) is the primary, persistent area.
         CanvasHost(components = state.canvas, renderer = renderer, modifier = Modifier.weight(1f))
         InputBar(onSend)
+    }
+}
+
+/**
+ * A collapsible conversation panel sitting ON TOP of the canvas (the UI-generation
+ * area). Bounded height when open so the generated components stay the focus;
+ * collapse it to a single header row to give the canvas the whole screen.
+ */
+@Composable
+private fun CollapsibleChatPanel(turns: List<ChatTurn>) {
+    val visible = turns.filter { it.text.isNotBlank() }
+    var expanded by remember { mutableStateOf(true) }
+    Row(
+        modifier =
+            Modifier.fillMaxWidth().clickable { expanded = !expanded }
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(if (expanded) "▼" else "▶")
+        Text("Conversation", style = MaterialTheme.typography.titleSmall)
+        if (visible.isNotEmpty()) {
+            Text(
+                "(${visible.size})",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+    if (expanded && visible.isNotEmpty()) {
+        ChatList(turns, Modifier.fillMaxWidth().heightIn(max = 260.dp))
     }
 }
 
