@@ -3134,7 +3134,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # qualification depends on knowing the full set first (Phase B).
         eligible: List[Tuple[str, Any]] = []
         for agent_id, card in self.agent_cards.items():
-            if agent_id not in self.agents:
+            if agent_id not in self.agents and agent_id not in self.local_agents:
                 continue
 
             # Draft test: only include tools from the draft agent being tested
@@ -7615,7 +7615,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             signal that the chat turn would dispatch in text-only mode.
         """
         for agent_id, card in self.agent_cards.items():
-            if agent_id not in self.agents:
+            if agent_id not in self.agents and agent_id not in self.local_agents:
                 continue
             if draft_agent_id and agent_id != draft_agent_id:
                 continue
