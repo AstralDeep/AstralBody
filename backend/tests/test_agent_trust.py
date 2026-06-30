@@ -1,4 +1,4 @@
-"""Feature 068 (US2) — owner-safe marking + permission baseline.
+"""Feature 040 (US2) — owner-safe marking + permission baseline.
 
 Covers: the safe baseline flips deny→allow for a fresh user, an explicit
 opt-out wins over the safe default, a non-safe agent stays default-deny,

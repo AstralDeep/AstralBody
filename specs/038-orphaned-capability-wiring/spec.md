@@ -1,6 +1,6 @@
 # Feature Specification: Orphaned 033-Capability Wiring Triage
 
-**Feature Branch**: `065-orphaned-capability-wiring`
+**Feature Branch**: `038-orphaned-capability-wiring`
 **Created**: 2026-06-17
 **Status**: RESOLVED — all 19 modules + companions wired into the runtime (decision: wire all)
 **Input**: Code review of all work from spec 033 onward. The final "Batch 1–6" wave (PR #80) plus a few earlier branches landed 19 capability modules that were fully built and unit-tested but **never imported by production code**. This spec inventories each one so a human can decide, per module: **delete** (preserved in git history, re-add when the feature is real) or **keep + wire** into the running product.

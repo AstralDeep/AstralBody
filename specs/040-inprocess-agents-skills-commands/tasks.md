@@ -1,10 +1,10 @@
 ---
-description: "Task list for 068-inprocess-agents-skills-commands"
+description: "Task list for 040-inprocess-agents-skills-commands"
 ---
 
 # Tasks: In-Process Built-In Agents, Owner-Safe Marking, and Skills + Slash Commands
 
-**Input**: Design documents from `specs/068-inprocess-agents-skills-commands/`
+**Input**: Design documents from `specs/040-inprocess-agents-skills-commands/`
 **Prerequisites**: plan.md, spec.md, research.md, data-model.md, contracts/
 
 **Tests**: INCLUDED — Constitution III mandates ≥90% changed-code coverage and the spec defines acceptance scenarios per story. Write each story's tests before/alongside its implementation and ensure they fail first.
@@ -166,7 +166,7 @@ Single server-driven backend under `backend/`. Tests under `backend/tests/`.
 - [X] T041 [P] Add Google/NumPy docstrings to all new modules/functions (`local_agents.py`, `local_transport.py`, `agent_trust.py`, `skill_packs.py`, `slash_commands.py`).
 - [X] T042 Run `ruff check .` (repo-root clean) and the full `pytest` suite inside the `astralbody` container; fix to green.
 - [X] T043 Run quickstart.md validation against the running container (no-port check, audit verify, credential confidentiality, real-browser command menu, flag on/off parity).
-- [X] T044 [P] Add a feature-068 summary paragraph to CLAUDE.md's manual notes section (mirroring prior features).
+- [X] T044 [P] Add a feature-040 summary paragraph to CLAUDE.md's manual notes section (mirroring prior features).
 
 ---
 

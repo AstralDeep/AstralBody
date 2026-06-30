@@ -1,4 +1,4 @@
-"""Feature 067 — desktop codegen download-card tests.
+"""Feature 039 — desktop codegen download-card tests.
 
 Covers:
   - the ``download_card`` webrender primitive (registry, renderer structure,

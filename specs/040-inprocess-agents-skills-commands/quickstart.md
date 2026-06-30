@@ -1,4 +1,4 @@
-# Quickstart: validating 068-inprocess-agents-skills-commands
+# Quickstart: validating 040-inprocess-agents-skills-commands
 
 How to exercise each pillar against the running container. Dev posture requires `ASTRAL_ENV=development`. The backend needs Python 3.11 (run inside the `astralbody` container).
 

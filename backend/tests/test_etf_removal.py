@@ -1,4 +1,4 @@
-"""Feature 068 (US3) — etf_tracker_1 retirement.
+"""Feature 040 (US3) — etf_tracker_1 retirement.
 
 Verifies the agent is removed from every surface (directory, first-party public
 catalog, retirement sets, history glyphs, knowledge index) and that the
@@ -74,7 +74,7 @@ def test_etf_orphan_rows_purged_idempotently():
     db.set_agent_ownership("etf-tracker-1-1", "pytest-etf@example.com", is_public=True)
     assert db.get_agent_ownership("etf-tracker-1-1"), "precondition: row seeded"
 
-    # First boot runs _cleanup_retired_agents_068 → row purged.
+    # First boot runs _cleanup_retired_agents_040 → row purged.
     db._init_db()
     assert not db.get_agent_ownership("etf-tracker-1-1"), "orphan row purged on boot"
 

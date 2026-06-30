@@ -1,4 +1,4 @@
-"""Feature 067 (C-6): deployment config resolution for a bare-downloaded exe.
+"""Feature 039 (C-6): deployment config resolution for a bare-downloaded exe.
 
 Precedence: env > persisted QSettings > first-run prompt. Without this a
 double-clicked exe silently fell back to a dev token the real-auth orchestrator

@@ -28,7 +28,7 @@ logger = logging.getLogger("ToolPermissions")
 # but missing here, leaving those tools without any permission control surface
 # (027 click-through finding) — agent_scopes has no scope CHECK constraint, so
 # adding it is purely additive.
-# "tools:execute" (feature 067) governs command-execution tools — the Windows
+# "tools:execute" (feature 039) governs command-execution tools — the Windows
 # coding agent's run_command/run_shell declare it. Additive for the same reason.
 VALID_SCOPES = ["tools:read", "tools:write", "tools:search", "tools:system",
                 "tools:files", "tools:execute"]
@@ -67,7 +67,7 @@ class ToolPermissionManager:
         # In-memory tool→scope mapping populated by orchestrator on agent registration
         # Structure: { agent_id: { tool_name: scope_string } }
         self._tool_scope_map: Dict[str, Dict[str, str]] = {}
-        # Feature 068: short-TTL cache of agent_trust.is_safe so the
+        # Feature 040: short-TTL cache of agent_trust.is_safe so the
         # safe-baseline check stays off the per-call DB hot path.
         self._safe_cache: Dict[str, tuple] = {}
         self._migrate_from_json()
@@ -271,7 +271,7 @@ class ToolPermissionManager:
         )
         if legacy_row is not None and not bool(legacy_row["enabled"]):
             return False
-        # 3. Fall back to the agent-wide scope. Feature 068: an owner-approved
+        # 3. Fall back to the agent-wide scope. Feature 040: an owner-approved
         # "safe" agent flips this baseline from deny→allow — but ONLY when the
         # user has no explicit scope row. An explicit grant OR opt-out (a stored
         # agent_scopes row, including enabled=False) always wins. Hard
@@ -288,7 +288,7 @@ class ToolPermissionManager:
         return False
 
     def _is_safe_agent(self, agent_id: str) -> bool:
-        """Whether ``agent_id`` is an owner-approved 'safe' agent (feature 068).
+        """Whether ``agent_id`` is an owner-approved 'safe' agent (feature 040).
 
         Gated by ``FF_SAFE_AGENTS``; cached briefly (30s) to avoid a DB hit on
         the per-call permission path. Fails closed (returns False) on any error,
@@ -315,7 +315,7 @@ class ToolPermissionManager:
     def _safe_flip_allowed(self, agent_id: str) -> bool:
         """Whether a safe agent's deny→allow baseline flip may apply for any user.
 
-        Feature 068's safe marker auto-allows tools for ALL users. To stop an
+        Feature 040's safe marker auto-allows tools for ALL users. To stop an
         owner from fleet-exposing a PRIVATE agent by marking it safe, only honor
         the flip for a PUBLIC agent — or one with no ownership record at all
         (built-in/system/test agents). A private agent (ownership row with

@@ -957,7 +957,7 @@ class Database:
         if not self._column_exists(cursor, 'workspace_snapshot', 'layouts'):
             cursor.execute("ALTER TABLE workspace_snapshot ADD COLUMN layouts TEXT NULL")
 
-        # ── Feature 068: per-agent owner-approved "safe" trust record ───────
+        # ── Feature 040: per-agent owner-approved "safe" trust record ───────
         # Distinct from agent_ownership.is_public (visibility). Drives the
         # check-time safe permission baseline (orchestrator/agent_trust.py).
         # Rollback: DROP TABLE IF EXISTS agent_trust;
@@ -975,11 +975,11 @@ class Database:
         # ── Feature 029: agent catalog migrations (data-model.md) ───────────
         self._migrate_agent_catalog_029(cursor)
 
-        # ── Feature 067 (C-2): purge phantom Windows-tools agent rows ───────
+        # ── Feature 039 (C-2): purge phantom Windows-tools agent rows ───────
         self._cleanup_phantom_windows_tools_ids(cursor)
 
-        # ── Feature 068: retire etf_tracker_1 (orphan row purge) ────────────
-        self._cleanup_retired_agents_068(cursor)
+        # ── Feature 040: retire etf_tracker_1 (orphan row purge) ────────────
+        self._cleanup_retired_agents_040(cursor)
 
         # ── Feature 030: first-party agent visibility backfill ──────────────
         self._migrate_agent_visibility_030(cursor)
@@ -1010,13 +1010,13 @@ class Database:
                           'nefarious', 'nefarious-1',
                           'nocodb', 'nocodb-1')
 
-    # Feature 068: etf_tracker_1 retired (agent directory + code removed). Both
+    # Feature 040: etf_tracker_1 retired (agent directory + code removed). Both
     # the hyphenated agent id and the legacy underscore directory-name row may
     # exist in deployed databases — cover both.
-    _RETIRED_AGENT_IDS_068 = ('etf-tracker-1-1', 'etf_tracker_1')
+    _RETIRED_AGENT_IDS_040 = ('etf-tracker-1-1', 'etf_tracker_1')
 
     def _cleanup_phantom_windows_tools_ids(self, cursor):
-        """Feature 067 (C-2): delete phantom Windows-tools agent rows.
+        """Feature 039 (C-2): delete phantom Windows-tools agent rows.
 
         The A2A discovery fallback used to slugify the agent's display name
         ("Windows Tools (code & system)") into an id instead of its real id
@@ -1035,8 +1035,8 @@ class Database:
             except Exception:  # noqa: BLE001 — table may be absent on older schema
                 pass
 
-    def _cleanup_retired_agents_068(self, cursor):
-        """Feature 068: purge permission/credential/ownership/trust rows for the
+    def _cleanup_retired_agents_040(self, cursor):
+        """Feature 040: purge permission/credential/ownership/trust rows for the
         retired ``etf_tracker_1`` agent.
 
         Idempotent: each DELETE matches nothing on re-run, so it is safe at
@@ -1044,9 +1044,9 @@ class Database:
         route through the runtime retired-agent handling
         (``orchestrator.RETIRED_AGENT_IDS``) so old transcripts degrade
         gracefully rather than dangling. Lead-approved destructive removal per
-        ``specs/068-inprocess-agents-skills-commands/data-model.md``.
+        ``specs/040-inprocess-agents-skills-commands/data-model.md``.
         """
-        retired = self._RETIRED_AGENT_IDS_068
+        retired = self._RETIRED_AGENT_IDS_040
         ph = ", ".join(["%s"] * len(retired))
         for table in ('agent_ownership', 'agent_scopes', 'tool_overrides',
                       'tool_permissions', 'user_credentials', 'agent_trust'):
@@ -1330,7 +1330,7 @@ class Database:
         rows = self.fetch_all("SELECT agent_id, owner_email, is_public FROM agent_ownership")
         return [dict(r) for r in rows]
 
-    # ── Feature 068: agent "safe" trust marker (agent_trust) ─────────────
+    # ── Feature 040: agent "safe" trust marker (agent_trust) ─────────────
 
     def get_agent_is_safe(self, agent_id: str) -> bool:
         """Return True if the agent carries the owner-approved 'safe' marker.
@@ -1364,7 +1364,7 @@ class Database:
         return prior
 
     def reset_agent_safe(self, agent_id: str, marked_by: str) -> bool:
-        """Clear the safe marker (revision reset, feature 068). Returns prior state."""
+        """Clear the safe marker (revision reset, feature 040). Returns prior state."""
         prior = self.get_agent_is_safe(agent_id)
         self.execute(
             """INSERT INTO agent_trust

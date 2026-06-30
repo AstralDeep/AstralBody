@@ -1,4 +1,4 @@
-"""Feature 068 (US5) — slash-command discovery popup in the Windows client.
+"""Feature 040 (US5) — slash-command discovery popup in the Windows client.
 
 Verifies the QCompleter model: every command is present, the popup display
 carries the description while the inserted value is the clean "/command "

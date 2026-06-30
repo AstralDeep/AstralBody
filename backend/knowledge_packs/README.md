@@ -1,4 +1,4 @@
-# Authored skill packs (feature 068, US4)
+# Authored skill packs (feature 040, US4)
 
 Human-authored, **version-controlled** capability/technique guidance that the
 chat model loads **on demand by relevance** — only for the agents whose tools

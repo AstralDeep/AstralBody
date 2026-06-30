@@ -1,4 +1,4 @@
-"""Feature 068 (US4) — authored skill packs + on-demand, bounded loading.
+"""Feature 040 (US4) — authored skill packs + on-demand, bounded loading.
 
 Covers: authored packs are loaded and take precedence over synthesized
 knowledge; the per-turn digest is relevance-scoped (only agents in play),

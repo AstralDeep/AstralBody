@@ -1,4 +1,4 @@
-"""Feature 067 — the ``offer_desktop_codegen`` orchestrator meta-tool.
+"""Feature 039 — the ``offer_desktop_codegen`` orchestrator meta-tool.
 
 When a user asks Astral to *generate code that should run on their machine*
 (e.g. "write me a Python script that sorts my downloads folder"), the chat LLM

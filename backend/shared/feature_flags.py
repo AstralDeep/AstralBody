@@ -50,7 +50,7 @@ class FeatureFlags:
             # actively use cross-session memory on request, mirroring
             # scheduling_chat. Passive prompt recall is unaffected. Default ON.
             "memory_chat": self._read("FF_MEMORY_CHAT", True),
-            # 067-desktop-codegen-download: injects the offer_desktop_codegen
+            # 039-desktop-codegen-download: injects the offer_desktop_codegen
             # meta-tool so the assistant can surface a download card for the
             # Windows coding-agent .exe (GitHub-released, integrity-checked)
             # when a user asks for code that runs on their machine. Default ON;
@@ -78,21 +78,21 @@ class FeatureFlags:
             # C-N15 (a tool's _model_digest is trusted and left unmarked).
             # No-op when OFF. Default OFF.
             "datamarking": self._read("FF_DATAMARKING", False),
-            # 068-inprocess-agents-skills-commands: run the nine bundled
+            # 040-inprocess-agents-skills-commands: run the nine bundled
             # first-party agents IN-PROCESS in the orchestrator (no per-agent
             # uvicorn port). The networked WS path is the kill-switch when OFF.
-            # Default ON (the intended posture). See specs/068-.../.
+            # Default ON (the intended posture). See specs/040-.../.
             "inprocess_agents": self._read("FF_INPROCESS_AGENTS", True),
-            # 068: owner-approved "safe" agents flip the per-call permission
+            # 040: owner-approved "safe" agents flip the per-call permission
             # baseline from deny→allow at check time (explicit user opt-out and
             # hard security blocks still win; no per-user rows written). When
             # OFF, the legacy default-deny applies. Default ON.
             "safe_agents": self._read("FF_SAFE_AGENTS", True),
-            # 068: load authored capability/technique skill packs on demand by
+            # 040: load authored capability/technique skill packs on demand by
             # relevance (wires get_techniques_for_agent into the turn). Bounded +
             # fail-open to today's behavior. Default ON.
             "skill_packs": self._read("FF_SKILL_PACKS", True),
-            # 068: user-typed /slash-commands in chat (expand-to-prompt or a
+            # 040: user-typed /slash-commands in chat (expand-to-prompt or a
             # defined flow), always through the permission/audit/PHI rails. A
             # "/"-prefixed message is ordinary chat when OFF (fail-open). Default ON.
             "slash_commands": self._read("FF_SLASH_COMMANDS", True),
