@@ -131,6 +131,17 @@ object Wire {
     private fun JsonObject.arr(key: String): JsonArray? = this[key] as? JsonArray
     private fun JsonObject.obj(key: String): JsonObject? = this[key] as? JsonObject
 
+    private fun JsonObject.boolMap(key: String): Map<String, Boolean> =
+        (this[key] as? JsonObject)?.entries
+            ?.associate { (k, v) -> k to ((v as? JsonPrimitive)?.booleanOrNull ?: false) } ?: emptyMap()
+
+    private fun JsonObject.strMap(key: String): Map<String, String> =
+        (this[key] as? JsonObject)?.entries
+            ?.associate { (k, v) -> k to ((v as? JsonPrimitive)?.contentOrNull ?: "") } ?: emptyMap()
+
+    private fun JsonObject.strList(key: String): List<String> =
+        (this[key] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull } ?: emptyList()
+
     private fun opsFromJson(arr: JsonArray?): List<CanvasOp> =
         arr?.mapNotNull { el ->
             val o = el as? JsonObject ?: return@mapNotNull null
@@ -156,11 +167,17 @@ object Wire {
         arr?.mapNotNull { el ->
             val o = el as? JsonObject ?: return@mapNotNull null
             val id = o.str("id") ?: return@mapNotNull null
-            val scopes =
-                (o["scopes"] as? JsonObject)?.entries?.associate { (k, v) ->
-                    k to ((v as? JsonPrimitive)?.booleanOrNull ?: false)
-                } ?: emptyMap()
-            Agent(id, o.str("name") ?: id, o.str("description").orEmpty(), o.bool("is_public") ?: false, scopes)
+            Agent(
+                id = id,
+                name = o.str("name") ?: id,
+                description = o.str("description").orEmpty(),
+                isPublic = o.bool("is_public") ?: false,
+                scopes = o.boolMap("scopes"),
+                tools = o.strList("tools"),
+                toolDescriptions = o.strMap("tool_descriptions"),
+                permissions = o.boolMap("permissions"),
+                toolScopeMap = o.strMap("tool_scope_map"),
+            )
         } ?: emptyList()
 
     private fun chatsFromJson(arr: JsonArray?): List<ChatSummary> =

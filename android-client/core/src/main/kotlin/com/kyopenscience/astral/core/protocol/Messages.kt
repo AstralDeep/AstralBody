@@ -33,6 +33,12 @@ data class Agent(
     val description: String,
     val isPublic: Boolean,
     val scopes: Map<String, Boolean>,
+    val tools: List<String> = emptyList(),
+    val toolDescriptions: Map<String, String> = emptyMap(),
+    /** Effective per-tool enabled state (server-computed from scopes + overrides). */
+    val permissions: Map<String, Boolean> = emptyMap(),
+    /** Each tool's required permission kind (e.g. "tools:read"), for toggling. */
+    val toolScopeMap: Map<String, String> = emptyMap(),
 )
 
 data class ChatSummary(val id: String, val title: String)

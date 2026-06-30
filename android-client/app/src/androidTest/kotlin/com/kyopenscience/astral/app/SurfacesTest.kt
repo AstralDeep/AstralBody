@@ -21,7 +21,7 @@ class SurfacesTest {
         rule.setContent {
             AgentsScreen(
                 agents = listOf(Agent("a1", "Weather", "Forecasts", false, mapOf("get_weather" to true))),
-                onToggle = { _, _ -> },
+                onToggleTool = { _, _, _ -> },
                 onEnableRecommended = {},
             )
         }

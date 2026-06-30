@@ -108,15 +108,14 @@ class AppViewModel(
         _state.value = _state.value.copy(screen = Screen.Chat)
     }
 
-    fun setAgentEnabled(agent: Agent, enabled: Boolean) {
-        sendEvent(
-            "set_agent_permissions",
-            buildJsonObject {
-                put("agent_id", agent.id)
-                put("enabled", enabled)
-            },
-        )
-        sendEvent("discover_agents")
+    /** Enable/disable a single tool of an agent (REST per-(tool,kind) write), then refresh. */
+    fun setToolEnabled(agent: Agent, tool: String, enabled: Boolean) {
+        val t = token ?: return
+        val kind = agent.toolScopeMap[tool] ?: "tools:read"
+        viewModelScope.launch {
+            runCatching { rest.setToolPermission(t, agent.id, tool, kind, enabled) }
+            sendEvent("discover_agents")
+        }
     }
 
     fun enableRecommended() {
