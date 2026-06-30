@@ -16,13 +16,6 @@ import androidx.compose.ui.unit.dp
 import com.kyopenscience.astral.app.render.Emit
 import com.kyopenscience.astral.app.render.Renderer
 import com.kyopenscience.astral.core.sdui.Component
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.contentOrNull
-
-private fun Component.str(key: String): String? = (attributes[key] as? JsonPrimitive)?.contentOrNull
-
-private fun Component.payload(): JsonObject = (attributes["payload"] as? JsonObject) ?: JsonObject(emptyMap())
 
 /**
  * Register the basic primitive renderers (US1 MVP): text, card, container, alert,

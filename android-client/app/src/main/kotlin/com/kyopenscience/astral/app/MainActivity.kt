@@ -39,7 +39,7 @@ import com.kyopenscience.astral.app.auth.TokenStore
 import com.kyopenscience.astral.app.render.CanvasHost
 import com.kyopenscience.astral.app.render.Emit
 import com.kyopenscience.astral.app.render.Renderer
-import com.kyopenscience.astral.app.render.renderers.registerBasicRenderers
+import com.kyopenscience.astral.app.render.renderers.registerAllRenderers
 import com.kyopenscience.astral.app.transport.OrchestratorClient
 import com.kyopenscience.astral.app.transport.deviceCapabilities
 import com.kyopenscience.astral.app.ui.AppViewModel
@@ -81,7 +81,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             AstralTheme {
                 val vm: AppViewModel = viewModel(factory = AppViewModel.factory(client))
-                val renderer = remember(vm) { Renderer(Emit { a, p -> vm.sendEvent(a, p) }).registerBasicRenderers() }
+                val renderer = remember(vm) { Renderer(Emit { a, p -> vm.sendEvent(a, p) }).registerAllRenderers() }
                 val token by authToken.collectAsStateWithLifecycle()
                 val error by signInError.collectAsStateWithLifecycle()
 
