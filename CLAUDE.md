@@ -1,6 +1,6 @@
 # AstralBody Development Guidelines
 
-Auto-generated from all feature plans. Last updated: 2026-04-13
+Auto-generated from all feature plans. Last updated: 2026-06-30
 
 ## Active Technologies
 - Python 3.11+ (backend), TypeScript 5.x (frontend, Vite + React 18) + FastAPI, websockets, existing OpenAI-compatible LLM client (`_call_llm`); React 18, Tailwind, framer-motion, lucide-react, existing `fetchJson` helper. **No new third-party libraries** (Constitution V). (013-agent-visibility-tool-picker)
@@ -29,10 +29,16 @@ Auto-generated from all feature plans. Last updated: 2026-04-13
 ## Project Structure
 
 ```text
-backend/
-frontend/
-tests/
+backend/        # Python FastAPI backend (orchestrator, agents, webrender, tests)
+windows-client/ # Standalone Windows desktop client (PyInstaller + tkinter)
+docs/           # Additional documentation
+specs/          # Feature specification documents (speckit)
 ```
+
+Note: the React/Vite frontend was removed in feature 026; the UI is now
+server-driven from the backend (`backend/webrender/`). An untracked
+`frontend/node_modules/` artifact may linger locally but is gitignored and
+contains no source.
 
 ## Commands
 
