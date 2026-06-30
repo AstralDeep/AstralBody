@@ -22,13 +22,13 @@ description: "Task list for 041-android-sdui-client"
 
 **Purpose**: Stand up the Gradle project, modules, dependency catalog, and tooling.
 
-- [ ] T001 Create the `android-client/` Gradle project skeleton (Gradle wrapper, `android-client/settings.gradle.kts` including `:core` and `:app`, root `android-client/build.gradle.kts`) per plan.md.
-- [ ] T002 [P] Configure the `:app` Android module (applicationId/namespace `com.kyopenscience.astral`, minSdk 26, targetSdk current, Compose BOM + Material 3 + Material 3 Adaptive) in `android-client/app/build.gradle.kts`.
-- [ ] T003 [P] Configure the `:core` pure-Kotlin module (JVM 17, kotlinx.serialization, coroutines; JUnit + kotlinx-coroutines-test) in `android-client/core/build.gradle.kts`.
-- [ ] T004 [P] Declare the approved dependency set (OkHttp/Okio, kotlinx.serialization-json, AppAuth-Android + AndroidX Browser, Coil, AndroidX Security-Crypto/DataStore/Lifecycle/Navigation-Compose) in `android-client/gradle/libs.versions.toml` (Principle V — to be approved in the PR).
-- [ ] T005 [P] Configure ktlint/detekt + Android Lint + Kover (≥90% changed-code gate) in `android-client/build.gradle.kts`.
-- [ ] T006 [P] Add the dark theme / design tokens mirroring the web + Windows palette in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/ui/theme/Theme.kt`.
-- [ ] T007 Add the Android CI workflow skeleton (lint + `:core:test` + `:app:assembleDebug`) in `.github/workflows/android-ci.yml` (finalized in Polish).
+- [X] T001 Create the `android-client/` Gradle project skeleton (Gradle wrapper, `android-client/settings.gradle.kts` including `:core` and `:app`, root `android-client/build.gradle.kts`) per plan.md.
+- [X] T002 [P] Configure the `:app` Android module (applicationId/namespace `com.kyopenscience.astral`, minSdk 26, targetSdk current, Compose BOM + Material 3 + Material 3 Adaptive) in `android-client/app/build.gradle.kts`.
+- [X] T003 [P] Configure the `:core` pure-Kotlin module (JVM 17, kotlinx.serialization, coroutines; JUnit + kotlinx-coroutines-test) in `android-client/core/build.gradle.kts`.
+- [X] T004 [P] Declare the approved dependency set (OkHttp/Okio, kotlinx.serialization-json, AppAuth-Android + AndroidX Browser, Coil, AndroidX Security-Crypto/DataStore/Lifecycle/Navigation-Compose) in `android-client/gradle/libs.versions.toml` (Principle V — to be approved in the PR).
+- [X] T005 [P] Configure ktlint/detekt + Android Lint + Kover (≥90% changed-code gate) in `android-client/build.gradle.kts`.
+- [X] T006 [P] Add the dark theme / design tokens mirroring the web + Windows palette in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/ui/theme/Theme.kt`.
+- [X] T007 Add the Android CI workflow skeleton (lint + `:core:test` + `:app:assembleDebug`) in `.github/workflows/android-ci.yml` (finalized in Polish).
 
 ---
 
@@ -47,8 +47,8 @@ description: "Task list for 041-android-sdui-client"
 - [ ] T014 Implement the OkHttp WebSocket transport (connect, send `register_ui` with android `DeviceCapabilities`, inbound `Flow<InboundMessage>`, outbound `ui_event`/`chat_message`, reconnect/backoff, connection-state) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/transport/OrchestratorClient.kt`.
 - [ ] T015 Implement the renderer registry scaffold + labeled-placeholder fallback (FR-005) + the Compose canvas host (children keyed by `component_id`, applies `CanvasOp` in place) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/render/Registry.kt` and `.../render/CanvasHost.kt`.
 - [ ] T016 Implement the app shell + ViewModel (connect on launch, observe inbound `Flow` → chat/canvas state, dispatch `ui_event`) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/MainActivity.kt` and `.../ui/AppViewModel.kt`.
-- [ ] T017 [P] Server: add an `android` value to `DeviceType` + a full-capability `_BASE_HOST_CONFIG["android"]` entry (mirroring `windows`) in `backend/rote/capabilities.py`.
-- [ ] T018 [P] Server: Python unit tests for the `android` ROTE profile (device_type → full-capability profile; `supported_types` honored) in `backend/rote/tests/test_android_profile.py`.
+- [X] T017 [P] Server: add an `android` value to `DeviceType` + a full-capability `_BASE_HOST_CONFIG["android"]` entry (mirroring `windows`) in `backend/rote/capabilities.py`.
+- [X] T018 [P] Server: Python unit tests for the `android` ROTE profile (device_type → full-capability profile; `supported_types` honored) in `backend/rote/tests/test_android_profile.py`.
 
 **Checkpoint**: A token can register, frames decode, and a component renders/updates in the canvas — stories can begin.
 
