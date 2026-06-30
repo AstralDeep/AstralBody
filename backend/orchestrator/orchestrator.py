@@ -6817,7 +6817,18 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         """
         from orchestrator import ui_designer
         from orchestrator.workspace import layout_key_for
+        from rote.capabilities import DeviceType
         timeline = self._ws_timeline_mode.get(id(websocket), False)
+        # Native clients (Windows/Android) render structured components with their
+        # OWN responsive layout. The web-oriented designer pass — a slow LLM call
+        # that emits a layout tree they can't render — only hurts them (the
+        # walkthrough saw a ~150 s wait, after which the flat components the user
+        # already saw were replaced by an unrenderable designed canvas, leaving only
+        # the text doc). Deliver the flat components and let the client arrange them;
+        # web/voice/etc. still get the adaptive designer.
+        _prof = self.rote.get_profile(websocket) if websocket is not None else None
+        if _prof is not None and _prof.device_type in (DeviceType.WINDOWS, DeviceType.ANDROID):
+            return await self._send_or_replace_components(websocket, components, chat_id, user_id)
         if not chat_id or not ui_designer.should_design(components, timeline_mode=timeline):
             return await self._send_or_replace_components(websocket, components, chat_id, user_id)
         try:
