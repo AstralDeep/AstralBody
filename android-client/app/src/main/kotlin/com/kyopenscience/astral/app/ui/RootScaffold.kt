@@ -47,7 +47,7 @@ fun RootScaffold(vm: AppViewModel, renderer: Renderer) {
         Box(modifier = Modifier.fillMaxSize().padding(padding)) {
             when (state.screen) {
                 Screen.Chat -> AdaptiveShell(vm, renderer)
-                Screen.Agents -> AgentsScreen(state.agents, vm::setToolEnabled, vm::enableRecommended)
+                Screen.Agents -> AgentsScreen(state.agents, vm::setAgentEnabled, vm::setToolEnabled, vm::enableRecommended)
                 Screen.History -> HistoryScreen(state.history, vm::openChat)
                 Screen.Audit -> AuditScreen(state.audit)
             }

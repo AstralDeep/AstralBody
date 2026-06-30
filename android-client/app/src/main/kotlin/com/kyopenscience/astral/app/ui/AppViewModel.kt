@@ -27,6 +27,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
 
 data class ChatTurn(val role: String, val text: String)
 
@@ -116,6 +117,20 @@ class AppViewModel(
             runCatching { rest.setToolPermission(t, agent.id, tool, kind, enabled) }
             sendEvent("discover_agents")
         }
+    }
+
+    /** Master toggle: enable/disable all of an agent's tools at once (WS scopes + overrides). */
+    fun setAgentEnabled(agent: Agent, enabled: Boolean) {
+        val kinds = agent.toolScopeMap.values.toSet().ifEmpty { agent.scopes.keys }
+        sendEvent(
+            "set_agent_permissions",
+            buildJsonObject {
+                put("agent_id", agent.id)
+                putJsonObject("scopes") { kinds.forEach { put(it, enabled) } }
+                putJsonObject("tool_overrides") { agent.tools.forEach { put(it, enabled) } }
+            },
+        )
+        sendEvent("discover_agents")
     }
 
     fun enableRecommended() {

@@ -30,6 +30,7 @@ import com.kyopenscience.astral.core.protocol.ChatSummary
 @Composable
 fun AgentsScreen(
     agents: List<Agent>,
+    onToggleAgent: (Agent, Boolean) -> Unit,
     onToggleTool: (Agent, String, Boolean) -> Unit,
     onEnableRecommended: () -> Unit,
 ) {
@@ -47,7 +48,7 @@ fun AgentsScreen(
                 Button(onClick = onEnableRecommended) { Text("Enable recommended") }
             }
         }
-        items(agents, key = { it.id }) { agent -> AgentCard(agent, onToggleTool) }
+        items(agents, key = { it.id }) { agent -> AgentCard(agent, onToggleAgent, onToggleTool) }
         if (agents.isEmpty()) {
             item { Text("No agents loaded yet.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
@@ -55,17 +56,24 @@ fun AgentsScreen(
 }
 
 @Composable
-private fun AgentCard(agent: Agent, onToggleTool: (Agent, String, Boolean) -> Unit) {
+private fun AgentCard(
+    agent: Agent,
+    onToggleAgent: (Agent, Boolean) -> Unit,
+    onToggleTool: (Agent, String, Boolean) -> Unit,
+) {
     var expanded by remember { mutableStateOf(false) }
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(
-                modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded },
+                modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(agent.name, style = MaterialTheme.typography.titleMedium)
+                Column(modifier = Modifier.weight(1f).clickable { expanded = !expanded }) {
+                    Text(
+                        (if (expanded) "▼ " else "▶ ") + agent.name,
+                        style = MaterialTheme.typography.titleMedium,
+                    )
                     if (agent.description.isNotBlank()) {
                         Text(
                             agent.description,
@@ -80,7 +88,10 @@ private fun AgentCard(agent: Agent, onToggleTool: (Agent, String, Boolean) -> Un
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                Text(if (expanded) "▼" else "▶")
+                Switch(
+                    checked = agent.permissions.values.any { it },
+                    onCheckedChange = { onToggleAgent(agent, it) },
+                )
             }
             if (expanded) {
                 if (agent.tools.isEmpty()) {

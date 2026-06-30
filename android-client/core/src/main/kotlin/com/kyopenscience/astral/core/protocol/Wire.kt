@@ -167,15 +167,29 @@ object Wire {
         arr?.mapNotNull { el ->
             val o = el as? JsonObject ?: return@mapNotNull null
             val id = o.str("id") ?: return@mapNotNull null
+            val permissions = o.boolMap("permissions")
+            // `tools` is a list of {name, description} (send_agent_list) OR plain
+            // strings (dashboard); fall back to the permission keys.
+            val toolObjs = (o["tools"] as? JsonArray)?.mapNotNull { it as? JsonObject }.orEmpty()
+            val tools: List<String>
+            val toolDescriptions: Map<String, String>
+            if (toolObjs.isNotEmpty()) {
+                tools = toolObjs.mapNotNull { it.str("name") }
+                toolDescriptions =
+                    toolObjs.mapNotNull { t -> t.str("name")?.let { it to t.str("description").orEmpty() } }.toMap()
+            } else {
+                tools = o.strList("tools").ifEmpty { permissions.keys.toList() }
+                toolDescriptions = o.strMap("tool_descriptions")
+            }
             Agent(
                 id = id,
                 name = o.str("name") ?: id,
                 description = o.str("description").orEmpty(),
                 isPublic = o.bool("is_public") ?: false,
                 scopes = o.boolMap("scopes"),
-                tools = o.strList("tools"),
-                toolDescriptions = o.strMap("tool_descriptions"),
-                permissions = o.boolMap("permissions"),
+                tools = tools,
+                toolDescriptions = toolDescriptions,
+                permissions = permissions,
                 toolScopeMap = o.strMap("tool_scope_map"),
             )
         } ?: emptyList()
