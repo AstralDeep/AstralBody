@@ -25,7 +25,7 @@ from astral_client import audit_log, phi_gate
 
 
 # --------------------------------------------------------------------------- #
-# Per-action confirmation gate (feature 067 UX).
+# Per-action confirmation gate (feature 039 UX).
 #
 # Mutating/exec tools ask the user for an explicit Allow before touching disk
 # or running a command. The real bridge (astral_client.confirm) shows a native
@@ -852,7 +852,7 @@ TOOL_REGISTRY: Dict[str, dict] = {
             },
         },
     },
-    # --- coding tools (feature 067) --- #
+    # --- coding tools (feature 039) --- #
     "read_file": {
         "function": read_file,
         "scope": "tools:read",

@@ -1,4 +1,4 @@
-"""Tests for the cross-thread confirmation bridge (feature 067 UX).
+"""Tests for the cross-thread confirmation bridge (feature 039 UX).
 
 Pure-Python — does NOT require PySide6. The bridge's poller is a plain function
 over a ``queue.Queue``, so tests inject a fake ``show_fn`` (the GUI-side

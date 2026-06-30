@@ -48,7 +48,7 @@ from .protocol import OrchestratorClient, device_caps
 from .renderer import RenderContext, render, supported_types as native_types, _scoped
 
 
-# Feature 068 (US5): slash-command discovery. Mirrors the web client's typeahead
+# Feature 040 (US5): slash-command discovery. Mirrors the web client's typeahead
 # and the server's orchestrator/slash_commands.COMMANDS registry — the server
 # expands a typed "/command" into a normal prompt; this popup just lets users
 # see the options as they type. Keep in sync with the web list.
@@ -646,7 +646,7 @@ class MainWindow(QMainWindow):
         self._input = QLineEdit()
         self._input.setPlaceholderText("Message AstralBody…  (type / for commands)")
         self._input.returnPressed.connect(self._send)
-        # Feature 068 (US5): pop up the slash-command options as the user types "/".
+        # Feature 040 (US5): pop up the slash-command options as the user types "/".
         self._input.setCompleter(build_slash_completer(self._input))
         send = QPushButton("Send")
         send.setObjectName("primary")
@@ -680,7 +680,7 @@ class MainWindow(QMainWindow):
 
         self.client.start()
 
-        # Launch-time integrity / update check (feature 067 B.5). Verifies the
+        # Launch-time integrity / update check (feature 039 B.5). Verifies the
         # running build's SHA-256 + sigstore signature against the GitHub release
         # before the binary is trusted — runs on a background thread so it never
         # delays the GUI, and fails open (offline ⇒ keep running) so it can never
@@ -882,7 +882,7 @@ class MainWindow(QMainWindow):
         if not shown:
             self.rail.show_empty_hint()
 
-    # --- cross-thread confirmation + workspace (feature 067 UX) ------------- #
+    # --- cross-thread confirmation + workspace (feature 039 UX) ------------- #
 
     def _show_confirm_dialog(self, req: dict) -> dict:
         """GUI-thread callback for the confirm bridge. Shows the right native
@@ -1068,7 +1068,7 @@ class MainWindow(QMainWindow):
         self._apply_workspace(chosen)
         QMessageBox.information(self, "Workspace", f"Workspace set to:\n{chosen}")
 
-    # --- launch-time integrity / update check (feature 067 B.5) ------------- #
+    # --- launch-time integrity / update check (feature 039 B.5) ------------- #
 
     def _start_integrity_check(self) -> None:
         """Verify the running build off the GUI thread (non-blocking, fail-open).

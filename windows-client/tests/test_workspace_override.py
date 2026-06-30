@@ -1,4 +1,4 @@
-"""Tests for the runtime workspace-directory override (feature 067 UX).
+"""Tests for the runtime workspace-directory override (feature 039 UX).
 
 The desktop GUI lets the user pick/change the coding-agent's workspace folder at
 runtime via ``set_workspace_override``. These tests prove confinement tracks the

@@ -1,4 +1,4 @@
-"""Tests for the desktop client integrity verifier (feature 067).
+"""Tests for the desktop client integrity verifier (feature 039).
 
 Covers:
   - SHA256SUMS parsing (extracts the exe's hash)

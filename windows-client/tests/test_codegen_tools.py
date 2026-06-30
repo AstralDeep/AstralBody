@@ -1,4 +1,4 @@
-"""Tests for the Windows coding agent's codegen tools (feature 067).
+"""Tests for the Windows coding agent's codegen tools (feature 039).
 
 Covers the safety rails that matter:
   - workspace confinement (path traversal refused; in-workspace allowed)
@@ -251,7 +251,7 @@ def test_codegen_tools_declare_scopes():
     assert scopes["run_shell"] == "tools:execute"
 
 
-# --- per-action confirmation (feature 067 UX) ------------------------------ #
+# --- per-action confirmation (feature 039 UX) ------------------------------ #
 
 
 def test_write_file_user_denied_no_side_effect(workspace, monkeypatch):

@@ -1,4 +1,4 @@
-# Data Model & Migrations: 068-inprocess-agents-skills-commands
+# Data Model & Migrations: 040-inprocess-agents-skills-commands
 
 Phase 1 output. All schema changes ship as idempotent, guarded deltas inside `shared/database.py::_init_db()` (Constitution IX). No ad-hoc SQL. Rollback documented per delta.
 

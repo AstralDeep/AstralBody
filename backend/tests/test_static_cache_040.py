@@ -1,4 +1,4 @@
-"""Feature 068 fix — static-asset cache control.
+"""Feature 040 fix — static-asset cache control.
 
 Browsers heuristically cached /static/* (no Cache-Control), serving a stale
 client.js after a rebuild so the slash-command menu never appeared. Verifies the

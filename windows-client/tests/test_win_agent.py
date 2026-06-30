@@ -16,7 +16,7 @@ def test_system_info_components():
 
 
 def test_list_directory(tmp_path, monkeypatch):
-    # list_directory is workspace-confined (feature 067); set the workspace to
+    # list_directory is workspace-confined (feature 039); set the workspace to
     # a tmp dir with a file in it.
     monkeypatch.setenv("ASTRAL_WORKSPACE_DIR", str(tmp_path))
     (tmp_path / "a.txt").write_text("x", encoding="utf-8")

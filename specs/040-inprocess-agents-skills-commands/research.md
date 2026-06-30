@@ -1,4 +1,4 @@
-# Research & Design Decisions: 068-inprocess-agents-skills-commands
+# Research & Design Decisions: 040-inprocess-agents-skills-commands
 
 Phase 0 output. Each decision records what was chosen, why, and the alternatives rejected. Findings are grounded in the discovery pass over the live codebase (file:line references are the seams the implementation touches).
 
