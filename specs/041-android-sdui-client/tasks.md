@@ -60,14 +60,14 @@ description: "Task list for 041-android-sdui-client"
 
 **Independent Test**: On a phone, complete OIDC sign-in, send a message, see a native-rendered response (no web view).
 
-- [ ] T019 [P] [US1] Implement OIDC Authorization-Code + PKCE via AppAuth (discovery from the authority, login in a Custom Tab against `astral-mobile`, redirect `com.kyopenscience.astral:/oauth2redirect`, code→token exchange) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/auth/OidcAuth.kt`.
-- [ ] T020 [P] [US1] Implement the encrypted refresh-token store + silent refresh + sign-out (AndroidX Security/DataStore) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/auth/TokenStore.kt`.
-- [ ] T021 [US1] Wire auth into the transport: real bearer in `register_ui`; `auth_required` → silent re-auth then reconnect; "no access" role → clear message (FR-001) in `.../app/transport/OrchestratorClient.kt` + `.../app/auth/`.
-- [ ] T022 [P] [US1] Debug-only dev-token path (`BuildConfig.DEBUG`-gated, absent from release per FR-002) in `android-client/app/src/debug/kotlin/com/kyopenscience/astral/app/auth/DevAuth.kt`.
-- [ ] T023 [P] [US1] Basic Composable renderers (`text`, `card`, `container`, `alert`, `button`) registered in the registry in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/render/renderers/Basic.kt`.
-- [ ] T024 [US1] Chat screen: input + send (`ui_event chat_message`), user/assistant text turns, `chat_status` indicator, `chat_created` active-chat in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/ui/ChatScreen.kt`.
-- [ ] T025 [US1] Render `ui_render` (target canvas/chat) + `ui_upsert` into the canvas with the basic vocabulary in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/ui/CanvasView.kt`.
-- [ ] T026 [P] [US1] JVM unit tests: token store + auth config; the `register_ui` device-caps builder (`device_type=android`, screen, `supported_types`) in `android-client/app/src/test/kotlin/com/kyopenscience/astral/app/auth/TokenStoreTest.kt` and `.../transport/DeviceCapsTest.kt`.
+- [X] T019 [P] [US1] Implement OIDC Authorization-Code + PKCE via AppAuth (discovery from the authority, login in a Custom Tab against `astral-mobile`, redirect `com.kyopenscience.astral:/oauth2redirect`, code→token exchange) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/auth/OidcAuth.kt`.
+- [X] T020 [P] [US1] Implement the encrypted refresh-token store + silent refresh + sign-out (AndroidX Security/DataStore) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/auth/TokenStore.kt`.
+- [X] T021 [US1] Wire auth into the transport: real bearer in `register_ui`; `auth_required` → silent re-auth then reconnect; "no access" role → clear message (FR-001) in `.../app/transport/OrchestratorClient.kt` + `.../app/auth/`.
+- [X] T022 [P] [US1] Debug-only dev-token path (`BuildConfig.DEBUG`-gated, absent from release per FR-002) in `android-client/app/src/debug/kotlin/com/kyopenscience/astral/app/auth/DevAuth.kt`.
+- [X] T023 [P] [US1] Basic Composable renderers (`text`, `card`, `container`, `alert`, `button`) registered in the registry in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/render/renderers/Basic.kt`.
+- [X] T024 [US1] Chat screen: input + send (`ui_event chat_message`), user/assistant text turns, `chat_status` indicator, `chat_created` active-chat in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/ui/ChatScreen.kt`.
+- [X] T025 [US1] Render `ui_render` (target canvas/chat) + `ui_upsert` into the canvas with the basic vocabulary in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/ui/CanvasView.kt`.
+- [X] T026 [P] [US1] JVM unit tests: token store + auth config; the `register_ui` device-caps builder (`device_type=android`, screen, `supported_types`) in `android-client/app/src/test/kotlin/com/kyopenscience/astral/app/auth/TokenStoreTest.kt` and `.../transport/DeviceCapsTest.kt`.
 - [ ] T027 [US1] Compose UI test: a signed-in chat round-trip renders a basic response natively in `android-client/app/src/androidTest/kotlin/com/kyopenscience/astral/app/ChatRenderTest.kt`.
 
 **Checkpoint**: MVP — sign in, chat, basic native rendering all work independently.
