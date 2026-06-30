@@ -46,6 +46,8 @@ from . import integrity as _integrity
 from . import __version__ as _APP_VERSION
 from .protocol import OrchestratorClient, device_caps
 from .renderer import RenderContext, render, supported_types as native_types, _scoped
+from .streaming import stream_error_ops, stream_frame_to_ops, subscribe_ack_ops
+from .chrome import chrome_render_notice
 
 
 # Feature 068 (US5): slash-command discovery. Mirrors the web client's typeahead
@@ -608,6 +610,9 @@ class MainWindow(QMainWindow):
         self._agents: List[dict] = []
         self._agents_dialog: Optional[AgentsDialog] = None
         self._history_dialog: Optional[HistoryDialog] = None
+        # Live-stream seq tracker (stream-key -> last seq) for the push
+        # streaming consumer; reset when the active conversation changes.
+        self._stream_seq: Dict[str, int] = {}
 
         ctx = RenderContext(emit=self._emit)
         self.client = OrchestratorClient(
@@ -708,6 +713,7 @@ class MainWindow(QMainWindow):
         self.rail.clear()
         self.rail.show_empty_hint()
         self.canvas.set_components([])
+        self._stream_seq.clear()
         self.client.send_event("new_chat", {})
 
     def _open_agents(self) -> None:
@@ -731,6 +737,7 @@ class MainWindow(QMainWindow):
 
     def _load_chat(self, chat_id: str) -> None:
         self.rail.clear()
+        self._stream_seq.clear()
         self.client.send_event("load_chat", {"chat_id": chat_id})
 
     def _sign_out(self) -> None:
@@ -857,6 +864,12 @@ class MainWindow(QMainWindow):
             chats = msg.get("chats") or []
             if self._history_dialog is not None:
                 self._history_dialog.set_chats(chats)
+        elif t in ("ui_stream_data", "stream_data"):
+            self._on_stream_data(msg)
+        elif t in ("stream_subscribed", "stream_error", "stream_unsubscribed", "stream_list"):
+            self._on_stream_control(msg)
+        elif t == "chrome_render":
+            self._on_chrome_render(msg)
         elif t == "chat_status":
             st = msg.get("status")
             if st in ("thinking", "executing", "fixing"):
@@ -865,6 +878,48 @@ class MainWindow(QMainWindow):
                 )
             elif st == "done":
                 self._on_status("connected")
+
+    # --- live streaming (push) + native chrome ----------------------------- #
+    def _on_stream_data(self, msg: dict) -> None:
+        """Render a ``ui_stream_data`` / legacy ``stream_data`` frame in place on
+        the canvas (structured ``components``, seq-deduped, chat-scoped)."""
+        ops = stream_frame_to_ops(
+            msg, active_chat=self.active_chat, seq_state=self._stream_seq
+        )
+        if ops:
+            self.canvas.apply_ops(ops)
+
+    def _on_stream_control(self, msg: dict) -> None:
+        """Handle stream control frames (subscribe ack / error / teardown)."""
+        t = msg.get("type")
+        if t == "stream_subscribed":
+            ops = subscribe_ack_ops(msg)
+            if ops:
+                self.canvas.apply_ops(ops)
+            self.topbar.set_status(
+                f"Streaming {msg.get('tool_name') or 'tool'}…",
+                T.VARIANT_COLORS["accent"][0],
+            )
+        elif t == "stream_error":
+            ops = stream_error_ops(msg)
+            if ops:
+                self.canvas.apply_ops(ops)
+            else:
+                payload = msg.get("payload") or {}
+                text = payload.get("message") or msg.get("error") or "stream error"
+                self.topbar.set_status(f"Stream error: {text}", T.VARIANT_COLORS["error"][0])
+        elif t == "stream_unsubscribed":
+            # Legacy teardown ack — clear the streaming status line.
+            self._on_status("connected")
+        # stream_list: no native surface yet.
+
+    def _on_chrome_render(self, msg: dict) -> None:
+        """Server-pushed app-chrome is web-shell HTML; this native client renders
+        chrome as Qt (driven by data actions), so we acknowledge the frame rather
+        than silently dropping it — never injecting a web view."""
+        notice = chrome_render_notice(msg)
+        if notice:
+            self.topbar.set_status(notice, T.MUTED)
 
     def _replay_transcript(self, chat: dict) -> None:
         """Repopulate the rail from a loaded chat's messages (best-effort)."""
