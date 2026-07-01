@@ -1,7 +1,12 @@
 package com.kyopenscience.astral.app
 
+import android.app.DownloadManager
+import android.content.Context
+import android.net.Uri
 import android.os.Bundle
+import android.os.Environment
 import android.util.Log
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -40,6 +45,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.kyopenscience.astral.app.auth.OidcAuth
 import com.kyopenscience.astral.app.auth.TokenStore
+import com.kyopenscience.astral.app.render.Download
 import com.kyopenscience.astral.app.render.Emit
 import com.kyopenscience.astral.app.render.Renderer
 import com.kyopenscience.astral.app.render.renderers.registerAllRenderers
@@ -60,6 +66,29 @@ class MainActivity : ComponentActivity() {
     private val client by lazy { OrchestratorClient(AppConfig.WS_URL) }
     private val rest by lazy { AstralRest(AppConfig.API_BASE) }
     private val oidc by lazy { OidcAuth(this) }
+
+    /** Download an authed backend file (`/api/download/...`) to the device's public
+     * Downloads via the system DownloadManager, forwarding the session bearer token. */
+    private fun downloadFile(
+        url: String,
+        filename: String,
+    ) {
+        try {
+            val full = if (url.startsWith("http")) url else AppConfig.API_BASE.trimEnd('/') + url
+            val req =
+                DownloadManager.Request(Uri.parse(full))
+                    .addRequestHeader("Authorization", "Bearer ${authToken.value.orEmpty()}")
+                    .setTitle(filename)
+                    .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                    .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, filename)
+            (getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(req)
+            Toast.makeText(this, "Downloading $filename…", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Log.w("MainActivity", "download failed: ${e.message}")
+            Toast.makeText(this, "Download failed", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     private val store by lazy { TokenStore(this) }
     private val authToken = MutableStateFlow<String?>(null)
     private val signInError = MutableStateFlow<String?>(null)
@@ -103,7 +132,13 @@ class MainActivity : ComponentActivity() {
         setContent {
             AstralTheme {
                 val vm: AppViewModel = viewModel(factory = AppViewModel.factory(client, rest))
-                val renderer = remember(vm) { Renderer(Emit { a, p -> vm.sendEvent(a, p) }).registerAllRenderers() }
+                val renderer =
+                    remember(vm) {
+                        Renderer(
+                            Emit { a, p -> vm.sendEvent(a, p) },
+                            Download { url, fn -> downloadFile(url, fn) },
+                        ).registerAllRenderers()
+                    }
                 val token by authToken.collectAsStateWithLifecycle()
                 val error by signInError.collectAsStateWithLifecycle()
 

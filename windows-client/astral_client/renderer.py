@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
@@ -48,9 +48,11 @@ from . import theme as T
 
 @dataclass
 class RenderContext:
-    """Carried through a render pass. `emit` posts a ui_event back to the server."""
+    """Carried through a render pass. `emit` posts a ui_event back to the server;
+    `download` (optional) fetches an authed backend file URL and saves it natively."""
 
     emit: Callable[[str, dict], None]
+    download: Optional[Callable[[str, str], None]] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -638,7 +640,15 @@ def _r_file_download(c, ctx):
     btn.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
     if valid:
         btn.setObjectName("primary")
-        btn.clicked.connect(lambda u=url: QDesktopServices.openUrl(QUrl(str(u))))
+        u = str(url)
+        # A root-relative /api/download/... URL is an authed backend file: fetch
+        # it with the session token and save via a native dialog. An absolute
+        # http(s) URL (e.g. a download_card GitHub asset) opens externally.
+        if u.startswith("/") and getattr(ctx, "download", None) is not None:
+            fn = str(filename or "download")
+            btn.clicked.connect(lambda checked=False, uu=u, ff=fn: ctx.download(uu, ff))
+        else:
+            btn.clicked.connect(lambda checked=False, uu=u: QDesktopServices.openUrl(QUrl(uu)))
     else:
         btn.setEnabled(False)
         btn.setText(str(label) + " (unavailable)")

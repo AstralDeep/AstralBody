@@ -17,6 +17,14 @@ fun interface Emit {
     )
 }
 
+/** Downloads an authed backend file (a `file_download`/`download_card`) to the device. */
+fun interface Download {
+    fun file(
+        url: String,
+        filename: String,
+    )
+}
+
 /**
  * A renderer for one primitive type — an extension composable on [Renderer] so it
  * can render children via `render(child)` and emit events via `emit`.
@@ -29,7 +37,7 @@ typealias ComponentRenderer = @Composable Renderer.(Component) -> Unit
  * to a labeled [Placeholder] (FR-005). [supportedTypes] is exactly what the
  * client advertises to ROTE in `register_ui`.
  */
-class Renderer(val emit: Emit) {
+class Renderer(val emit: Emit, val download: Download = Download { _, _ -> }) {
     private val registry = LinkedHashMap<String, ComponentRenderer>()
 
     fun register(
