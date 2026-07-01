@@ -110,6 +110,96 @@ def test_bad_component_does_not_crash(qapp):
 def test_supported_types_published(qapp):
     types = supported_types()
     assert "card" in types and "hero" in types and "table" in types
+    # Feature 044 (T028): vocabulary grew to include image + plotly_chart (33).
+    assert "image" in types and "plotly_chart" in types
+
+
+# --- feature 044 (T026): server-side table pagination pager -----------------
+
+# A 1x1 transparent PNG as a data: URI (valid, decodes cleanly — no network).
+_PNG_1x1 = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC"
+)
+
+
+def test_paginated_table_renders_pager(qapp):
+    w = render({"type": "table", "headers": ["A", "B"], "rows": [["1", "2"]],
+                "total_rows": 100, "page_size": 25, "page_offset": 0,
+                "component_id": "tbl1"}, _ctx())
+    btns = [b.text() for b in w.findChildren(QPushButton)]
+    assert any("Prev" in t for t in btns)
+    assert any("Next" in t for t in btns)
+
+
+def test_plain_table_has_no_pager(qapp):
+    w = render({"type": "table", "headers": ["A"], "rows": [["1"], ["2"]]}, _ctx())
+    assert w.findChildren(QPushButton) == []
+
+
+def test_pager_prev_disabled_at_offset_zero(qapp):
+    w = render({"type": "table", "headers": ["A"], "rows": [["1"]],
+                "total_rows": 100, "page_size": 25, "page_offset": 0,
+                "component_id": "t"}, _ctx())
+    prev = next(b for b in w.findChildren(QPushButton) if "Prev" in b.text())
+    nxt = next(b for b in w.findChildren(QPushButton) if "Next" in b.text())
+    assert prev.isEnabled() is False
+    assert nxt.isEnabled() is True
+
+
+def test_pager_emits_table_paginate(qapp):
+    seen = []
+    ctx = RenderContext(emit=lambda a, p: seen.append((a, p)), chat_id="chatZ")
+    w = render({"type": "table", "headers": ["A"], "rows": [["1"]],
+                "total_rows": 100, "page_size": 25, "page_offset": 25,
+                "component_id": "tblX"}, ctx)
+    nxt = next(b for b in w.findChildren(QPushButton) if "Next" in b.text())
+    nxt.click()
+    assert seen[-1][0] == "table_paginate"
+    payload = seen[-1][1]
+    assert payload["component_id"] == "tblX"
+    assert payload["params"] == {"page_offset": 50, "page_size": 25}
+    assert payload["chat_id"] == "chatZ"  # scoped to the active chat
+
+
+def test_pager_next_disabled_on_last_page(qapp):
+    w = render({"type": "table", "headers": ["A"], "rows": [["1"]],
+                "total_rows": 50, "page_size": 25, "page_offset": 25,
+                "component_id": "t"}, _ctx())
+    nxt = next(b for b in w.findChildren(QPushButton) if "Next" in b.text())
+    prev = next(b for b in w.findChildren(QPushButton) if "Prev" in b.text())
+    assert nxt.isEnabled() is False   # 25 + 25 >= 50
+    assert prev.isEnabled() is True
+
+
+# --- feature 044 (T028): image + plotly_chart native renderers --------------
+
+def test_image_renders_data_uri(qapp):
+    w = render({"type": "image", "url": _PNG_1x1, "alt": "dot"}, _ctx())
+    assert isinstance(w, QWidget)
+
+
+def test_image_malformed_does_not_raise(qapp):
+    # no url, unknown scheme, and a garbage data uri all degrade to alt text
+    for comp in ({"type": "image"},
+                 {"type": "image", "url": "ftp://nope"},
+                 {"type": "image", "url": "data:image/png;base64,not-base64!!"}):
+        w = render(comp, _ctx())
+        assert isinstance(w, QWidget)
+
+
+def test_plotly_chart_renders_from_traces(qapp):
+    w = render({"type": "plotly_chart", "title": "Fig",
+                "data": [{"x": [1, 2, 3], "y": [4, 5, 6], "type": "bar"}]}, _ctx())
+    assert isinstance(w, QWidget)
+
+
+def test_plotly_chart_malformed_does_not_raise(qapp):
+    for comp in ({"type": "plotly_chart"},
+                 {"type": "plotly_chart", "data": "oops"},
+                 {"type": "plotly_chart", "data": [{"no": "series"}]}):
+        w = render(comp, _ctx())
+        assert isinstance(w, QWidget)
 
 
 # Drift guard: the backend's published primitive vocabulary is the committed
@@ -127,10 +217,10 @@ BACKEND_TYPES = frozenset(_json.loads(_MANIFEST.read_text(encoding="utf-8"))["co
 # (they fall back to a labeled placeholder). Each must have a deliberate reason;
 # adding a type here is an explicit decision to degrade it on desktop.
 KNOWN_DEGRADED = frozenset({
-    "image",         # no native image fetch/decode pipeline yet
     "audio",         # no native audio playback widget yet
-    "plotly_chart",  # Plotly is web/JS-only; native uses QtCharts bar/line/pie
-    # color_picker + theme_apply now render natively (feature 043 Theme surface).
+    # image + plotly_chart now render natively (feature 044 T028): image decodes
+    # data:/http(s) into a QPixmap; plotly_chart draws its traces via QtCharts.
+    # color_picker + theme_apply render natively (feature 043 Theme surface).
     "generative",    # flag-gated web-only generative grammar renderer
 })
 
