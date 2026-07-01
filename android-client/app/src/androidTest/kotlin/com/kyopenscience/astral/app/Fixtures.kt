@@ -7,5 +7,7 @@ import kotlinx.serialization.json.jsonObject
 
 internal fun attrs(json: String): JsonObject = Json.parseToJsonElement(json).jsonObject
 
-internal fun textComponent(text: String, id: String = "t-$text"): Component =
-    Component("text", id, attrs("""{"type":"text","content":"$text"}"""), emptyList())
+internal fun textComponent(
+    text: String,
+    id: String = "t-$text",
+): Component = Component("text", id, attrs("""{"type":"text","content":"$text"}"""), emptyList())

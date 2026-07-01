@@ -38,7 +38,10 @@ fun Renderer.registerInputRenderers(): Renderer =
     }
 
 @Composable
-private fun InputPrimitive(c: Component, emit: Emit) {
+private fun InputPrimitive(
+    c: Component,
+    emit: Emit,
+) {
     var value by remember { mutableStateOf(c.str("value").orEmpty()) }
     val action = c.str("action")
     OutlinedTextField(
@@ -56,7 +59,10 @@ private fun InputPrimitive(c: Component, emit: Emit) {
 }
 
 @Composable
-private fun ParamPickerPrimitive(c: Component, emit: Emit) {
+private fun ParamPickerPrimitive(
+    c: Component,
+    emit: Emit,
+) {
     val action = c.str("action")
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(14.dp)) {
@@ -82,7 +88,11 @@ private fun CodePrimitive(c: Component) {
 }
 
 @Composable
-private fun FileActionButton(c: Component, emit: Emit, label: String) {
+private fun FileActionButton(
+    c: Component,
+    emit: Emit,
+    label: String,
+) {
     val action = c.str("action")
     Button(
         onClick = { if (action != null) emit.event(action, c.payload()) },

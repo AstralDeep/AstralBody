@@ -8,6 +8,8 @@ import com.kyopenscience.astral.app.rest.AstralRest
 import com.kyopenscience.astral.app.rest.AuditEvent
 import com.kyopenscience.astral.app.transport.ConnectionState
 import com.kyopenscience.astral.app.transport.OrchestratorClient
+import com.kyopenscience.astral.core.chrome.ChromeMenuModel
+import com.kyopenscience.astral.core.chrome.MenuItem
 import com.kyopenscience.astral.core.protocol.Agent
 import com.kyopenscience.astral.core.protocol.ChatAttachment
 import com.kyopenscience.astral.core.protocol.ChatSummary
@@ -33,8 +35,13 @@ import kotlinx.serialization.json.putJsonObject
 
 data class ChatTurn(val role: String, val text: String)
 
-/** The top-level navigable surfaces (US4). */
-enum class Screen { Chat, Agents, History, Audit, Settings }
+/**
+ * The top-level navigable surfaces. Settings is no longer a screen — it is the
+ * server-driven dropdown from the top-bar gear (feature 042); items route to the
+ * native Agents/Audit screens or, for a surface not yet native on Android, a
+ * labeled [SurfacePlaceholder] (P2 replaces these with SDUI).
+ */
+enum class Screen { Chat, Agents, History, Audit, SurfacePlaceholder }
 
 /** A paperclip-staged upload chip (feature 031). */
 data class StagedAttachment(
@@ -55,8 +62,8 @@ data class UiState(
     val screen: Screen = Screen.Chat,
     val activeChatId: String? = null,
     val turns: List<ChatTurn> = emptyList(),
-    // --- canvas lifecycle (commit-on-done) ---
-    /** The committed, live canvas — the last FINAL SDUI the orchestrator produced. */
+    // canvas lifecycle (commit-on-done): the committed, live canvas is the last
+    // FINAL SDUI the orchestrator produced.
     val canvas: List<Component> = emptyList(),
     /** Buffer built from a replacing turn's ops; shown only when the turn is done. */
     val pendingCanvas: List<Component> = emptyList(),
@@ -82,6 +89,11 @@ data class UiState(
     val agentsLoading: Boolean = false,
     val historyLoading: Boolean = false,
     val auditLoading: Boolean = false,
+    // The server-owned chrome model (top bar + settings menu). Rendered verbatim
+    // (already role-filtered by the server) — the client never hard-codes the menu.
+    val chromeMenu: ChromeMenuModel? = null,
+    // Label of the settings surface shown on the SurfacePlaceholder screen.
+    val pendingSurfaceLabel: String = "",
 ) {
     /** What the canvas area actually renders (a history entry, or the live canvas). */
     val visibleCanvas: List<Component>
@@ -120,7 +132,10 @@ class AppViewModel(
     private val seqState = mutableMapOf<String, Int>()
 
     /** Begin (or restart) the session with a bearer token + device caps. */
-    fun start(token: String, device: DeviceCapabilities) {
+    fun start(
+        token: String,
+        device: DeviceCapabilities,
+    ) {
         this.token = token
         session?.cancel()
         seqState.clear()
@@ -160,8 +175,11 @@ class AppViewModel(
         val ready = s.staged.filter { it.state == "ready" && it.attachmentId != null }
         if (text.isBlank() && ready.isEmpty()) return
         val bubble =
-            if (ready.isEmpty()) text
-            else (text + "\n📎 " + ready.joinToString(", ") { it.filename }).trim()
+            if (ready.isEmpty()) {
+                text
+            } else {
+                (text + "\n📎 " + ready.joinToString(", ") { it.filename }).trim()
+            }
         _state.value =
             s.copy(
                 turns = s.turns + ChatTurn("user", bubble),
@@ -177,7 +195,10 @@ class AppViewModel(
         client.sendChat(text, _state.value.activeChatId, attachments)
     }
 
-    fun sendEvent(action: String, payload: JsonObject = JsonObject(emptyMap())) {
+    fun sendEvent(
+        action: String,
+        payload: JsonObject = JsonObject(emptyMap()),
+    ) {
         // A rendered control that submits a chat turn (e.g. an example card) goes
         // through sendEvent, not sendChat — mirror the optimistic turn-start so the
         // canvas shows the skeleton the instant it's tapped, not only once the
@@ -218,7 +239,11 @@ class AppViewModel(
     // --- attachments (paperclip, feature 031) -------------------------------
 
     /** Stage + upload a picked file; the chip flips uploading→ready/failed. */
-    fun stageAttachment(filename: String, mimeType: String?, bytes: ByteArray) {
+    fun stageAttachment(
+        filename: String,
+        mimeType: String?,
+        bytes: ByteArray,
+    ) {
         val t = token ?: return
         val uid = ++attachSeq
         _state.value =
@@ -279,7 +304,26 @@ class AppViewModel(
             Screen.History -> sendEvent("get_history")
             Screen.Audit -> loadAudit()
             Screen.Chat -> Unit
-            Screen.Settings -> Unit
+            Screen.SurfacePlaceholder -> Unit
+        }
+    }
+
+    /**
+     * Route a settings-menu item (from the server-owned model) to its
+     * destination: the native Agents/Audit screens where they exist, otherwise
+     * a labeled placeholder for a surface not yet native on Android (P2 delivers
+     * these as SDUI). The menu structure itself always matches the web exactly.
+     */
+    fun openMenuItem(item: MenuItem) {
+        when (item.surface) {
+            "agents" -> goTo(Screen.Agents)
+            "audit" -> goTo(Screen.Audit)
+            else ->
+                _state.value =
+                    _state.value.copy(
+                        screen = Screen.SurfacePlaceholder,
+                        pendingSurfaceLabel = item.label,
+                    )
         }
     }
 
@@ -289,7 +333,11 @@ class AppViewModel(
     }
 
     /** Enable/disable a single tool of an agent (REST per-(tool,kind) write), then refresh. */
-    fun setToolEnabled(agent: Agent, tool: String, enabled: Boolean) {
+    fun setToolEnabled(
+        agent: Agent,
+        tool: String,
+        enabled: Boolean,
+    ) {
         patchAgent(agent.id) { it.copy(permissions = it.permissions + (tool to enabled)) } // optimistic
         val t = token ?: return
         val kind = agent.toolScopeMap[tool] ?: "tools:read"
@@ -300,7 +348,10 @@ class AppViewModel(
     }
 
     /** Master toggle: enable/disable all of an agent's tools at once (WS scopes + overrides). */
-    fun setAgentEnabled(agent: Agent, enabled: Boolean) {
+    fun setAgentEnabled(
+        agent: Agent,
+        enabled: Boolean,
+    ) {
         patchAgent(agent.id) { a -> a.copy(permissions = a.tools.associateWith { enabled }) } // optimistic
         val kinds = agent.toolScopeMap.values.toSet().ifEmpty { agent.scopes.keys }
         sendEvent(
@@ -318,7 +369,10 @@ class AppViewModel(
      * Optimistically update one agent so a toggle responds instantly; the
      * subsequent discover_agents refresh reconciles with the server truth.
      */
-    private fun patchAgent(agentId: String, transform: (Agent) -> Agent) {
+    private fun patchAgent(
+        agentId: String,
+        transform: (Agent) -> Agent,
+    ) {
         _state.value =
             _state.value.copy(
                 agents = _state.value.agents.map { if (it.id == agentId) transform(it) else it },
@@ -344,7 +398,10 @@ class AppViewModel(
 
     // --- reducer ------------------------------------------------------------
 
-    private fun reduce(s: UiState, msg: Inbound): UiState =
+    private fun reduce(
+        s: UiState,
+        msg: Inbound,
+    ): UiState =
         when (msg) {
             is Inbound.UiRender ->
                 if (msg.target == "chat") {
@@ -441,11 +498,15 @@ class AppViewModel(
                 applyCanvasOps(s, subscribeAckOps(msg))
             is Inbound.StreamErrorMsg ->
                 applyCanvasOps(s, streamErrorOps(msg))
+            is Inbound.ChromeMenu -> s.copy(chromeMenu = msg.model)
             else -> s
         }
 
     /** Route streaming/patch ops to the buffer (mid-replace-turn) or live canvas. */
-    private fun applyCanvasOps(s: UiState, ops: List<CanvasOp>): UiState {
+    private fun applyCanvasOps(
+        s: UiState,
+        ops: List<CanvasOp>,
+    ): UiState {
         if (ops.isEmpty()) return s
         return if (s.pendingReplace) {
             s.copy(pendingCanvas = Canvas.apply(s.pendingCanvas, ops))
@@ -467,7 +528,10 @@ class AppViewModel(
             CanvasOp(op = "upsert", componentId = id, component = if (c.id == null) c.copy(id = id) else c)
         }
 
-    private fun reduceStatus(s: UiState, msg: Inbound.ChatStatus): UiState {
+    private fun reduceStatus(
+        s: UiState,
+        msg: Inbound.ChatStatus,
+    ): UiState {
         val label = msg.message?.takeIf { it.isNotBlank() } ?: msg.status
         return when (msg.status) {
             "done" -> commitTurn(s)
@@ -546,9 +610,11 @@ class AppViewModel(
         // instead, so that paired lead is suppressed to avoid duplication.
         private const val DOC_ON_CANVAS_MARKER = "full write-up is on the canvas"
 
-        fun factory(client: OrchestratorClient, rest: AstralRest) =
-            viewModelFactory {
-                initializer { AppViewModel(client, rest) }
-            }
+        fun factory(
+            client: OrchestratorClient,
+            rest: AstralRest,
+        ) = viewModelFactory {
+            initializer { AppViewModel(client, rest) }
+        }
     }
 }

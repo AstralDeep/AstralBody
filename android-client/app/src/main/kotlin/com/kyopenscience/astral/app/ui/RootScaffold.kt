@@ -40,26 +40,35 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.kyopenscience.astral.app.R
 import com.kyopenscience.astral.app.render.Renderer
 import com.kyopenscience.astral.app.ui.theme.AstralColors
+import com.kyopenscience.astral.core.chrome.ChromeMenuModel
+import com.kyopenscience.astral.core.chrome.MenuItem
 
 /**
- * The app root. A compact top bar (app-icon brand + New chat + a hamburger menu)
- * frees the whole bottom of the phone for the chat input, so the SDUI canvas can
- * own 80–90% of the Chat surface. The hamburger holds navigation (Home / Agents /
- * History / Audit), Settings, and Sign out — mirroring the web settings menu. Chat
+ * The app root. The top bar is deliberately minimal and identical across clients
+ * (feature 042): the small brand logo · a New-chat button · a Recent-chats
+ * button · a Settings gear whose dropdown holds ALL settings, built from the
+ * single server-owned menu model the orchestrator pushes over `chrome_menu`
+ * (Constitution XII — one definition, every client renders it). There is no
+ * separate Settings *screen* anymore (it used to duplicate Agents/Audit). Chat
  * is the adaptive SDUI shell; the others are native Compose surfaces.
  */
 @Composable
-fun RootScaffold(vm: AppViewModel, renderer: Renderer, onSignOut: () -> Unit) {
+fun RootScaffold(
+    vm: AppViewModel,
+    renderer: Renderer,
+    onSignOut: () -> Unit,
+) {
     val state by vm.state.collectAsStateWithLifecycle()
     Scaffold(
         topBar = {
             AstralTopBar(
-                current = state.screen,
-                onNavigate = vm::goTo,
+                model = state.chromeMenu,
                 onNewChat = {
                     vm.newChat()
                     vm.goTo(Screen.Chat)
                 },
+                onRecentChats = { vm.goTo(Screen.History) },
+                onOpenItem = vm::openMenuItem,
                 onSignOut = onSignOut,
             )
         },
@@ -79,12 +88,7 @@ fun RootScaffold(vm: AppViewModel, renderer: Renderer, onSignOut: () -> Unit) {
                     )
                 Screen.History -> HistoryScreen(state.history, state.historyLoading, vm::openChat)
                 Screen.Audit -> AuditScreen(state.audit, state.auditLoading)
-                Screen.Settings ->
-                    SettingsScreen(
-                        connection = state.connection,
-                        onOpenAgents = { vm.goTo(Screen.Agents) },
-                        onOpenAudit = { vm.goTo(Screen.Audit) },
-                    )
+                Screen.SurfacePlaceholder -> SurfacePlaceholderScreen(state.pendingSurfaceLabel)
             }
         }
     }
@@ -92,9 +96,10 @@ fun RootScaffold(vm: AppViewModel, renderer: Renderer, onSignOut: () -> Unit) {
 
 @Composable
 private fun AstralTopBar(
-    current: Screen,
-    onNavigate: (Screen) -> Unit,
+    model: ChromeMenuModel?,
     onNewChat: () -> Unit,
+    onRecentChats: () -> Unit,
+    onOpenItem: (MenuItem) -> Unit,
     onSignOut: () -> Unit,
 ) {
     Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 2.dp) {
@@ -103,49 +108,69 @@ private fun AstralTopBar(
                 Modifier
                     .fillMaxWidth()
                     .statusBarsPadding()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
         ) {
+            // Small brand logo only — no wordmark, no status text.
             Image(
                 painter = painterResource(R.drawable.app_icon),
                 contentDescription = "AstralBody",
-                modifier = Modifier.size(28.dp).clip(RoundedCornerShape(8.dp)),
-            )
-            Text(
-                "AstralBody",
-                color = MaterialTheme.colorScheme.onSurface,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.size(30.dp).clip(RoundedCornerShape(8.dp)),
             )
             Box(modifier = Modifier.weight(1f))
             NewChatButton(onClick = onNewChat)
-            HamburgerMenu(current = current, onNavigate = onNavigate, onSignOut = onSignOut)
+            // Recent chats.
+            IconButton(onClick = onRecentChats) {
+                Icon(
+                    painter = painterResource(R.drawable.ic_history),
+                    contentDescription = "Recent chats",
+                    tint = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.size(22.dp),
+                )
+            }
+            // Settings gear → dropdown with ALL settings (from the server model).
+            SettingsMenu(model = model, onOpenItem = onOpenItem, onSignOut = onSignOut)
         }
     }
 }
 
+/**
+ * The Settings gear + its dropdown, rendered from the server-owned model.
+ * `internal` so the instrumented UI test can drive it without real auth.
+ */
 @Composable
-private fun HamburgerMenu(current: Screen, onNavigate: (Screen) -> Unit, onSignOut: () -> Unit) {
+internal fun SettingsMenu(
+    model: ChromeMenuModel?,
+    onOpenItem: (MenuItem) -> Unit,
+    onSignOut: () -> Unit,
+) {
     var open by remember { mutableStateOf(false) }
     Box {
         IconButton(onClick = { open = true }) {
             Icon(
-                painter = painterResource(R.drawable.ic_menu),
-                contentDescription = "Menu",
+                painter = painterResource(R.drawable.ic_settings),
+                contentDescription = "Settings",
                 tint = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.size(22.dp),
             )
         }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-            MenuItem("Home", R.drawable.ic_chat, current == Screen.Chat) { open = false; onNavigate(Screen.Chat) }
-            MenuItem("Agents", R.drawable.ic_agents, current == Screen.Agents) { open = false; onNavigate(Screen.Agents) }
-            MenuItem("History", R.drawable.ic_history, current == Screen.History) { open = false; onNavigate(Screen.History) }
-            MenuItem("Audit", R.drawable.ic_audit, current == Screen.Audit) { open = false; onNavigate(Screen.Audit) }
+            model?.menu?.forEach { group ->
+                SectionHeader(group.label)
+                group.items.forEach { item ->
+                    DropdownMenuItem(
+                        text = { Text(item.label, color = MaterialTheme.colorScheme.onSurface) },
+                        onClick = {
+                            open = false
+                            onOpenItem(item)
+                        },
+                    )
+                }
+            }
             HorizontalDivider(color = MaterialTheme.colorScheme.outline)
-            MenuItem("Settings", R.drawable.ic_settings, current == Screen.Settings) { open = false; onNavigate(Screen.Settings) }
             DropdownMenuItem(
-                text = { Text("Sign out", color = MaterialTheme.colorScheme.error) },
+                text = { Text(model?.signout?.label ?: "Sign out", color = MaterialTheme.colorScheme.error) },
                 leadingIcon = {
                     Icon(
                         painter = painterResource(R.drawable.ic_signout),
@@ -164,25 +189,12 @@ private fun HamburgerMenu(current: Screen, onNavigate: (Screen) -> Unit, onSignO
 }
 
 @Composable
-private fun MenuItem(label: String, iconRes: Int, selected: Boolean, onClick: () -> Unit) {
-    val accent = AstralColors.Indigo
-    DropdownMenuItem(
-        text = {
-            Text(
-                label,
-                color = if (selected) accent else MaterialTheme.colorScheme.onSurface,
-                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-            )
-        },
-        leadingIcon = {
-            Icon(
-                painter = painterResource(iconRes),
-                contentDescription = null,
-                tint = if (selected) accent else MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(20.dp),
-            )
-        },
-        onClick = onClick,
+private fun SectionHeader(label: String) {
+    Text(
+        label.uppercase(),
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
     )
 }
 

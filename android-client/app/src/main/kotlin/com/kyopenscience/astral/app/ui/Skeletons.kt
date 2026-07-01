@@ -41,7 +41,11 @@ internal fun shimmerAlpha(): Float {
 }
 
 @Composable
-internal fun SkeletonBlock(alpha: Float, heightDp: Int, widthFraction: Float = 1f) {
+internal fun SkeletonBlock(
+    alpha: Float,
+    heightDp: Int,
+    widthFraction: Float = 1f,
+) {
     Box(
         modifier =
             Modifier
@@ -67,7 +71,11 @@ internal fun SkeletonCanvas(modifier: Modifier = Modifier) {
 
 /** Row placeholders for the list surfaces (agents / history / audit) while they load. */
 @Composable
-internal fun SkeletonList(modifier: Modifier = Modifier, rows: Int = 6, rowHeightDp: Int = 74) {
+internal fun SkeletonList(
+    modifier: Modifier = Modifier,
+    rows: Int = 6,
+    rowHeightDp: Int = 74,
+) {
     val alpha = shimmerAlpha()
     Column(
         modifier = modifier.fillMaxSize().padding(16.dp),

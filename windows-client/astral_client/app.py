@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -43,8 +44,9 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
-from PySide6.QtGui import QBrush, QColor
+from PySide6.QtGui import QAction, QBrush, QColor
 
 from . import theme as T
 from . import confirm as _confirm
@@ -265,87 +267,117 @@ class Canvas(QScrollArea):
 
 
 class TopBar(QFrame):
-    """Native app chrome header: brand, connection status, identity + actions."""
+    """Native app chrome header, identical across clients (feature 042 —
+    Constitution XII): a small brand mark · a New-chat button · a Recent-chats
+    button · a Settings gear whose dropdown holds ALL settings (ACCOUNT / HELP /
+    ADMIN TOOLS + a red Sign out), built from the single server-owned menu model.
+    Nothing else — Agents/Audit/LLM/etc. live inside the gear menu, exactly as on
+    the web. Connection/integrity status is carried in the mark's tooltip so the
+    bar stays clean."""
 
-    def __init__(self, user: str, on_new_chat, on_history, on_agents, on_audit, on_sign_out):
+    def __init__(self, user: str, on_new_chat, on_recent, on_open_surface, on_sign_out):
         super().__init__()
         self.setObjectName("topbar")
         self.setStyleSheet(
             f"#topbar {{ background:{T.SURFACE}; border-bottom:1px solid {T.BORDER}; }}"
         )
+        self._on_open_surface = on_open_surface
+        self._on_sign_out = on_sign_out
+
         lay = QHBoxLayout(self)
         lay.setContentsMargins(14, 8, 12, 8)
-        lay.setSpacing(10)
+        lay.setSpacing(8)
 
-        brand = QLabel("◆  AstralBody")
-        brand.setStyleSheet(
-            f"color:{T.TEXT}; font-size:14px; font-weight:700; background:transparent;"
+        # Small brand mark only — no wordmark, no visible status/identity text.
+        self._mark = QLabel("◆")
+        self._mark.setStyleSheet(
+            f"color:{T.PRIMARY}; font-size:16px; font-weight:800; background:transparent;"
         )
-        self._status = QLabel("connecting…")
-        self._status.setStyleSheet(
-            f"color:{T.MUTED}; font-size:12px; background:transparent; padding:2px 8px;"
-        )
+        self._mark.setToolTip("connecting…")
 
-        self._user = QLabel(user)
-        self._user.setStyleSheet(
-            f"color:{T.MUTED}; font-size:12px; background:transparent;"
-        )
-
-        self.new_btn = QPushButton("＋ New chat")
+        self.new_btn = QPushButton("＋ New")
         self.new_btn.setObjectName("primary")
         self.new_btn.clicked.connect(on_new_chat)
-        self.history_btn = QPushButton("History")
-        self.history_btn.clicked.connect(on_history)
-        self.agents_btn = QPushButton("Agents")
-        self.agents_btn.clicked.connect(on_agents)
-        self.audit_btn = QPushButton("Audit")
-        self.audit_btn.clicked.connect(on_audit)
-        self.signout_btn = QPushButton("Sign out")
-        self.signout_btn.clicked.connect(on_sign_out)
-        for b in (self.new_btn, self.history_btn, self.agents_btn, self.audit_btn, self.signout_btn):
+        # Recent chats (the web's history icon) — reopen a past conversation.
+        self.recent_btn = QPushButton("🕓 Recent chats")
+        self.recent_btn.clicked.connect(on_recent)
+        # Settings gear → dropdown built from the server-owned menu model.
+        self.settings_btn = QPushButton("⚙ Settings")
+        self._menu = QMenu(self)
+        self._menu.setStyleSheet(
+            f"QMenu {{ background:{T.SURFACE}; color:{T.TEXT}; border:1px solid {T.BORDER}; padding:4px; }}"
+            f"QMenu::item {{ padding:6px 24px; }}"
+            f"QMenu::item:selected {{ background:{T.PRIMARY}; color:#ffffff; }}"
+            f"QMenu::separator {{ height:1px; background:{T.BORDER}; margin:4px 8px; }}"
+        )
+        self.settings_btn.setMenu(self._menu)
+        for b in (self.new_btn, self.recent_btn, self.settings_btn):
             b.setCursor(Qt.CursorShape.PointingHandCursor)
 
-        lay.addWidget(brand)
-        lay.addWidget(self._dot())
-        lay.addWidget(self._status)
+        lay.addWidget(self._mark)
         lay.addStretch(1)
-        lay.addWidget(self._user)
-        lay.addSpacing(6)
         lay.addWidget(self.new_btn)
-        lay.addWidget(self.history_btn)
-        lay.addWidget(self.agents_btn)
-        lay.addWidget(self.audit_btn)
-        lay.addWidget(self.signout_btn)
+        lay.addWidget(self.recent_btn)
+        lay.addWidget(self.settings_btn)
 
-    def _dot(self) -> QLabel:
-        self._statusdot = QLabel("●")
-        self._statusdot.setStyleSheet(
-            f"color:{T.MUTED}; font-size:12px; background:transparent;"
-        )
-        return self._statusdot
+        # Until the server model arrives, offer just Sign out (always safe).
+        self._rebuild_menu({"sections": [], "signout": {"label": "Sign out", "action": "logout"}})
+
+    def set_menu_model(self, model: dict) -> None:
+        """(Re)build the Settings dropdown from the server-owned chrome model
+        (the `chrome_menu` WS frame / GET /api/chrome/menu)."""
+        from .rest import parse_chrome_menu
+
+        self._rebuild_menu(parse_chrome_menu(model))
+
+    def _rebuild_menu(self, parsed: dict) -> None:
+        self._menu.clear()
+        for section in parsed.get("sections", []):
+            self._menu.addSection(section.get("label", ""))
+            for item in section.get("items", []):
+                act = QAction(item.get("label", ""), self._menu)
+                surface = item.get("surface", "")
+                label = item.get("label", "")
+                act.triggered.connect(
+                    lambda _checked=False, s=surface, ln=label: self._emit_open(s, ln)
+                )
+                self._menu.addAction(act)
+        self._menu.addSeparator()
+        # Red Sign out at the very bottom (a QWidgetAction so we can color it).
+        so = parsed.get("signout", {}) or {}
+        so_label = QLabel(so.get("label", "Sign out"))
+        so_label.setStyleSheet("color:#EF4444; padding:6px 24px; background:transparent;")
+        so_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        so_label.mousePressEvent = lambda _ev: (self._menu.close(), self._emit_sign_out())
+        wa = QWidgetAction(self._menu)
+        wa.setDefaultWidget(so_label)
+        self._menu.addAction(wa)
+
+    def _emit_open(self, surface: str, label: str) -> None:
+        if callable(self._on_open_surface):
+            self._on_open_surface(surface, label)
+
+    def _emit_sign_out(self) -> None:
+        if callable(self._on_sign_out):
+            self._on_sign_out()
 
     def set_status(self, text: str, color: str) -> None:
-        self._status.setText(text)
-        self._status.setStyleSheet(
-            f"color:{color}; font-size:12px; background:transparent; padding:2px 8px;"
-        )
-        self._statusdot.setStyleSheet(
-            f"color:{color}; font-size:12px; background:transparent;"
+        """Status/integrity is surfaced on the brand mark (tooltip + tint) so the
+        top bar stays minimal (logo · New · Recent · Settings)."""
+        self._mark.setToolTip(text)
+        self._mark.setStyleSheet(
+            f"color:{color}; font-size:16px; font-weight:800; background:transparent;"
         )
 
     def set_user(self, user: str) -> None:
-        self._user.setText(user)
+        """No-op retained for callers: the identity label was removed from the
+        minimal top bar (feature 042)."""
+        return
 
     def highlight_agents(self, on: bool) -> None:
-        """Accent the Agents button when no tools are enabled yet (call to action)."""
-        if on:
-            self.agents_btn.setText("⚡ Enable agents")
-            self.agents_btn.setObjectName("primary")
-        else:
-            self.agents_btn.setText("Agents")
-            self.agents_btn.setObjectName("")
-        self.agents_btn.style().unpolish(self.agents_btn)
-        self.agents_btn.style().polish(self.agents_btn)
+        """No-op retained for callers: Agents now lives inside the Settings menu
+        (matching the web), so there is no standalone Agents button to accent."""
+        return
 
 
 class AgentsDialog(QDialog):
@@ -795,9 +827,8 @@ class MainWindow(QMainWindow):
         self.topbar = TopBar(
             _user_from_token(token),
             self._new_chat,
-            self._open_history,
-            self._open_agents,
-            self._open_audit,
+            self._open_history,  # Recent chats
+            self._open_surface,
             self._sign_out,
         )
 
@@ -889,6 +920,25 @@ class MainWindow(QMainWindow):
         self.client.send_event("discover_agents", {})  # refresh
         self._agents_dialog.show()
         self._agents_dialog.raise_()
+
+    def _open_surface(self, surface: str, label: str) -> None:
+        """Route a settings-menu item (from the server-owned model) to its native
+        surface. Agents/Audit/timeline have native dialogs today; other surfaces
+        are delivered as SDUI in a later slice — until then a clear placeholder
+        (FR-013), never a dead menu entry."""
+        s = (surface or "").strip()
+        if s == "agents":
+            self._open_agents()
+        elif s == "audit":
+            self._open_audit()
+        elif s == "workspace_timeline":
+            self._open_history()
+        else:
+            QMessageBox.information(
+                self,
+                label or "Settings",
+                f"“{label or s}” is coming to the desktop app soon.",
+            )
 
     def _open_history(self) -> None:
         if self._history_dialog is None:
@@ -1080,6 +1130,10 @@ class MainWindow(QMainWindow):
             self._on_stream_control(msg)
         elif t == "chrome_render":
             self._on_chrome_render(msg)
+        elif t == "chrome_menu":
+            # Feature 042: (re)build the Settings dropdown from the server-owned
+            # menu model (pushed after register / on role/flag change).
+            self.topbar.set_menu_model(msg.get("model") or {})
         elif t == "chat_status":
             st = msg.get("status")
             if st in ("thinking", "executing", "fixing"):

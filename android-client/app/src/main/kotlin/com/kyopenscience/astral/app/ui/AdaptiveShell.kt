@@ -80,7 +80,10 @@ fun layoutModeFor(width: WindowWidthSizeClass): LayoutMode =
     if (width == WindowWidthSizeClass.COMPACT) LayoutMode.Stacked else LayoutMode.Split
 
 @Composable
-fun AdaptiveShell(vm: AppViewModel, renderer: Renderer) {
+fun AdaptiveShell(
+    vm: AppViewModel,
+    renderer: Renderer,
+) {
     val state by vm.state.collectAsStateWithLifecycle()
     val width = currentWindowAdaptiveInfo().windowSizeClass.windowWidthSizeClass
     when (layoutModeFor(width)) {
@@ -96,7 +99,11 @@ fun AdaptiveShell(vm: AppViewModel, renderer: Renderer) {
  * a new final SDUI commits (see [AppViewModel]).
  */
 @Composable
-private fun StackedShell(state: UiState, renderer: Renderer, vm: AppViewModel) {
+private fun StackedShell(
+    state: UiState,
+    renderer: Renderer,
+    vm: AppViewModel,
+) {
     Column(modifier = Modifier.fillMaxSize()) {
         CanvasArea(
             state = state,
@@ -120,7 +127,11 @@ private fun StackedShell(state: UiState, renderer: Renderer, vm: AppViewModel) {
  * canvas. Same input + timeline affordances, reflowed to the wider window.
  */
 @Composable
-private fun SplitShell(state: UiState, renderer: Renderer, vm: AppViewModel) {
+private fun SplitShell(
+    state: UiState,
+    renderer: Renderer,
+    vm: AppViewModel,
+) {
     Row(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.width(360.dp).fillMaxHeight()) {
             PanelHeader("Conversation")
@@ -210,7 +221,10 @@ private fun WorkingBar() {
 }
 
 @Composable
-private fun ReadOnlyBanner(label: String?, onBackToLive: () -> Unit) {
+private fun ReadOnlyBanner(
+    label: String?,
+    onBackToLive: () -> Unit,
+) {
     Surface(color = AstralColors.Indigo.copy(alpha = 0.16f), modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
@@ -252,7 +266,11 @@ private fun ReadOnlyBanner(label: String?, onBackToLive: () -> Unit) {
 }
 
 @Composable
-private fun TimelinePill(count: Int, onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun TimelinePill(
+    count: Int,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Surface(
         color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
         shape = RoundedCornerShape(18.dp),
@@ -385,7 +403,10 @@ private fun EmptyCanvasHint(modifier: Modifier = Modifier) {
  * any content; tapping the bar expands the transcript up over the canvas.
  */
 @Composable
-private fun MessagesPanel(turns: List<ChatTurn>, statusText: String?) {
+private fun MessagesPanel(
+    turns: List<ChatTurn>,
+    statusText: String?,
+) {
     val visible = turns.filter { it.text.isNotBlank() }
     if (visible.isEmpty()) return
     // Appears expanded when the chat first has content; the user can collapse it
@@ -448,7 +469,10 @@ private fun PanelHeader(title: String) {
 }
 
 @Composable
-private fun ChatList(turns: List<ChatTurn>, modifier: Modifier) {
+private fun ChatList(
+    turns: List<ChatTurn>,
+    modifier: Modifier,
+) {
     val visible = turns.filter { it.text.isNotBlank() }
     LazyColumn(
         modifier = modifier.padding(horizontal = 12.dp, vertical = 8.dp),
@@ -595,7 +619,11 @@ private fun InputBar(
 }
 
 @Composable
-private fun GlyphButton(iconRes: Int, contentDescription: String, onClick: () -> Unit) {
+private fun GlyphButton(
+    iconRes: Int,
+    contentDescription: String,
+    onClick: () -> Unit,
+) {
     IconButton(onClick = onClick) {
         Icon(
             painter = painterResource(iconRes),
@@ -607,7 +635,10 @@ private fun GlyphButton(iconRes: Int, contentDescription: String, onClick: () ->
 }
 
 @Composable
-private fun SendButton(enabled: Boolean, onClick: () -> Unit) {
+private fun SendButton(
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
     val bg = if (enabled) AstralColors.Indigo else AstralColors.SurfaceVariant
     Box(
         modifier =
@@ -628,7 +659,10 @@ private fun SendButton(enabled: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun AttachmentChips(staged: List<StagedAttachment>, onRemove: (Long) -> Unit) {
+private fun AttachmentChips(
+    staged: List<StagedAttachment>,
+    onRemove: (Long) -> Unit,
+) {
     Row(
         modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -676,7 +710,10 @@ private fun AttachmentChips(staged: List<StagedAttachment>, onRemove: (Long) -> 
 }
 
 /** Read a picked file's display name + bytes off the ContentResolver (IO thread). */
-private fun readPickedFile(context: Context, uri: Uri): Pair<String, ByteArray>? =
+private fun readPickedFile(
+    context: Context,
+    uri: Uri,
+): Pair<String, ByteArray>? =
     runCatching {
         val name =
             context.contentResolver.query(uri, null, null, null, null)?.use { c ->

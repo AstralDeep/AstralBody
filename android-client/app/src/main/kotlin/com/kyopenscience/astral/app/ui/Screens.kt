@@ -22,11 +22,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import com.kyopenscience.astral.app.AppConfig
-import com.kyopenscience.astral.app.BuildConfig
 import com.kyopenscience.astral.app.rest.AuditEvent
 import com.kyopenscience.astral.app.transport.ConnectionState
 import com.kyopenscience.astral.core.protocol.Agent
@@ -105,7 +101,11 @@ private fun AgentCard(
             }
             if (expanded) {
                 if (agent.tools.isEmpty()) {
-                    Text("This agent exposes no tools.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        "This agent exposes no tools.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 agent.tools.forEach { tool ->
                     Row(
@@ -131,7 +131,11 @@ private fun AgentCard(
 }
 
 @Composable
-fun HistoryScreen(chats: List<ChatSummary>, loading: Boolean, onOpen: (String) -> Unit) {
+fun HistoryScreen(
+    chats: List<ChatSummary>,
+    loading: Boolean,
+    onOpen: (String) -> Unit,
+) {
     if (loading && chats.isEmpty()) {
         SkeletonList()
         return
@@ -156,7 +160,10 @@ fun HistoryScreen(chats: List<ChatSummary>, loading: Boolean, onOpen: (String) -
 }
 
 @Composable
-fun AuditScreen(events: List<AuditEvent>, loading: Boolean) {
+fun AuditScreen(
+    events: List<AuditEvent>,
+    loading: Boolean,
+) {
     if (loading && events.isEmpty()) {
         SkeletonList()
         return
@@ -195,94 +202,46 @@ private fun AuditCard(event: AuditEvent) {
                     Text("id: $it", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 if (event.outcomeDetail == null && event.detail == null) {
-                    Text("No additional detail recorded.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        "No additional detail recorded.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
         }
     }
 }
 
+/**
+ * Placeholder for a settings surface not yet rendered natively on Android. The
+ * menu item is present (matching the web exactly, feature 042); its SDUI surface
+ * arrives in P2. FR-013 graceful degradation — a labeled placeholder, never a
+ * blank or broken screen.
+ */
 @Composable
-fun SettingsScreen(
-    connection: ConnectionState,
-    onOpenAgents: () -> Unit,
-    onOpenAudit: () -> Unit,
-) {
-    LazyColumn(
-        modifier = Modifier.fillMaxSize().padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+fun SurfacePlaceholderScreen(label: String) {
+    Column(
+        modifier = Modifier.fillMaxSize().padding(28.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
     ) {
-        item { Text("Settings", style = MaterialTheme.typography.titleLarge) }
-        item {
-            SettingsGroup("Account") {
-                SettingsLink("Agents & permissions", "Enable agents and tune their tools", onOpenAgents)
-                SettingsLink("Audit log", "Review what ran on your behalf", onOpenAudit)
-            }
-        }
-        item {
-            SettingsGroup("Connection") {
-                SettingsInfo("Status", connectionLabel(connection))
-                SettingsInfo("Server", AppConfig.API_BASE)
-            }
-        }
-        item {
-            SettingsGroup("About") {
-                SettingsInfo("Version", BuildConfig.VERSION_NAME)
-                SettingsInfo("Appearance", "Dark")
-            }
-        }
-    }
-}
-
-@Composable
-private fun SettingsGroup(title: String, content: @Composable () -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(
-            title.uppercase(),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(start = 4.dp),
+            label.ifBlank { "Settings" },
+            style = MaterialTheme.typography.titleLarge,
+            color = MaterialTheme.colorScheme.onSurface,
         )
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.padding(vertical = 4.dp)) { content() }
-        }
-    }
-}
-
-@Composable
-private fun SettingsLink(title: String, subtitle: String, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 14.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodyLarge)
-            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        Text("›", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 20.sp)
-    }
-}
-
-@Composable
-private fun SettingsInfo(label: String, value: String) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Text(label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
         Text(
-            value,
+            "This settings screen is coming to the Android app soon.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            modifier = Modifier.weight(1f),
+            modifier = Modifier.padding(top = 10.dp),
         )
     }
 }
 
-private fun connectionLabel(c: ConnectionState): String =
+/** Human-readable connection status shown in the top bar. */
+fun connectionLabel(c: ConnectionState): String =
     when (c) {
         ConnectionState.Connected -> "Connected"
         ConnectionState.Connecting -> "Connecting…"

@@ -85,6 +85,7 @@ dependencies {
     implementation(libs.coil.compose)
 
     testImplementation(libs.junit)
+    testImplementation(kotlin("test")) // kotlin.test.* (assertEquals/Test) bridged to JUnit4
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.okhttp.mockwebserver)
 
