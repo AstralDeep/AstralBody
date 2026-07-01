@@ -26,6 +26,16 @@ fun interface Download {
 }
 
 /**
+ * Applies a theme spec locally (feature 044 US5). A `theme_apply` component or an
+ * interactive `color_picker` calls this with the raw spec object
+ * (`preset`|`colors`|`color_key`+`color_value`) so the whole app restyles live,
+ * without waiting for a server round-trip.
+ */
+fun interface ThemeSink {
+    fun apply(spec: JsonObject)
+}
+
+/**
  * A renderer for one primitive type — an extension composable on [Renderer] so it
  * can render children via `render(child)` and emit events via `emit`.
  */
@@ -37,7 +47,11 @@ typealias ComponentRenderer = @Composable Renderer.(Component) -> Unit
  * to a labeled [Placeholder] (FR-005). [supportedTypes] is exactly what the
  * client advertises to ROTE in `register_ui`.
  */
-class Renderer(val emit: Emit, val download: Download = Download { _, _ -> }) {
+class Renderer(
+    val emit: Emit,
+    val download: Download = Download { _, _ -> },
+    val theme: ThemeSink = ThemeSink { },
+) {
     private val registry = LinkedHashMap<String, ComponentRenderer>()
 
     fun register(

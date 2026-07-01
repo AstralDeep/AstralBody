@@ -136,6 +136,32 @@ class AstralRest(
         }
 
     /**
+     * Sign-out ladder rung 1 (feature 044): server-side revocation via
+     * `POST /api/auth/logout` (Bearer auth, `{refresh_token, client_id}` JSON
+     * body) — the backend revokes at Keycloak or queues offline-tolerantly.
+     * Best-effort: true on a 2xx, false on any failure (never throws).
+     */
+    suspend fun logout(
+        token: String,
+        refreshToken: String,
+        clientId: String,
+    ): Boolean =
+        withContext(Dispatchers.IO) {
+            val body =
+                buildJsonObject {
+                    put("refresh_token", refreshToken)
+                    put("client_id", clientId)
+                }.toString()
+            val request =
+                Request.Builder()
+                    .url("${baseUrl.trimEnd('/')}/api/auth/logout")
+                    .header("Authorization", "Bearer $token")
+                    .post(body.toRequestBody("application/json".toMediaType()))
+                    .build()
+            runCatching { client.newCall(request).execute().use { it.isSuccessful } }.getOrDefault(false)
+        }
+
+    /**
      * Toggle one tool's permission for the current user (feature-013 per-(tool,
      * kind) shape): PUT /api/agents/{id}/permissions
      * `{per_tool_permissions: {tool: {kind: enabled}}}`. Granular — does not touch

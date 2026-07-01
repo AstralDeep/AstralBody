@@ -9,6 +9,8 @@ import com.kyopenscience.astral.app.rest.AstralRest
 import com.kyopenscience.astral.app.rest.AuditEvent
 import com.kyopenscience.astral.app.transport.ConnectionState
 import com.kyopenscience.astral.app.transport.OrchestratorClient
+import com.kyopenscience.astral.app.ui.theme.ThemePalette
+import com.kyopenscience.astral.app.ui.theme.themePaletteForSpec
 import com.kyopenscience.astral.core.chrome.ChromeMenuModel
 import com.kyopenscience.astral.core.chrome.MenuItem
 import com.kyopenscience.astral.core.protocol.Agent
@@ -40,10 +42,10 @@ data class ChatTurn(val role: String, val text: String)
 /**
  * The top-level navigable surfaces. Settings is no longer a screen — it is the
  * server-driven dropdown from the top-bar gear (feature 042); items route to the
- * native Agents/Audit screens or, for a surface not yet native on Android, a
- * labeled [SurfacePlaceholder] (P2 replaces these with SDUI).
+ * native Agents/Audit screens or, for any other surface, the SDUI [Surface] screen
+ * (chrome_open → chrome_surface, rendered natively).
  */
-enum class Screen { Chat, Agents, History, Audit, SurfacePlaceholder, Surface }
+enum class Screen { Chat, Agents, History, Audit, Surface }
 
 /** A paperclip-staged upload chip (feature 031). */
 data class StagedAttachment(
@@ -104,10 +106,14 @@ data class UiState(
     // The server-owned chrome model (top bar + settings menu). Rendered verbatim
     // (already role-filtered by the server) — the client never hard-codes the menu.
     val chromeMenu: ChromeMenuModel? = null,
-    // Label of the settings surface shown on the SurfacePlaceholder screen.
-    val pendingSurfaceLabel: String = "",
+    /** The surface key the client asked to open — used to retry a stalled surface (T039). */
+    val pendingSurfaceKey: String = "",
     /** Feature 043 — the SDUI settings surface currently delivered (native render). */
     val pendingSurface: Inbound.ChromeSurface? = null,
+    /** Live theme palette (feature 044 US5); null = the default brand dark scheme. */
+    val themePalette: ThemePalette? = null,
+    /** Feature 028/044 — the read-only workspace timeline is being viewed (mutations paused). */
+    val timelineReadOnly: Boolean = false,
 ) {
     /** What the canvas area actually renders (a history entry, or the live canvas). */
     val visibleCanvas: List<Component>
@@ -122,7 +128,22 @@ data class UiState(
      */
     val showSkeleton: Boolean
         get() = pendingReplace && viewingIndex == null
+
+    /**
+     * Mutating affordances are locked while the read-only workspace timeline is
+     * being viewed (T041) — the composer/send and component re-execution are
+     * disabled until the live view is restored.
+     */
+    val mutationsLocked: Boolean get() = timelineReadOnly
 }
+
+/**
+ * The `ui_event` actions refused while the read-only timeline is active (T041):
+ * the two mutation entry points on the native client. Navigation (chrome_open,
+ * load_chat, discover_agents, …) and the timeline-exit action stay allowed so the
+ * user is never trapped. Pure → unit-tested.
+ */
+internal fun isTimelineMutation(action: String): Boolean = action == "chat_message" || action == "component_action"
 
 /**
  * Owns the connection + derived UI state. Folds each [Inbound] into [state] and
@@ -203,6 +224,8 @@ class AppViewModel(
 
     fun sendChat(text: String) {
         val s = _state.value
+        // Viewing the read-only timeline: refuse a new turn (mutations paused, T041).
+        if (s.timelineReadOnly) return
         val ready = s.staged.filter { it.state == "ready" && it.attachmentId != null }
         if (text.isBlank() && ready.isEmpty()) return
         val bubble =
@@ -233,6 +256,17 @@ class AppViewModel(
         action: String,
         payload: JsonObject = JsonObject(emptyMap()),
     ) {
+        // `attach_existing` is a CLIENT-LOCAL action (ui_protocol.json
+        // client_local_actions): the attachments library's "Attach" button stages
+        // the already-uploaded file as a chip HERE — it is never forwarded to the
+        // server (mirrors the web paperclip "Choose from your files", T047).
+        if (action == "attach_existing") {
+            stageExistingAttachment(payload)
+            return
+        }
+        // Viewing the read-only timeline: refuse mutating events (T041); navigation
+        // and the timeline-exit action still flow so the user is never trapped.
+        if (_state.value.timelineReadOnly && isTimelineMutation(action)) return
         // A rendered control that submits a chat turn (e.g. an example card) goes
         // through sendEvent, not sendChat — mirror the optimistic turn-start so the
         // canvas shows the skeleton the instant it's tapped, not only once the
@@ -344,33 +378,77 @@ class AppViewModel(
             Screen.History -> sendEvent("get_history")
             Screen.Audit -> loadAudit()
             Screen.Chat -> Unit
-            Screen.SurfacePlaceholder -> Unit
             Screen.Surface -> Unit
         }
     }
 
     /**
-     * Route a settings-menu item (from the server-owned model) to its
-     * destination: the native Agents/Audit screens where they exist, otherwise
-     * a labeled placeholder for a surface not yet native on Android (P2 delivers
-     * these as SDUI). The menu structure itself always matches the web exactly.
+     * Route a settings-menu item (from the server-owned model) to its surface.
+     * The menu structure itself always matches the web exactly.
      */
-    fun openMenuItem(item: MenuItem) {
-        when (item.surface) {
+    fun openMenuItem(item: MenuItem) = openSurface(item.surface, item.params)
+
+    /**
+     * Open a chrome surface by key — from a settings-menu item OR a top-bar action
+     * (pulse/timeline, T037). Native Agents/Audit screens where they exist,
+     * otherwise request the SDUI surface (chrome_open) and render it natively when
+     * the chrome_surface frame arrives (feature 043).
+     */
+    fun openSurface(
+        surface: String,
+        params: JsonObject = JsonObject(emptyMap()),
+    ) {
+        when (surface) {
             "agents" -> goTo(Screen.Agents)
             "audit" -> goTo(Screen.Audit)
             else -> {
-                // Feature 043: request the SDUI surface; render it natively when the
-                // chrome_surface frame arrives (replaces the placeholder screen).
-                sendEvent("chrome_open", buildJsonObject { put("surface", item.surface) })
+                sendEvent(
+                    "chrome_open",
+                    buildJsonObject {
+                        put("surface", surface)
+                        put("params", params)
+                    },
+                )
                 _state.value =
                     _state.value.copy(
                         screen = Screen.Surface,
-                        pendingSurfaceLabel = item.label,
+                        pendingSurfaceKey = surface,
                         pendingSurface = null,
                     )
             }
         }
+    }
+
+    /** Re-request the pending SDUI surface after a load timeout (T039 retry). */
+    fun retryPendingSurface() {
+        val key = _state.value.pendingSurfaceKey
+        if (key.isNotBlank()) sendEvent("chrome_open", buildJsonObject { put("surface", key) })
+    }
+
+    /**
+     * Stage an already-uploaded attachment as a ready chip (feature 031, T047) from
+     * the attachments library's `attach_existing {attachment_id, filename,
+     * category}` — no re-upload, no server frame. Blank/duplicate ids are ignored.
+     */
+    private fun stageExistingAttachment(payload: JsonObject) {
+        val id = (payload["attachment_id"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() } ?: return
+        if (_state.value.staged.any { it.attachmentId == id }) return
+        val filename = (payload["filename"] as? JsonPrimitive)?.contentOrNull ?: "attachment"
+        val category = (payload["category"] as? JsonPrimitive)?.contentOrNull ?: "file"
+        _state.value =
+            _state.value.copy(
+                staged = _state.value.staged + StagedAttachment(++attachSeq, filename, category, id, "ready"),
+            )
+    }
+
+    /**
+     * Apply a theme spec locally (feature 044 US5) — from a `theme_apply` component,
+     * an interactive `color_picker`, or the local echo of `save_theme`.
+     * Recomposition restyles the whole app; the server persists it in parallel, so
+     * this is a pure UI mirror (fail-safe: a bad hex leaves the palette unchanged).
+     */
+    fun applyTheme(spec: JsonObject) {
+        _state.value = _state.value.copy(themePalette = themePaletteForSpec(_state.value.themePalette, spec))
     }
 
     fun openChat(chatId: String) {
@@ -481,8 +559,16 @@ class AppViewModel(
                         // round's upserted components (charts/tables/etc.).
                         s2.pendingReplace ->
                             s2.copy(pendingCanvas = Canvas.apply(s2.pendingCanvas, renderToOps(canvasComps)))
-                        // Out-of-turn full canvas (load_chat rehydration): commit now.
-                        else -> s2.copy(canvas = canvasComps, pendingCanvas = emptyList())
+                        // Out-of-turn canvas render (load_chat rehydration, or a
+                        // mid-session push): RECONCILE BY IDENTITY over the current
+                        // canvas rather than wholesale-replacing it (FR-013). A
+                        // wholesale replace dropped earlier ui_upsert-added
+                        // components the render didn't re-list (the known clobber);
+                        // Canvas.apply upserts each incoming component in place (or
+                        // appends) and leaves untouched ids intact. On load_chat the
+                        // canvas was already reset, so this merges onto empty = the
+                        // incoming set.
+                        else -> s2.copy(canvas = Canvas.apply(s2.canvas, renderToOps(canvasComps)), pendingCanvas = emptyList())
                     }
                 }
             is Inbound.UiUpsert ->
@@ -549,6 +635,11 @@ class AppViewModel(
                 applyCanvasOps(s, streamErrorOps(msg))
             is Inbound.ChromeMenu -> s.copy(chromeMenu = msg.model)
             is Inbound.ChromeSurface -> s.copy(pendingSurface = msg, screen = Screen.Surface)
+            // Stored preferences at boot: fold `theme` into the live palette so the
+            // app opens in the user's saved theme (US5 restyle).
+            is Inbound.UserPreferences -> s.copy(themePalette = themePaletteForSpec(s.themePalette, msg.theme))
+            // Read-only workspace timeline toggled: lock/unlock mutations (T041).
+            is Inbound.WorkspaceTimelineMode -> s.copy(timelineReadOnly = msg.active)
             // A server error reply is never silent (FR-002): banner it and resolve
             // any in-flight turn so nothing stays stuck "thinking" (SC-006).
             is Inbound.ErrorFrame ->

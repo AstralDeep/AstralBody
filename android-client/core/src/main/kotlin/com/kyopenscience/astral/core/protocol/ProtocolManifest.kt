@@ -17,40 +17,49 @@ object ProtocolManifest {
     val classification: Map<String, String> =
         mapOf(
             // bootstrap
-            "rote_config" to IGNORED, // natives are full-capability; profile unused
+            // rote_config: natives are full-capability; profile unused
+            "rote_config" to IGNORED,
             "chrome_menu" to HANDLED,
-            "user_preferences" to HANDLED, // theme boot (044)
-            "system_config" to IGNORED, // web dashboard payload; app uses agent_list
+            // user_preferences: theme boot (044)
+            "user_preferences" to HANDLED,
+            // system_config: web dashboard payload; app uses agent_list
+            "system_config" to IGNORED,
             "agent_list" to HANDLED,
             "agent_registered" to IGNORED,
             // auth
             "auth_required" to HANDLED,
             // canvas / SDUI
             "ui_render" to HANDLED,
-            "ui_update" to IGNORED, // legacy frame; server no longer targets natives
+            // ui_update: legacy frame; server no longer targets natives
+            "ui_update" to IGNORED,
             "ui_upsert" to HANDLED,
-            "ui_append" to IGNORED, // legacy frame
+            // ui_append: legacy frame
+            "ui_append" to IGNORED,
             "ui_stream_data" to HANDLED,
             // chrome
-            "chrome_render" to IGNORED, // web HTML region push; native gets chrome_surface
+            // chrome_render: web HTML region push; native gets chrome_surface
+            "chrome_render" to IGNORED,
             "chrome_surface" to HANDLED,
             // chat lifecycle / progress
             "chat_status" to HANDLED,
             "chat_step" to HANDLED,
             "chat_created" to HANDLED,
             "chat_loaded" to HANDLED,
-            "chat_deleted" to IGNORED, // cross-tab concern; app is single-window
+            // chat_deleted: cross-tab concern; app is single-window
+            "chat_deleted" to IGNORED,
             "history_list" to HANDLED,
             "user_message_acked" to HANDLED,
             "task_started" to HANDLED,
             "task_completed" to HANDLED,
             "tool_progress" to HANDLED,
             "workspace_timeline_mode" to HANDLED,
-            "heartbeat" to IGNORED, // transport keepalive
+            // heartbeat: transport keepalive
+            "heartbeat" to IGNORED,
             // streaming
             "stream_subscribed" to HANDLED,
             "stream_unsubscribed" to HANDLED,
-            "stream_list" to IGNORED, // no app surface enumerates streams
+            // stream_list: no app surface enumerates streams
+            "stream_list" to IGNORED,
             "stream_data" to HANDLED,
             "stream_error" to HANDLED,
             // workspace component verbs (web workspace acks; app canvas is ui_* driven)

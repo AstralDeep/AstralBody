@@ -42,16 +42,16 @@ then user stories in spec priority order (US1, US2 = P1; US3, US4 = P2; US5, US6
 **Independent Test**: scripted conversation per client with injected failures (server error, socket drop, expired token, sign-out) — expected states + recovery on all three.
 
 - [X] T011 [P] [US1] Windows routing rework: classified dispatch + `unhandled frame type` warning default branch, 3-shape error normalizer → banner + rail notice + turn-fail, in windows-client/astral_client/app.py (_on_message) + tests in windows-client/tests/test_message_routing.py
-- [ ] T012 [P] [US1] Android: log Unknown frames in reducer, decode `error` (3 shapes) in android-client/core/.../protocol/Wire.kt + surface banner/turn-fail in android-client/app/.../ui/AppViewModel.kt + tests in core WireTest + app unit
+- [X] T012 [P] [US1] Android: log Unknown frames in reducer, decode `error` (3 shapes) in android-client/core/.../protocol/Wire.kt + surface banner/turn-fail in android-client/app/.../ui/AppViewModel.kt + tests in core WireTest + app unit
 - [X] T013 [US1] Windows connection UX: top-bar status chip + reconnect banner + queue-overflow visible notice wired to T007 status vocabulary in windows-client/astral_client/app.py
-- [ ] T014 [P] [US1] Android: disconnected banner + queue-overflow visible notice (replace silent drop-oldest) in android-client/app/.../transport/OrchestratorClient.kt + ui/RootScaffold.kt
+- [X] T014 [P] [US1] Android: disconnected banner + queue-overflow visible notice (replace silent drop-oldest) in android-client/app/.../transport/OrchestratorClient.kt + ui/RootScaffold.kt
 - [X] T015 [P] [US1] Windows explicit sign-in affordance on dead auth (no session / refresh failed / tries exhausted → dialog running oidc_login off-thread → _reconnect) in windows-client/astral_client/app.py + test
-- [ ] T016 [P] [US1] Android: cold-start/AuthRequired refresh failure routes to SignInScreen (not log-only) in android-client/app/.../MainActivity.kt + test
+- [X] T016 [P] [US1] Android: cold-start/AuthRequired refresh failure routes to SignInScreen (not log-only) in android-client/app/.../MainActivity.kt + test
 - [X] T017 [US1] Backend native logout: `POST /api/auth/logout` (bearer + KEYCLOAK_ALLOWED_AZP client_id validation) in backend/orchestrator/api.py; `client_id` param through `_revoke_refresh_token`/`_revoke_or_queue`/retrier in backend/orchestrator/web_auth.py; idempotent `auth_revocation_queue.client_id TEXT` migration in backend/shared/database.py; offline-grant revocation + `auth.logout` audit; tests (endpoint, queue retry with client_id, allowlist reject) in backend/tests/
 - [X] T018 [US1] Windows sign-out ladder (POST /api/auth/logout → direct Keycloak logout fallback → always local clear + quit; outcome logged) in windows-client/astral_client/app.py + rest.py + tests in windows-client/tests/test_rest.py
-- [ ] T019 [US1] Android sign-out ladder (AstralRest.logout → OidcAuth direct revoke fallback → store.clear + SignInScreen) in android-client/app/.../rest/AstralRest.kt + auth/OidcAuth.kt + MainActivity.kt + tests
+- [X] T019 [US1] Android sign-out ladder (AstralRest.logout → OidcAuth direct revoke fallback → store.clear + SignInScreen) in android-client/app/.../rest/AstralRest.kt + auth/OidcAuth.kt + MainActivity.kt + tests
 - [X] T020 [P] [US1] Windows progress signals: user_message_acked, chat_step trail, tool_progress line, task_started/task_completed notices, notification toast, full chat_status vocab (incl. processing_async) in windows-client/astral_client/app.py + tests
-- [ ] T021 [P] [US1] Android progress signals: chat_step, tool_progress, task_started/task_completed, notification decode (Wire.kt) + reduce/UI (AppViewModel.kt, Screens.kt) + tests
+- [X] T021 [P] [US1] Android progress signals: chat_step, tool_progress, task_started/task_completed, notification decode (Wire.kt) + reduce/UI (AppViewModel.kt, Screens.kt) + tests
 - [ ] T022 [US1] US1 live checkpoint on all three clients (error reply, socket drop → ≤30 s resume, expired token, sign-out then SC-004 refresh-rejection check) — record interim evidence in specs/044-native-client-parity/verification/results.md
 
 **Checkpoint**: US1 independently shippable — the daily loop is dependable everywhere.
@@ -64,11 +64,11 @@ then user stories in spec priority order (US1, US2 = P1; US3, US4 = P2; US5, US6
 
 - [X] T023 [US2] Backend canvas guarantee: regression test asserting canvas-target `ui_render`s deliver the full materialized canvas (029 designer contract; fix server-side if violated) in backend/tests/test_canvas_full_render.py
 - [X] T024 [P] [US2] Windows identity-reconciled canvas (Canvas.set_components morphs matching ids, appends new, removes absent — no blind rebuild) in windows-client/astral_client/app.py + stream sequence guard (drop out-of-order/duplicate frames) in windows-client/astral_client/streaming.py + tests incl. the known clobber sequence in windows-client/tests/test_canvas_convergence.py
-- [ ] T025 [P] [US2] Android out-of-turn full-render identity reconcile (AppViewModel reduce ui_render else-branch → Canvas.apply-based reconcile per contracts/canvas-and-interaction.md §1) in android-client/app/.../ui/AppViewModel.kt + clobber-sequence unit test
+- [X] T025 [P] [US2] Android out-of-turn full-render identity reconcile (AppViewModel reduce ui_render else-branch → Canvas.apply-based reconcile per contracts/canvas-and-interaction.md §1) in android-client/app/.../ui/AppViewModel.kt + clobber-sequence unit test
 - [X] T026 [P] [US2] Windows table pager (`‹ Prev · rows X–Y of Z · Next ›` when total_rows+page_size+component_id; emits table_paginate per contract §2) in windows-client/astral_client/renderer.py + tests
-- [ ] T027 [P] [US2] Android table pager (same contract) in android-client/app/.../render/renderers/Data.kt + tests
+- [X] T027 [P] [US2] Android table pager (same contract) in android-client/app/.../render/renderers/Data.kt + tests
 - [X] T028 [P] [US2] Windows `image` (QPixmap via rest.fetch_bytes/base64) + `plotly_chart` (QtCharts approximation; undisplayable trace kinds → table with disclosure) renderers; registry 31→33; shrink KNOWN_DEGRADED to {audio, generative} in windows-client/astral_client/renderer.py + windows-client/tests/test_renderer.py
-- [ ] T029 [P] [US2] Android markdown links (inlineMarkdown → LinkAnnotation.Url via withLink) in android-client/app/.../render/Markdown.kt + test
+- [X] T029 [P] [US2] Android markdown links (inlineMarkdown → LinkAnnotation.Url via withLink) in android-client/app/.../render/Markdown.kt + test
 - [X] T030 [P] [US2] Shared markdown construct fixture (headings/bold/italic/inline+fenced code/lists/links) asserted in windows-client/tests/test_renderer.py and android-client :app unit test (same fixture text)
 - [X] T031 [US2] Canonical gallery driver: push all 35 types + interactive variants (button, input, multi-action param_picker, file_upload/download, paginated table, empty/long/malformed cases) through the real WS path to connected clients in backend/verification/gallery_driver.py
 - [X] T032 [US2] Windows `ui_render target=history` routing into the history view (replace silent pass, app.py:1187-1188) in windows-client/astral_client/app.py + test
@@ -85,11 +85,11 @@ then user stories in spec priority order (US1, US2 = P1; US3, US4 = P2; US5, US6
 - [X] T034 [P] [US3] `components()` for workspace_timeline (snapshot rows + Newer/Older/Back-to-live buttons) + device-aware `_view`/`_live` handlers in backend/webrender/chrome/surfaces/workspace_timeline.py + tests
 - [X] T035 [P] [US3] `components()` for pulse (digest cards via build_digest; flag-off notice) in backend/webrender/chrome/surfaces/pulse.py + tests
 - [X] T036 [P] [US3] `components()` for attachments (rows + `attach_existing` Attach buttons + `chrome_attachment_delete` + empty state) in backend/webrender/chrome/surfaces/attachments.py + tests
-- [ ] T037 [P] [US3] Android server-driven top bar: render model.topbar (status ← ConnectionState reviving connectionLabel, pulse/timeline action IconButtons with sparkle/history/gear icon map, settings anchor) in android-client/app/.../ui/RootScaffold.kt + ui/Screens.kt + tests
+- [X] T037 [P] [US3] Android server-driven top bar: render model.topbar (status ← ConnectionState reviving connectionLabel, pulse/timeline action IconButtons with sparkle/history/gear icon map, settings anchor) in android-client/app/.../ui/RootScaffold.kt + ui/Screens.kt + tests
 - [X] T038 [P] [US3] Windows top bar: render parsed topbar_actions + bind status chip to the `status` control in windows-client/astral_client/app.py (TopBar) + tests
-- [ ] T039 [P] [US3] Android surface resilience: 10 s bounded skeleton → error+Retry (re-emit chrome_open), in-flight state on action submit, remove unreachable Screen.SurfacePlaceholder/SurfacePlaceholderScreen/pendingSurfaceLabel in android-client/app/.../ui/{AppViewModel,Screens,RootScaffold}.kt + tests
+- [X] T039 [P] [US3] Android surface resilience: 10 s bounded skeleton → error+Retry (re-emit chrome_open), in-flight state on action submit, remove unreachable Screen.SurfacePlaceholder/SurfacePlaceholderScreen/pendingSurfaceLabel in android-client/app/.../ui/{AppViewModel,Screens,RootScaffold}.kt + tests
 - [X] T040 [P] [US3] Windows surface resilience: same 10 s timeout/retry + in-flight submit state in windows-client/astral_client/chrome.py + app.py + tests
-- [ ] T041 [US3] `workspace_timeline_mode` read-only enforcement (disable send/component mutations while viewing history) on both natives: windows-client/astral_client/app.py + android-client/app/.../ui/AppViewModel.kt + tests
+- [X] T041 [US3] `workspace_timeline_mode` read-only enforcement (disable send/component mutations while viewing history) on both natives: windows-client/astral_client/app.py + android-client/app/.../ui/AppViewModel.kt + tests
 - [ ] T042 [US3] US3 live checkpoint: full menu+topbar walk, 8/8 surface round-trips incl. forced failure (e.g. invalid LLM base URL), timeline/pulse/attachments surfaces open natively on both clients; interim evidence
 
 **Checkpoint**: settings parity complete.
@@ -104,7 +104,7 @@ then user stories in spec priority order (US1, US2 = P1; US3, US4 = P2; US5, US6
 - [X] T044 [US4] Windows composer: paperclip menu (Upload files… ≤10 multi-select / Choose from your files), chip strip above input (filename + parser-status glyph/tooltip + remove; worker-thread uploads; failed state), send maps ready chips to send_chat(attachments=…), strip clears on send, in windows-client/astral_client/app.py + tests in windows-client/tests/test_attachments.py
 - [X] T045 [US4] Windows transcript rehydration: per-turn attachment chips in the rail from load_chat data in windows-client/astral_client/app.py + test
 - [X] T046 [P] [US4] Windows `attach_existing` interception (stage chip from attachments-surface button payload, never forwarded) in windows-client/astral_client/app.py (_emit) + test
-- [ ] T047 [P] [US4] Android paperclip parity: "Choose from your files" entry → chrome_open attachments + `attach_existing` interception staging a chip in android-client/app/.../ui/{AppViewModel,Screens}.kt + tests
+- [X] T047 [P] [US4] Android paperclip parity: "Choose from your files" entry → chrome_open attachments + `attach_existing` interception staging a chip in android-client/app/.../ui/{AppViewModel,Screens}.kt + tests
 - [ ] T048 [US4] US4 live checkpoint: full lifecycle on Windows (covered + no-parser file), cross-client reload comparison; interim evidence
 
 **Checkpoint**: the last big feature hole closed.
@@ -116,7 +116,7 @@ then user stories in spec priority order (US1, US2 = P1; US3, US4 = P2; US5, US6
 **Independent Test**: each preset on each client → immediate restyle; restart → preset persists; fine-tune a channel.
 
 - [X] T049 [P] [US5] Windows live theme: mutable Palette + build_stylesheet(palette) in windows-client/astral_client/theme.py; apply path (user_preferences boot + theme_apply live + save_theme echo) re-sets app stylesheet, repolishes chrome, re-renders canvas; interactive color_picker (QColorDialog → save_theme); disclosure line on the Theme surface behavior; in windows-client/astral_client/{theme,app,renderer}.py + tests in windows-client/tests/test_theme_live.py
-- [ ] T050 [P] [US5] Android live theme: UiState.themePalette → dynamic ColorScheme in android-client/app/.../ui/theme/Theme.kt; user_preferences decode (Wire.kt) + theme_apply handling + interactive color_picker (color dialog → save_theme) in android-client/app/.../{ui/AppViewModel.kt,render/renderers/Input.kt} + tests
+- [X] T050 [P] [US5] Android live theme: UiState.themePalette → dynamic ColorScheme in android-client/app/.../ui/theme/Theme.kt; user_preferences decode (Wire.kt) + theme_apply handling + interactive color_picker (color dialog → save_theme) in android-client/app/.../{ui/AppViewModel.kt,render/renderers/Input.kt} + tests
 - [ ] T051 [US5] US5 live checkpoint: all 5 presets × both natives restyle immediately; restart persistence; fine-tune channel; interim captures
 
 **Checkpoint**: no more broken promise on the Theme surface.
@@ -131,7 +131,7 @@ then user stories in spec priority order (US1, US2 = P1; US3, US4 = P2; US5, US6
 - [ ] T053 [US6] Full live verification (quickstart §6): gallery + all US1–US5 acceptance scenarios on web (browser), Windows app (dev machine), Android emulator (adb screencap); legible captures into verification/{web,windows,android}/; complete specs/044-native-client-parity/verification/results.md
 - [ ] T054 [US6] Finalize specs/044-native-client-parity/parity-matrix.md (evidence links, zero pending) + defect-register.md dispositions (fixed / deferred-with-rationale: agents/audit convergence, :app Kover gate, Android endpoint override)
 - [ ] T055 [P] [US6] Docs reconciliation: 041 spec status header; 042 tasks.md checked to shipped reality (+ commit or regenerate its untracked captures); 043 open tasks closed/re-homed with 044 cross-refs; windows-client/README.md + android-client/README.md + specs/041-android-sdui-client/KNOWN-ISSUES.md updated; Launch-AstralBody.bat `if not defined` env guards
-- [ ] T056 [P] [US6] Android dead code: remove debug+release DevAuth.kt, drop unused navigation-compose from android-client/gradle/libs.versions.toml + app/build.gradle.kts, resolve dangling proguard-rules.pro reference (add file or drop reference)
+- [X] T056 [P] [US6] Android dead code: remove debug+release DevAuth.kt, drop unused navigation-compose from android-client/gradle/libs.versions.toml + app/build.gradle.kts, resolve dangling proguard-rules.pro reference (add file or drop reference)
 
 **Checkpoint**: the parity claim is durable.
 
