@@ -10,7 +10,6 @@ import com.kyopenscience.astral.app.transport.ConnectionState
 import com.kyopenscience.astral.app.transport.OrchestratorClient
 import com.kyopenscience.astral.core.chrome.ChromeMenuModel
 import com.kyopenscience.astral.core.chrome.MenuItem
-import com.kyopenscience.astral.core.chrome.TopBarControl
 import com.kyopenscience.astral.core.protocol.Agent
 import com.kyopenscience.astral.core.protocol.ChatAttachment
 import com.kyopenscience.astral.core.protocol.ChatSummary
@@ -324,21 +323,6 @@ class AppViewModel(
                     _state.value.copy(
                         screen = Screen.SurfacePlaceholder,
                         pendingSurfaceLabel = item.label,
-                    )
-        }
-    }
-
-    /** Route a top-bar action control (Workspace Timeline, Pulse) from the model. */
-    fun openTopBarAction(control: TopBarControl) {
-        when (control.action?.surface) {
-            // The Workspace Timeline maps to the native history/past-chats surface.
-            "workspace_timeline" -> goTo(Screen.History)
-            null -> Unit
-            else ->
-                _state.value =
-                    _state.value.copy(
-                        screen = Screen.SurfacePlaceholder,
-                        pendingSurfaceLabel = control.label ?: (control.action?.surface ?: ""),
                     )
         }
     }
