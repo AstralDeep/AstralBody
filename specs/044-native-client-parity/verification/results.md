@@ -19,7 +19,7 @@ credential I cannot enter).
 ## US1 — Dependable chat loop
 | Scenario | Web | Windows | Android | Evidence |
 |---|---|---|---|---|
-| 1.1 server error visible (not silent/thinking) | ✅ toast handler served (`function showToast`/`case "error"` in served client.js) | ✅ error banner + turn resolved (unit: test_message_routing) | ✅ error banner + turn cleared (unit: AppViewModelReducerTest) | served-JS grep; native unit suites |
+| 1.1 server error visible (not silent/thinking) | ✅ **LIVE**: a missing-tool error rendered as a red Alert ("No agent available for tool 'interactive_artifacts'") mid-turn, not silent; toast handler also served | ✅ error banner + turn resolved (unit: test_message_routing) | ✅ error banner + turn cleared (unit: AppViewModelReducerTest) | web/web_dashboard_query.png; native unit suites |
 | 1.2 socket drop → reconnect ≤30s + resume | ➖ (browser reload) | ✅ backoff 1→30s + queue (unit: test_transport) | ✅ backoff + bounded queue (unit: BackoffTest/QueueOverflowTest) | transport unit tests |
 | 1.3 expired token → refresh or explicit sign-in | ✅ | ✅ sign-in dialog on dead auth | ✅ **LIVE**: cold-start refresh failed → SignInScreen "Session expired — sign in again" | android/android_launch.png |
 | 1.4 sign-out revokes server session | ✅ (web /auth/logout) | ✅ ladder (rest.native_logout→keycloak→local) | ✅ ladder (AstralRest.logout→KeycloakLogout→clear) | backend test_native_logout (10), native unit |
@@ -29,7 +29,7 @@ credential I cannot enter).
 ## US2 — Rendering fidelity
 | Scenario | Web | Windows | Android | Evidence |
 |---|---|---|---|---|
-| 2.1 gallery types render legibly | ✅ welcome canvas (hero/cards/buttons/text) | ✅ **LIVE, LEGIBLE** welcome canvas | ✅ instrumented RenderersTest (card+child, placeholder) | web_welcome.png; windows/shot_welcome.png; emulator instrumented |
+| 2.1 gallery types render legibly | ✅ **LIVE** welcome canvas + a dashboard turn's Document card / Reasoning collapsible / step trail | ✅ **LIVE, LEGIBLE** welcome canvas + Reasoning collapsible | ✅ instrumented RenderersTest (card+child, placeholder) | web_welcome.png, web_dashboard_query.png; windows/shot_welcome.png; emulator instrumented |
 | 2.3 interactive round-trips | ✅ | ✅ buttons/param_picker (renderer unit) | ✅ (instrumented) | 210 Windows / 130 Android unit + 10 instrumented |
 | 2.4 large table pagination | ✅ | ✅ pager emits table_paginate (unit) | ✅ pager (TablePagerTest) | renderer unit suites |
 | 2.5 canvas convergence (no clobber) | ✅ (DOM morph) | ✅ identity reconcile (test_canvas_convergence) | ✅ identity reconcile (CanvasClobberTest) | native unit + backend test_canvas_full_render |
@@ -66,7 +66,24 @@ credential I cannot enter).
 - Windows: **210 passed** (offscreen-safe pytest).
 - Android: `:core` **58**, `:app` **72** unit + **10/10 instrumented on the emulator**, ktlint clean, assembleDebug OK.
 
-## Known limitation (recorded, not a defect)
-🔒 Android full logged-in chat over real Keycloak was not driven autonomously (credential
-entry is out of bounds). Covered by instrumented on-device rendering + the identical server
-contract exercised live on web and Windows. See Defect Register D-032.
+## What was driven live vs. test-covered (honest split)
+- **Driven live in a real client this run**: web welcome canvas + dashboard query (rich
+  Document card, Reasoning collapsible, live progress step-trail, **visible error Alert**,
+  markdown answer, cross-client Recent-chats persistence); Windows welcome canvas + settings
+  menu (server model, admin/tour omitted) + dice query (markdown + Reasoning collapsible) +
+  server-driven top-bar buttons + paperclip; Android app launch + **live session-expired →
+  SignInScreen** + 10/10 instrumented Compose tests on the emulator.
+- **Test-covered, NOT interactively clicked in a native app this run** (residual manual pass):
+  the native **theme-preset apply** (T051) and the Windows **live file upload** (T048) — both
+  fully unit-tested (test_theme_live, test_attachments, ThemeTest/ThemeReducerTest) and their
+  server round-trips proven, but not driven through a live native click here. Native **table
+  pagination** click is likewise unit-tested; the paginate contract is server-shared.
+
+## Known limitations (recorded, not defects)
+🔒 D-032 — Android full logged-in chat over real Keycloak not driven autonomously (credential
+entry is out of bounds); covered by instrumented on-device rendering + the identical server
+contract exercised live on web and Windows.
+🔒 The local dev LLM under default-deny scopes returns text answers rather than provisioning
+rich dashboards for a fresh user, so a live agent-produced chart/table on the canvas wasn't
+captured; rich-component rendering is instead proven by the welcome canvas + the dashboard
+Document card live, and by the renderer unit/instrumented suites.
