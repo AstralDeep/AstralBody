@@ -42,7 +42,13 @@ class OidcAuth(context: Context) {
                 AppConfig.OIDC_CLIENT_ID,
                 ResponseTypeValues.CODE,
                 Uri.parse(AppConfig.OIDC_REDIRECT_URI),
-            ).setScope("openid profile email").build()
+            )
+                // `offline_access` yields a DURABLE (offline) refresh token whose
+                // lifetime is the realm's offline-session setting rather than the
+                // short interactive SSO session — the basis for the "sign in once a
+                // year" policy. Its rotation is persisted after every refresh.
+                .setScope("openid profile email offline_access")
+                .build()
         return service.getAuthorizationRequestIntent(request)
     }
 

@@ -70,8 +70,9 @@ class MainActivity : ComponentActivity() {
             lifecycleScope.launch(Dispatchers.IO) {
                 runCatching {
                     val state = oidc.exchange(data)
-                    store.save(state)
-                    oidc.freshToken(state)
+                    val token = oidc.freshToken(state)
+                    store.save(state) // persist AFTER the first refresh (captures rotation)
+                    token
                 }.onSuccess {
                     authToken.value = it
                     signInError.value = null
@@ -84,11 +85,20 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Resume an existing session (silent refresh) if one is stored.
+        // Resume a cached session. Per the sign-in-once-a-year policy: if credentials
+        // are found on the device, go straight to the home screen — show it right away
+        // with the cached access token, then refresh silently and PERSIST the (rotated)
+        // refresh token so the session survives future cold starts. Only a missing or
+        // fully-dead session falls back to the sign-in screen.
         lifecycleScope.launch(Dispatchers.IO) {
-            store.load()?.let { st ->
-                runCatching { oidc.freshToken(st) }.onSuccess { authToken.value = it }
-            }
+            val st = store.load() ?: return@launch
+            st.accessToken?.takeIf { it.isNotBlank() }?.let { authToken.value = it }
+            runCatching { oidc.freshToken(st) }
+                .onSuccess {
+                    store.save(st)
+                    authToken.value = it
+                }
+                .onFailure { Log.w("MainActivity", "silent token refresh failed: ${it.message}") }
         }
         setContent {
             AstralTheme {
@@ -120,7 +130,9 @@ class MainActivity : ComponentActivity() {
                         if (uiState.connection == ConnectionState.AuthRequired) {
                             authToken.value =
                                 withContext(Dispatchers.IO) {
-                                    runCatching { store.load()?.let { oidc.freshToken(it) } }.getOrNull()
+                                    store.load()?.let { st ->
+                                        runCatching { oidc.freshToken(st).also { store.save(st) } }.getOrNull()
+                                    }
                                 }
                         }
                     }
@@ -185,7 +197,7 @@ private fun SignInScreen(error: String?, onSignIn: () -> Unit) {
                 }
                 Spacer(Modifier.height(28.dp))
                 Text(
-                    text = "Secured by Keycloak · UK AI",
+                    text = "Secured by Keycloak",
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
                     fontSize = 12.sp,
                 )

@@ -361,7 +361,7 @@ class AppViewModel(
                     // cards (id "doc_…") are a chat message, never canvas content —
                     // drop them here (on rehydration the transcript carries the text).
                     val (reasoning, rest0) = msg.components.partition(::isReasoning)
-                    val canvasComps = rest0.filterNot { isDocCard(it.id) }
+                    val canvasComps = rest0.filterNot { isDocCard(it.id) || isSkeleton(it) }
                     val reasoningTurns =
                         reasoning.mapNotNull { r ->
                             flattenText(r.children).ifBlank { flattenText(listOf(r)) }
@@ -399,7 +399,7 @@ class AppViewModel(
                                 null
                             }
                         }
-                    val canvasOps = msg.ops.filterNot { isDocCard(it.componentId) }
+                    val canvasOps = msg.ops.filterNot { isDocCard(it.componentId) || isSkeleton(it.component) }
                     val s2 = if (docTurns.isEmpty()) s else s.copy(turns = s.turns + docTurns)
                     when {
                         canvasOps.isEmpty() -> s2
@@ -518,6 +518,9 @@ class AppViewModel(
 
     /** The narrative doc card the server promotes long answers into (id "doc_…"). */
     private fun isDocCard(id: String?): Boolean = id != null && id.startsWith("doc_")
+
+    /** A `skeleton` loading placeholder — stray in a finished canvas, so dropped. */
+    private fun isSkeleton(c: Component?): Boolean = c != null && c.type.equals("skeleton", ignoreCase = true)
 
     private fun flattenText(components: List<Component>): String =
         components.joinToString("\n") { c ->

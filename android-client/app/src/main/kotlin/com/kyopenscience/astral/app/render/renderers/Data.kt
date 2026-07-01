@@ -1,19 +1,10 @@
 package com.kyopenscience.astral.app.render.renderers
 
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Tab
@@ -25,8 +16,6 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.kyopenscience.astral.app.render.Renderer
@@ -121,24 +110,9 @@ private fun ChatHistoryPrimitive(c: Component) {
 
 @Composable
 private fun SkeletonPrimitive(c: Component) {
-    val count = (c.int("count") ?: 3).coerceIn(1, 12)
-    val transition = rememberInfiniteTransition(label = "skeleton")
-    val alpha by transition.animateFloat(
-        initialValue = 0.4f,
-        targetValue = 0.85f,
-        animationSpec = infiniteRepeatable(tween(850), RepeatMode.Reverse),
-        label = "alpha",
-    )
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        repeat(count) { i ->
-            Box(
-                modifier =
-                    Modifier
-                        .fillMaxWidth(if (i % 3 == 2) 0.6f else 1f)
-                        .height(16.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(Color(0xFF313A5C).copy(alpha = alpha)),
-            )
-        }
-    }
+    // A `skeleton` is a LOADING placeholder. The native canvas commits only FINAL
+    // content (the app shows its own skeleton while a query is in flight), so a
+    // skeleton reaching the canvas is stray — a placeholder the model never filled.
+    // Render nothing rather than dead gray bars. (The reducer also drops top-level
+    // skeletons so they leave no gap; this handles any nested ones.)
 }
