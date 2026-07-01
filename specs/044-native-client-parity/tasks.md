@@ -62,7 +62,7 @@ then user stories in spec priority order (US1, US2 = P1; US3, US4 = P2; US5, US6
 
 **Independent Test**: canonical 35-type gallery + convergence/pagination scripts per client vs parity matrix.
 
-- [ ] T023 [US2] Backend canvas guarantee: regression test asserting canvas-target `ui_render`s deliver the full materialized canvas (029 designer contract; fix server-side if violated) in backend/tests/test_canvas_full_render.py
+- [X] T023 [US2] Backend canvas guarantee: regression test asserting canvas-target `ui_render`s deliver the full materialized canvas (029 designer contract; fix server-side if violated) in backend/tests/test_canvas_full_render.py
 - [ ] T024 [P] [US2] Windows identity-reconciled canvas (Canvas.set_components morphs matching ids, appends new, removes absent — no blind rebuild) in windows-client/astral_client/app.py + stream sequence guard (drop out-of-order/duplicate frames) in windows-client/astral_client/streaming.py + tests incl. the known clobber sequence in windows-client/tests/test_canvas_convergence.py
 - [ ] T025 [P] [US2] Android out-of-turn full-render identity reconcile (AppViewModel reduce ui_render else-branch → Canvas.apply-based reconcile per contracts/canvas-and-interaction.md §1) in android-client/app/.../ui/AppViewModel.kt + clobber-sequence unit test
 - [ ] T026 [P] [US2] Windows table pager (`‹ Prev · rows X–Y of Z · Next ›` when total_rows+page_size+component_id; emits table_paginate per contract §2) in windows-client/astral_client/renderer.py + tests
@@ -70,7 +70,7 @@ then user stories in spec priority order (US1, US2 = P1; US3, US4 = P2; US5, US6
 - [ ] T028 [P] [US2] Windows `image` (QPixmap via rest.fetch_bytes/base64) + `plotly_chart` (QtCharts approximation; undisplayable trace kinds → table with disclosure) renderers; registry 31→33; shrink KNOWN_DEGRADED to {audio, generative} in windows-client/astral_client/renderer.py + windows-client/tests/test_renderer.py
 - [ ] T029 [P] [US2] Android markdown links (inlineMarkdown → LinkAnnotation.Url via withLink) in android-client/app/.../render/Markdown.kt + test
 - [ ] T030 [P] [US2] Shared markdown construct fixture (headings/bold/italic/inline+fenced code/lists/links) asserted in windows-client/tests/test_renderer.py and android-client :app unit test (same fixture text)
-- [ ] T031 [US2] Canonical gallery driver: push all 35 types + interactive variants (button, input, multi-action param_picker, file_upload/download, paginated table, empty/long/malformed cases) through the real WS path to connected clients in backend/verification/gallery_driver.py
+- [X] T031 [US2] Canonical gallery driver: push all 35 types + interactive variants (button, input, multi-action param_picker, file_upload/download, paginated table, empty/long/malformed cases) through the real WS path to connected clients in backend/verification/gallery_driver.py
 - [ ] T032 [US2] Windows `ui_render target=history` routing into the history view (replace silent pass, app.py:1187-1188) in windows-client/astral_client/app.py + test
 - [ ] T033 [US2] US2 live checkpoint: gallery + convergence + pagination clicks on all three clients; interim captures into specs/044-native-client-parity/verification/
 
@@ -82,9 +82,9 @@ then user stories in spec priority order (US1, US2 = P1; US3, US4 = P2; US5, US6
 
 **Independent Test**: walk the entire menu + topbar per client, exercise every surface action incl. one forced failure.
 
-- [ ] T034 [P] [US3] `components()` for workspace_timeline (snapshot rows + Newer/Older/Back-to-live buttons) + device-aware `_view`/`_live` handlers in backend/webrender/chrome/surfaces/workspace_timeline.py + tests
-- [ ] T035 [P] [US3] `components()` for pulse (digest cards via build_digest; flag-off notice) in backend/webrender/chrome/surfaces/pulse.py + tests
-- [ ] T036 [P] [US3] `components()` for attachments (rows + `attach_existing` Attach buttons + `chrome_attachment_delete` + empty state) in backend/webrender/chrome/surfaces/attachments.py + tests
+- [X] T034 [P] [US3] `components()` for workspace_timeline (snapshot rows + Newer/Older/Back-to-live buttons) + device-aware `_view`/`_live` handlers in backend/webrender/chrome/surfaces/workspace_timeline.py + tests
+- [X] T035 [P] [US3] `components()` for pulse (digest cards via build_digest; flag-off notice) in backend/webrender/chrome/surfaces/pulse.py + tests
+- [X] T036 [P] [US3] `components()` for attachments (rows + `attach_existing` Attach buttons + `chrome_attachment_delete` + empty state) in backend/webrender/chrome/surfaces/attachments.py + tests
 - [ ] T037 [P] [US3] Android server-driven top bar: render model.topbar (status ← ConnectionState reviving connectionLabel, pulse/timeline action IconButtons with sparkle/history/gear icon map, settings anchor) in android-client/app/.../ui/RootScaffold.kt + ui/Screens.kt + tests
 - [ ] T038 [P] [US3] Windows top bar: render parsed topbar_actions + bind status chip to the `status` control in windows-client/astral_client/app.py (TopBar) + tests
 - [ ] T039 [P] [US3] Android surface resilience: 10 s bounded skeleton → error+Retry (re-emit chrome_open), in-flight state on action submit, remove unreachable Screen.SurfacePlaceholder/SurfacePlaceholderScreen/pendingSurfaceLabel in android-client/app/.../ui/{AppViewModel,Screens,RootScaffold}.kt + tests

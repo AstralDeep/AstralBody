@@ -312,7 +312,7 @@ def test_auth_logout_revokes_real_offline_grant(db, grant_store, monkeypatch):
 
     revoked_refresh = []
 
-    async def idp_revoke_ok(token):
+    async def idp_revoke_ok(token, client_id=None):
         revoked_refresh.append(token)
         return True
 
