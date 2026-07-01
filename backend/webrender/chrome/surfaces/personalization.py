@@ -44,6 +44,7 @@ from personalization.phi_gate import get_phi_gate
 from personalization.schemas import PersonalitySpec, ProfileUpdateRequest
 from scheduler.store import ScheduledJobStore
 from webrender.chrome import esc, notice_block
+from webrender.chrome.surfaces import _sdui
 
 logger = logging.getLogger("Orchestrator.Chrome.Personalization")
 
@@ -511,6 +512,215 @@ def _render_dreaming(orch, user_id: str) -> str:
             f'mb-1">Recent sweeps</div><ul class="space-y-2">{"".join(lines)}</ul></div>'
         )
     return status_card + sweeps_html
+
+
+# ---------------------------------------------------------------------------
+# Feature 043 — the surface as native SDUI components (one tab at a time, so
+# the per-tab data reads + audit — e.g. memory.view — match render() exactly).
+# ---------------------------------------------------------------------------
+
+async def components(orch, user_id, roles, params):
+    """The personalization surface as native SDUI components, per ``params.tab``.
+
+    Mirrors ``render()``: a tab bar of ``chrome_open`` buttons (re-open on a
+    tab) + only the selected tab's content, so switching tabs re-reads that
+    tab's data (and re-fires its audit) exactly like the web.
+    """
+    params = params or {}
+    tab = params.get("tab") or "soul"
+    if tab not in _TAB_KEYS:
+        tab = "soul"
+    tab_bar = _sdui.container(
+        [_sdui.button(label, "chrome_open",
+                      {"surface": "personalization", "params": {"tab": key}},
+                      variant="primary" if key == tab else "secondary")
+         for key, label in _TABS],
+        direction="row",
+    )
+    if tab == "soul":
+        body = _components_soul(orch, user_id, params)
+    elif tab == "memory":
+        body = await _components_memory(orch, user_id)
+    elif tab == "skills":
+        body = _components_skills(orch, user_id)
+    elif tab == "schedule":
+        body = _components_schedule(orch, user_id)
+    else:
+        body = _components_dreaming(orch, user_id)
+    return [tab_bar, *body]
+
+
+def _components_soul(orch, user_id, params):
+    svc = _svc(orch)
+    if svc is None:
+        return [_sdui.alert("Personalization subsystem is not available.", "warning")]
+    profile = svc.repo.get_profile(user_id) or {}
+    draft = params.get("draft") if isinstance(params.get("draft"), dict) else None
+    if draft is not None:
+        profession = str(draft.get("profession") or "")
+        goals_text = str(draft.get("goals") or "")
+        notes = str(draft.get("personality_notes") or "")
+    else:
+        profession = str(profile.get("profession") or "")
+        goals_text = "\n".join(str(g) for g in (profile.get("goals") or []))
+        notes = str((profile.get("personality") or {}).get("notes") or "")
+    return [
+        _sdui.form(
+            [_sdui.field("profession", "Profession", "text", default=profession,
+                         help="e.g. clinical researcher"),
+             _sdui.field("goals", "Goals (one per line)", "textarea", default=goals_text),
+             _sdui.field("personality_notes", "Personality notes", "textarea", default=notes,
+                         help="How should the assistant sound?")],
+            submit_action="chrome_profile_save", submit_label="Save profile"),
+        _sdui.text("Personality guides tone and voice only — it never overrides the safety, "
+                   "privacy, or HIPAA rules, and free-text values are PHI-screened.", "caption"),
+    ]
+
+
+async def _components_memory(orch, user_id):
+    svc = _svc(orch)
+    if svc is None:
+        return [_sdui.alert("Personalization subsystem is not available.", "warning")]
+    items = svc.repo.list_memory(user_id)
+    # Preserve the render()-time memory.view audit event.
+    await record_generic(
+        claims={"sub": user_id}, event_class="memory", action_type="memory.view",
+        description="Viewed durable memory", outputs_meta={"count": len(items)},
+    )
+    out = [_sdui.text("Durable, non-PHI facts the assistant remembers across sessions. Edits "
+                      "are screened by the same PHI gate as everything else.", "caption")]
+    if not items:
+        out.append(_sdui.alert("No memory items yet — they appear as you chat or when dreaming "
+                               "promotes recurring signals.", "info"))
+        return out
+    for item in items:
+        mem_id = str(item.get("id") or "")
+        out.append(_sdui.card(
+            str(item.get("category") or "memory"),
+            [_sdui.form(
+                [_sdui.field("value", "Value", "text", default=str(item.get("value") or ""))],
+                actions=[
+                    {"label": "Save", "action": "chrome_memory_update", "variant": "primary",
+                     "payload": {"id": mem_id}},
+                    {"label": "Delete", "action": "chrome_memory_delete", "variant": "danger",
+                     "payload": {"id": mem_id}},
+                ])],
+        ))
+    return out
+
+
+def _components_skills(orch, user_id):
+    tp = getattr(orch, "tool_permissions", None)
+    if tp is None:
+        return [_sdui.alert("Tool permissions are not available.", "warning")]
+    catalog = []
+    for agent_id in list(getattr(tp, "_tool_scope_map", {}) or {}):
+        for tool_name, scope in tp.get_tool_scope_map(agent_id).items():
+            catalog.append({
+                "agent_id": agent_id, "tool_name": tool_name, "scope": scope,
+                "enabled": tp.is_tool_allowed(user_id, agent_id, tool_name),
+                "authorized": tp.is_scope_enabled(user_id, agent_id, scope),
+            })
+    if not catalog:
+        return [_sdui.alert("No skills are available yet.", "info")]
+    catalog.sort(key=lambda s: (s["agent_id"], s["tool_name"]))
+    out = []
+    for e in catalog:
+        children = [_sdui.badge(e["scope"], "default")]
+        if e["authorized"]:
+            children.append(_sdui.badge("Enabled" if e["enabled"] else "Disabled",
+                                        "success" if e["enabled"] else "default"))
+            children.append(_sdui.button(
+                "Disable" if e["enabled"] else "Enable", "chrome_skill_toggle",
+                {"agent_id": e["agent_id"], "tool_name": e["tool_name"],
+                 "enabled": not e["enabled"]},
+                variant="secondary" if e["enabled"] else "primary"))
+        else:
+            children.append(_sdui.text(
+                f"Unavailable — requires the '{e['scope']}' permission, which you haven't "
+                f"been granted.", "caption"))
+        out.append(_sdui.card(f"{e['tool_name']} · {e['agent_id']}", children))
+    return out
+
+
+def _components_schedule(orch, user_id):
+    store = _job_store(orch)
+    if store is None:
+        return [_sdui.alert("The scheduler is not available.", "warning")]
+    from shared.feature_flags import flags
+    out = []
+    if not flags.is_enabled("scheduler_execution"):
+        out.append(_sdui.alert("Unattended execution is currently unavailable: scheduled jobs "
+                               "will not run until an administrator enables it (pending a "
+                               "security review). You can still create and manage jobs.", "warning"))
+    out.append(_sdui.text("New jobs are created in chat — ask the assistant to schedule a task.",
+                          "caption"))
+    jobs = [j for j in store.list_jobs(user_id)
+            if (j.get("status") or "") != "disabled" and j.get("agent_id") != "__dreaming__"]
+    if not jobs:
+        out.append(_sdui.alert("No scheduled jobs yet.", "info"))
+        return out
+    for job in jobs:
+        job_id = str(job.get("id") or "")
+        status = str(job.get("status") or "")
+        actions = []
+        if status == "active":
+            actions.append(_sdui.button("Pause", "chrome_job_pause", {"job_id": job_id}, "secondary"))
+            actions.append(_sdui.button("Run now", "chrome_job_run_now", {"job_id": job_id}, "primary"))
+        elif status == "paused":
+            actions.append(_sdui.button("Resume", "chrome_job_resume", {"job_id": job_id}, "primary"))
+        actions.append(_sdui.button("Delete", "chrome_job_delete", {"job_id": job_id}, "danger"))
+        card_children = [_sdui.key_value([
+            {"label": "Status", "value": status},
+            {"label": "Schedule",
+             "value": f'{job.get("schedule_kind") or "?"}: {job.get("schedule_expr") or "?"} '
+                      f'({job.get("timezone") or "UTC"})'},
+            {"label": "Next run", "value": _fmt_ts(job.get("next_run_at"))},
+            {"label": "Last run", "value": _fmt_ts(job.get("last_run_at"))},
+        ])]
+        runs = store.list_runs(user_id, job_id)[:5]
+        if runs:
+            card_children.append(_sdui.text("Recent runs", "caption"))
+            card_children.append(_sdui.bullet_list([
+                f'{_fmt_ts(r.get("started_at"))} — {r.get("outcome") or ""}'
+                + (f' · {r.get("summary")}' if r.get("summary") else "")
+                for r in runs
+            ]))
+        card_children.append(_sdui.container(actions, direction="row"))
+        out.append(_sdui.card(str(job.get("name") or "Job"), card_children))
+    return out
+
+
+def _components_dreaming(orch, user_id):
+    svc = _svc(orch)
+    if svc is None:
+        return [_sdui.alert("Personalization subsystem is not available.", "warning")]
+    profile = svc.repo.get_profile(user_id)
+    enabled = bool(profile.get("dreaming_enabled", True)) if profile else True
+    out = [_sdui.card(
+        f"Background consolidation is {'on' if enabled else 'off'}",
+        [_sdui.text("Dreaming periodically reviews recent, recurring signals and promotes the "
+                    "non-PHI ones into long-term memory. In-app only; every sweep is recorded "
+                    "below.", "caption"),
+         _sdui.button("Turn off" if enabled else "Turn on", "chrome_dreaming_toggle",
+                      {"enabled": not enabled}, variant="secondary" if enabled else "primary"),
+         _sdui.button("Run a sweep now", "chrome_dreaming_trigger", {}, "primary")],
+    )]
+    sweeps = svc.repo.list_sweeps(user_id)
+    if not sweeps:
+        out.append(_sdui.alert("No sweeps yet.", "info"))
+        return out
+    lines = []
+    for s in sweeps:
+        counts = (f'considered {s.get("candidates_considered", 0)}, '
+                  f'promoted {s.get("promoted_count", 0)}')
+        line = f'{_fmt_ts(s.get("ran_at"))} · {s.get("trigger") or ""} — {counts}'
+        if s.get("summary"):
+            line += f' · {s.get("summary")}'
+        lines.append(line)
+    out.append(_sdui.text("Recent sweeps", "caption"))
+    out.append(_sdui.bullet_list(lines))
+    return out
 
 
 # ---------------------------------------------------------------------------

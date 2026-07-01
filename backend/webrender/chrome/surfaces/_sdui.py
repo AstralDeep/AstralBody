@@ -105,24 +105,32 @@ def field(name: str, label: str, kind: str = "text", default: Any = None,
     return f
 
 
-def form(fields: List[Dict[str, Any]], submit_action: str, submit_label: str = "Save",
-         submit_payload: Optional[Dict[str, Any]] = None, title: str = "",
+def form(fields: List[Dict[str, Any]], submit_action: Optional[str] = None,
+         submit_label: str = "Save", submit_payload: Optional[Dict[str, Any]] = None,
+         actions: Optional[List[Dict[str, Any]]] = None, title: str = "",
          description: str = "") -> Dict[str, Any]:
     """A ``ParamPicker`` in **action-submit** mode (research D2).
 
-    On submit the client posts ``ui_event{action: submit_action,
-    payload:{fields:{...}, ...submit_payload}}`` — the ``payload.fields`` shape
-    the existing ``chrome_*`` handlers already parse.
+    Single-action form: pass ``submit_action`` — submit posts
+    ``ui_event{action: submit_action, payload:{fields:{...}, ...submit_payload}}``.
+    Multi-action form (e.g. LLM's Load / Test / Save): pass ``actions`` as
+    ``[{"label", "action", "variant"?, "payload"?}]`` — the client renders each
+    as a button that submits the SAME collected ``fields`` with that action.
+    Either way ``payload.fields`` is the shape the existing ``chrome_*`` handlers
+    already parse.
     """
+    attrs: Dict[str, Any] = {}
+    if actions:
+        attrs["actions"] = [dict(a) for a in actions]
+    if submit_action:
+        attrs["submit_action"] = submit_action
+        attrs["submit_payload"] = submit_payload or {}
     return ParamPicker(
         title=title,
         description=description,
         fields=list(fields),
         submit_label=submit_label,
-        attributes={
-            "submit_action": submit_action,
-            "submit_payload": submit_payload or {},
-        },
+        attributes=attrs,
     ).to_dict()
 
 
