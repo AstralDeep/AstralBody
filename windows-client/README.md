@@ -189,8 +189,14 @@ read-only `/api/audit` viewer with event-class / outcome / keyword filters and
 cursor pagination). The web app renders chrome as server HTML (`chrome_render`,
 which this client acknowledges but never embeds — there is no web view); the
 native Qt reimplementations are the parity path (see "Native-only" below).
-**In progress**: the remaining settings surfaces (LLM, personalization, theme,
-attachments, drafts), each driven by its existing REST/WS data action.
+**Since feature 044**: automatic reconnect (1→30 s backoff + frame resume) with a
+connection status chip, identity-reconciled canvas convergence, **table
+pagination**, a server-model-driven **top bar**, native **settings surfaces**
+(LLM, personalization, theme, guide) delivered as SDUI via `chrome_surface`,
+**live theme restyle** (a preset applies immediately), **chat attachments**
+(paperclip upload + chips + attach-from-library), `image`/`plotly` renderers, a
+robust sign-out ladder, and progress signals (steps / tool progress /
+notifications) — each verified live under feature 044.
 
 ## Native-only (no embedded web browser)
 
