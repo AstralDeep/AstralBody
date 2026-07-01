@@ -52,7 +52,7 @@ then user stories in spec priority order (US1, US2 = P1; US3, US4 = P2; US5, US6
 - [X] T019 [US1] Android sign-out ladder (AstralRest.logout → OidcAuth direct revoke fallback → store.clear + SignInScreen) in android-client/app/.../rest/AstralRest.kt + auth/OidcAuth.kt + MainActivity.kt + tests
 - [X] T020 [P] [US1] Windows progress signals: user_message_acked, chat_step trail, tool_progress line, task_started/task_completed notices, notification toast, full chat_status vocab (incl. processing_async) in windows-client/astral_client/app.py + tests
 - [X] T021 [P] [US1] Android progress signals: chat_step, tool_progress, task_started/task_completed, notification decode (Wire.kt) + reduce/UI (AppViewModel.kt, Screens.kt) + tests
-- [ ] T022 [US1] US1 live checkpoint on all three clients (error reply, socket drop → ≤30 s resume, expired token, sign-out then SC-004 refresh-rejection check) — record interim evidence in specs/044-native-client-parity/verification/results.md
+- [X] T022 [US1] US1 live checkpoint on all three clients (error reply, socket drop → ≤30 s resume, expired token, sign-out then SC-004 refresh-rejection check) — record interim evidence in specs/044-native-client-parity/verification/results.md
 
 **Checkpoint**: US1 independently shippable — the daily loop is dependable everywhere.
 
@@ -72,7 +72,7 @@ then user stories in spec priority order (US1, US2 = P1; US3, US4 = P2; US5, US6
 - [X] T030 [P] [US2] Shared markdown construct fixture (headings/bold/italic/inline+fenced code/lists/links) asserted in windows-client/tests/test_renderer.py and android-client :app unit test (same fixture text)
 - [X] T031 [US2] Canonical gallery driver: push all 35 types + interactive variants (button, input, multi-action param_picker, file_upload/download, paginated table, empty/long/malformed cases) through the real WS path to connected clients in backend/verification/gallery_driver.py
 - [X] T032 [US2] Windows `ui_render target=history` routing into the history view (replace silent pass, app.py:1187-1188) in windows-client/astral_client/app.py + test
-- [ ] T033 [US2] US2 live checkpoint: gallery + convergence + pagination clicks on all three clients; interim captures into specs/044-native-client-parity/verification/
+- [X] T033 [US2] US2 live checkpoint: gallery + convergence + pagination clicks on all three clients; interim captures into specs/044-native-client-parity/verification/
 
 **Checkpoint**: rendering fidelity proven; both P1 stories complete.
 
@@ -90,7 +90,7 @@ then user stories in spec priority order (US1, US2 = P1; US3, US4 = P2; US5, US6
 - [X] T039 [P] [US3] Android surface resilience: 10 s bounded skeleton → error+Retry (re-emit chrome_open), in-flight state on action submit, remove unreachable Screen.SurfacePlaceholder/SurfacePlaceholderScreen/pendingSurfaceLabel in android-client/app/.../ui/{AppViewModel,Screens,RootScaffold}.kt + tests
 - [X] T040 [P] [US3] Windows surface resilience: same 10 s timeout/retry + in-flight submit state in windows-client/astral_client/chrome.py + app.py + tests
 - [X] T041 [US3] `workspace_timeline_mode` read-only enforcement (disable send/component mutations while viewing history) on both natives: windows-client/astral_client/app.py + android-client/app/.../ui/AppViewModel.kt + tests
-- [ ] T042 [US3] US3 live checkpoint: full menu+topbar walk, 8/8 surface round-trips incl. forced failure (e.g. invalid LLM base URL), timeline/pulse/attachments surfaces open natively on both clients; interim evidence
+- [X] T042 [US3] US3 live checkpoint: full menu+topbar walk, 8/8 surface round-trips incl. forced failure (e.g. invalid LLM base URL), timeline/pulse/attachments surfaces open natively on both clients; interim evidence
 
 **Checkpoint**: settings parity complete.
 
@@ -105,7 +105,7 @@ then user stories in spec priority order (US1, US2 = P1; US3, US4 = P2; US5, US6
 - [X] T045 [US4] Windows transcript rehydration: per-turn attachment chips in the rail from load_chat data in windows-client/astral_client/app.py + test
 - [X] T046 [P] [US4] Windows `attach_existing` interception (stage chip from attachments-surface button payload, never forwarded) in windows-client/astral_client/app.py (_emit) + test
 - [X] T047 [P] [US4] Android paperclip parity: "Choose from your files" entry → chrome_open attachments + `attach_existing` interception staging a chip in android-client/app/.../ui/{AppViewModel,Screens}.kt + tests
-- [ ] T048 [US4] US4 live checkpoint: full lifecycle on Windows (covered + no-parser file), cross-client reload comparison; interim evidence
+- [~] T048 [US4] US4 checkpoint (test-covered; live native file-upload click is the residual manual pass — see verification/results.md): full lifecycle on Windows (covered + no-parser file), cross-client reload comparison; interim evidence
 
 **Checkpoint**: the last big feature hole closed.
 
@@ -117,7 +117,7 @@ then user stories in spec priority order (US1, US2 = P1; US3, US4 = P2; US5, US6
 
 - [X] T049 [P] [US5] Windows live theme: mutable Palette + build_stylesheet(palette) in windows-client/astral_client/theme.py; apply path (user_preferences boot + theme_apply live + save_theme echo) re-sets app stylesheet, repolishes chrome, re-renders canvas; interactive color_picker (QColorDialog → save_theme); disclosure line on the Theme surface behavior; in windows-client/astral_client/{theme,app,renderer}.py + tests in windows-client/tests/test_theme_live.py
 - [X] T050 [P] [US5] Android live theme: UiState.themePalette → dynamic ColorScheme in android-client/app/.../ui/theme/Theme.kt; user_preferences decode (Wire.kt) + theme_apply handling + interactive color_picker (color dialog → save_theme) in android-client/app/.../{ui/AppViewModel.kt,render/renderers/Input.kt} + tests
-- [ ] T051 [US5] US5 live checkpoint: all 5 presets × both natives restyle immediately; restart persistence; fine-tune channel; interim captures
+- [~] T051 [US5] US5 checkpoint (test-covered; live native preset-apply click is the residual manual pass — see verification/results.md): all 5 presets × both natives restyle immediately; restart persistence; fine-tune channel; interim captures
 
 **Checkpoint**: no more broken promise on the Theme surface.
 
