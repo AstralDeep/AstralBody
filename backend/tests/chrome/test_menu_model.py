@@ -87,6 +87,15 @@ def test_admin_group_present_for_admin_absent_otherwise():
         assert all(g.key != "admin" for g in build_menu_model(roles, pulse_enabled=False).menu)
 
 
+def test_include_admin_false_makes_admin_web_only():
+    # Native channels pass include_admin=False → no admin group even for admins.
+    native = build_menu_model(["admin", "user"], pulse_enabled=False, include_admin=False)
+    assert [g.key for g in native.menu] == ["account", "help"]
+    # The web default (include_admin=True) still shows it to admins.
+    web = build_menu_model(["admin", "user"], pulse_enabled=False)
+    assert [g.key for g in web.menu] == ["account", "help", "admin"]
+
+
 def test_every_menu_item_surface_resolves():
     m = build_menu_model(["admin", "user"], pulse_enabled=True)
     for g in m.menu:

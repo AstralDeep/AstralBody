@@ -1171,8 +1171,10 @@ class Orchestrator:
                             _roles = list((user_data.get("realm_access") or {}).get("roles") or [])
                             for _c in (user_data.get("resource_access") or {}).values():
                                 _roles.extend((_c or {}).get("roles") or [])
+                            # Native clients: ADMIN TOOLS is web-only.
                             await self._safe_send(
-                                websocket, ChromeMenu(model=menu_model_dict(_roles)).to_json()
+                                websocket,
+                                ChromeMenu(model=menu_model_dict(_roles, include_admin=False)).to_json(),
                             )
                     except Exception as _e:  # pragma: no cover — non-fatal push
                         logger.debug(f"chrome_menu push failed (non-fatal): {_e}")
