@@ -23,11 +23,9 @@ internal fun Component.arr(key: String): JsonArray? = attributes[key] as? JsonAr
 
 internal fun Component.payload(): JsonObject = (attributes["payload"] as? JsonObject) ?: JsonObject(emptyMap())
 
-internal fun Component.strList(key: String): List<String> =
-    arr(key)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull } ?: emptyList()
+internal fun Component.strList(key: String): List<String> = arr(key)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull } ?: emptyList()
 
-internal fun Component.numList(key: String): List<Double> =
-    arr(key)?.mapNotNull { (it as? JsonPrimitive)?.doubleOrNull } ?: emptyList()
+internal fun Component.numList(key: String): List<Double> = arr(key)?.mapNotNull { (it as? JsonPrimitive)?.doubleOrNull } ?: emptyList()
 
 /** Rows for `table` / generic 2-D arrays: a JSON array of arrays of cells. */
 internal fun Component.rows(key: String): List<List<String>> =

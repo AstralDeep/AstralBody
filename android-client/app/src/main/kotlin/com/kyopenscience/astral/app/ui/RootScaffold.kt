@@ -49,7 +49,11 @@ import com.kyopenscience.astral.app.ui.theme.AstralColors
  * is the adaptive SDUI shell; the others are native Compose surfaces.
  */
 @Composable
-fun RootScaffold(vm: AppViewModel, renderer: Renderer, onSignOut: () -> Unit) {
+fun RootScaffold(
+    vm: AppViewModel,
+    renderer: Renderer,
+    onSignOut: () -> Unit,
+) {
     val state by vm.state.collectAsStateWithLifecycle()
     Scaffold(
         topBar = {
@@ -126,7 +130,11 @@ private fun AstralTopBar(
 }
 
 @Composable
-private fun HamburgerMenu(current: Screen, onNavigate: (Screen) -> Unit, onSignOut: () -> Unit) {
+private fun HamburgerMenu(
+    current: Screen,
+    onNavigate: (Screen) -> Unit,
+    onSignOut: () -> Unit,
+) {
     var open by remember { mutableStateOf(false) }
     Box {
         IconButton(onClick = { open = true }) {
@@ -138,12 +146,27 @@ private fun HamburgerMenu(current: Screen, onNavigate: (Screen) -> Unit, onSignO
             )
         }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-            MenuItem("Home", R.drawable.ic_chat, current == Screen.Chat) { open = false; onNavigate(Screen.Chat) }
-            MenuItem("Agents", R.drawable.ic_agents, current == Screen.Agents) { open = false; onNavigate(Screen.Agents) }
-            MenuItem("History", R.drawable.ic_history, current == Screen.History) { open = false; onNavigate(Screen.History) }
-            MenuItem("Audit", R.drawable.ic_audit, current == Screen.Audit) { open = false; onNavigate(Screen.Audit) }
+            MenuItem("Home", R.drawable.ic_chat, current == Screen.Chat) {
+                open = false
+                onNavigate(Screen.Chat)
+            }
+            MenuItem("Agents", R.drawable.ic_agents, current == Screen.Agents) {
+                open = false
+                onNavigate(Screen.Agents)
+            }
+            MenuItem("History", R.drawable.ic_history, current == Screen.History) {
+                open = false
+                onNavigate(Screen.History)
+            }
+            MenuItem("Audit", R.drawable.ic_audit, current == Screen.Audit) {
+                open = false
+                onNavigate(Screen.Audit)
+            }
             HorizontalDivider(color = MaterialTheme.colorScheme.outline)
-            MenuItem("Settings", R.drawable.ic_settings, current == Screen.Settings) { open = false; onNavigate(Screen.Settings) }
+            MenuItem("Settings", R.drawable.ic_settings, current == Screen.Settings) {
+                open = false
+                onNavigate(Screen.Settings)
+            }
             DropdownMenuItem(
                 text = { Text("Sign out", color = MaterialTheme.colorScheme.error) },
                 leadingIcon = {
@@ -164,7 +187,12 @@ private fun HamburgerMenu(current: Screen, onNavigate: (Screen) -> Unit, onSignO
 }
 
 @Composable
-private fun MenuItem(label: String, iconRes: Int, selected: Boolean, onClick: () -> Unit) {
+private fun MenuItem(
+    label: String,
+    iconRes: Int,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
     val accent = AstralColors.Indigo
     DropdownMenuItem(
         text = {

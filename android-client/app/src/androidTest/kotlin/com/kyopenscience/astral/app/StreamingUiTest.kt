@@ -23,8 +23,10 @@ import org.junit.Test
 class StreamingUiTest {
     @get:Rule val rule = createComposeRule()
 
-    private fun frame(seq: Int, text: String) =
-        Inbound.UiStreamData("s1", null, seq, listOf(textComponent(text)), false, null, null)
+    private fun frame(
+        seq: Int,
+        text: String,
+    ) = Inbound.UiStreamData("s1", null, seq, listOf(textComponent(text)), false, null, null)
 
     @Test
     fun stream_updates_in_place() {

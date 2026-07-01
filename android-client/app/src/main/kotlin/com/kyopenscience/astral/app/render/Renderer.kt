@@ -11,7 +11,10 @@ import kotlinx.serialization.json.JsonObject
 
 /** Emits a `ui_event` back to the orchestrator (e.g. a rendered button's action). */
 fun interface Emit {
-    fun event(action: String, payload: JsonObject)
+    fun event(
+        action: String,
+        payload: JsonObject,
+    )
 }
 
 /**
@@ -29,7 +32,10 @@ typealias ComponentRenderer = @Composable Renderer.(Component) -> Unit
 class Renderer(val emit: Emit) {
     private val registry = LinkedHashMap<String, ComponentRenderer>()
 
-    fun register(type: String, renderer: ComponentRenderer): Renderer {
+    fun register(
+        type: String,
+        renderer: ComponentRenderer,
+    ): Renderer {
         registry[type] = renderer
         return this
     }

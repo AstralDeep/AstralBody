@@ -27,7 +27,10 @@ import androidx.compose.ui.unit.dp
  * **bold**, *italic*, and `code`. Anything else falls through as plain text.
  */
 @Composable
-fun MarkdownText(text: String, modifier: Modifier = Modifier) {
+fun MarkdownText(
+    text: String,
+    modifier: Modifier = Modifier,
+) {
     val lines = text.trim('\n').split("\n")
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
         var i = 0
@@ -63,12 +66,18 @@ private fun String.matchesOrderedItem(): Boolean {
 }
 
 @Composable
-private fun HeadingLine(text: String, style: androidx.compose.ui.text.TextStyle) {
+private fun HeadingLine(
+    text: String,
+    style: androidx.compose.ui.text.TextStyle,
+) {
     Text(inlineMarkdown(text), style = style)
 }
 
 @Composable
-private fun BulletLine(marker: String, content: String) {
+private fun BulletLine(
+    marker: String,
+    content: String,
+) {
     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(marker, style = MaterialTheme.typography.bodyMedium)
         Text(inlineMarkdown(content), style = MaterialTheme.typography.bodyMedium)
@@ -103,7 +112,8 @@ fun inlineMarkdown(text: String): AnnotatedString =
                         withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(text.substring(i + 2, end)) }
                         i = end + 2
                     } else {
-                        append(text[i]); i++
+                        append(text[i])
+                        i++
                     }
                 }
                 text[i] == '`' -> {
@@ -112,7 +122,8 @@ fun inlineMarkdown(text: String): AnnotatedString =
                         withStyle(SpanStyle(fontFamily = FontFamily.Monospace)) { append(text.substring(i + 1, end)) }
                         i = end + 1
                     } else {
-                        append(text[i]); i++
+                        append(text[i])
+                        i++
                     }
                 }
                 (text[i] == '*' || text[i] == '_') && i + 1 < text.length && text[i + 1] != ' ' -> {
@@ -122,11 +133,13 @@ fun inlineMarkdown(text: String): AnnotatedString =
                         withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(text.substring(i + 1, end)) }
                         i = end + 1
                     } else {
-                        append(text[i]); i++
+                        append(text[i])
+                        i++
                     }
                 }
                 else -> {
-                    append(text[i]); i++
+                    append(text[i])
+                    i++
                 }
             }
         }
