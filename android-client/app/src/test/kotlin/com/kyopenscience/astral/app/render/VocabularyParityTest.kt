@@ -19,11 +19,11 @@ class VocabularyParityTest {
             "grid", "hero", "badge", "metric", "keyvalue", "timeline", "rating", "divider", "progress", "collapsible",
             "list", "table", "tabs", "chat_history", "skeleton",
             "input", "param_picker", "code", "file_upload", "file_download", "download_card",
-            "bar_chart", "line_chart", "pie_chart",
+            "bar_chart", "line_chart", "pie_chart", "plotly_chart",
             "image",
         )
 
-    private val excluded = setOf("plotly_chart", "audio", "color_picker", "theme_apply", "generative")
+    private val excluded = setOf("audio", "color_picker", "theme_apply", "generative")
 
     private fun renderer() = Renderer(Emit { _, _ -> }).registerAllRenderers()
 

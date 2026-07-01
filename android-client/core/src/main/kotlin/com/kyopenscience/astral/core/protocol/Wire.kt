@@ -71,6 +71,11 @@ object Wire {
             }
             "stream_unsubscribed" -> Inbound.StreamUnsubscribed(root.str("tool_name"))
             "chat_created" -> Inbound.ChatCreated(root.obj("payload")?.str("chat_id") ?: root.str("chat_id"))
+            "user_message_acked" ->
+                Inbound.UserMessageAcked(
+                    chatId = root.obj("payload")?.str("chat_id") ?: root.str("chat_id"),
+                    messageId = root.obj("payload")?.str("message_id") ?: root.str("message_id"),
+                )
             "chat_loaded" -> Inbound.ChatLoaded(transcriptFromJson(root.obj("chat")))
             "agent_list" -> Inbound.AgentList(agentsFromJson(root.arr("agents")))
             "history_list" -> Inbound.HistoryList(chatsFromJson(root.arr("chats")))
@@ -112,7 +117,11 @@ object Wire {
             put("payload", payload)
         }.toString()
 
-    fun encodeChatMessage(message: String, chatId: String?): String =
+    fun encodeChatMessage(
+        message: String,
+        chatId: String?,
+        attachments: List<ChatAttachment> = emptyList(),
+    ): String =
         encodeUiEvent(
             action = "chat_message",
             sessionId = chatId,
@@ -120,6 +129,19 @@ object Wire {
                 buildJsonObject {
                     put("message", message)
                     if (chatId != null) put("chat_id", chatId)
+                    if (attachments.isNotEmpty()) {
+                        putJsonArray("attachments") {
+                            attachments.forEach { a ->
+                                add(
+                                    buildJsonObject {
+                                        put("attachment_id", a.attachmentId)
+                                        put("filename", a.filename)
+                                        put("category", a.category)
+                                    },
+                                )
+                            }
+                        }
+                    }
                 },
         )
 
