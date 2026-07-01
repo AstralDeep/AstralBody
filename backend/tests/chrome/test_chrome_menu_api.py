@@ -29,13 +29,16 @@ def _client(payload):
     return TestClient(app)
 
 
-def test_admin_menu_body():
+def test_native_menu_body_omits_admin_even_for_admins():
+    """ADMIN TOOLS is web-only — the native REST channel never sends it, even to
+    an admin caller (include_admin=False)."""
     c = _client({"realm_access": {"roles": ["admin", "user"]}})
     r = c.get("/api/chrome/menu")
     assert r.status_code == 200
     body = r.json()
     assert body["version"] == 1
-    assert [g["key"] for g in body["menu"]] == ["account", "help", "admin"]
+    assert [g["key"] for g in body["menu"]] == ["account", "help"]  # no admin group
+    assert "admin_tools" not in json.dumps(body)
     assert [c_["key"] for c_ in body["topbar"]] == ["brand", "status", "timeline", "settings"]
     assert body["signout"] == {"key": "signout", "label": "Sign out", "style": "danger", "action": "logout"}
 
@@ -47,10 +50,10 @@ def test_non_admin_menu_omits_admin():
     assert "admin_tools" not in json.dumps(body)
 
 
-def test_roles_read_from_resource_access_too():
+def test_admin_via_resource_access_still_web_only():
     c = _client({"resource_access": {"astral-frontend": {"roles": ["admin"]}}})
     body = c.get("/api/chrome/menu").json()
-    assert [g["key"] for g in body["menu"]] == ["account", "help", "admin"]
+    assert [g["key"] for g in body["menu"]] == ["account", "help"]  # admin is web-only
 
 
 def test_unauthenticated_401():
@@ -65,7 +68,8 @@ def test_rest_body_equals_ws_frame_model():
     for roles in (["user"], ["admin", "user"]):
         c = _client({"realm_access": {"roles": roles}})
         rest = c.get("/api/chrome/menu").json()
-        frame = json.loads(ChromeMenu(model=menu_model_dict(roles)).to_json())
+        # Both native channels omit admin (web-only) — include_admin=False.
+        frame = json.loads(ChromeMenu(model=menu_model_dict(roles, include_admin=False)).to_json())
         assert frame["type"] == "chrome_menu"
         assert frame["model"] == rest
 

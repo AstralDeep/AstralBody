@@ -17,7 +17,13 @@
 
 **Refinement applied from live review:** the top bar on every client is now exactly **brand logo · New · Recent chats · Settings** (all settings inside the gear) — no wordmark, no status text, no duplicate history control.
 
-**Remaining (sequenced below):** P2 (SDUI delivery of LLM/Personalization/Theme/Tour/Guide surfaces so they render natively instead of the current placeholder), P3 (theme presets applied natively, flag-gated Pulse, admin surfaces).
+**Second live-review round (also in this PR):**
+- **ADMIN TOOLS is now web-only.** `build_menu_model(..., include_admin=...)`: the web passes `True` (admins still see it), but the native channels (`GET /api/chrome/menu` + the `chrome_menu` WS frame) pass `include_admin=False`, so Windows/Android never receive the admin group even for admins. Server-side `ADMIN_ONLY` enforcement is unchanged (defense in depth).
+- **Android settings gear fixed.** The line-gear path reached the 24-unit viewport edges (2px stroke clipped at small sizes → looked "cut off/malformed"); inset ~12% via a scale group + more right-edge top-bar padding.
+
+### 🔜 Next round (highlighted from review) — P2: port the settings surfaces
+
+The settings items that currently open a *"This settings screen is coming to the app soon"* placeholder on the native clients — **LLM settings, Personalization, Theme, Take the tour, User guide** — must be **ported from the web** so they render natively. These pages already exist as server-rendered chrome surfaces (`webrender/chrome/surfaces/*.py`); the work is to deliver them as **SDUI** (astralprims components → orchestrator render → ROTE → the clients' existing renderers) via a new `chrome_surface` frame, then render + wire their actions on Android and Windows. See Phase 5 (US3) tasks T025–T039 below. P3 (theme presets applied natively, flag-gated Pulse) follows.
 
 ---
 

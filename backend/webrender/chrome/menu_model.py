@@ -167,7 +167,12 @@ def _resolve_pulse(pulse_enabled: Optional[bool]) -> bool:
         return False
 
 
-def build_menu_model(roles: Optional[List[str]] = None, *, pulse_enabled: Optional[bool] = None) -> ChromeModel:
+def build_menu_model(
+    roles: Optional[List[str]] = None,
+    *,
+    pulse_enabled: Optional[bool] = None,
+    include_admin: bool = True,
+) -> ChromeModel:
     """Build the role-filtered, flag-resolved chrome model.
 
     Args:
@@ -175,12 +180,18 @@ def build_menu_model(roles: Optional[List[str]] = None, *, pulse_enabled: Option
             group. Anything falsy ⇒ no admin group.
         pulse_enabled: override for the Pulse control's presence (tests). When
             ``None``, resolved from ``FF_PULSE_DIGEST`` via ``dreaming.pulse``.
+        include_admin: whether the ADMIN TOOLS group is eligible at all. The web
+            passes ``True`` (admins see it). Native clients (Windows/Android)
+            pass ``False`` — admin settings are web-only, so the group is omitted
+            even for admins (the ``chrome_menu`` frame / REST never send it).
+            Server-side ``ADMIN_ONLY`` enforcement on ``chrome_open`` stays
+            authoritative regardless.
 
     Returns:
         A :class:`ChromeModel` ready to render (web) or serialize (native).
     """
     roles = roles or []
-    is_admin = "admin" in roles
+    is_admin = "admin" in roles and include_admin
     show_pulse = _resolve_pulse(pulse_enabled)
 
     topbar: List[TopBarControl] = [
@@ -208,6 +219,15 @@ def build_menu_model(roles: Optional[List[str]] = None, *, pulse_enabled: Option
     return ChromeModel(topbar=tuple(topbar), menu=tuple(groups), signout=SignOutItem())
 
 
-def menu_model_dict(roles: Optional[List[str]] = None, *, pulse_enabled: Optional[bool] = None) -> Dict:
-    """Convenience: ``build_menu_model(...).to_dict()`` for the REST/WS channels."""
-    return build_menu_model(roles, pulse_enabled=pulse_enabled).to_dict()
+def menu_model_dict(
+    roles: Optional[List[str]] = None,
+    *,
+    pulse_enabled: Optional[bool] = None,
+    include_admin: bool = True,
+) -> Dict:
+    """Convenience: ``build_menu_model(...).to_dict()`` for the REST/WS channels.
+
+    The native channels (``GET /api/chrome/menu`` + the ``chrome_menu`` WS frame)
+    pass ``include_admin=False`` — ADMIN TOOLS is web-only.
+    """
+    return build_menu_model(roles, pulse_enabled=pulse_enabled, include_admin=include_admin).to_dict()

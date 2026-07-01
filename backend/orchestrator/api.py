@@ -1515,7 +1515,8 @@ def _roles_from_payload(payload: dict) -> list:
 )
 async def get_chrome_menu(payload: dict = Depends(get_current_user_payload)):
     from webrender.chrome.menu_model import menu_model_dict
-    return menu_model_dict(_roles_from_payload(payload))
+    # Native clients consume this — ADMIN TOOLS is web-only (include_admin=False).
+    return menu_model_dict(_roles_from_payload(payload), include_admin=False)
 
 
 # =============================================================================
