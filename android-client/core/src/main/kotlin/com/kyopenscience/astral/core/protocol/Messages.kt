@@ -1,5 +1,6 @@
 package com.kyopenscience.astral.core.protocol
 
+import com.kyopenscience.astral.core.chrome.ChromeMenuModel
 import com.kyopenscience.astral.core.sdui.CanvasOp
 import com.kyopenscience.astral.core.sdui.Component
 
@@ -104,6 +105,9 @@ sealed interface Inbound {
     data class ChatStatus(val status: String?, val message: String?) : Inbound
 
     data class ChromeRender(val region: String, val html: String) : Inbound
+
+    /** Feature 042 — the server-owned chrome model (top bar + settings menu). */
+    data class ChromeMenu(val model: ChromeMenuModel) : Inbound
 
     data class AuthRequired(val reason: String?) : Inbound
 
