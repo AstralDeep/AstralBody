@@ -20,8 +20,6 @@ import sys
 import threading
 from typing import Dict, List, Optional
 
-logger = logging.getLogger("astral.client")
-
 from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt, QSettings, QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -61,6 +59,8 @@ from .renderer import RenderContext, render, supported_types as native_types, _s
 from .streaming import stream_error_ops, stream_frame_to_ops, subscribe_ack_ops
 from .chrome import chrome_render_notice
 from . import rest
+
+logger = logging.getLogger("astral.client")
 
 
 def normalize_error(msg: dict) -> str:
@@ -1740,7 +1740,7 @@ class MainWindow(QMainWindow):
                     bff_base=bff_base,
                 )
                 self._reauth_done.emit(session)
-            except Exception as exc:  # noqa: BLE001 — surfaced in the banner
+            except Exception:  # noqa: BLE001 — surfaced in the banner
                 logger.warning("interactive re-auth failed", exc_info=True)
                 self._reauth_done.emit(None)
 

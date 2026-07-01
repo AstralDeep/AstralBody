@@ -207,8 +207,8 @@ def test_plotly_chart_malformed_does_not_raise(qapp):
 # backend's own tests keep equal to `webrender.allowed_primitive_types()`. This
 # test therefore breaks when a backend primitive is added without either a
 # native desktop renderer OR an explicit degradation entry below.
-import json as _json
-from pathlib import Path as _Path
+import json as _json  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
 
 _MANIFEST = _Path(__file__).resolve().parents[2] / "backend" / "shared" / "ui_protocol.json"
 BACKEND_TYPES = frozenset(_json.loads(_MANIFEST.read_text(encoding="utf-8"))["component_types"])
