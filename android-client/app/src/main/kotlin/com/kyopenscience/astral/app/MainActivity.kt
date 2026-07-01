@@ -136,7 +136,7 @@ class MainActivity : ComponentActivity() {
                                 }
                         }
                     }
-                    RootScaffold(vm, renderer)
+                    RootScaffold(vm, renderer, onSignOut = ::signOut)
                 }
             }
         }
@@ -145,6 +145,13 @@ class MainActivity : ComponentActivity() {
     private fun startSignIn() {
         runCatching { authLauncher.launch(oidc.authorizeIntent()) }
             .onFailure { signInError.value = it.message ?: "could not start sign-in" }
+    }
+
+    /** Sign out: drop the cached session and return to the sign-in screen. */
+    private fun signOut() {
+        store.clear()
+        signInError.value = null
+        authToken.value = null
     }
 
     override fun onDestroy() {

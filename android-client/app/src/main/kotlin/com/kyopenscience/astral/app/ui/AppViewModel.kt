@@ -34,7 +34,7 @@ import kotlinx.serialization.json.putJsonObject
 data class ChatTurn(val role: String, val text: String)
 
 /** The top-level navigable surfaces (US4). */
-enum class Screen { Chat, Agents, History, Audit }
+enum class Screen { Chat, Agents, History, Audit, Settings }
 
 /** A paperclip-staged upload chip (feature 031). */
 data class StagedAttachment(
@@ -279,6 +279,7 @@ class AppViewModel(
             Screen.History -> sendEvent("get_history")
             Screen.Audit -> loadAudit()
             Screen.Chat -> Unit
+            Screen.Settings -> Unit
         }
     }
 
