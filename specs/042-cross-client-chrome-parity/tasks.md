@@ -7,6 +7,20 @@
 
 **Organization**: Grouped by user story (US1–US4) for independent implementation, testing, and delivery. `[P]` = parallelizable (distinct files, no ordering dependency). `[USx]` = owning story.
 
+## Delivery status (PR #99)
+
+**Landed & verified — P1 (Foundational + US1 + US2 role-gating):**
+- Backend: server-owned `menu_model.py` (single source of truth) + web `topbar.py` rendered from it (byte-identical, verified) + `GET /api/chrome/menu` + `chrome_menu` WS frame. 18 new tests; backend `ci.yml` green (lint/build/test/coverage/smoke/secret-scan).
+- Android `:core` `ChromeMenuModel` + decoder (Kover ≥90%). `:app` top bar → **logo · New · Recent chats · Settings** (per review feedback — the model-driven Pulse/Timeline row was collapsed to one Recent-chats control; gear no longer clipped); Settings dropdown = ACCOUNT/HELP/ADMIN + red Sign out from the model; the duplicated Settings screen is gone. Instrumented `ChromeMenuUiTest` + **live emulator screenshots** (`verification/android-topbar-fixed.png`, `android-settings-menu.png`) show the exact web menu. `android-ci` green for the first time (pre-existing ktlint/test debt also cleared).
+- Windows: identical minimal top bar + gear dropdown from the model (`parse_chrome_menu`), red Sign out, surface router. 135 tests pass; ruff clean; layout screenshot in `verification/`.
+- Constitution v2.3.0 (Principle XII) — separate commit.
+
+**Refinement applied from live review:** the top bar on every client is now exactly **brand logo · New · Recent chats · Settings** (all settings inside the gear) — no wordmark, no status text, no duplicate history control.
+
+**Remaining (sequenced below):** P2 (SDUI delivery of LLM/Personalization/Theme/Tour/Guide surfaces so they render natively instead of the current placeholder), P3 (theme presets applied natively, flag-gated Pulse, admin surfaces).
+
+---
+
 ## Path conventions
 
 - Backend: `backend/webrender/chrome/`, `backend/orchestrator/`, `backend/rote/`, per-module `tests/`.
