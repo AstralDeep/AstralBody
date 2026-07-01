@@ -18,6 +18,7 @@ from astral_client.rest import (
     native_logout,
     parse_audit_response,
     parse_chrome_menu,
+    upload_attachment,
 )
 
 
@@ -240,3 +241,49 @@ def test_fetch_json_transport_error_becomes_resterror():
 def test_event_classes_and_outcomes_exported():
     assert "auth" in EVENT_CLASSES and "agent_lifecycle" in EVENT_CLASSES
     assert OUTCOMES == ("in_progress", "success", "failure", "interrupted")
+
+
+# ── feature 044: chat attachment upload (US4, T043) ──────────────────────────
+
+def test_upload_attachment_multipart_bearer_and_parse():
+    seen = {}
+
+    def opener(req, timeout=None):
+        seen["url"] = req.full_url
+        seen["method"] = req.get_method()
+        seen["auth"] = req.get_header("Authorization")
+        seen["ctype"] = req.get_header("Content-type")  # urllib capitalizes the key
+        seen["body"] = req.data
+        return _FakeResp(
+            b'{"attachment_id":"att-1","filename":"a.csv",'
+            b'"category":"data","parser_status":"covered"}'
+        )
+
+    out = upload_attachment("http://h:8001", "TOK", "a.csv", "text/csv",
+                            b"col\n1\n", opener=opener)
+    assert out == {"attachment_id": "att-1", "filename": "a.csv",
+                   "category": "data", "parser_status": "covered"}
+    assert seen["url"] == "http://h:8001/api/upload"
+    assert seen["method"] == "POST"
+    assert seen["auth"] == "Bearer TOK"
+    assert seen["ctype"].startswith("multipart/form-data; boundary=")
+    assert b'name="file"; filename="a.csv"' in seen["body"]
+    assert b"col\n1\n" in seen["body"]        # the file bytes are in the body
+
+
+def test_upload_attachment_http_error_becomes_resterror():
+    def opener(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 413, "Payload Too Large", {}, None)
+
+    with pytest.raises(RestError) as ei:
+        upload_attachment("http://h", "T", "f", "text/plain", b"x", opener=opener)
+    assert ei.value.status == 413
+
+
+def test_upload_attachment_transport_error_becomes_resterror():
+    def opener(req, timeout=None):
+        raise OSError("connection refused")
+
+    with pytest.raises(RestError) as ei:
+        upload_attachment("http://h", "T", "f", "text/plain", b"x", opener=opener)
+    assert ei.value.status == 0

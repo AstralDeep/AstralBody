@@ -153,3 +153,121 @@ def test_timeline_mode_banner(win):
     assert (not win._banner.isHidden())
     win._on_message({"type": "workspace_timeline_mode", "active": False})
     assert win._timeline_mode is False
+
+
+# --- T041: timeline read-only disables the composer -------------------------
+
+def test_timeline_mode_disables_composer(win):
+    assert win._input.isEnabled() and win._send_btn.isEnabled()
+    win._on_message({"type": "workspace_timeline_mode", "active": True})
+    assert win._input.isEnabled() is False
+    assert win._send_btn.isEnabled() is False
+    win._on_message({"type": "workspace_timeline_mode", "active": False})
+    assert win._input.isEnabled() is True
+    assert win._send_btn.isEnabled() is True
+
+
+# --- T032: ui_render target=history is routed, never silently dropped --------
+
+def test_history_target_render_populates_dialog(win, caplog):
+    import logging
+
+    from astral_client.app import HistoryDialog
+
+    win._history_dialog = HistoryDialog(win, lambda cid: None)
+    with caplog.at_level(logging.INFO, logger="astral.client"):
+        win._on_message({"type": "ui_render", "target": "history", "components": [
+            {"type": "chat_history", "title": "Recent chats", "items": [
+                {"chat_id": "c1", "title": "First"},
+                {"chat_id": "c2", "title": "Second"}]}]})
+    # Observable effect: the native Recent-chats dialog is populated (2 + stretch).
+    assert win._history_dialog._listlay.count() == 3
+    # And it is logged with intent (the old code silently `pass`ed).
+    assert any("history surface rendered" in r.message for r in caplog.records)
+
+
+def test_history_target_render_without_dialog_is_logged(win, caplog):
+    import logging
+
+    win._history_dialog = None
+    with caplog.at_level(logging.INFO, logger="astral.client"):
+        win._on_message({"type": "ui_render", "target": "history", "components": [
+            {"type": "chat_history", "items": [{"chat_id": "c1", "title": "X"}]}]})
+    assert any("history surface rendered" in r.message for r in caplog.records)
+
+
+# --- T038: top bar renders server-model action controls ---------------------
+
+def test_topbar_renders_and_routes_action_buttons(qapp):
+    from astral_client.app import TopBar
+
+    opened = []
+    tb = TopBar("user", lambda: None, lambda: None,
+                lambda s, ln: opened.append((s, ln)), lambda: None)
+    tb.set_menu_model({
+        "topbar": [
+            {"key": "brand", "kind": "brand"},
+            {"key": "timeline", "kind": "action", "label": "Workspace timeline",
+             "icon": "history", "action": {"surface": "workspace_timeline", "params": {}}},
+            {"key": "pulse", "kind": "action", "label": "Pulse",
+             "icon": "pulse", "action": {"surface": "pulse", "params": {}}},
+            {"key": "settings", "kind": "menu", "label": "Settings", "icon": "gear"},
+        ],
+        "menu": [],
+        "signout": {"label": "Sign out", "action": "logout"},
+    })
+    assert len(tb._action_buttons) == 2
+    assert any("Workspace timeline" in b.text() for b in tb._action_buttons)
+    tb._action_buttons[0].click()
+    assert opened and opened[0][0] == "workspace_timeline"
+
+
+def test_topbar_actions_rebuilt_and_cleared(qapp):
+    from astral_client.app import TopBar
+
+    tb = TopBar("u", lambda: None, lambda: None, lambda s, ln: None, lambda: None)
+    tb.set_menu_model({"topbar": [
+        {"kind": "action", "label": "T", "action": {"surface": "workspace_timeline"}}]})
+    assert len(tb._action_buttons) == 1
+    tb.set_menu_model({"topbar": [], "menu": []})  # no actions -> cleared
+    assert tb._action_buttons == []
+
+
+# --- T040: settings surface load timeout + retry + in-flight ----------------
+
+def test_surface_dialog_timeout_shows_retry_and_arrival_cancels(qapp):
+    from PySide6.QtWidgets import QPushButton
+
+    from astral_client.app import SurfaceDialog
+
+    retried = []
+    dlg = SurfaceDialog(None, emit=lambda a, p: None,
+                        on_retry=lambda s, p: retried.append((s, p)))
+    dlg.begin_load("theme", {}, title="Theme")
+    assert dlg._timer.isActive()                       # bound armed on load
+    dlg._on_timeout()                                  # simulate the timeout
+    assert dlg._timer.isActive() is False
+    retry = [b for b in dlg.findChildren(QPushButton) if b.text() == "Retry"]
+    assert retry, "no Retry affordance after the load timeout"
+    retry[0].click()                                   # re-request + re-arm
+    assert dlg._timer.isActive()
+    assert retried and retried[0][0] == "theme"
+    dlg.set_surface("Theme", [{"type": "text", "content": "hi"}])  # arrival
+    assert dlg._timer.isActive() is False              # bound cancelled
+    dlg.close()
+
+
+def test_surface_dialog_chrome_submit_shows_in_flight(qapp):
+    from astral_client.app import SurfaceDialog
+
+    sent = []
+    dlg = SurfaceDialog(None, emit=lambda a, p: sent.append((a, p)))
+    dlg.set_surface("LLM", [])
+    # a chrome_* form submit from inside the surface shows the in-flight state
+    dlg._emit_from_surface("chrome_llm_save", {"fields": {}})
+    assert sent == [("chrome_llm_save", {"fields": {}})]
+    assert not dlg._status.isHidden()             # in-flight status shown
+    # arrival of the re-render clears it
+    dlg.set_surface("LLM", [])
+    assert dlg._status.isHidden()
+    dlg.close()

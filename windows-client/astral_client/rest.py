@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+import uuid
 from typing import List, Optional, Tuple
 from urllib.parse import urlencode
 
@@ -172,6 +173,63 @@ def fetch_bytes(url: str, token: str, *, timeout: int = 60, opener=urllib.reques
         raise RestError(exc.code, exc.reason or "HTTP error")
     except Exception as exc:  # noqa: BLE001 — transport failure, surfaced to the UI
         raise RestError(0, str(exc))
+
+
+# --- feature 044: chat attachments (US4) ------------------------------------- #
+
+def upload_attachment(http_base: str, token: str, filename: str, mime: str,
+                      data: bytes, *, timeout: int = 60,
+                      opener=urllib.request.urlopen) -> dict:
+    """Upload one file to ``POST /api/upload`` as ``multipart/form-data`` (field
+    name ``file``) — the exact contract the web + Android clients use.
+
+    Returns the new attachment's metadata
+    (``attachment_id``/``filename``/``category``/``parser_status``). Raises
+    :class:`RestError` on any HTTP/transport error. Stdlib only — the multipart
+    body is assembled by hand (no new deps). ``opener`` is injectable for tests.
+    """
+    boundary = "----AstralBoundary" + uuid.uuid4().hex
+    crlf = b"\r\n"
+    safe_name = (filename or "upload").replace("\r", "").replace("\n", "").replace('"', "")
+    content_type = (mime or "application/octet-stream")
+    body = b"".join([
+        b"--", boundary.encode("ascii"), crlf,
+        b'Content-Disposition: form-data; name="file"; filename="',
+        safe_name.encode("utf-8"), b'"', crlf,
+        b"Content-Type: ", content_type.encode("ascii", "replace"), crlf, crlf,
+        data or b"", crlf,
+        b"--", boundary.encode("ascii"), b"--", crlf,
+    ])
+    req = urllib.request.Request(
+        http_base.rstrip("/") + "/api/upload",
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Accept": "application/json",
+            "Authorization": f"Bearer {token}",
+            "Content-Length": str(len(body)),
+        },
+    )
+    try:
+        with opener(req, timeout=timeout) as r:
+            raw = r.read(4 * 1024 * 1024)
+    except urllib.error.HTTPError as exc:
+        raise RestError(exc.code, exc.reason or "HTTP error")
+    except Exception as exc:  # noqa: BLE001 — transport failure, surfaced to the UI
+        raise RestError(0, str(exc))
+    try:
+        payload = json.loads(raw.decode("utf-8", "replace"))
+    except (ValueError, TypeError) as exc:
+        raise RestError(0, f"bad JSON: {exc}")
+    if not isinstance(payload, dict) or not payload.get("attachment_id"):
+        raise RestError(0, "upload response missing attachment_id")
+    return {
+        "attachment_id": payload.get("attachment_id"),
+        "filename": payload.get("filename") or filename,
+        "category": payload.get("category") or "file",
+        "parser_status": payload.get("parser_status"),
+    }
 
 
 # --- feature 044: server-revoking sign-out (FR-005) -------------------------- #

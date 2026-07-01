@@ -22,7 +22,7 @@ from typing import Dict, List, Optional
 
 logger = logging.getLogger("astral.client")
 
-from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt, QSettings, Signal
+from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt, QSettings, QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -74,6 +74,18 @@ def normalize_error(msg: dict) -> str:
     )
     code = msg.get("code")
     return f"{text} ({code})" if code and code != "internal" else str(text)
+
+
+def parser_status_glyph(status: str) -> tuple:
+    """Feature 044 (US4): map an attachment ``parser_status`` to a
+    ``(glyph, label)`` for its chip — covered→ready, preparing/pending→working,
+    unavailable→can't-read. Mirrors the web chip states."""
+    return {
+        "covered": ("✓", "ready"),
+        "preparing": ("⏳", "preparing a reader"),
+        "pending_admin_approval": ("⏳", "needs admin approval"),
+        "unavailable": ("✗", "can't read this type yet"),
+    }.get(status or "", ("•", "staged"))
 
 
 # Feature 040 (US5): slash-command discovery. Mirrors the web client's typeahead
@@ -215,6 +227,20 @@ class ChatRail(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
+    def add_note(self, text: str) -> None:
+        """A small muted line in the rail (feature 044 — used to show a turn's
+        attachment chips, mirroring the web '📎 name')."""
+        self._drop_hint()
+        lbl = QLabel(str(text))
+        lbl.setWordWrap(True)
+        lbl.setFrameShape(QFrame.Shape.NoFrame)
+        lbl.setStyleSheet(
+            f"color:{T.MUTED}; font-size:11px; background:transparent; padding:0 6px;"
+        )
+        self._lay.insertWidget(self._lay.count() - 1, lbl)
+        bar = self._scroll.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
     def show_empty_hint(self) -> None:
         """A gentle empty-state so a fresh chat rail isn't a blank void."""
         self.clear()
@@ -247,16 +273,50 @@ class Canvas(QScrollArea):
         self._lay.insertWidget(self._lay.count() - 1, widget)
 
     def set_components(self, components: list) -> None:
-        """Full canvas replace (a `ui_render` to the canvas region)."""
+        """Full canvas render (a `ui_render` to the canvas region), reconciled BY
+        component identity instead of a blind drop-and-rebuild (feature 044 T024).
+
+        A component_id already on the canvas keeps its existing widget — its
+        identity persists across the render (streaming nodes, interactive state,
+        scroll position). Ids absent from the new set are removed; brand-new ids
+        (and unkeyed components) are rendered fresh. This is the fix for the
+        clobber bug where a full render threw away components the new set still
+        contains (e.g. one just added via a `ui_upsert`)."""
+        components = list(components or [])
+        new_ids = set()
+        for comp in components:
+            if isinstance(comp, dict):
+                cid = comp.get("component_id") or comp.get("id")
+                if cid:
+                    new_ids.add(str(cid))
+        # Detach every current child (keep the trailing stretch), remembering the
+        # keyed widgets whose id survives into the new set so we can reuse them.
+        detached: List[QWidget] = []
         while self._lay.count() > 1:
             item = self._lay.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._by_id.clear()
-        for comp in components or []:
-            w = render(comp, self.ctx)
+            w = item.widget()
+            if w is not None:
+                detached.append(w)
+        reusable = {cid: w for cid, w in self._by_id.items() if cid in new_ids}
+        reused = set(reusable.values())
+        for w in detached:
+            if w not in reused:  # unkeyed, or an id dropped from the new set
+                w.setParent(None)
+                w.deleteLater()
+        # Re-insert in the new order, reusing a kept widget by id or rendering
+        # fresh. `_insert` appends before the stretch, so order follows the list.
+        self._by_id = {}
+        for comp in components:
+            cid = None
+            if isinstance(comp, dict):
+                raw = comp.get("component_id") or comp.get("id")
+                cid = str(raw) if raw else None
+            w = reusable.get(cid) if cid else None
+            if w is None:
+                w = render(comp, self.ctx)
+                if cid:
+                    w.setProperty("component_id", cid)
             self._insert(w)
-            cid = w.property("component_id")
             if cid:
                 self._by_id[cid] = w
 
@@ -289,17 +349,31 @@ class SurfaceDialog(QDialog):
     Replaces the "coming soon" placeholder for the ported surfaces (theme, user
     guide, LLM settings, personalization)."""
 
-    def __init__(self, parent, emit, download=None):
+    #: How long to wait for a `chrome_surface` before showing the retry error.
+    LOAD_TIMEOUT_MS = 10000
+
+    def __init__(self, parent, emit, download=None, on_retry=None):
         super().__init__(parent)
         self.setModal(False)
         self.resize(600, 560)
-        self._ctx = RenderContext(emit=emit, download=download)
+        self._raw_emit = emit
+        self._on_retry = on_retry
+        self._surface = ""
+        self._params: dict = {}
+        # Feature 044 (T040): actions submitted from inside the surface show an
+        # in-flight state and re-arm the load bound (the server replies with a
+        # chrome_surface re-render that cancels it).
+        self._ctx = RenderContext(emit=self._emit_from_surface, download=download)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(16, 14, 16, 14)
         outer.setSpacing(10)
         self._title = QLabel("Settings")
         self._title.setStyleSheet(f"color:{T.TEXT}; font-size:15px; font-weight:600;")
         outer.addWidget(self._title)
+        self._status = QLabel("")
+        self._status.setStyleSheet(f"color:{T.MUTED}; font-size:12px;")
+        self._status.setVisible(False)
+        outer.addWidget(self._status)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         self._inner = QWidget()
@@ -309,15 +383,81 @@ class SurfaceDialog(QDialog):
         self._lay.addStretch(1)
         scroll.setWidget(self._inner)
         outer.addWidget(scroll, 1)
+        # Load-timeout bound (T040): armed on open/submit, cancelled on arrival.
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(self.LOAD_TIMEOUT_MS)
+        self._timer.timeout.connect(self._on_timeout)
 
-    def set_surface(self, title: str, components: list) -> None:
-        """Replace the modal body with a freshly-rendered component list."""
-        self.setWindowTitle(title or "Settings")
-        self._title.setText(title or "Settings")
+    def _clear_body(self) -> None:
         while self._lay.count() > 1:
             item = self._lay.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+
+    def _emit_from_surface(self, action: str, payload: dict) -> None:
+        self._raw_emit(action, payload)
+        # A form submit re-renders the surface; show in-flight + re-arm the bound.
+        if action != "chat_message":
+            self._status.setText("Applying…")
+            self._status.setVisible(True)
+            self._timer.start()
+
+    def begin_load(self, surface: str, params: dict, title: str = "") -> None:
+        """Show the in-flight state for a requested surface and arm the
+        load-timeout bound (T040). Called right after sending `chrome_open`."""
+        self._surface = surface or self._surface
+        self._params = params or {}
+        self.setWindowTitle(title or self._surface or "Settings")
+        self._title.setText(title or self._surface or "Settings")
+        self._status.setText("Loading…")
+        self._status.setVisible(True)
+        self._clear_body()
+        loading = QLabel("Loading…")
+        loading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        loading.setStyleSheet(f"color:{T.MUTED}; font-size:13px; padding:32px;")
+        self._lay.insertWidget(self._lay.count() - 1, loading)
+        self._timer.start()
+
+    def _on_timeout(self) -> None:
+        """The surface didn't arrive in time — show an inline error + Retry."""
+        self._timer.stop()
+        self._status.setVisible(False)
+        self._clear_body()
+        box = QWidget()
+        bl = QVBoxLayout(box)
+        bl.setContentsMargins(0, 24, 0, 0)
+        bl.setSpacing(10)
+        msg = QLabel("This settings screen didn't load. Check your connection and try again.")
+        msg.setWordWrap(True)
+        msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        msg.setStyleSheet(f"color:{T.VARIANT_COLORS['warning'][0]}; font-size:13px;")
+        self._retry_btn = QPushButton("Retry")
+        self._retry_btn.setObjectName("primary")
+        self._retry_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._retry_btn.clicked.connect(self._retry)
+        bl.addWidget(msg)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(self._retry_btn)
+        row.addStretch(1)
+        bl.addLayout(row)
+        self._lay.insertWidget(self._lay.count() - 1, box)
+
+    def _retry(self) -> None:
+        """Re-send `chrome_open` for the pending surface (re-arms the bound)."""
+        self.begin_load(self._surface, self._params, title=self._title.text())
+        if callable(self._on_retry):
+            self._on_retry(self._surface, self._params)
+
+    def set_surface(self, title: str, components: list) -> None:
+        """Replace the modal body with a freshly-rendered component list. Cancels
+        the load-timeout bound — this is the arrival path (T040)."""
+        self._timer.stop()
+        self._status.setVisible(False)
+        self.setWindowTitle(title or "Settings")
+        self._title.setText(title or "Settings")
+        self._clear_body()
         for comp in components or []:
             self._lay.insertWidget(self._lay.count() - 1, render(comp, self._ctx))
 
@@ -370,8 +510,19 @@ class TopBar(QFrame):
         for b in (self.new_btn, self.recent_btn, self.settings_btn):
             b.setCursor(Qt.CursorShape.PointingHandCursor)
 
+        # Feature 044 (T038): server-model top-bar action controls (pulse,
+        # timeline, …) render as buttons in this holder, left of the gear. Each
+        # emits its chrome_open{surface} via on_open_surface. Rebuilt from the
+        # chrome menu model; empty until it arrives.
+        self._actions_holder = QWidget()
+        self._actions_lay = QHBoxLayout(self._actions_holder)
+        self._actions_lay.setContentsMargins(0, 0, 0, 0)
+        self._actions_lay.setSpacing(6)
+        self._action_buttons: List[QPushButton] = []
+
         lay.addWidget(self._mark)
         lay.addStretch(1)
+        lay.addWidget(self._actions_holder)
         lay.addWidget(self.new_btn)
         lay.addWidget(self.recent_btn)
         lay.addWidget(self.settings_btn)
@@ -379,12 +530,44 @@ class TopBar(QFrame):
         # Until the server model arrives, offer just Sign out (always safe).
         self._rebuild_menu({"sections": [], "signout": {"label": "Sign out", "action": "logout"}})
 
+    #: Known top-bar action icon names → a leading glyph (falls back to label).
+    _ACTION_ICONS = {"history": "🕓", "pulse": "⚡", "activity": "⚡", "clock": "🕓"}
+
     def set_menu_model(self, model: dict) -> None:
-        """(Re)build the Settings dropdown from the server-owned chrome model
-        (the `chrome_menu` WS frame / GET /api/chrome/menu)."""
+        """(Re)build the Settings dropdown AND the top-bar action buttons from the
+        server-owned chrome model (the `chrome_menu` WS frame / GET
+        /api/chrome/menu)."""
         from .rest import parse_chrome_menu
 
-        self._rebuild_menu(parse_chrome_menu(model))
+        parsed = parse_chrome_menu(model)
+        self._rebuild_menu(parsed)
+        self._rebuild_topbar_actions(parsed.get("topbar_actions", []))
+
+    def _rebuild_topbar_actions(self, actions: list) -> None:
+        """Render the server model's `kind:"action"` top-bar controls as buttons
+        (feature 044 T038). Each triggers its `chrome_open{surface}` through the
+        shared on_open_surface callback — the same path the gear-menu items use."""
+        while self._actions_lay.count():
+            item = self._actions_lay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._action_buttons = []
+        for a in actions or []:
+            if not isinstance(a, dict):
+                continue
+            surface = a.get("surface", "")
+            if not surface:
+                continue
+            label = a.get("label") or surface
+            glyph = self._ACTION_ICONS.get(a.get("icon", ""), "")
+            btn = QPushButton(f"{glyph} {label}".strip() if glyph else str(label))
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(str(label))
+            btn.clicked.connect(
+                lambda _checked=False, s=surface, ln=label: self._emit_open(s, ln)
+            )
+            self._actions_lay.addWidget(btn)
+            self._action_buttons.append(btn)
 
     def _rebuild_menu(self, parsed: dict) -> None:
         self._menu.clear()
@@ -844,6 +1027,8 @@ class MainWindow(QMainWindow):
     # Audit-log page fetched off-thread -> GUI thread (dict payload).
     _audit_loaded = Signal(object)
     _download_done = Signal(object)
+    # Attachment upload resolved off-thread -> GUI thread (dict payload).
+    _attachment_uploaded = Signal(object)
     # Sign-out revocation resolved off-thread -> GUI thread (outcome string).
     _signed_out = Signal(str)
     # Interactive re-auth completed off-thread -> GUI thread (Session or None).
@@ -874,6 +1059,8 @@ class MainWindow(QMainWindow):
         self._turn_active = False
         self._timeline_mode = False
         self._user_prefs: dict = {}
+        # Feature 044 (US4): staged chat attachments (chip records) for the turn.
+        self._attachments: List[dict] = []
 
         ctx = RenderContext(emit=self._emit, download=self._download)
         self.client = OrchestratorClient(
@@ -914,15 +1101,40 @@ class MainWindow(QMainWindow):
         self._input.returnPressed.connect(self._send)
         # Feature 040 (US5): pop up the slash-command options as the user types "/".
         self._input.setCompleter(build_slash_completer(self._input))
-        send = QPushButton("Send")
-        send.setObjectName("primary")
-        send.clicked.connect(self._send)
-        send.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._send_btn = QPushButton("Send")
+        self._send_btn.setObjectName("primary")
+        self._send_btn.clicked.connect(self._send)
+        self._send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        # Feature 044 (US4): a paperclip → Upload files… / Choose from your files,
+        # and a chips strip (above the input) for staged attachments.
+        self._attach_btn = QPushButton("📎")
+        self._attach_btn.setToolTip("Attach files")
+        self._attach_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        attach_menu = QMenu(self._attach_btn)
+        attach_menu.setStyleSheet(
+            f"QMenu {{ background:{T.SURFACE}; color:{T.TEXT}; border:1px solid {T.BORDER}; padding:4px; }}"
+            f"QMenu::item {{ padding:6px 24px; }}"
+            f"QMenu::item:selected {{ background:{T.PRIMARY}; color:#ffffff; }}"
+        )
+        act_up = attach_menu.addAction("Upload files…")
+        act_up.triggered.connect(self._pick_files)
+        act_ex = attach_menu.addAction("Choose from your files")
+        act_ex.triggered.connect(lambda: self._open_surface("attachments", "Your files"))
+        self._attach_btn.setMenu(attach_menu)
+
+        self._chips_bar = QWidget()
+        self._chips_lay = QHBoxLayout(self._chips_bar)
+        self._chips_lay.setContentsMargins(12, 6, 12, 0)
+        self._chips_lay.setSpacing(6)
+        self._chips_bar.setVisible(False)
+
         bottom = QHBoxLayout()
         bottom.setContentsMargins(12, 8, 12, 12)
         bottom.setSpacing(8)
+        bottom.addWidget(self._attach_btn)
         bottom.addWidget(self._input, 1)
-        bottom.addWidget(send)
+        bottom.addWidget(self._send_btn)
 
         # Feature 044 (FR-002/FR-003): a dismissible banner strip under the top
         # bar for connection state + server errors + queue-drop notices. Hidden
@@ -946,6 +1158,7 @@ class MainWindow(QMainWindow):
         rl.addWidget(self.topbar)
         rl.addWidget(self._banner)
         rl.addWidget(split, 1)
+        rl.addWidget(self._chips_bar)
         rl.addLayout(bottom)
         self.setCentralWidget(root)
         self._input.setFocus()  # cursor ready in the message box on launch
@@ -969,6 +1182,7 @@ class MainWindow(QMainWindow):
         self._integrity_notice.connect(self._on_integrity_notice)
         self._audit_loaded.connect(self._on_audit_loaded)
         self._download_done.connect(self._on_download_done)
+        self._attachment_uploaded.connect(self._on_attachment_uploaded)
         self._signed_out.connect(self._finish_sign_out)
         self._reauth_done.connect(self._on_reauth_done)
         self._signing_out_done = False
@@ -1028,9 +1242,20 @@ class MainWindow(QMainWindow):
         self._banner.setVisible(False)
         self._banner.setText("")
 
+    def _set_composer_enabled(self, enabled: bool) -> None:
+        """Enable/disable the message input + Send button (feature 044 FR-007 —
+        read-only enforcement while viewing workspace history)."""
+        self._input.setEnabled(enabled)
+        self._send_btn.setEnabled(enabled)
+        self._input.setPlaceholderText(
+            "Message AstralBody…  (type / for commands)" if enabled
+            else "Viewing workspace history — return to live to send messages"
+        )
+
     # --- chrome actions -------------------------------------------------- #
     def _new_chat(self) -> None:
         self.active_chat = None
+        self.canvas.ctx.chat_id = None
         self.rail.clear()
         self.rail.show_empty_hint()
         self.canvas.set_components([])
@@ -1064,12 +1289,19 @@ class MainWindow(QMainWindow):
         else:
             # Feature 043: request the SDUI surface and render it natively when
             # the chrome_surface frame arrives (replaces the placeholder).
+            # Feature 044 (T040): show an in-flight state + bound the wait.
             if self._surface_dialog is None:
-                self._surface_dialog = SurfaceDialog(self, self._emit, self._download)
-            self._surface_dialog.set_surface(label or s, [])
+                self._surface_dialog = SurfaceDialog(
+                    self, self._emit, self._download, on_retry=self._retry_surface)
+            self._surface_dialog.begin_load(s, {}, title=label or s)
             self._surface_dialog.show()
             self._surface_dialog.raise_()
             self.client.send_event("chrome_open", {"surface": s, "params": {}})
+
+    def _retry_surface(self, surface: str, params: dict) -> None:
+        """Feature 044 (T040): re-request a settings surface that failed to load
+        in time (the SurfaceDialog re-arms its in-flight state; we re-send)."""
+        self.client.send_event("chrome_open", {"surface": surface, "params": params or {}})
 
     def _open_history(self) -> None:
         if self._history_dialog is None:
@@ -1087,9 +1319,11 @@ class MainWindow(QMainWindow):
 
     def _on_chrome_surface(self, msg: dict) -> None:
         """Feature 043 — render a pushed SDUI settings surface natively (open the
-        dialog if a re-render arrives for a surface the user opened)."""
+        dialog if a re-render arrives for a surface the user opened). Feature 044
+        (T040): arrival cancels the load-timeout bound (via set_surface)."""
         if self._surface_dialog is None:
-            self._surface_dialog = SurfaceDialog(self, self._emit, self._download)
+            self._surface_dialog = SurfaceDialog(
+                self, self._emit, self._download, on_retry=self._retry_surface)
         self._surface_dialog.set_surface(
             msg.get("title") or "Settings", msg.get("components") or [])
         self._surface_dialog.show()
@@ -1159,6 +1393,145 @@ class MainWindow(QMainWindow):
             self.topbar.set_status(
                 f"Saved {os.path.basename(str(result.get('path')))}", T.VARIANT_COLORS["success"][0])
 
+    # --- chat attachments (feature 044 US4) -------------------------------- #
+    def _pick_files(self) -> None:
+        """Paperclip → Upload files…: multi-select up to 10 staged files total,
+        each uploaded on a worker thread (result marshalled back via signal)."""
+        paths, _ = QFileDialog.getOpenFileNames(self, "Upload files", "", "All files (*)")
+        if not paths:
+            return
+        room = 10 - len(self._attachments)
+        if room <= 0:
+            self._show_banner("You can attach up to 10 files per message.", "warning")
+            return
+        if len(paths) > room:
+            self._show_banner("You can attach up to 10 files per message.", "warning")
+        for path in paths[:room]:
+            self._stage_upload(path)
+
+    def _stage_upload(self, path: str) -> None:
+        """Stage a chip in the 'uploading' state and upload the file off-thread."""
+        import uuid
+
+        chip_id = uuid.uuid4().hex
+        self._attachments.append({
+            "chip_id": chip_id, "attachment_id": None,
+            "filename": os.path.basename(path), "category": "file",
+            "parser_status": None, "status": "uploading",
+        })
+        self._render_chips()
+        token = self._current_token()
+        http_base = _http_base(self._url)
+
+        def _work() -> None:
+            import mimetypes
+
+            try:
+                with open(path, "rb") as fh:
+                    data = fh.read()
+                mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+                result = rest.upload_attachment(
+                    http_base, token, os.path.basename(path), mime, data)
+                self._attachment_uploaded.emit({"chip_id": chip_id, "result": result, "error": None})
+            except Exception as exc:  # noqa: BLE001 — surfaced on the chip / banner
+                self._attachment_uploaded.emit({"chip_id": chip_id, "result": None, "error": str(exc)})
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _on_attachment_uploaded(self, payload: object) -> None:
+        """GUI-thread handler for a finished upload: flip the chip to staged/failed."""
+        if not isinstance(payload, dict):
+            return
+        rec = next((c for c in self._attachments
+                    if c.get("chip_id") == payload.get("chip_id")), None)
+        if rec is None:
+            return  # the chip was removed before the upload finished
+        result = payload.get("result")
+        if payload.get("error") or not isinstance(result, dict):
+            rec["status"] = "failed"
+            self._show_banner(
+                f"Couldn't upload {rec['filename']}: {payload.get('error') or 'upload failed'}",
+                "warning")
+        else:
+            rec["attachment_id"] = result.get("attachment_id")
+            rec["filename"] = result.get("filename") or rec["filename"]
+            rec["category"] = result.get("category") or "file"
+            rec["parser_status"] = result.get("parser_status") or "covered"
+            rec["status"] = "staged" if rec["attachment_id"] else "failed"
+        self._render_chips()
+
+    def _stage_existing(self, payload: dict) -> None:
+        """Stage a chip for an already-uploaded file (the attachments surface
+        'Attach' button → `attach_existing`, intercepted client-side)."""
+        aid = (payload or {}).get("attachment_id")
+        if not aid:
+            return
+        if any(c.get("attachment_id") == aid for c in self._attachments):
+            return  # already staged
+        if len(self._attachments) >= 10:
+            self._show_banner("You can attach up to 10 files per message.", "warning")
+            return
+        import uuid
+
+        self._attachments.append({
+            "chip_id": uuid.uuid4().hex, "attachment_id": aid,
+            "filename": payload.get("filename") or "file",
+            "category": payload.get("category") or "file",
+            "parser_status": payload.get("parser_status") or "covered",
+            "status": "staged",
+        })
+        self._render_chips()
+
+    def _remove_chip(self, chip_id: str) -> None:
+        self._attachments = [c for c in self._attachments if c.get("chip_id") != chip_id]
+        self._render_chips()
+
+    def _clear_attachments(self) -> None:
+        self._attachments = []
+        self._render_chips()
+
+    def _sendable_attachments(self) -> List[dict]:
+        """The staged (successfully uploaded) attachments to attach to a turn."""
+        return [{"attachment_id": c["attachment_id"], "filename": c["filename"],
+                 "category": c.get("category") or "file"}
+                for c in self._attachments
+                if c.get("attachment_id") and c.get("status") == "staged"]
+
+    def _chip_widget(self, rec: dict) -> QWidget:
+        chip = QFrame()
+        _scoped(chip, f"background:{T.SURFACE_2}; border:1px solid {T.BORDER}; border-radius:12px;")
+        lay = QHBoxLayout(chip)
+        lay.setContentsMargins(10, 3, 6, 3)
+        lay.setSpacing(6)
+        status = rec.get("status")
+        if status == "uploading":
+            glyph, tip = "⏳", "uploading…"
+        elif status == "failed":
+            glyph, tip = "✗", "upload failed"
+        else:
+            glyph, tip = parser_status_glyph(rec.get("parser_status"))
+        lbl = QLabel(f"{glyph} {rec.get('filename', 'file')}".strip())
+        lbl.setToolTip(tip)
+        lbl.setStyleSheet(f"color:{T.TEXT}; font-size:12px; background:transparent;")
+        rm = QPushButton("✕")
+        rm.setFixedSize(18, 18)
+        rm.setCursor(Qt.CursorShape.PointingHandCursor)
+        rm.setStyleSheet("padding:0; border:none; background:transparent;")
+        rm.clicked.connect(lambda _=False, cid=rec.get("chip_id"): self._remove_chip(cid))
+        lay.addWidget(lbl)
+        lay.addWidget(rm)
+        return chip
+
+    def _render_chips(self) -> None:
+        while self._chips_lay.count():
+            item = self._chips_lay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        for rec in self._attachments:
+            self._chips_lay.addWidget(self._chip_widget(rec))
+        self._chips_lay.addStretch(1)
+        self._chips_bar.setVisible(bool(self._attachments))
+
     def _on_audit_loaded(self, result: object) -> None:
         """GUI-thread handler for a loaded audit page."""
         if self._audit_dialog is None or not isinstance(result, dict):
@@ -1209,7 +1582,6 @@ class MainWindow(QMainWindow):
 
         threading.Thread(target=_revoke, daemon=True).start()
         # Safety net: quit even if the network hangs past the request timeouts.
-        from PySide6.QtCore import QTimer
         QTimer.singleShot(12000, self._finish_sign_out)
 
     def _finish_sign_out(self, _outcome: str = "") -> None:
@@ -1225,13 +1597,29 @@ class MainWindow(QMainWindow):
     # --- outbound -------------------------------------------------------- #
     def _send(self) -> None:
         text = self._input.text().strip()
-        if not text:
+        atts = self._sendable_attachments()
+        if not text and not atts:
             return
         self._input.clear()
-        self.rail.add("user", text)  # auto-drops the empty-state hint
-        self.client.send_chat(text, self.active_chat)
+        # Show the turn in the rail (auto-drops the empty-state hint), plus a
+        # small attachment line mirroring the web '📎 name'.
+        if text:
+            self.rail.add("user", text)
+        if atts:
+            names = ", ".join(a["filename"] for a in atts)
+            if not text:
+                self.rail.add("user", "📎 " + names)
+            else:
+                self.rail.add_note("📎 " + names)
+        self.client.send_chat(text, self.active_chat, attachments=atts or None)
+        self._clear_attachments()
 
     def _emit(self, action: str, payload: dict) -> None:
+        if action == "attach_existing":
+            # Feature 044 (US4): the attachments-surface 'Attach' button stages a
+            # chip locally — it is NOT forwarded to the server.
+            self._stage_existing(payload or {})
+            return
         if action == "chat_message":
             msg = payload.get("message", "")
             if msg:
@@ -1377,7 +1765,7 @@ class MainWindow(QMainWindow):
                 if text.strip():
                     self.rail.add("assistant", text)
             elif target == "history":
-                pass
+                self._on_history_render(comps)
             else:
                 self.canvas.set_components(comps)
         elif t == "ui_upsert":
@@ -1387,9 +1775,11 @@ class MainWindow(QMainWindow):
             self.active_chat = (msg.get("payload") or {}).get(
                 "chat_id"
             ) or self.active_chat
+            self.canvas.ctx.chat_id = self.active_chat
         elif t == "chat_loaded":
             chat = msg.get("chat") or {}
             self.active_chat = chat.get("id") or self.active_chat
+            self.canvas.ctx.chat_id = self.active_chat
             self._replay_transcript(chat)
         elif t == "agent_list":
             self._agents = msg.get("agents") or []
@@ -1457,6 +1847,11 @@ class MainWindow(QMainWindow):
             self._show_banner("Background task finished.")
         elif t == "workspace_timeline_mode":
             self._timeline_mode = bool(msg.get("active") or msg.get("on"))
+            # FR-007: a historical workspace view is strictly read-only — disable
+            # the mutating affordances (message input + Send) while active and
+            # restore them when the user returns to live. Component-action
+            # mutations are also refused server-side (`_ws_timeline_mode` guard).
+            self._set_composer_enabled(not self._timeline_mode)
             if self._timeline_mode:
                 self._show_banner("Viewing workspace history (read-only).")
             else:
@@ -1517,6 +1912,26 @@ class MainWindow(QMainWindow):
         if notice:
             self.topbar.set_status(notice, T.MUTED)
 
+    def _on_history_render(self, components: list) -> None:
+        """Feature 044 (T032) — a server-pushed SDUI history surface
+        (``ui_render target=history``, feature 037). The desktop shows recent
+        chats in a native Recent-chats dialog fed by ``history_list``; when that
+        dialog is open we refresh it from this surface's ``chat_history`` items so
+        the SDUI surface still drives the native surface. Never silently dropped
+        (was ``pass``): the render is logged with intent even when no dialog is
+        open, consistent with ``load_chat``/``history_list`` handling."""
+        items: List[dict] = []
+        for comp in components or []:
+            if not isinstance(comp, dict):
+                continue
+            if comp.get("type") == "chat_history":
+                for it in comp.get("items", comp.get("chats", [])) or []:
+                    if isinstance(it, dict):
+                        items.append(it)
+        if self._history_dialog is not None and items:
+            self._history_dialog.set_chats(items)
+        logger.info("history surface rendered (%d chats)", len(items))
+
     def _replay_transcript(self, chat: dict) -> None:
         """Repopulate the rail from a loaded chat's messages (best-effort)."""
         self.rail.clear()
@@ -1530,6 +1945,15 @@ class MainWindow(QMainWindow):
             if isinstance(content, str) and content.strip():
                 self.rail.add("user" if role == "user" else "assistant", content)
                 shown = True
+            # Feature 044 (US4): re-hydrate a turn's attachment chips as a small
+            # rail line (the server re-adds `attachments` on user messages).
+            atts = m.get("attachments")
+            if isinstance(atts, list) and atts:
+                names = ", ".join(
+                    str(a.get("filename") or "file") for a in atts if isinstance(a, dict))
+                if names:
+                    self.rail.add_note("📎 " + names)
+                    shown = True
         if not shown:
             self.rail.show_empty_hint()
 

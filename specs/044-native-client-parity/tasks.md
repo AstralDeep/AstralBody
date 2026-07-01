@@ -63,15 +63,15 @@ then user stories in spec priority order (US1, US2 = P1; US3, US4 = P2; US5, US6
 **Independent Test**: canonical 35-type gallery + convergence/pagination scripts per client vs parity matrix.
 
 - [X] T023 [US2] Backend canvas guarantee: regression test asserting canvas-target `ui_render`s deliver the full materialized canvas (029 designer contract; fix server-side if violated) in backend/tests/test_canvas_full_render.py
-- [ ] T024 [P] [US2] Windows identity-reconciled canvas (Canvas.set_components morphs matching ids, appends new, removes absent — no blind rebuild) in windows-client/astral_client/app.py + stream sequence guard (drop out-of-order/duplicate frames) in windows-client/astral_client/streaming.py + tests incl. the known clobber sequence in windows-client/tests/test_canvas_convergence.py
+- [X] T024 [P] [US2] Windows identity-reconciled canvas (Canvas.set_components morphs matching ids, appends new, removes absent — no blind rebuild) in windows-client/astral_client/app.py + stream sequence guard (drop out-of-order/duplicate frames) in windows-client/astral_client/streaming.py + tests incl. the known clobber sequence in windows-client/tests/test_canvas_convergence.py
 - [ ] T025 [P] [US2] Android out-of-turn full-render identity reconcile (AppViewModel reduce ui_render else-branch → Canvas.apply-based reconcile per contracts/canvas-and-interaction.md §1) in android-client/app/.../ui/AppViewModel.kt + clobber-sequence unit test
-- [ ] T026 [P] [US2] Windows table pager (`‹ Prev · rows X–Y of Z · Next ›` when total_rows+page_size+component_id; emits table_paginate per contract §2) in windows-client/astral_client/renderer.py + tests
+- [X] T026 [P] [US2] Windows table pager (`‹ Prev · rows X–Y of Z · Next ›` when total_rows+page_size+component_id; emits table_paginate per contract §2) in windows-client/astral_client/renderer.py + tests
 - [ ] T027 [P] [US2] Android table pager (same contract) in android-client/app/.../render/renderers/Data.kt + tests
-- [ ] T028 [P] [US2] Windows `image` (QPixmap via rest.fetch_bytes/base64) + `plotly_chart` (QtCharts approximation; undisplayable trace kinds → table with disclosure) renderers; registry 31→33; shrink KNOWN_DEGRADED to {audio, generative} in windows-client/astral_client/renderer.py + windows-client/tests/test_renderer.py
+- [X] T028 [P] [US2] Windows `image` (QPixmap via rest.fetch_bytes/base64) + `plotly_chart` (QtCharts approximation; undisplayable trace kinds → table with disclosure) renderers; registry 31→33; shrink KNOWN_DEGRADED to {audio, generative} in windows-client/astral_client/renderer.py + windows-client/tests/test_renderer.py
 - [ ] T029 [P] [US2] Android markdown links (inlineMarkdown → LinkAnnotation.Url via withLink) in android-client/app/.../render/Markdown.kt + test
-- [ ] T030 [P] [US2] Shared markdown construct fixture (headings/bold/italic/inline+fenced code/lists/links) asserted in windows-client/tests/test_renderer.py and android-client :app unit test (same fixture text)
+- [X] T030 [P] [US2] Shared markdown construct fixture (headings/bold/italic/inline+fenced code/lists/links) asserted in windows-client/tests/test_renderer.py and android-client :app unit test (same fixture text)
 - [X] T031 [US2] Canonical gallery driver: push all 35 types + interactive variants (button, input, multi-action param_picker, file_upload/download, paginated table, empty/long/malformed cases) through the real WS path to connected clients in backend/verification/gallery_driver.py
-- [ ] T032 [US2] Windows `ui_render target=history` routing into the history view (replace silent pass, app.py:1187-1188) in windows-client/astral_client/app.py + test
+- [X] T032 [US2] Windows `ui_render target=history` routing into the history view (replace silent pass, app.py:1187-1188) in windows-client/astral_client/app.py + test
 - [ ] T033 [US2] US2 live checkpoint: gallery + convergence + pagination clicks on all three clients; interim captures into specs/044-native-client-parity/verification/
 
 **Checkpoint**: rendering fidelity proven; both P1 stories complete.
@@ -86,9 +86,9 @@ then user stories in spec priority order (US1, US2 = P1; US3, US4 = P2; US5, US6
 - [X] T035 [P] [US3] `components()` for pulse (digest cards via build_digest; flag-off notice) in backend/webrender/chrome/surfaces/pulse.py + tests
 - [X] T036 [P] [US3] `components()` for attachments (rows + `attach_existing` Attach buttons + `chrome_attachment_delete` + empty state) in backend/webrender/chrome/surfaces/attachments.py + tests
 - [ ] T037 [P] [US3] Android server-driven top bar: render model.topbar (status ← ConnectionState reviving connectionLabel, pulse/timeline action IconButtons with sparkle/history/gear icon map, settings anchor) in android-client/app/.../ui/RootScaffold.kt + ui/Screens.kt + tests
-- [ ] T038 [P] [US3] Windows top bar: render parsed topbar_actions + bind status chip to the `status` control in windows-client/astral_client/app.py (TopBar) + tests
+- [X] T038 [P] [US3] Windows top bar: render parsed topbar_actions + bind status chip to the `status` control in windows-client/astral_client/app.py (TopBar) + tests
 - [ ] T039 [P] [US3] Android surface resilience: 10 s bounded skeleton → error+Retry (re-emit chrome_open), in-flight state on action submit, remove unreachable Screen.SurfacePlaceholder/SurfacePlaceholderScreen/pendingSurfaceLabel in android-client/app/.../ui/{AppViewModel,Screens,RootScaffold}.kt + tests
-- [ ] T040 [P] [US3] Windows surface resilience: same 10 s timeout/retry + in-flight submit state in windows-client/astral_client/chrome.py + app.py + tests
+- [X] T040 [P] [US3] Windows surface resilience: same 10 s timeout/retry + in-flight submit state in windows-client/astral_client/chrome.py + app.py + tests
 - [ ] T041 [US3] `workspace_timeline_mode` read-only enforcement (disable send/component mutations while viewing history) on both natives: windows-client/astral_client/app.py + android-client/app/.../ui/AppViewModel.kt + tests
 - [ ] T042 [US3] US3 live checkpoint: full menu+topbar walk, 8/8 surface round-trips incl. forced failure (e.g. invalid LLM base URL), timeline/pulse/attachments surfaces open natively on both clients; interim evidence
 
@@ -100,10 +100,10 @@ then user stories in spec priority order (US1, US2 = P1; US3, US4 = P2; US5, US6
 
 **Independent Test**: attach supported + unsupported types on Windows; compare chips/status/agent-read/reload against Android and web.
 
-- [ ] T043 [US4] Windows multipart upload helper `upload_attachment(http_base, token, filename, mime, data)` (stdlib urllib; POST /api/upload; parses attachment_id/filename/category/parser_status; 4xx surfaced) in windows-client/astral_client/rest.py + tests in windows-client/tests/test_rest.py
-- [ ] T044 [US4] Windows composer: paperclip menu (Upload files… ≤10 multi-select / Choose from your files), chip strip above input (filename + parser-status glyph/tooltip + remove; worker-thread uploads; failed state), send maps ready chips to send_chat(attachments=…), strip clears on send, in windows-client/astral_client/app.py + tests in windows-client/tests/test_attachments.py
-- [ ] T045 [US4] Windows transcript rehydration: per-turn attachment chips in the rail from load_chat data in windows-client/astral_client/app.py + test
-- [ ] T046 [P] [US4] Windows `attach_existing` interception (stage chip from attachments-surface button payload, never forwarded) in windows-client/astral_client/app.py (_emit) + test
+- [X] T043 [US4] Windows multipart upload helper `upload_attachment(http_base, token, filename, mime, data)` (stdlib urllib; POST /api/upload; parses attachment_id/filename/category/parser_status; 4xx surfaced) in windows-client/astral_client/rest.py + tests in windows-client/tests/test_rest.py
+- [X] T044 [US4] Windows composer: paperclip menu (Upload files… ≤10 multi-select / Choose from your files), chip strip above input (filename + parser-status glyph/tooltip + remove; worker-thread uploads; failed state), send maps ready chips to send_chat(attachments=…), strip clears on send, in windows-client/astral_client/app.py + tests in windows-client/tests/test_attachments.py
+- [X] T045 [US4] Windows transcript rehydration: per-turn attachment chips in the rail from load_chat data in windows-client/astral_client/app.py + test
+- [X] T046 [P] [US4] Windows `attach_existing` interception (stage chip from attachments-surface button payload, never forwarded) in windows-client/astral_client/app.py (_emit) + test
 - [ ] T047 [P] [US4] Android paperclip parity: "Choose from your files" entry → chrome_open attachments + `attach_existing` interception staging a chip in android-client/app/.../ui/{AppViewModel,Screens}.kt + tests
 - [ ] T048 [US4] US4 live checkpoint: full lifecycle on Windows (covered + no-parser file), cross-client reload comparison; interim evidence
 
@@ -115,7 +115,7 @@ then user stories in spec priority order (US1, US2 = P1; US3, US4 = P2; US5, US6
 
 **Independent Test**: each preset on each client → immediate restyle; restart → preset persists; fine-tune a channel.
 
-- [ ] T049 [P] [US5] Windows live theme: mutable Palette + build_stylesheet(palette) in windows-client/astral_client/theme.py; apply path (user_preferences boot + theme_apply live + save_theme echo) re-sets app stylesheet, repolishes chrome, re-renders canvas; interactive color_picker (QColorDialog → save_theme); disclosure line on the Theme surface behavior; in windows-client/astral_client/{theme,app,renderer}.py + tests in windows-client/tests/test_theme_live.py
+- [X] T049 [P] [US5] Windows live theme: mutable Palette + build_stylesheet(palette) in windows-client/astral_client/theme.py; apply path (user_preferences boot + theme_apply live + save_theme echo) re-sets app stylesheet, repolishes chrome, re-renders canvas; interactive color_picker (QColorDialog → save_theme); disclosure line on the Theme surface behavior; in windows-client/astral_client/{theme,app,renderer}.py + tests in windows-client/tests/test_theme_live.py
 - [ ] T050 [P] [US5] Android live theme: UiState.themePalette → dynamic ColorScheme in android-client/app/.../ui/theme/Theme.kt; user_preferences decode (Wire.kt) + theme_apply handling + interactive color_picker (color dialog → save_theme) in android-client/app/.../{ui/AppViewModel.kt,render/renderers/Input.kt} + tests
 - [ ] T051 [US5] US5 live checkpoint: all 5 presets × both natives restyle immediately; restart persistence; fine-tune channel; interim captures
 

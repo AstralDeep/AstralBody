@@ -15,6 +15,7 @@ history rows, param-picker / table-pagination submits) so the app can post a
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 from dataclasses import dataclass
@@ -49,10 +50,13 @@ from . import theme as T
 @dataclass
 class RenderContext:
     """Carried through a render pass. `emit` posts a ui_event back to the server;
-    `download` (optional) fetches an authed backend file URL and saves it natively."""
+    `download` (optional) fetches an authed backend file URL and saves it natively;
+    `chat_id` (optional, kept current by the app) scopes component actions such
+    as table pagination to the active conversation."""
 
     emit: Callable[[str, dict], None]
     download: Optional[Callable[[str, str], None]] = None
+    chat_id: Optional[str] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -750,7 +754,56 @@ def _r_table(c, ctx):
     tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
     tbl.setFixedHeight(min(420, 32 * (len(rows) + 1) + 8))
     lay.addWidget(tbl)
+    # Feature 044 (T026): a server-side pagination pager when the table
+    # advertises a total + page size (parity with the web table_paginate
+    # round-trip — the server replies with a ui_upsert keyed to component_id).
+    total = c.get("total_rows")
+    page_size = c.get("page_size")
+    if isinstance(total, int) and isinstance(page_size, int) and page_size > 0:
+        lay.addLayout(_table_pager(c, ctx, len(rows)))
     return frame
+
+
+def _table_pager(c, ctx, n_rows: int):
+    """A ``‹ Prev  rows X–Y of Z  Next ›`` row under a paginated table. Prev/Next
+    emit ``table_paginate`` for the table's component id; the server upserts the
+    same component in place."""
+    total = int(c.get("total_rows") or 0)
+    page_size = int(c.get("page_size") or 0)
+    try:
+        page_offset = max(0, int(c.get("page_offset") or 0))
+    except (TypeError, ValueError):
+        page_offset = 0
+    cid = c.get("component_id") or c.get("id")
+    shown = n_rows if n_rows else page_size
+    start = page_offset + 1 if total else 0
+    end = min(page_offset + shown, total) if total else page_offset + shown
+
+    def _go(new_offset: int) -> None:
+        payload = {
+            "component_id": cid,
+            "params": {"page_offset": max(0, new_offset), "page_size": page_size},
+        }
+        chat_id = getattr(ctx, "chat_id", None)
+        if chat_id:
+            payload["chat_id"] = chat_id
+        ctx.emit("table_paginate", payload)
+
+    row = QHBoxLayout()
+    row.setSpacing(8)
+    prev = QPushButton("‹ Prev")
+    prev.setEnabled(page_offset > 0)
+    prev.clicked.connect(lambda: _go(page_offset - page_size))
+    nxt = QPushButton("Next ›")
+    nxt.setEnabled(page_offset + page_size < total)
+    nxt.clicked.connect(lambda: _go(page_offset + page_size))
+    for b in (prev, nxt):
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+    row.addWidget(prev)
+    row.addWidget(_label(f"rows {start}–{end} of {total}", color=T.MUTED, size=12), 1)
+    row.addWidget(nxt)
+    return row
 
 
 def _r_tabs(c, ctx):
@@ -810,6 +863,127 @@ def _r_chart(c, ctx):
     frame.setLayout(lay)
     lay.addWidget(_label(c.get("title", c.get("type", "chart")), size=14, bold=True))
     lay.addWidget(_label("(chart)", color=T.MUTED, size=12))
+    return frame
+
+
+def _image_pixmap(url: str):
+    """Best-effort ``QPixmap`` from a ``data:`` URI or an http(s) URL (bounded
+    synchronous fetch, 8 MB / 4 s caps). Returns ``None`` on any failure so the
+    caller falls back to the alt text — never raises."""
+    from PySide6.QtGui import QPixmap
+
+    url = str(url or "")
+    if not url:
+        return None
+    try:
+        if url.startswith("data:"):
+            header, _, payload = url.partition(",")
+            raw = (base64.b64decode(payload) if "base64" in header.lower()
+                   else payload.encode("utf-8"))
+        elif url.startswith(("http://", "https://")):
+            import urllib.request
+
+            req = urllib.request.Request(url, headers={"User-Agent": "AstralWindowsClient"})
+            with urllib.request.urlopen(req, timeout=4) as r:  # noqa: S310 — scheme-guarded
+                raw = r.read(8 * 1024 * 1024)
+        else:
+            return None
+        pix = QPixmap()
+        pix.loadFromData(raw)
+        return pix if not pix.isNull() else None
+    except Exception:  # noqa: BLE001 — image load is best-effort, degrade to alt
+        return None
+
+
+def _r_image(c, ctx):
+    """Native image: decode a ``data:`` URI or fetch an http(s) URL into a
+    QPixmap (width-capped); show the alt text when unavailable. Parity with the
+    Android ``image`` renderer — a native improvement over the old placeholder."""
+    w = QWidget()
+    lay = _vbox(4)
+    w.setLayout(lay)
+    alt = str(c.get("alt") or c.get("caption") or c.get("title") or "")
+    pix = _image_pixmap(c.get("url") or c.get("src") or "")
+    if pix is not None:
+        try:
+            maxw = int(c.get("width") or 0) or 480
+        except (TypeError, ValueError):
+            maxw = 480
+        maxw = max(48, min(maxw, 900))
+        if pix.width() > maxw:
+            pix = pix.scaledToWidth(maxw, Qt.TransformationMode.SmoothTransformation)
+        img = QLabel()
+        img.setPixmap(pix)
+        img.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        lay.addWidget(img)
+        if alt:
+            lay.addWidget(_label(alt, color=T.MUTED, size=11))
+    else:
+        lay.addWidget(_label(alt or "🖼 image", color=T.MUTED, size=12))
+    return w
+
+
+def _is_number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _plotly_to_chart_dict(c) -> Optional[dict]:
+    """Extract numeric x/y traces from a Plotly figure spec into a chart dict the
+    QtCharts path (``charts.build_chart``) can draw, or ``None`` when there is
+    nothing numeric to plot."""
+    data = c.get("data")
+    layout = c.get("layout") if isinstance(c.get("layout"), dict) else {}
+    fig = c.get("figure") if isinstance(c.get("figure"), dict) else None
+    if fig:
+        if isinstance(fig.get("data"), list):
+            data = fig["data"]
+        if isinstance(fig.get("layout"), dict):
+            layout = fig["layout"]
+    if not isinstance(data, list):
+        return None
+    datasets: List[dict] = []
+    labels: List[str] = []
+    kind = "line_chart"
+    for tr in data:
+        if not isinstance(tr, dict):
+            continue
+        ys = [float(v) for v in (tr.get("y") or []) if _is_number(v)]
+        if not ys:
+            continue
+        datasets.append({"label": str(tr.get("name") or f"series {len(datasets) + 1}"),
+                         "data": ys})
+        if not labels and isinstance(tr.get("x"), list):
+            labels = [str(x) for x in tr["x"]][: len(ys)]
+        if str(tr.get("type") or "").lower() == "bar":
+            kind = "bar_chart"
+    if not datasets:
+        return None
+    title = c.get("title") or ""
+    if not title and layout:
+        t = layout.get("title")
+        title = (t.get("text") if isinstance(t, dict) else t) or ""
+    return {"type": kind, "title": str(title), "labels": labels, "datasets": datasets}
+
+
+def _r_plotly_chart(c, ctx):
+    """Plotly is web/JS-only; draw a best-effort native approximation from the
+    figure's traces via the QtCharts bar/line path, else a labeled note. Never
+    raises. Advertising this type keeps ROTE from degrading server-side charts."""
+    spec = _plotly_to_chart_dict(c)
+    if spec is not None:
+        try:
+            from .charts import build_chart
+
+            w = build_chart(spec)
+            if w is not None:
+                return w
+        except Exception:  # noqa: BLE001 — fall through to the labeled note
+            pass
+    frame = _card_frame(bg=T.SURFACE_2)
+    lay = _vbox(4, (16, 14, 16, 14))
+    frame.setLayout(lay)
+    lay.addWidget(_label(c.get("title", "Chart"), size=14, bold=True))
+    lay.addWidget(_label("interactive chart — view on web", color=T.MUTED, size=12))
     return frame
 
 
@@ -888,38 +1062,82 @@ REGISTRY: Dict[str, Callable[[dict, RenderContext], QWidget]] = {
     "bar_chart": _r_chart,
     "line_chart": _r_chart,
     "pie_chart": _r_chart,
+    "plotly_chart": _r_plotly_chart,
+    "image": _r_image,
     "chat_history": _r_chat_history,
     "skeleton": _r_skeleton,
 }
 
 
-def _r_color_picker(c, ctx):
-    """Feature 043 — a theme channel swatch + hex readout (Theme surface).
+def _apply_theme_and_restyle(spec) -> None:
+    """Feature 044 (US5) — apply a theme spec to the live palette and restyle the
+    running app. Self-contained (imports Qt lazily) so any renderer can trigger a
+    live restyle without a handle to the MainWindow; fail-open."""
+    try:
+        if T.apply_theme(spec):
+            from PySide6.QtWidgets import QApplication
 
-    Read-only display of one ``--astral-*`` colour; the preset buttons are the
-    primary theme control, so per-channel live editing is a later refinement.
-    """
+            app = QApplication.instance()
+            if app is not None:
+                app.setStyleSheet(T.build_stylesheet() + getattr(T, "ROOT_BG_STYLE", ""))
+    except Exception:  # noqa: BLE001 — theming must never break a render pass
+        pass
+
+
+def _choose_color(initial: str, parent, key: str) -> Optional[str]:
+    """Open the native colour chooser, returning the picked ``#rrggbb`` (or
+    ``None`` if cancelled). Factored out so the color_picker's emit path is
+    unit-testable without driving a modal dialog."""
+    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QColorDialog
+
+    chosen = QColorDialog.getColor(QColor(initial), parent, f"Choose {key or 'color'}")
+    return chosen.name() if chosen.isValid() else None
+
+
+def _r_color_picker(c, ctx):
+    """Feature 043/044 — a theme channel swatch + hex readout (Theme surface).
+
+    Clicking the swatch opens a native colour chooser; on pick it emits
+    ``save_theme`` (server persist, FR-016) AND applies the change to the live
+    palette immediately (US5 fine-tune)."""
     w = QWidget()
     lay = QHBoxLayout()
     lay.setContentsMargins(0, 2, 0, 2)
     lay.setSpacing(8)
     w.setLayout(lay)
+    key = str(c.get("color_key") or "")
     val = str(c.get("value") or "#000000")
-    swatch = QFrame()
+    swatch = QPushButton()
     swatch.setFixedSize(22, 22)
-    swatch.setStyleSheet(
-        f"background:{val}; border:1px solid rgba(255,255,255,0.2); border-radius:4px;")
+    swatch.setCursor(Qt.CursorShape.PointingHandCursor)
+    _swatch_css = "background:%s; border:1px solid rgba(255,255,255,0.2); border-radius:4px;"
+    swatch.setStyleSheet(_swatch_css % val)
+    readout = _label(val, color=T.MUTED, size=12)
+
+    def _pick():
+        hexv = _choose_color(val, w, key)
+        if not hexv:
+            return
+        swatch.setStyleSheet(_swatch_css % hexv)
+        readout.setText(hexv)
+        if key:
+            ctx.emit("save_theme", {"theme": {"color_key": key, "color_value": hexv}})
+            _apply_theme_and_restyle({"color_key": key, "color_value": hexv})
+
+    swatch.clicked.connect(_pick)
     lay.addWidget(swatch)
-    lay.addWidget(_label(str(c.get("label") or c.get("color_key") or ""), color=T.TEXT, size=13))
+    lay.addWidget(_label(str(c.get("label") or key or ""), color=T.TEXT, size=13))
     lay.addStretch(1)
-    lay.addWidget(_label(val, color=T.MUTED, size=12))
+    lay.addWidget(readout)
     return w
 
 
 def _r_theme_apply(c, ctx):
-    """Feature 043 — the ``theme_apply`` side-effect carries the chosen preset's
-    palette for the client to apply; it has no visible UI (zero-height spacer).
-    The live restyle (US3) reads ``preset``/``colors`` off this frame."""
+    """Feature 043/044 — the ``theme_apply`` side-effect carries the chosen
+    preset/colors for the client to apply. Apply it to the live palette (US5)
+    and return a zero-height spacer (no visible UI)."""
+    _apply_theme_and_restyle(c)
     w = QWidget()
     w.setFixedHeight(0)
     return w
