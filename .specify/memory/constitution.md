@@ -1,6 +1,26 @@
 <!--
   Sync Impact Report
   ==================
+  Version change: 2.3.0 → 2.3.1 (PATCH — Principle XII: deliberate,
+    documented, server-enforced web-only capability carve-out clarified)
+
+  Amendment (2026-07-01, v2.3.1):
+    XII. Cross-Client Consistency (PATCH) — clarified that a capability MAY be
+        deliberately scoped WEB-ONLY (offered on the web, intentionally absent
+        from other clients) without being the accidental drift the principle
+        forbids, PROVIDED the omission is enforced from the shared server-owned
+        definition (the item is dropped from other clients' menu channels by
+        the server, not hidden client-side), documented in the owning feature
+        spec, and applied uniformly to every non-web client. Sanctions the
+        existing admin-tools web-only scoping (feature 042) and the feature-043
+        removal of "Take the tour" from the Windows and Android clients.
+    Templates requiring updates:
+      ✅ .specify/templates/plan-template.md — generic Constitution Check, compatible
+      ✅ .specify/templates/spec-template.md — generic, compatible
+      ✅ .specify/templates/tasks-template.md — generic, compatible
+    Follow-up TODOs: None
+
+  -- Prior amendment (2026-07-01, v2.3.0) --------------------------------
   Version change: 2.2.0 → 2.3.0 (MINOR — Principle XII added: cross-client
     consistency; Principle II expanded: shared server-owned chrome + minimal
     client wrapping; Principle X clarified: verify every affected client)
@@ -450,6 +470,18 @@ is a requirement, not an aspiration.
   client genuinely cannot yet render something, it MUST degrade
   gracefully (labeled placeholder), never silently omit or
   diverge.
+- A capability MAY be deliberately scoped **web-only** — offered
+  on the web but intentionally absent from other clients — when it
+  is inherently tied to something another client genuinely lacks
+  (e.g. admin-only desktop tooling, or a walkthrough anchored to
+  web-DOM elements). This is NOT the accidental drift this
+  principle forbids, PROVIDED it is (a) documented in the owning
+  feature spec, (b) enforced from the shared server-owned
+  definition — the item is omitted from the other clients' menu
+  channels by the server, not hidden client-side — and (c) applied
+  uniformly to every non-web client. The admin surfaces (Tool
+  quality, Tutorial admin) and "Take the tour" are the current
+  web-only capabilities.
 
 **Rationale**: Divergent clients erode trust, multiply
 maintenance, and produce exactly the drift this project has
@@ -525,4 +557,4 @@ guidance when conflicts arise.
   adherence to these principles. Violations MUST be resolved
   before merge.
 
-**Version**: 2.3.0 | **Ratified**: 2026-03-11 | **Last Amended**: 2026-07-01
+**Version**: 2.3.1 | **Ratified**: 2026-03-11 | **Last Amended**: 2026-07-01

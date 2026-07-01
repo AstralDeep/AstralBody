@@ -19,6 +19,7 @@ import logging
 import re
 
 from webrender.chrome import esc, notice_block, render_one
+from webrender.chrome.surfaces import _sdui
 
 logger = logging.getLogger("Orchestrator.Chrome")
 
@@ -161,6 +162,45 @@ async def render(orch, user_id, roles, params) -> str:
         f'<p class="text-xs text-astral-muted">Color changes apply and save instantly.</p>'
         f'<div class="bg-white/5 border border-white/10 rounded-lg p-3">{pickers}</div></div>'
     )
+
+
+async def components(orch, user_id, roles, params):
+    """Feature 043 — the Theme surface as native SDUI components.
+
+    Same data + the SAME ``chrome_theme_preset`` action as ``render()``; the
+    per-key ``color_picker`` primitives are reused verbatim (US3 live restyle is
+    the native client's job — the handler already ships the chosen preset).
+    """
+    theme = _stored_theme(orch, user_id)
+    active = theme.get("preset") if theme.get("preset") in PRESETS else None
+    colors = _effective_colors(theme)
+
+    out = [
+        _sdui.text(_summary_text(theme), "caption"),
+        _sdui.text("Presets", "h3"),
+        _sdui.text("Pick a preset to apply and save it.", "caption"),
+    ]
+    for name in PRESETS:
+        is_active = name == active
+        swatches = _sdui.container(
+            [{"type": "container", "children": [],
+              "css": {"background": PRESETS[name][key], "height": "22px", "flex": "1"}}
+             for key, _label in _COLOR_KEYS],
+            direction="row",
+        )
+        out.append(_sdui.card(
+            name.capitalize() + (" — Active" if is_active else ""),
+            [swatches, _sdui.button(
+                "Applied" if is_active else f"Apply {name.capitalize()}",
+                "chrome_theme_preset", {"preset": name},
+                variant="secondary" if is_active else "primary")],
+        ))
+    out.append(_sdui.text("Fine-tune colors", "h3"))
+    out.append(_sdui.text("Color changes apply and save instantly.", "caption"))
+    for key, label in _COLOR_KEYS:
+        out.append({"type": "color_picker", "color_key": key,
+                    "value": colors[key], "label": label})
+    return out
 
 
 async def _handle_theme_preset(orch, websocket, user_id, roles, payload):

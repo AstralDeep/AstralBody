@@ -134,8 +134,7 @@ KNOWN_DEGRADED = frozenset({
     "image",         # no native image fetch/decode pipeline yet
     "audio",         # no native audio playback widget yet
     "plotly_chart",  # Plotly is web/JS-only; native uses QtCharts bar/line/pie
-    "color_picker",  # theme-editing control, web-chrome only
-    "theme_apply",   # web theme-application acknowledgement, web-chrome only
+    # color_picker + theme_apply now render natively (feature 043 Theme surface).
     "generative",    # flag-gated web-only generative grammar renderer
 })
 

@@ -135,4 +135,6 @@ shell commands, and other important information, read the current plan at
 - [specs/033-frontier-techniques-research/plan.md](specs/033-frontier-techniques-research/plan.md)
 - [specs/040-inprocess-agents-skills-commands/plan.md](specs/040-inprocess-agents-skills-commands/plan.md)
 - [specs/041-android-sdui-client/plan.md](specs/041-android-sdui-client/plan.md)
+- [specs/042-cross-client-chrome-parity/plan.md](specs/042-cross-client-chrome-parity/plan.md)
+- [specs/043-sdui-settings-surfaces/plan.md](specs/043-sdui-settings-surfaces/plan.md)
 <!-- SPECKIT END -->
