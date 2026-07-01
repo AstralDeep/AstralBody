@@ -69,6 +69,48 @@ def audit_url(
     return f"{http_base.rstrip('/')}/api/audit?{urlencode(params)}"
 
 
+def chrome_menu_url(http_base: str) -> str:
+    """Build the ``GET /api/chrome/menu`` URL (REST fallback; the model also
+    arrives over the ``chrome_menu`` WS frame after register)."""
+    return f"{http_base.rstrip('/')}/api/chrome/menu"
+
+
+def parse_chrome_menu(model: dict) -> dict:
+    """Normalize a feature-042 chrome model into the structure the native top bar
+    renders (single server-owned source of truth — Constitution XII):
+
+    ``{"sections": [{"label", "items": [{"label", "surface", "params"}]}],
+       "topbar_actions": [{"label", "surface", "icon"}],
+       "signout": {"label", "action"}}``
+
+    Pure + defensive so the desktop menu builder stays unit-testable and an older
+    client tolerates an unknown/newer model rather than crashing.
+    """
+    model = model or {}
+    sections: List[dict] = []
+    for g in (model.get("menu") or []):
+        items = [
+            {"label": str(i.get("label") or ""), "surface": str(i.get("surface") or ""),
+             "params": i.get("params") or {}}
+            for i in (g.get("items") or [])
+            if isinstance(i, dict) and i.get("surface")
+        ]
+        if items:
+            sections.append({"label": str(g.get("label") or ""), "items": items})
+    topbar_actions: List[dict] = []
+    for c in (model.get("topbar") or []):
+        if not isinstance(c, dict) or c.get("kind") != "action":
+            continue
+        surface = str((c.get("action") or {}).get("surface") or "")
+        if surface:
+            topbar_actions.append(
+                {"label": str(c.get("label") or ""), "surface": surface, "icon": str(c.get("icon") or "")}
+            )
+    so = model.get("signout") or {}
+    signout = {"label": str(so.get("label") or "Sign out"), "action": str(so.get("action") or "logout")}
+    return {"sections": sections, "topbar_actions": topbar_actions, "signout": signout}
+
+
 def _fmt_ts(value) -> str:
     """ISO-8601 timestamp -> ``YYYY-MM-DD HH:MM:SS`` for display (best-effort)."""
     if not value:
