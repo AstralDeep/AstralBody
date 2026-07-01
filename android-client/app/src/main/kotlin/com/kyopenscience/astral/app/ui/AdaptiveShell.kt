@@ -35,6 +35,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -55,6 +56,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
@@ -62,6 +64,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.window.core.layout.WindowWidthSizeClass
+import com.kyopenscience.astral.app.R
 import com.kyopenscience.astral.app.render.CanvasHost
 import com.kyopenscience.astral.app.render.MarkdownText
 import com.kyopenscience.astral.app.render.Renderer
@@ -222,7 +225,12 @@ private fun ReadOnlyBanner(label: String?, onBackToLive: () -> Unit) {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text("👁", fontSize = 14.sp)
+            Icon(
+                painter = painterResource(R.drawable.ic_history),
+                contentDescription = null,
+                tint = AstralColors.Indigo,
+                modifier = Modifier.size(16.dp),
+            )
             Column(Modifier.weight(1f)) {
                 Text(
                     "Viewing a previous canvas",
@@ -264,7 +272,12 @@ private fun TimelinePill(count: Int, onClick: () -> Unit, modifier: Modifier = M
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
         ) {
-            Text("🕘", fontSize = 13.sp)
+            Icon(
+                painter = painterResource(R.drawable.ic_history),
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.size(14.dp),
+            )
             Text(
                 "History ($count)",
                 color = MaterialTheme.colorScheme.onSurface,
@@ -606,7 +619,7 @@ private fun InputBar(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                GlyphButton(glyph = "🎤", contentDescription = "Voice input", onClick = ::launchMic)
+                GlyphButton(iconRes = R.drawable.ic_mic, contentDescription = "Voice input", onClick = ::launchMic)
                 OutlinedTextField(
                     value = input,
                     onValueChange = { input = it },
@@ -616,7 +629,7 @@ private fun InputBar(
                     shape = RoundedCornerShape(22.dp),
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
                 )
-                GlyphButton(glyph = "📎", contentDescription = "Attach a file") { filePicker.launch("*/*") }
+                GlyphButton(iconRes = R.drawable.ic_paperclip, contentDescription = "Attach a file") { filePicker.launch("*/*") }
                 SendButton(enabled = input.isNotBlank() || staged.any { it.state == "ready" }, onClick = ::doSend)
             }
         }
@@ -624,9 +637,14 @@ private fun InputBar(
 }
 
 @Composable
-private fun GlyphButton(glyph: String, contentDescription: String, onClick: () -> Unit) {
+private fun GlyphButton(iconRes: Int, contentDescription: String, onClick: () -> Unit) {
     IconButton(onClick = onClick) {
-        Text(glyph, fontSize = 19.sp)
+        Icon(
+            painter = painterResource(iconRes),
+            contentDescription = contentDescription,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(22.dp),
+        )
     }
 }
 
@@ -642,7 +660,12 @@ private fun SendButton(enabled: Boolean, onClick: () -> Unit) {
                 .clickable(enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Text("➤", color = if (enabled) Color.White else MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 17.sp)
+        Icon(
+            painter = painterResource(R.drawable.ic_send),
+            contentDescription = "Send",
+            tint = if (enabled) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(20.dp),
+        )
     }
 }
 
