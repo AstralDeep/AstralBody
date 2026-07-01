@@ -42,18 +42,15 @@ import com.kyopenscience.astral.app.render.Renderer
 import com.kyopenscience.astral.app.ui.theme.AstralColors
 import com.kyopenscience.astral.core.chrome.ChromeMenuModel
 import com.kyopenscience.astral.core.chrome.MenuItem
-import com.kyopenscience.astral.core.chrome.TopBarControl
 
 /**
- * The app root. The top bar mirrors the web chrome (feature 042): brand · status ·
- * [Pulse, flag-gated] · Workspace-timeline · Settings gear — the gear opens the
- * grouped Settings dropdown (ACCOUNT / HELP / ADMIN TOOLS + a red Sign out) built
- * from the single server-owned menu model the orchestrator pushes over
- * `chrome_menu` (Constitution XII — one definition, every client renders it). A
- * compact New-chat button is kept as a mobile chat affordance. There is no longer
- * a separate Settings *screen* (which used to duplicate Agents/Audit) — Settings
- * is only this dropdown. Chat is the adaptive SDUI shell; the others are native
- * Compose surfaces.
+ * The app root. The top bar is deliberately minimal and identical across clients
+ * (feature 042): the small brand logo · a New-chat button · a Recent-chats
+ * button · a Settings gear whose dropdown holds ALL settings, built from the
+ * single server-owned menu model the orchestrator pushes over `chrome_menu`
+ * (Constitution XII — one definition, every client renders it). There is no
+ * separate Settings *screen* anymore (it used to duplicate Agents/Audit). Chat
+ * is the adaptive SDUI shell; the others are native Compose surfaces.
  */
 @Composable
 fun RootScaffold(
@@ -65,12 +62,12 @@ fun RootScaffold(
     Scaffold(
         topBar = {
             AstralTopBar(
-                state = state,
+                model = state.chromeMenu,
                 onNewChat = {
                     vm.newChat()
                     vm.goTo(Screen.Chat)
                 },
-                onTopBarAction = vm::openTopBarAction,
+                onRecentChats = { vm.goTo(Screen.History) },
                 onOpenItem = vm::openMenuItem,
                 onSignOut = onSignOut,
             )
@@ -99,9 +96,9 @@ fun RootScaffold(
 
 @Composable
 private fun AstralTopBar(
-    state: UiState,
+    model: ChromeMenuModel?,
     onNewChat: () -> Unit,
-    onTopBarAction: (TopBarControl) -> Unit,
+    onRecentChats: () -> Unit,
     onOpenItem: (MenuItem) -> Unit,
     onSignOut: () -> Unit,
 ) {
@@ -111,53 +108,30 @@ private fun AstralTopBar(
                 Modifier
                     .fillMaxWidth()
                     .statusBarsPadding()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    .padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
         ) {
+            // Small brand logo only — no wordmark, no status text.
             Image(
                 painter = painterResource(R.drawable.app_icon),
                 contentDescription = "AstralBody",
-                modifier = Modifier.size(28.dp).clip(RoundedCornerShape(8.dp)),
-            )
-            Text(
-                "AstralBody",
-                color = MaterialTheme.colorScheme.onSurface,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
-            // Status text — mirrors the web's status span (usually quiet).
-            Text(
-                connectionLabel(state.connection),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontSize = 11.sp,
-                maxLines = 1,
+                modifier = Modifier.size(30.dp).clip(RoundedCornerShape(8.dp)),
             )
             Box(modifier = Modifier.weight(1f))
-            // Model-driven top-bar action controls, in order: Pulse (only present
-            // when the server enables FF_PULSE_DIGEST) then Workspace timeline.
-            state.chromeMenu?.topbarActions?.forEach { control ->
-                TopBarActionButton(control = control, onClick = { onTopBarAction(control) })
-            }
             NewChatButton(onClick = onNewChat)
-            SettingsMenu(model = state.chromeMenu, onOpenItem = onOpenItem, onSignOut = onSignOut)
+            // Recent chats.
+            IconButton(onClick = onRecentChats) {
+                Icon(
+                    painter = painterResource(R.drawable.ic_history),
+                    contentDescription = "Recent chats",
+                    tint = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.size(22.dp),
+                )
+            }
+            // Settings gear → dropdown with ALL settings (from the server model).
+            SettingsMenu(model = model, onOpenItem = onOpenItem, onSignOut = onSignOut)
         }
-    }
-}
-
-/** An icon button for a model top-bar action control (Pulse / Workspace timeline). */
-@Composable
-private fun TopBarActionButton(
-    control: TopBarControl,
-    onClick: () -> Unit,
-) {
-    IconButton(onClick = onClick) {
-        Icon(
-            painter = painterResource(iconResFor(control.icon)),
-            contentDescription = control.label,
-            tint = MaterialTheme.colorScheme.onSurface,
-            modifier = Modifier.size(20.dp),
-        )
     }
 }
 
@@ -245,13 +219,3 @@ private fun NewChatButton(onClick: () -> Unit) {
         Text("New", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
     }
 }
-
-/** Map a model icon id (gear/history/sparkle) to a client drawable. */
-private fun iconResFor(iconId: String?): Int =
-    when (iconId) {
-        "history" -> R.drawable.ic_history
-        "gear" -> R.drawable.ic_settings
-        // "sparkle" (Pulse) has no dedicated asset yet; the history glyph reads as
-        // "what happened" and Pulse is flag-gated off by default anyway.
-        else -> R.drawable.ic_history
-    }
