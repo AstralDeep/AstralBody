@@ -100,5 +100,9 @@ Windows advertised vocabulary moves 31 → 33 (adds `image`, `plotly_chart`), ma
 | Markdown links | ✅ | ✅ | ✅ ※(was raw text) |
 | History rehydration + read-only timeline | ✅ | ✅ ※ | ✅ ※ |
 
-**Evidence**: every ※ cell must link a `verification/` artifact before the feature closes;
-non-※ cells get gallery/scenario evidence in the same pass.
+**Evidence**: captured in [verification/results.md](verification/results.md) (live run
+2026-07-01) — per-scenario outcomes across web (Chromium), the Windows app (native Qt), and
+the Android emulator, with legible screenshots in `verification/{web,windows,android}/` and
+suite tallies (backend 3037 / Windows 210 / Android 58+72 unit + 10 instrumented). No cell
+is "unknown"; the one blocked path (Android real-Keycloak logged-in chat) is recorded as
+D-032 with its compensating on-device rendering evidence.
