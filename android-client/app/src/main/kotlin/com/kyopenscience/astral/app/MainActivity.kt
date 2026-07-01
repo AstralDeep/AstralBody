@@ -5,27 +5,39 @@ import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.kyopenscience.astral.app.auth.DevAuth
 import com.kyopenscience.astral.app.auth.OidcAuth
 import com.kyopenscience.astral.app.auth.TokenStore
 import com.kyopenscience.astral.app.render.Emit
@@ -37,6 +49,7 @@ import com.kyopenscience.astral.app.transport.OrchestratorClient
 import com.kyopenscience.astral.app.transport.deviceCapabilities
 import com.kyopenscience.astral.app.ui.AppViewModel
 import com.kyopenscience.astral.app.ui.RootScaffold
+import com.kyopenscience.astral.app.ui.theme.AstralColors
 import com.kyopenscience.astral.app.ui.theme.AstralTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -85,12 +98,7 @@ class MainActivity : ComponentActivity() {
                 val error by signInError.collectAsStateWithLifecycle()
 
                 if (token == null) {
-                    SignInScreen(
-                        error = error,
-                        devAvailable = DevAuth.devToken != null,
-                        onSignIn = ::startSignIn,
-                        onDevSignIn = ::devSignIn,
-                    )
+                    SignInScreen(error = error, onSignIn = ::startSignIn)
                 } else {
                     val uiState by vm.state.collectAsStateWithLifecycle()
                     LaunchedEffect(token) {
@@ -127,37 +135,78 @@ class MainActivity : ComponentActivity() {
             .onFailure { signInError.value = it.message ?: "could not start sign-in" }
     }
 
-    private fun devSignIn() {
-        DevAuth.devToken?.let { authToken.value = it }
-    }
-
     override fun onDestroy() {
         oidc.dispose()
         super.onDestroy()
     }
 }
 
+/**
+ * The sign-in landing. Painted on its own [Surface] so content color resolves to
+ * the theme's on-background (the earlier bare Column rendered text in the default
+ * black, which was invisible on the dark backdrop). The AstralDeep wordmark is the
+ * hero; a single gradient "Sign in" launches the Keycloak PKCE flow.
+ */
 @Composable
-private fun SignInScreen(
-    error: String?,
-    devAvailable: Boolean,
-    onSignIn: () -> Unit,
-    onDevSignIn: () -> Unit,
-) {
-    Column(
-        modifier = Modifier.fillMaxSize().padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
+private fun SignInScreen(error: String?, onSignIn: () -> Unit) {
+    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+        Box(
+            modifier = Modifier.fillMaxSize().background(AstralColors.BackdropBrush).padding(28.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+                modifier = Modifier.widthIn(max = 420.dp).fillMaxWidth(),
+            ) {
+                Image(
+                    painter = painterResource(R.drawable.astral_logo),
+                    contentDescription = "AstralDeep",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxWidth(0.78f).height(96.dp),
+                )
+                Spacer(Modifier.height(14.dp))
+                Text(
+                    text = "Your adaptive AI workspace",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 15.sp,
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(Modifier.height(40.dp))
+                GradientButton(text = "Sign in", onClick = onSignIn)
+                error?.let {
+                    Spacer(Modifier.height(18.dp))
+                    Text(
+                        text = it,
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 13.sp,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+                Spacer(Modifier.height(28.dp))
+                Text(
+                    text = "Secured by Keycloak · UK AI",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                    fontSize = 12.sp,
+                )
+            }
+        }
+    }
+}
+
+/** The signature indigo→purple pill button used for the primary sign-in action. */
+@Composable
+private fun GradientButton(text: String, onClick: () -> Unit) {
+    Box(
+        modifier =
+            Modifier
+                .widthIn(min = 220.dp)
+                .clip(RoundedCornerShape(26.dp))
+                .background(AstralColors.AccentBrush)
+                .clickable(onClick = onClick)
+                .padding(vertical = 15.dp, horizontal = 32.dp),
+        contentAlignment = Alignment.Center,
     ) {
-        Text("AstralBody", style = MaterialTheme.typography.headlineMedium)
-        Spacer(Modifier.height(24.dp))
-        Button(onClick = onSignIn) { Text("Sign in") }
-        if (devAvailable) {
-            TextButton(onClick = onDevSignIn) { Text("Dev sign-in (debug)") }
-        }
-        error?.let {
-            Spacer(Modifier.height(12.dp))
-            Text(text = it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-        }
+        Text(text = text, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
     }
 }
