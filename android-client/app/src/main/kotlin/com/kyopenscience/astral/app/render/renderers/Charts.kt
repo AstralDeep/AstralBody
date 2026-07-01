@@ -33,8 +33,14 @@ import kotlin.math.min
 
 private val pieColors =
     listOf(
-        Color(0xFF6366F1), Color(0xFF8B5CF6), Color(0xFF06B6D4), Color(0xFF22C55E),
-        Color(0xFFEAB308), Color(0xFFEF4444), Color(0xFFEC4899), Color(0xFF14B8A6),
+        Color(0xFF6366F1),
+        Color(0xFF8B5CF6),
+        Color(0xFF06B6D4),
+        Color(0xFF22C55E),
+        Color(0xFFEAB308),
+        Color(0xFFEF4444),
+        Color(0xFFEC4899),
+        Color(0xFF14B8A6),
     )
 
 private fun Component.values(): List<Double> = numList("values").ifEmpty { numList("data") }

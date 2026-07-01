@@ -36,7 +36,10 @@ fun Renderer.registerDataRenderers(): Renderer =
     }
 
 @Composable
-private fun ListPrimitive(c: Component, renderChild: @Composable (Component) -> Unit) {
+private fun ListPrimitive(
+    c: Component,
+    renderChild: @Composable (Component) -> Unit,
+) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         if (c.children.isNotEmpty()) {
             c.children.forEach { renderChild(it) }
@@ -75,7 +78,10 @@ private fun TablePrimitive(c: Component) {
 }
 
 @Composable
-private fun TabsPrimitive(c: Component, renderChild: @Composable (Component) -> Unit) {
+private fun TabsPrimitive(
+    c: Component,
+    renderChild: @Composable (Component) -> Unit,
+) {
     val tabs = c.arr("tabs")?.mapNotNull { it as? JsonObject } ?: emptyList()
     if (tabs.isEmpty()) return
     var selected by remember { mutableIntStateOf(0) }

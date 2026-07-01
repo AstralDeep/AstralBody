@@ -29,8 +29,20 @@ def pump(app: QApplication, seconds: float) -> None:
 
 def grab(win: MainWindow, path: str) -> None:
     win.grab().save(path)
-    status = win.topbar._status.text().encode("ascii", "replace").decode()
+    # Feature 042: status now lives on the brand-mark tooltip (minimal top bar).
+    status = win.topbar._mark.toolTip().encode("ascii", "replace").decode()
     print("saved", path, "| status:", status)
+
+
+def grab_settings_menu(win: MainWindow, app: QApplication, path: str) -> None:
+    """Pop the Settings dropdown (built from the server-owned model) and grab it."""
+    btn = win.topbar.settings_btn
+    win.topbar._menu.popup(btn.mapToGlobal(btn.rect().bottomLeft()))
+    pump(app, 0.6)
+    win.topbar._menu.grab().save(path)
+    labels = [a.text() for a in win.topbar._menu.actions() if a.text()]
+    win.topbar._menu.close()
+    print("saved", path, "| menu:", ", ".join(labels).encode("ascii", "replace").decode())
 
 
 def main() -> int:
@@ -49,6 +61,7 @@ def main() -> int:
 
     pump(app, 5)                       # connect + welcome canvas
     grab(win, os.path.join(args.out, "shot_welcome.png"))
+    grab_settings_menu(win, app, os.path.join(args.out, "shot_settings_menu.png"))
 
     win._input.setText(args.prompt)    # ask a question
     win._send()

@@ -200,6 +200,20 @@ class ChromeRender(Message):
     html: str = ""
     mode: str = "replace"  # reserved; only "replace" in 027
 
+@dataclass
+class ChromeMenu(Message):
+    """Feature 042 — the server-owned chrome model pushed to native clients.
+
+    Carries the same ``ChromeModel.to_dict()`` the web shell renders and
+    ``GET /api/chrome/menu`` returns, so every client (web, Windows, Android,
+    future iOS) renders identical chrome from one definition (Constitution
+    XII). Emitted right after ``register_ui`` for native SDUI targets, and
+    re-emitted on a role/flag change. Web clients ignore it (their shell is
+    already server-rendered from the same model).
+    """
+    type: str = "chrome_menu"
+    model: Dict[str, Any] = field(default_factory=dict)
+
 # --- Agent2Agent Protocol ---
 @dataclass
 class AgentSkill:

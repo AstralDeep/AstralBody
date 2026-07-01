@@ -20,8 +20,7 @@ class TokenStore(context: Context) {
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
         )
 
-    fun load(): AuthState? =
-        prefs.getString(KEY, null)?.let { runCatching { AuthState.jsonDeserialize(it) }.getOrNull() }
+    fun load(): AuthState? = prefs.getString(KEY, null)?.let { runCatching { AuthState.jsonDeserialize(it) }.getOrNull() }
 
     fun save(state: AuthState) {
         prefs.edit().putString(KEY, state.jsonSerializeString()).apply()

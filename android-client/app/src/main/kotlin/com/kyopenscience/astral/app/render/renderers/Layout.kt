@@ -43,7 +43,10 @@ fun Renderer.registerLayoutRenderers(): Renderer =
     }
 
 @Composable
-private fun GridPrimitive(c: Component, renderChild: @Composable (Component) -> Unit) {
+private fun GridPrimitive(
+    c: Component,
+    renderChild: @Composable (Component) -> Unit,
+) {
     val cols = (c.int("columns") ?: 2).coerceAtLeast(1)
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         c.children.chunked(cols).forEach { rowItems ->
@@ -59,7 +62,9 @@ private fun HeroPrimitive(c: Component) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             c.str("title")?.let { Text(it, style = MaterialTheme.typography.headlineSmall) }
-            c.str("subtitle")?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            c.str(
+                "subtitle",
+            )?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
     }
 }
@@ -80,7 +85,9 @@ private fun MetricPrimitive(c: Component) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(c.str("value") ?: "—", style = MaterialTheme.typography.headlineMedium)
-            c.str("label")?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            c.str(
+                "label",
+            )?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
     }
 }
@@ -112,7 +119,10 @@ private fun TimelinePrimitive(c: Component) {
             (el as? JsonObject)?.let { o ->
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("•", color = MaterialTheme.colorScheme.primary)
-                    Text(((o["title"] ?: o["label"] ?: o["text"]) as? JsonPrimitive)?.contentOrNull ?: "", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        ((o["title"] ?: o["label"] ?: o["text"]) as? JsonPrimitive)?.contentOrNull ?: "",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
                 }
             }
         }
@@ -137,7 +147,10 @@ private fun ProgressPrimitive(c: Component) {
 }
 
 @Composable
-private fun CollapsiblePrimitive(c: Component, renderChild: @Composable (Component) -> Unit) {
+private fun CollapsiblePrimitive(
+    c: Component,
+    renderChild: @Composable (Component) -> Unit,
+) {
     var expanded by remember { mutableStateOf(false) }
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {

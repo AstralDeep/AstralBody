@@ -42,7 +42,9 @@ class WireTest {
     fun decodes_ui_stream_data() {
         val r =
             assertIs<Inbound.UiStreamData>(
-                Wire.decode("""{"type":"ui_stream_data","stream_id":"s1","session_id":"chatA","seq":3,"components":[{"type":"text"}],"terminal":false}"""),
+                Wire.decode(
+                    """{"type":"ui_stream_data","stream_id":"s1","session_id":"chatA","seq":3,"components":[{"type":"text"}],"terminal":false}""",
+                ),
             )
         assertEquals("s1", r.streamId)
         assertEquals(3, r.seq)
@@ -54,7 +56,9 @@ class WireTest {
     fun decodes_stream_error_push_shape() {
         val r =
             assertIs<Inbound.StreamErrorMsg>(
-                Wire.decode("""{"type":"stream_error","request_action":"stream_subscribe","session_id":"chatA","payload":{"stream_id":"s1","code":"blocked","message":"no"}}"""),
+                Wire.decode(
+                    """{"type":"stream_error","request_action":"stream_subscribe","session_id":"chatA","payload":{"stream_id":"s1","code":"blocked","message":"no"}}""",
+                ),
             )
         assertEquals("s1", r.streamId)
         assertEquals("blocked", r.error.code)
@@ -65,7 +69,9 @@ class WireTest {
     fun decodes_agent_list_with_scopes() {
         val r =
             assertIs<Inbound.AgentList>(
-                Wire.decode("""{"type":"agent_list","agents":[{"id":"a1","name":"Weather","description":"d","is_public":true,"scopes":{"tools:read":true,"tools:write":false}}]}"""),
+                Wire.decode(
+                    """{"type":"agent_list","agents":[{"id":"a1","name":"Weather","description":"d","is_public":true,"scopes":{"tools:read":true,"tools:write":false}}]}""",
+                ),
             )
         assertEquals(1, r.agents.size)
         assertTrue(r.agents[0].isPublic)

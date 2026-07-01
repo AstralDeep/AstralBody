@@ -1158,6 +1158,27 @@ class Orchestrator:
                         "speech_server_available": bool(os.getenv("SPEACHES_URL", "").strip()),
                     }))
 
+                    # Feature 042: native SDUI clients (Windows/Android) render
+                    # their top bar + settings menu from the single server-owned
+                    # chrome model. Push it right after the handshake (the web
+                    # shell already renders the SAME model server-side, so it
+                    # neither needs nor receives this frame — Constitution XII).
+                    try:
+                        _dt = getattr(rote_profile.device_type, "value", str(rote_profile.device_type))
+                        if _dt in ("windows", "android"):
+                            from shared.protocol import ChromeMenu
+                            from webrender.chrome.menu_model import menu_model_dict
+                            _roles = list((user_data.get("realm_access") or {}).get("roles") or [])
+                            for _c in (user_data.get("resource_access") or {}).values():
+                                _roles.extend((_c or {}).get("roles") or [])
+                            # Native clients: ADMIN TOOLS is web-only.
+                            await self._safe_send(
+                                websocket,
+                                ChromeMenu(model=menu_model_dict(_roles, include_admin=False)).to_json(),
+                            )
+                    except Exception as _e:  # pragma: no cover — non-fatal push
+                        logger.debug(f"chrome_menu push failed (non-fatal): {_e}")
+
                     # Send stored user preferences (theme, etc.)
                     user_id = user_data.get("sub", "legacy")
                     try:
@@ -8289,7 +8310,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         app.mount("/static", _NoCacheStaticFiles(directory=_os.path.join(_webrender_dir, "static")), name="static")
 
         # Mount REST API routers
-        from orchestrator.api import chat_router, component_router, agent_router, dashboard_router, draft_router, voice_router, task_router, async_task_router, user_router
+        from orchestrator.api import chat_router, component_router, agent_router, dashboard_router, draft_router, voice_router, task_router, async_task_router, user_router, chrome_router
         from orchestrator.auth import auth_router
         from orchestrator.web_auth import web_auth_router  # Feature 026 — server-side OIDC
         from orchestrator.attachments.router import attachments_router
@@ -8312,6 +8333,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         app.include_router(user_router)  # Feature 013 — tool-selection prefs
         app.include_router(draft_router)
         app.include_router(dashboard_router)
+        app.include_router(chrome_router)  # Feature 042 — GET /api/chrome/menu
         app.include_router(auth_router)
         app.include_router(web_auth_router)  # Feature 026 — /auth/login,/callback,/session,/logout
         app.include_router(attachments_router)

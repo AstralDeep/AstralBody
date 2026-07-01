@@ -20,14 +20,20 @@ const val STREAM_NODE_PREFIX = "stream-"
 fun streamNodeId(streamId: String): String = "$STREAM_NODE_PREFIX$streamId"
 
 /** (canvasComponentId, dedupeKey) for a frame — push keys on stream_id, legacy poll on tool_name. */
-private fun nodeKey(streamId: String?, toolName: String?): Pair<String, String>? =
+private fun nodeKey(
+    streamId: String?,
+    toolName: String?,
+): Pair<String, String>? =
     when {
         streamId != null -> streamNodeId(streamId) to streamId
         toolName != null -> "${STREAM_NODE_PREFIX}tool-$toolName" to "tool:$toolName"
         else -> null
     }
 
-private fun errorComponent(node: String, err: StreamError): Component {
+private fun errorComponent(
+    node: String,
+    err: StreamError,
+): Component {
     val retryable = err.retryable
     val text = err.message ?: err.code ?: "stream error"
     val attrs =
@@ -40,7 +46,10 @@ private fun errorComponent(node: String, err: StreamError): Component {
     return Component(type = "alert", id = node, attributes = attrs, children = emptyList())
 }
 
-private fun containerOf(node: String, comps: List<Component>): Component =
+private fun containerOf(
+    node: String,
+    comps: List<Component>,
+): Component =
     Component(
         type = "container",
         id = node,

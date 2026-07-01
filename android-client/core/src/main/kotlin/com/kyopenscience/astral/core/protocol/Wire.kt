@@ -2,10 +2,10 @@ package com.kyopenscience.astral.core.protocol
 
 import com.kyopenscience.astral.core.sdui.CanvasOp
 import com.kyopenscience.astral.core.sdui.Component
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
@@ -29,8 +29,9 @@ object Wire {
         }
 
     fun decode(raw: String): Inbound {
-        val root = runCatching { json.parseToJsonElement(raw) as? JsonObject }.getOrNull()
-            ?: return Inbound.Unknown("")
+        val root =
+            runCatching { json.parseToJsonElement(raw) as? JsonObject }.getOrNull()
+                ?: return Inbound.Unknown("")
         return decode(root)
     }
 
@@ -65,8 +66,9 @@ object Wire {
                     sessionId = root.str("session_id"),
                     streamId = payload?.str("stream_id"),
                     toolName = payload?.str("tool_name") ?: root.str("tool_name"),
-                    error = errorFromJson(payload)
-                        ?: StreamError(code = root.str("error"), message = root.str("error")),
+                    error =
+                        errorFromJson(payload)
+                            ?: StreamError(code = root.str("error"), message = root.str("error")),
                 )
             }
             "stream_unsubscribed" -> Inbound.StreamUnsubscribed(root.str("tool_name"))
@@ -81,13 +83,20 @@ object Wire {
             "history_list" -> Inbound.HistoryList(chatsFromJson(root.arr("chats")))
             "chat_status" -> Inbound.ChatStatus(root.str("status"), root.str("message"))
             "chrome_render" -> Inbound.ChromeRender(root.str("region") ?: "modal", root.str("html").orEmpty())
+            "chrome_menu" ->
+                com.kyopenscience.astral.core.chrome.ChromeMenuModel.fromJson(root.obj("model"))
+                    ?.let { Inbound.ChromeMenu(it) } ?: Inbound.Unknown(type)
             "auth_required" -> Inbound.AuthRequired(root.str("reason"))
             else -> Inbound.Unknown(type)
         }
 
     // ---- outbound encoders ----
 
-    fun encodeRegisterUi(token: String, sessionId: String?, device: DeviceCapabilities): String =
+    fun encodeRegisterUi(
+        token: String,
+        sessionId: String?,
+        device: DeviceCapabilities,
+    ): String =
         buildJsonObject {
             put("type", "register_ui")
             put("token", token)
@@ -109,7 +118,11 @@ object Wire {
             put("resumed", false)
         }.toString()
 
-    fun encodeUiEvent(action: String, sessionId: String?, payload: JsonObject = JsonObject(emptyMap())): String =
+    fun encodeUiEvent(
+        action: String,
+        sessionId: String?,
+        payload: JsonObject = JsonObject(emptyMap()),
+    ): String =
         buildJsonObject {
             put("type", "ui_event")
             put("action", action)
@@ -148,9 +161,13 @@ object Wire {
     // ---- helpers ----
 
     private fun JsonObject.str(key: String): String? = (this[key] as? JsonPrimitive)?.contentOrNull
+
     private fun JsonObject.int(key: String): Int? = (this[key] as? JsonPrimitive)?.intOrNull
+
     private fun JsonObject.bool(key: String): Boolean? = (this[key] as? JsonPrimitive)?.booleanOrNull
+
     private fun JsonObject.arr(key: String): JsonArray? = this[key] as? JsonArray
+
     private fun JsonObject.obj(key: String): JsonObject? = this[key] as? JsonObject
 
     private fun JsonObject.boolMap(key: String): Map<String, Boolean> =

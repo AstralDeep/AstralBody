@@ -167,7 +167,10 @@ class MainActivity : ComponentActivity() {
  * hero; a single gradient "Sign in" launches the Keycloak PKCE flow.
  */
 @Composable
-private fun SignInScreen(error: String?, onSignIn: () -> Unit) {
+private fun SignInScreen(
+    error: String?,
+    onSignIn: () -> Unit,
+) {
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Box(
             modifier = Modifier.fillMaxSize().background(AstralColors.BackdropBrush).padding(28.dp),
@@ -215,7 +218,10 @@ private fun SignInScreen(error: String?, onSignIn: () -> Unit) {
 
 /** The signature indigo→purple pill button used for the primary sign-in action. */
 @Composable
-private fun GradientButton(text: String, onClick: () -> Unit) {
+private fun GradientButton(
+    text: String,
+    onClick: () -> Unit,
+) {
     Box(
         modifier =
             Modifier

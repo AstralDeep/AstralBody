@@ -12,9 +12,60 @@ from astral_client.rest import (
     OUTCOMES,
     RestError,
     audit_url,
+    chrome_menu_url,
     fetch_json,
     parse_audit_response,
+    parse_chrome_menu,
 )
+
+
+# ── feature 042: chrome menu model (single server-owned source of truth) ──────
+
+def test_chrome_menu_url():
+    assert chrome_menu_url("http://h:8001/") == "http://h:8001/api/chrome/menu"
+
+
+def test_parse_chrome_menu_full():
+    model = {
+        "version": 1,
+        "topbar": [
+            {"key": "brand", "kind": "brand"},
+            {"key": "timeline", "kind": "action", "label": "Workspace timeline",
+             "icon": "history", "action": {"surface": "workspace_timeline", "params": {}}},
+            {"key": "settings", "kind": "menu", "label": "Settings", "icon": "gear"},
+        ],
+        "menu": [
+            {"key": "account", "label": "Account", "items": [
+                {"key": "agents", "label": "Agents & permissions", "surface": "agents", "params": {}},
+                {"key": "audit", "label": "Audit log", "surface": "audit", "params": {}},
+            ]},
+            {"key": "admin", "label": "Admin tools", "admin_only": True, "items": [
+                {"key": "tq", "label": "Tool quality", "surface": "admin_tools", "params": {"tab": "quality"}},
+            ]},
+        ],
+        "signout": {"key": "signout", "label": "Sign out", "style": "danger", "action": "logout"},
+    }
+    parsed = parse_chrome_menu(model)
+    assert [s["label"] for s in parsed["sections"]] == ["Account", "Admin tools"]
+    assert [i["surface"] for i in parsed["sections"][0]["items"]] == ["agents", "audit"]
+    assert parsed["sections"][0]["items"][0]["label"] == "Agents & permissions"
+    assert parsed["sections"][1]["items"][0]["params"] == {"tab": "quality"}
+    assert [a["surface"] for a in parsed["topbar_actions"]] == ["workspace_timeline"]
+    assert parsed["signout"] == {"label": "Sign out", "action": "logout"}
+
+
+def test_parse_chrome_menu_tolerates_empty_and_malformed():
+    assert parse_chrome_menu({}) == {
+        "sections": [], "topbar_actions": [],
+        "signout": {"label": "Sign out", "action": "logout"},
+    }
+    assert parse_chrome_menu(None)["sections"] == []
+    # items without a surface are dropped; a group with no valid items is dropped.
+    m = {"menu": [
+        {"label": "Empty", "items": [{"label": "nosurf"}]},
+        {"label": "Ok", "items": [{"label": "A", "surface": "agents"}]},
+    ]}
+    assert [s["label"] for s in parse_chrome_menu(m)["sections"]] == ["Ok"]
 
 
 def test_audit_url_minimal():

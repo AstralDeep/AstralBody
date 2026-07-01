@@ -1,14 +1,22 @@
-<!-- Themed line icon (settings gear). Tinted at use-site. -->
+<!-- Themed line icon (settings gear). Tinted at use-site. The gear path reaches
+     the 24-unit viewport edges, so it is inset ~12% via a scale group to keep the
+     2px stroke from clipping at small sizes (was rendering "cut off"). -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
     android:viewportWidth="24"
     android:viewportHeight="24">
-    <path
-        android:strokeColor="#FFFFFFFF"
-        android:strokeWidth="2"
-        android:strokeLineCap="round"
-        android:strokeLineJoin="round"
-        android:fillColor="#00000000"
-        android:pathData="M12,9 a3,3 0 1 0 0,6 a3,3 0 1 0 0,-6 z M19.4,15 a1.65,1.65 0 0 0 0.33,1.82 l0.06,0.06 a2,2 0 0 1 0,2.83 a2,2 0 0 1 -2.83,0 l-0.06,-0.06 a1.65,1.65 0 0 0 -1.82,-0.33 a1.65,1.65 0 0 0 -1,1.51 V21 a2,2 0 0 1 -2,2 a2,2 0 0 1 -2,-2 v-0.09 a1.65,1.65 0 0 0 -1,-1.51 a1.65,1.65 0 0 0 -1.82,0.33 l-0.06,0.06 a2,2 0 0 1 -2.83,0 a2,2 0 0 1 0,-2.83 l0.06,-0.06 a1.65,1.65 0 0 0 0.33,-1.82 a1.65,1.65 0 0 0 -1.51,-1 H3 a2,2 0 0 1 -2,-2 a2,2 0 0 1 2,-2 h0.09 a1.65,1.65 0 0 0 1.51,-1 a1.65,1.65 0 0 0 -0.33,-1.82 l-0.06,-0.06 a2,2 0 0 1 0,-2.83 a2,2 0 0 1 2.83,0 l0.06,0.06 a1.65,1.65 0 0 0 1.82,0.33 H9 a1.65,1.65 0 0 0 1,-1.51 V3 a2,2 0 0 1 2,-2 a2,2 0 0 1 2,2 v0.09 a1.65,1.65 0 0 0 1,1.51 a1.65,1.65 0 0 0 1.82,-0.33 l0.06,-0.06 a2,2 0 0 1 2.83,0 a2,2 0 0 1 0,2.83 l-0.06,0.06 a1.65,1.65 0 0 0 -0.33,1.82 V15 z" />
+    <group
+        android:pivotX="12"
+        android:pivotY="12"
+        android:scaleX="0.88"
+        android:scaleY="0.88">
+        <path
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="2"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:fillColor="#00000000"
+            android:pathData="M12,9 a3,3 0 1 0 0,6 a3,3 0 1 0 0,-6 z M19.4,15 a1.65,1.65 0 0 0 0.33,1.82 l0.06,0.06 a2,2 0 0 1 0,2.83 a2,2 0 0 1 -2.83,0 l-0.06,-0.06 a1.65,1.65 0 0 0 -1.82,-0.33 a1.65,1.65 0 0 0 -1,1.51 V21 a2,2 0 0 1 -2,2 a2,2 0 0 1 -2,-2 v-0.09 a1.65,1.65 0 0 0 -1,-1.51 a1.65,1.65 0 0 0 -1.82,0.33 l-0.06,0.06 a2,2 0 0 1 -2.83,0 a2,2 0 0 1 0,-2.83 l0.06,-0.06 a1.65,1.65 0 0 0 0.33,-1.82 a1.65,1.65 0 0 0 -1.51,-1 H3 a2,2 0 0 1 -2,-2 a2,2 0 0 1 2,-2 h0.09 a1.65,1.65 0 0 0 1.51,-1 a1.65,1.65 0 0 0 -0.33,-1.82 l-0.06,-0.06 a2,2 0 0 1 0,-2.83 a2,2 0 0 1 2.83,0 l0.06,0.06 a1.65,1.65 0 0 0 1.82,0.33 H9 a1.65,1.65 0 0 0 1,-1.51 V3 a2,2 0 0 1 2,-2 a2,2 0 0 1 2,2 v0.09 a1.65,1.65 0 0 0 1,1.51 a1.65,1.65 0 0 0 1.82,-0.33 l0.06,-0.06 a2,2 0 0 1 2.83,0 a2,2 0 0 1 0,2.83 l-0.06,0.06 a1.65,1.65 0 0 0 -0.33,1.82 V15 z" />
+    </group>
 </vector>

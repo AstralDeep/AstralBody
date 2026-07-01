@@ -16,7 +16,10 @@ data class CanvasOp(
  * Mirrors the Windows client's `Canvas.apply_ops`.
  */
 object Canvas {
-    fun apply(current: List<Component>, ops: List<CanvasOp>): List<Component> {
+    fun apply(
+        current: List<Component>,
+        ops: List<CanvasOp>,
+    ): List<Component> {
         val order = ArrayList<String>(current.size)
         val byId = LinkedHashMap<String, Component>(current.size)
         current.forEachIndexed { index, c ->

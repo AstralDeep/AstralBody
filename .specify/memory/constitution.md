@@ -1,6 +1,34 @@
 <!--
   Sync Impact Report
   ==================
+  Version change: 2.2.0 → 2.3.0 (MINOR — Principle XII added: cross-client
+    consistency; Principle II expanded: shared server-owned chrome + minimal
+    client wrapping; Principle X clarified: verify every affected client)
+
+  Amendment (2026-07-01, v2.3.0):
+    XII. Cross-Client Consistency (NEW) — every client target (web, desktop,
+        native mobile, and any future client such as iOS) MUST present the
+        same user-facing capabilities and application chrome, rendered from
+        shared, server-owned definitions. No client may add, omit, rename,
+        reorder, or otherwise diverge from those shared definitions; a new
+        client is a thin consumer of them, never a parallel reimplementation.
+    II. UI Delivery Architecture — expanded: the application chrome (top-bar
+        controls + settings-menu structure) MUST be described ONCE, server-
+        side, and consumed by every client; clients hold only minimal generic
+        wrapping and MUST NOT reimplement generative UI or maintain a parallel
+        per-client definition of the menu/chrome. Generative UI remains owned
+        by the orchestrator (render) + ROTE (per-device adaptation).
+    X. Production Readiness — clarified: a UI change MUST be exercised against
+        EVERY affected client target (e.g. web in a real browser, the desktop
+        client launched, the native mobile client on an emulator), not just
+        one, before it is declared complete.
+    Templates requiring updates:
+      ✅ .specify/templates/plan-template.md — generic Constitution Check, compatible
+      ✅ .specify/templates/spec-template.md — generic, compatible
+      ✅ .specify/templates/tasks-template.md — generic, compatible
+    Follow-up TODOs: None
+
+  -- Prior amendment (2026-06-24, v2.2.0) --------------------------------
   Version change: 2.1.0 → 2.2.0 (MINOR — Principle VII expanded: in-process
     first-party agents + owner-safe marking)
 
@@ -152,6 +180,18 @@ application framework acting as the source of truth for UI.
   constitution amendment. Client-side assets emitted by the
   orchestrator's render layer for a target (e.g., HTML/CSS/JS
   for the web) are permitted and expected.
+- The application **chrome** (the top-bar controls and the
+  settings-menu structure) MUST be described ONCE on the server
+  as a single, role-aware, data-driven source of truth, and
+  every client MUST render its chrome from that description.
+  Clients MUST NOT hard-code a parallel menu/chrome definition.
+- Clients hold only minimal, generic wrapping (a shell plus a
+  reuse of the shared server-driven-UI renderer). They MUST NOT
+  reimplement generative UI or settings surfaces natively in a
+  way that can diverge from the server; settings surfaces are
+  composed from `astralprims` primitives, rendered by the
+  orchestrator, and adapted per device by ROTE, exactly like any
+  other server-driven UI.
 
 **Rationale**: Separating primitive **definition** (in the
 `astralprims` package) from **rendering** (in the orchestrator,
@@ -320,10 +360,13 @@ and the happy path works."
   authentication, deployment topology, container images,
   background workers) MUST be validated end-to-end in a
   staging environment before merge.
-- UI changes MUST be exercised against a real client target
-  (e.g., a real browser for the web) running against the live
-  backend before being declared complete; type-checks and unit
-  tests do not verify feature correctness.
+- UI changes MUST be exercised against EVERY affected client
+  target (e.g., a real browser for the web, the desktop client
+  launched, the native mobile client on an emulator or device)
+  running against the live backend before being declared
+  complete; type-checks and unit tests do not verify feature
+  correctness, and verifying one client does not stand in for
+  the others (Principle XII).
 
 **Rationale**: A change that is "almost done" is a future
 incident. Setting the merge bar at production-ready — not
@@ -375,6 +418,48 @@ as their enforcement. A named, versioned gate set turns
 machine verdict, and the registry-published image makes every
 green main commit deployable by pull.
 
+### XII. Cross-Client Consistency
+
+Every client target MUST present the same user-facing
+capabilities and application chrome. Consistency across clients
+is a requirement, not an aspiration.
+
+- All current and future clients — the web experience, the
+  desktop client, native mobile clients, and any later target
+  (e.g. an iOS client) — MUST expose the same menu structure,
+  the same settings surfaces, and the same functionality, so a
+  user moving between clients finds the same options in the same
+  places.
+- The menu/chrome structure and the settings surfaces MUST be
+  sourced from the shared, server-owned definitions (Principle
+  II). No client may add, omit, rename, reorder, or otherwise
+  diverge from those shared definitions. Per-client cosmetic
+  adaptation to the device form factor is expected; changing
+  which capabilities exist or where they live is not.
+- Role-gating (e.g. admin-only surfaces) MUST be derived from
+  the same server-owned, verified-role source on every client,
+  and MUST be enforced server-side regardless of what a client
+  displays.
+- Adding a new client target MUST be achievable by making it a
+  thin consumer of the shared chrome definition and the shared
+  server-driven-UI renderer — NOT by re-specifying the menu or
+  re-implementing settings surfaces for that client.
+- A change to a user-facing capability MUST be reflected on
+  every client without a per-client code change wherever the
+  shared server-owned definition makes that possible; where a
+  client genuinely cannot yet render something, it MUST degrade
+  gracefully (labeled placeholder), never silently omit or
+  diverge.
+
+**Rationale**: Divergent clients erode trust, multiply
+maintenance, and produce exactly the drift this project has
+already seen (duplicated and missing menu items across the web,
+desktop, and mobile clients). Anchoring every client to one
+server-owned definition and one shared renderer makes
+"the clients match" a structural guarantee rather than a
+recurring manual reconciliation, and keeps new client targets
+cheap and faithful.
+
 ## Technology Stack
 
 - **Backend**: Python (FastAPI or equivalent ASGI framework)
@@ -410,6 +495,12 @@ green main commit deployable by pull.
   that add or change how primitives are presented MUST do so in
   the orchestrator's render layer, with a renderer for each
   supported client target and per-device adaptation via ROTE.
+- PRs that change the application chrome (top-bar controls or
+  the settings menu) or that add, remove, or relocate a
+  user-facing capability MUST update the single server-owned
+  chrome definition rather than any per-client copy, and MUST
+  verify parity on every affected client target before merge
+  (Principle XII).
 - PRs MUST be production-ready before merge — reviewers MUST
   reject changes that contain stubs, debug-only code, missing
   observability for new features, or untested error paths.
@@ -434,4 +525,4 @@ guidance when conflicts arise.
   adherence to these principles. Violations MUST be resolved
   before merge.
 
-**Version**: 2.2.0 | **Ratified**: 2026-03-11 | **Last Amended**: 2026-06-24
+**Version**: 2.3.0 | **Ratified**: 2026-03-11 | **Last Amended**: 2026-07-01

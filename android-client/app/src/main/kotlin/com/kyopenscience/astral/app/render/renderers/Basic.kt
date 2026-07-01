@@ -37,7 +37,10 @@ private fun TextPrimitive(c: Component) {
 }
 
 @Composable
-private fun CardPrimitive(c: Component, renderChild: @Composable (Component) -> Unit) {
+private fun CardPrimitive(
+    c: Component,
+    renderChild: @Composable (Component) -> Unit,
+) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             c.str("title")?.let { Text(it, style = MaterialTheme.typography.titleMedium) }
@@ -47,7 +50,10 @@ private fun CardPrimitive(c: Component, renderChild: @Composable (Component) -> 
 }
 
 @Composable
-private fun ContainerPrimitive(c: Component, renderChild: @Composable (Component) -> Unit) {
+private fun ContainerPrimitive(
+    c: Component,
+    renderChild: @Composable (Component) -> Unit,
+) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         c.children.forEach { renderChild(it) }
     }
@@ -71,7 +77,10 @@ private fun AlertPrimitive(c: Component) {
 }
 
 @Composable
-private fun ButtonPrimitive(c: Component, emit: Emit) {
+private fun ButtonPrimitive(
+    c: Component,
+    emit: Emit,
+) {
     val action = c.str("action")
     Button(
         onClick = { if (action != null) emit.event(action, c.payload()) },
