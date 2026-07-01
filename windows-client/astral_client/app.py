@@ -266,6 +266,45 @@ class Canvas(QScrollArea):
             self._by_id[cid] = new_w
 
 
+class SurfaceDialog(QDialog):
+    """Feature 043 — a settings surface delivered as SDUI (``chrome_surface``),
+    rendered natively with the SAME component renderer used for the chat canvas.
+    Replaces the "coming soon" placeholder for the ported surfaces (theme, user
+    guide, LLM settings, personalization)."""
+
+    def __init__(self, parent, emit):
+        super().__init__(parent)
+        self.setModal(False)
+        self.resize(600, 560)
+        self._ctx = RenderContext(emit=emit)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(16, 14, 16, 14)
+        outer.setSpacing(10)
+        self._title = QLabel("Settings")
+        self._title.setStyleSheet(f"color:{T.TEXT}; font-size:15px; font-weight:600;")
+        outer.addWidget(self._title)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        self._inner = QWidget()
+        self._lay = QVBoxLayout(self._inner)
+        self._lay.setContentsMargins(0, 0, 0, 0)
+        self._lay.setSpacing(12)
+        self._lay.addStretch(1)
+        scroll.setWidget(self._inner)
+        outer.addWidget(scroll, 1)
+
+    def set_surface(self, title: str, components: list) -> None:
+        """Replace the modal body with a freshly-rendered component list."""
+        self.setWindowTitle(title or "Settings")
+        self._title.setText(title or "Settings")
+        while self._lay.count() > 1:
+            item = self._lay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        for comp in components or []:
+            self._lay.insertWidget(self._lay.count() - 1, render(comp, self._ctx))
+
+
 class TopBar(QFrame):
     """Native app chrome header, identical across clients (feature 042 —
     Constitution XII): a small brand mark · a New-chat button · a Recent-chats
@@ -805,6 +844,7 @@ class MainWindow(QMainWindow):
         # Bearer token for REST surfaces (audit log); kept current on reconnect.
         self._token = token
         self._audit_dialog: Optional[AuditDialog] = None
+        self._surface_dialog: Optional[SurfaceDialog] = None  # feature 043 (SDUI settings)
 
         ctx = RenderContext(emit=self._emit)
         self.client = OrchestratorClient(
@@ -934,11 +974,14 @@ class MainWindow(QMainWindow):
         elif s == "workspace_timeline":
             self._open_history()
         else:
-            QMessageBox.information(
-                self,
-                label or "Settings",
-                f"“{label or s}” is coming to the desktop app soon.",
-            )
+            # Feature 043: request the SDUI surface and render it natively when
+            # the chrome_surface frame arrives (replaces the placeholder).
+            if self._surface_dialog is None:
+                self._surface_dialog = SurfaceDialog(self, self._emit)
+            self._surface_dialog.set_surface(label or s, [])
+            self._surface_dialog.show()
+            self._surface_dialog.raise_()
+            self.client.send_event("chrome_open", {"surface": s, "params": {}})
 
     def _open_history(self) -> None:
         if self._history_dialog is None:
@@ -953,6 +996,16 @@ class MainWindow(QMainWindow):
         self._audit_dialog.show()
         self._audit_dialog.raise_()
         self._query_audit({}, True)  # initial page (no filters)
+
+    def _on_chrome_surface(self, msg: dict) -> None:
+        """Feature 043 — render a pushed SDUI settings surface natively (open the
+        dialog if a re-render arrives for a surface the user opened)."""
+        if self._surface_dialog is None:
+            self._surface_dialog = SurfaceDialog(self, self._emit)
+        self._surface_dialog.set_surface(
+            msg.get("title") or "Settings", msg.get("components") or [])
+        self._surface_dialog.show()
+        self._surface_dialog.raise_()
 
     def _current_token(self) -> str:
         """The freshest bearer token: the OIDC session's (refreshed) access
@@ -1134,6 +1187,9 @@ class MainWindow(QMainWindow):
             # Feature 042: (re)build the Settings dropdown from the server-owned
             # menu model (pushed after register / on role/flag change).
             self.topbar.set_menu_model(msg.get("model") or {})
+        elif t == "chrome_surface":
+            # Feature 043: a settings surface delivered as SDUI components.
+            self._on_chrome_surface(msg)
         elif t == "chat_status":
             st = msg.get("status")
             if st in ("thinking", "executing", "fixing"):

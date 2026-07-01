@@ -460,6 +460,21 @@ def _r_param_picker(c, ctx):
                 edit.setText(str(default))
             getters[name] = lambda e=edit: None if e.text() == "" else _to_number(e.text())
             lay.addWidget(edit)
+        elif kind == "password":
+            # Feature 043: write-only key field — never pre-filled (blank = keep).
+            lay.addWidget(_label(label, color=T.MUTED, size=12))
+            edit = QLineEdit()
+            edit.setEchoMode(QLineEdit.EchoMode.Password)
+            getters[name] = lambda e=edit: e.text()
+            lay.addWidget(edit)
+        elif kind == "textarea":
+            lay.addWidget(_label(label, color=T.MUTED, size=12))
+            area = QPlainTextEdit()
+            if default is not None:
+                area.setPlainText(str(default))
+            area.setMinimumHeight(72)
+            getters[name] = lambda a=area: a.toPlainText()
+            lay.addWidget(area)
         else:  # text (default)
             lay.addWidget(_label(label, color=T.MUTED, size=12))
             edit = QLineEdit()
@@ -469,19 +484,43 @@ def _r_param_picker(c, ctx):
             lay.addWidget(edit)
         if field.get("help"):
             lay.addWidget(_label(field["help"], color=T.MUTED, size=11))
-    template = c.get("submit_message_template", "")
-    submit = QPushButton(str(c.get("submit_label", "Submit")))
-    submit.setObjectName("primary")
-    submit.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
-
-    def _submit():
-        state = {k: g() for k, g in getters.items()}
-        ctx.emit("chat_message", {"message": _fill_template(template, state)})
-
-    submit.clicked.connect(_submit)
+    # Feature 043: settings forms (LLM, Personalization) submit their collected
+    # fields to a chrome_* action (action-submit) rather than a chat message. A
+    # form may carry several action buttons (Load / Test / Save) that all submit
+    # the SAME fields. Falls back to the legacy chat_message submit otherwise.
+    actions = c.get("actions") if isinstance(c.get("actions"), list) else []
+    if not actions and c.get("submit_action"):
+        actions = [{"label": c.get("submit_label", "Save"), "action": c["submit_action"],
+                    "variant": "primary", "payload": c.get("submit_payload") or {}}]
     row = QHBoxLayout()
     row.addStretch(1)
-    row.addWidget(submit)
+    if actions:
+        def _make(action, extra):
+            def _s():
+                state = {k: g() for k, g in getters.items()}
+                ctx.emit(action, {"fields": state, **(extra or {})})
+            return _s
+        for a in actions:
+            if not isinstance(a, dict) or not a.get("action"):
+                continue
+            btn = QPushButton(str(a.get("label") or "Submit"))
+            if (a.get("variant") or "") == "primary":
+                btn.setObjectName("primary")
+            btn.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+            btn.clicked.connect(_make(a["action"], a.get("payload") or {}))
+            row.addWidget(btn)
+    else:
+        template = c.get("submit_message_template", "")
+        submit = QPushButton(str(c.get("submit_label", "Submit")))
+        submit.setObjectName("primary")
+        submit.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+
+        def _submit():
+            state = {k: g() for k, g in getters.items()}
+            ctx.emit("chat_message", {"message": _fill_template(template, state)})
+
+        submit.clicked.connect(_submit)
+        row.addWidget(submit)
     lay.addLayout(row)
     return frame
 
@@ -842,6 +881,41 @@ REGISTRY: Dict[str, Callable[[dict, RenderContext], QWidget]] = {
     "chat_history": _r_chat_history,
     "skeleton": _r_skeleton,
 }
+
+
+def _r_color_picker(c, ctx):
+    """Feature 043 — a theme channel swatch + hex readout (Theme surface).
+
+    Read-only display of one ``--astral-*`` colour; the preset buttons are the
+    primary theme control, so per-channel live editing is a later refinement.
+    """
+    w = QWidget()
+    lay = QHBoxLayout()
+    lay.setContentsMargins(0, 2, 0, 2)
+    lay.setSpacing(8)
+    w.setLayout(lay)
+    val = str(c.get("value") or "#000000")
+    swatch = QFrame()
+    swatch.setFixedSize(22, 22)
+    swatch.setStyleSheet(
+        f"background:{val}; border:1px solid rgba(255,255,255,0.2); border-radius:4px;")
+    lay.addWidget(swatch)
+    lay.addWidget(_label(str(c.get("label") or c.get("color_key") or ""), color=T.TEXT, size=13))
+    lay.addStretch(1)
+    lay.addWidget(_label(val, color=T.MUTED, size=12))
+    return w
+
+
+def _r_theme_apply(c, ctx):
+    """Feature 043 — the ``theme_apply`` side-effect carries the chosen preset's
+    palette for the client to apply; it has no visible UI (zero-height spacer).
+    The live restyle (US3) reads ``preset``/``colors`` off this frame."""
+    w = QWidget()
+    w.setFixedHeight(0)
+    return w
+
+
+REGISTRY.update({"color_picker": _r_color_picker, "theme_apply": _r_theme_apply})
 
 
 def render(component: Any, ctx: RenderContext) -> QWidget:
