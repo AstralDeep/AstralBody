@@ -21,6 +21,7 @@ class SurfacesTest {
         rule.setContent {
             AgentsScreen(
                 agents = listOf(Agent("a1", "Weather", "Forecasts", false, mapOf("get_weather" to true))),
+                loading = false,
                 onToggleAgent = { _, _ -> },
                 onToggleTool = { _, _, _ -> },
                 onEnableRecommended = {},
@@ -32,7 +33,7 @@ class SurfacesTest {
     @Test
     fun history_screen_lists_chat() {
         rule.setContent {
-            HistoryScreen(listOf(ChatSummary("c1", "My chat")), onOpen = {})
+            HistoryScreen(listOf(ChatSummary("c1", "My chat")), loading = false, onOpen = {})
         }
         rule.onNodeWithText("My chat").assertIsDisplayed()
     }
@@ -40,7 +41,7 @@ class SurfacesTest {
     @Test
     fun audit_screen_shows_event() {
         rule.setContent {
-            AuditScreen(listOf(AuditEvent("e1", "auth", "login", "success", "2026-06-30")))
+            AuditScreen(listOf(AuditEvent("e1", "auth", "login", "success", "2026-06-30")), loading = false)
         }
         rule.onNodeWithText("auth · login").assertIsDisplayed()
     }

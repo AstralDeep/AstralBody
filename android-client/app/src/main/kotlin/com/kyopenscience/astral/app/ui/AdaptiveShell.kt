@@ -7,11 +7,6 @@ import android.provider.OpenableColumns
 import android.speech.RecognizerIntent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -72,9 +67,6 @@ import com.kyopenscience.astral.app.ui.theme.AstralColors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-
-/** Base tone for the shimmering skeleton placeholder blocks (clearly above the bg). */
-private val SkeletonShade = Color(0xFF313A5C)
 
 /** How the chat + canvas are arranged for the current window width. */
 enum class LayoutMode { Stacked, Split }
@@ -381,40 +373,6 @@ private fun EmptyCanvasHint(modifier: Modifier = Modifier) {
             )
         }
     }
-}
-
-/** Shimmering placeholders shown until the first FINAL canvas commits. */
-@Composable
-private fun SkeletonCanvas(modifier: Modifier = Modifier) {
-    val transition = rememberInfiniteTransition(label = "skeleton")
-    val alpha by transition.animateFloat(
-        initialValue = 0.5f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(850), RepeatMode.Reverse),
-        label = "alpha",
-    )
-    Column(
-        modifier = modifier.padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
-    ) {
-        SkeletonBlock(alpha, heightDp = 28, widthFraction = 0.55f)
-        SkeletonBlock(alpha, heightDp = 120, widthFraction = 1f)
-        SkeletonBlock(alpha, heightDp = 92, widthFraction = 1f)
-        SkeletonBlock(alpha, heightDp = 150, widthFraction = 1f)
-        SkeletonBlock(alpha, heightDp = 40, widthFraction = 0.4f)
-    }
-}
-
-@Composable
-private fun SkeletonBlock(alpha: Float, heightDp: Int, widthFraction: Float) {
-    Box(
-        modifier =
-            Modifier
-                .fillMaxWidth(widthFraction)
-                .heightIn(min = heightDp.dp, max = heightDp.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(SkeletonShade.copy(alpha = alpha)),
-    )
 }
 
 // ---------------------------------------------------------------------------

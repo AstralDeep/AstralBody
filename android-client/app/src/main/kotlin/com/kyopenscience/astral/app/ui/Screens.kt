@@ -30,10 +30,15 @@ import com.kyopenscience.astral.core.protocol.ChatSummary
 @Composable
 fun AgentsScreen(
     agents: List<Agent>,
+    loading: Boolean,
     onToggleAgent: (Agent, Boolean) -> Unit,
     onToggleTool: (Agent, String, Boolean) -> Unit,
     onEnableRecommended: () -> Unit,
 ) {
+    if (loading && agents.isEmpty()) {
+        SkeletonList()
+        return
+    }
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -121,7 +126,11 @@ private fun AgentCard(
 }
 
 @Composable
-fun HistoryScreen(chats: List<ChatSummary>, onOpen: (String) -> Unit) {
+fun HistoryScreen(chats: List<ChatSummary>, loading: Boolean, onOpen: (String) -> Unit) {
+    if (loading && chats.isEmpty()) {
+        SkeletonList()
+        return
+    }
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -142,7 +151,11 @@ fun HistoryScreen(chats: List<ChatSummary>, onOpen: (String) -> Unit) {
 }
 
 @Composable
-fun AuditScreen(events: List<AuditEvent>) {
+fun AuditScreen(events: List<AuditEvent>, loading: Boolean) {
+    if (loading && events.isEmpty()) {
+        SkeletonList()
+        return
+    }
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
