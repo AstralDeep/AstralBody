@@ -8,6 +8,9 @@ import com.kyopenscience.astral.app.rest.AstralRest
 import com.kyopenscience.astral.app.rest.AuditEvent
 import com.kyopenscience.astral.app.transport.ConnectionState
 import com.kyopenscience.astral.app.transport.OrchestratorClient
+import com.kyopenscience.astral.core.chrome.ChromeMenuModel
+import com.kyopenscience.astral.core.chrome.MenuItem
+import com.kyopenscience.astral.core.chrome.TopBarControl
 import com.kyopenscience.astral.core.protocol.Agent
 import com.kyopenscience.astral.core.protocol.ChatAttachment
 import com.kyopenscience.astral.core.protocol.ChatSummary
@@ -33,8 +36,13 @@ import kotlinx.serialization.json.putJsonObject
 
 data class ChatTurn(val role: String, val text: String)
 
-/** The top-level navigable surfaces (US4). */
-enum class Screen { Chat, Agents, History, Audit, Settings }
+/**
+ * The top-level navigable surfaces. Settings is no longer a screen — it is the
+ * server-driven dropdown from the top-bar gear (feature 042); items route to the
+ * native Agents/Audit screens or, for a surface not yet native on Android, a
+ * labeled [SurfacePlaceholder] (P2 replaces these with SDUI).
+ */
+enum class Screen { Chat, Agents, History, Audit, SurfacePlaceholder }
 
 /** A paperclip-staged upload chip (feature 031). */
 data class StagedAttachment(
@@ -82,6 +90,11 @@ data class UiState(
     val agentsLoading: Boolean = false,
     val historyLoading: Boolean = false,
     val auditLoading: Boolean = false,
+    // The server-owned chrome model (top bar + settings menu). Rendered verbatim
+    // (already role-filtered by the server) — the client never hard-codes the menu.
+    val chromeMenu: ChromeMenuModel? = null,
+    // Label of the settings surface shown on the SurfacePlaceholder screen.
+    val pendingSurfaceLabel: String = "",
 ) {
     /** What the canvas area actually renders (a history entry, or the live canvas). */
     val visibleCanvas: List<Component>
@@ -292,7 +305,41 @@ class AppViewModel(
             Screen.History -> sendEvent("get_history")
             Screen.Audit -> loadAudit()
             Screen.Chat -> Unit
-            Screen.Settings -> Unit
+            Screen.SurfacePlaceholder -> Unit
+        }
+    }
+
+    /**
+     * Route a settings-menu item (from the server-owned model) to its
+     * destination: the native Agents/Audit screens where they exist, otherwise
+     * a labeled placeholder for a surface not yet native on Android (P2 delivers
+     * these as SDUI). The menu structure itself always matches the web exactly.
+     */
+    fun openMenuItem(item: MenuItem) {
+        when (item.surface) {
+            "agents" -> goTo(Screen.Agents)
+            "audit" -> goTo(Screen.Audit)
+            else ->
+                _state.value =
+                    _state.value.copy(
+                        screen = Screen.SurfacePlaceholder,
+                        pendingSurfaceLabel = item.label,
+                    )
+        }
+    }
+
+    /** Route a top-bar action control (Workspace Timeline, Pulse) from the model. */
+    fun openTopBarAction(control: TopBarControl) {
+        when (control.action?.surface) {
+            // The Workspace Timeline maps to the native history/past-chats surface.
+            "workspace_timeline" -> goTo(Screen.History)
+            null -> Unit
+            else ->
+                _state.value =
+                    _state.value.copy(
+                        screen = Screen.SurfacePlaceholder,
+                        pendingSurfaceLabel = control.label ?: (control.action?.surface ?: ""),
+                    )
         }
     }
 
@@ -467,6 +514,7 @@ class AppViewModel(
                 applyCanvasOps(s, subscribeAckOps(msg))
             is Inbound.StreamErrorMsg ->
                 applyCanvasOps(s, streamErrorOps(msg))
+            is Inbound.ChromeMenu -> s.copy(chromeMenu = msg.model)
             else -> s
         }
 
