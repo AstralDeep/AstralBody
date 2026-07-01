@@ -214,6 +214,27 @@ class ChromeMenu(Message):
     type: str = "chrome_menu"
     model: Dict[str, Any] = field(default_factory=dict)
 
+@dataclass
+class ChromeSurface(Message):
+    """Feature 043 — a settings surface delivered to a native SDUI client.
+
+    The structured twin of ``ChromeRender``'s web-HTML modal: carries the
+    surface's ``astralprims`` component dicts (ROTE-adapted for the device) so
+    the Windows/Android clients render it through the SAME component renderer
+    they use for the chat canvas (Constitution II/XII) — no web view, no
+    per-client hand-built surface. Web clients keep receiving ``ChromeRender``
+    HTML; a native client that receives this renders ``components`` into its
+    modal/sheet and wires the components' ``chrome_*`` actions back over the
+    existing ``ui_event`` path. Empty ``components`` clears/closes the modal.
+    """
+    type: str = "chrome_surface"
+    region: str = "modal"          # "modal" (parity with ChromeRender.region)
+    surface_key: str = ""
+    title: str = ""
+    admin_only: bool = False
+    components: List[Dict[str, Any]] = field(default_factory=list)
+    mode: str = "replace"          # reserved; only "replace" today
+
 # --- Agent2Agent Protocol ---
 @dataclass
 class AgentSkill:
