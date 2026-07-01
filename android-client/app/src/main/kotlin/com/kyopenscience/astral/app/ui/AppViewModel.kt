@@ -348,12 +348,20 @@ class AppViewModel(
             is Inbound.UiRender ->
                 if (msg.target == "chat") {
                     val text = flattenText(msg.components)
-                    if (text.isBlank()) s else s.copy(turns = s.turns + ChatTurn("assistant", text))
+                    // Suppress the "concise lead" that pairs with a narrative doc
+                    // card — the full narrative is routed to the chat from the card
+                    // itself (see UiUpsert), so this render would just duplicate it.
+                    if (text.isBlank() || text.contains(DOC_ON_CANVAS_MARKER, ignoreCase = true)) {
+                        s
+                    } else {
+                        s.copy(turns = s.turns + ChatTurn("assistant", text))
+                    }
                 } else {
-                    // Reasoning collapsibles (pushed via ui_render(canvas)) belong in
-                    // the CHAT window as collapsible snippets, never on the canvas.
-                    // Everything else is real canvas content.
-                    val (reasoning, canvasComps) = msg.components.partition(::isReasoning)
+                    // Reasoning collapsibles → chat snippets. Narrative "Document"
+                    // cards (id "doc_…") are a chat message, never canvas content —
+                    // drop them here (on rehydration the transcript carries the text).
+                    val (reasoning, rest0) = msg.components.partition(::isReasoning)
+                    val canvasComps = rest0.filterNot { isDocCard(it.id) }
                     val reasoningTurns =
                         reasoning.mapNotNull { r ->
                             flattenText(r.children).ifBlank { flattenText(listOf(r)) }
@@ -378,10 +386,26 @@ class AppViewModel(
                 // upserts arrive — accept those rather than losing the canvas.
                 if (msg.chatId != null && s.activeChatId != null && msg.chatId != s.activeChatId) {
                     s
-                } else if (s.pendingReplace) {
-                    s.copy(pendingCanvas = Canvas.apply(s.pendingCanvas, msg.ops))
                 } else {
-                    s.copy(canvas = Canvas.apply(s.canvas, msg.ops))
+                    // A narrative "Document" card (id "doc_…") is the assistant's
+                    // written answer — route it to the chat, keep it OFF the canvas.
+                    val docTurns =
+                        msg.ops.mapNotNull { op ->
+                            if (op.op != "remove" && isDocCard(op.componentId)) {
+                                op.component?.let { flattenText(listOf(it)) }
+                                    ?.takeIf { it.isNotBlank() }
+                                    ?.let { ChatTurn("assistant", it) }
+                            } else {
+                                null
+                            }
+                        }
+                    val canvasOps = msg.ops.filterNot { isDocCard(it.componentId) }
+                    val s2 = if (docTurns.isEmpty()) s else s.copy(turns = s.turns + docTurns)
+                    when {
+                        canvasOps.isEmpty() -> s2
+                        s2.pendingReplace -> s2.copy(pendingCanvas = Canvas.apply(s2.pendingCanvas, canvasOps))
+                        else -> s2.copy(canvas = Canvas.apply(s2.canvas, canvasOps))
+                    }
                 }
             is Inbound.ChatCreated -> s.copy(activeChatId = msg.chatId ?: s.activeChatId)
             is Inbound.UserMessageAcked ->
@@ -492,6 +516,9 @@ class AppViewModel(
             ((c.attributes["title"] as? JsonPrimitive)?.contentOrNull ?: "")
                 .equals("Reasoning", ignoreCase = true)
 
+    /** The narrative doc card the server promotes long answers into (id "doc_…"). */
+    private fun isDocCard(id: String?): Boolean = id != null && id.startsWith("doc_")
+
     private fun flattenText(components: List<Component>): String =
         components.joinToString("\n") { c ->
             val own =
@@ -510,6 +537,11 @@ class AppViewModel(
         }
 
     companion object {
+        // The server pairs a canvas doc card with a "…full write-up is on the
+        // canvas" lead in the chat. On mobile we route the full answer to the chat
+        // instead, so that paired lead is suppressed to avoid duplication.
+        private const val DOC_ON_CANVAS_MARKER = "full write-up is on the canvas"
+
         fun factory(client: OrchestratorClient, rest: AstralRest) =
             viewModelFactory {
                 initializer { AppViewModel(client, rest) }
