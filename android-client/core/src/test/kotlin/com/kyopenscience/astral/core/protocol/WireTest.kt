@@ -39,6 +39,21 @@ class WireTest {
     }
 
     @Test
+    fun decodes_chrome_surface() {
+        val r =
+            assertIs<Inbound.ChromeSurface>(
+                Wire.decode(
+                    """{"type":"chrome_surface","region":"modal","surface_key":"theme","title":"Theme","components":[{"type":"button","label":"Apply","action":"chrome_theme_preset"},{"type":"color_picker","color_key":"bg","value":"#0F1221"}]}""",
+                ),
+            )
+        assertEquals("theme", r.surfaceKey)
+        assertEquals("Theme", r.title)
+        assertEquals(2, r.components.size)
+        assertEquals("button", r.components[0].type)
+        assertEquals("color_picker", r.components[1].type)
+    }
+
+    @Test
     fun decodes_ui_stream_data() {
         val r =
             assertIs<Inbound.UiStreamData>(
