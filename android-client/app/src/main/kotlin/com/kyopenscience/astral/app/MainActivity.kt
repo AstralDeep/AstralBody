@@ -43,11 +43,15 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.kyopenscience.astral.app.auth.KeycloakLogout
 import com.kyopenscience.astral.app.auth.OidcAuth
 import com.kyopenscience.astral.app.auth.TokenStore
+import com.kyopenscience.astral.app.auth.keycloakEndpoints
+import com.kyopenscience.astral.app.auth.routeAfterRefresh
 import com.kyopenscience.astral.app.render.Download
 import com.kyopenscience.astral.app.render.Emit
 import com.kyopenscience.astral.app.render.Renderer
+import com.kyopenscience.astral.app.render.ThemeSink
 import com.kyopenscience.astral.app.render.renderers.registerAllRenderers
 import com.kyopenscience.astral.app.rest.AstralRest
 import com.kyopenscience.astral.app.transport.ConnectionState
@@ -66,6 +70,9 @@ class MainActivity : ComponentActivity() {
     private val client by lazy { OrchestratorClient(AppConfig.WS_URL) }
     private val rest by lazy { AstralRest(AppConfig.API_BASE) }
     private val oidc by lazy { OidcAuth(this) }
+    private val keycloakLogout by lazy {
+        KeycloakLogout(keycloakEndpoints(AppConfig.KEYCLOAK_AUTHORITY).endSessionEndpoint)
+    }
 
     /** Download an authed backend file (`/api/download/...`) to the device's public
      * Downloads via the system DownloadManager, forwarding the session bearer token. */
@@ -117,26 +124,32 @@ class MainActivity : ComponentActivity() {
         // Resume a cached session. Per the sign-in-once-a-year policy: if credentials
         // are found on the device, go straight to the home screen — show it right away
         // with the cached access token, then refresh silently and PERSIST the (rotated)
-        // refresh token so the session survives future cold starts. Only a missing or
-        // fully-dead session falls back to the sign-in screen.
+        // refresh token so the session survives future cold starts. A failed refresh
+        // routes to the sign-in screen with an explanation, never a dead app (T016).
         lifecycleScope.launch(Dispatchers.IO) {
             val st = store.load() ?: return@launch
             st.accessToken?.takeIf { it.isNotBlank() }?.let { authToken.value = it }
-            runCatching { oidc.freshToken(st) }
-                .onSuccess {
-                    store.save(st)
-                    authToken.value = it
-                }
-                .onFailure { Log.w("MainActivity", "silent token refresh failed: ${it.message}") }
+            val route =
+                routeAfterRefresh(
+                    runCatching { oidc.freshToken(st) }
+                        .onSuccess { store.save(st) }
+                        .onFailure { Log.w("MainActivity", "silent token refresh failed: ${it.message}") },
+                )
+            authToken.value = route.token
+            signInError.value = route.error
         }
         setContent {
-            AstralTheme {
-                val vm: AppViewModel = viewModel(factory = AppViewModel.factory(client, rest))
+            val vm: AppViewModel = viewModel(factory = AppViewModel.factory(client, rest))
+            // Collect once at the top so the theme can restyle live (US5): the palette
+            // drives AstralTheme, and recomposition repaints the whole tree.
+            val uiState by vm.state.collectAsStateWithLifecycle()
+            AstralTheme(palette = uiState.themePalette) {
                 val renderer =
                     remember(vm) {
                         Renderer(
                             Emit { a, p -> vm.sendEvent(a, p) },
                             Download { url, fn -> downloadFile(url, fn) },
+                            ThemeSink { spec -> vm.applyTheme(spec) },
                         ).registerAllRenderers()
                     }
                 val token by authToken.collectAsStateWithLifecycle()
@@ -145,7 +158,6 @@ class MainActivity : ComponentActivity() {
                 if (token == null) {
                     SignInScreen(error = error, onSignIn = ::startSignIn)
                 } else {
-                    val uiState by vm.state.collectAsStateWithLifecycle()
                     LaunchedEffect(token) {
                         val dm = resources.displayMetrics
                         vm.start(
@@ -160,15 +172,21 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                     // Mid-session token expiry: silently refresh and reconnect; if the
-                    // refresh fails, drop to the sign-in screen (FR-012).
+                    // refresh fails, drop to the sign-in screen WITH an explanation
+                    // (FR-012/T016) — never a silent dead session.
                     LaunchedEffect(uiState.connection) {
                         if (uiState.connection == ConnectionState.AuthRequired) {
-                            authToken.value =
+                            val route =
                                 withContext(Dispatchers.IO) {
-                                    store.load()?.let { st ->
-                                        runCatching { oidc.freshToken(st).also { store.save(st) } }.getOrNull()
-                                    }
+                                    routeAfterRefresh(
+                                        runCatching {
+                                            val st = checkNotNull(store.load()) { "no stored session" }
+                                            oidc.freshToken(st).also { store.save(st) }
+                                        },
+                                    )
                                 }
+                            authToken.value = route.token
+                            signInError.value = route.error
                         }
                     }
                     RootScaffold(vm, renderer, onSignOut = ::signOut)
@@ -182,11 +200,35 @@ class MainActivity : ComponentActivity() {
             .onFailure { signInError.value = it.message ?: "could not start sign-in" }
     }
 
-    /** Sign out: drop the cached session and return to the sign-in screen. */
+    /**
+     * Sign out (T019): capture the session's tokens, clear local state immediately
+     * (the sign-in screen never waits on the network), then best-effort server-side
+     * revocation — the backend `/api/auth/logout` first, direct Keycloak logout as
+     * the fallback — so the refresh token dies even when the backend is down.
+     */
     private fun signOut() {
-        store.clear()
-        signInError.value = null
-        authToken.value = null
+        lifecycleScope.launch(Dispatchers.IO) {
+            // Capture BEFORE clearing — revocation needs the refresh token.
+            val st = runCatching { store.load() }.getOrNull()
+            val access = authToken.value ?: st?.accessToken
+            val refresh = st?.refreshToken
+            store.clear()
+            signInError.value = null
+            authToken.value = null
+            if (refresh.isNullOrBlank()) return@launch
+            val viaBackend =
+                access != null &&
+                    runCatching { rest.logout(access, refresh, AppConfig.OIDC_CLIENT_ID) }.getOrDefault(false)
+            val outcome =
+                if (viaBackend) {
+                    "backend"
+                } else if (runCatching { keycloakLogout.revoke(AppConfig.OIDC_CLIENT_ID, refresh) }.getOrDefault(false)) {
+                    "keycloak"
+                } else {
+                    "unrevoked"
+                }
+            Log.i("MainActivity", "sign-out revocation: $outcome")
+        }
     }
 
     override fun onDestroy() {

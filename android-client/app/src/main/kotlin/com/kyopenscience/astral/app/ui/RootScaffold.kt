@@ -43,6 +43,7 @@ import com.kyopenscience.astral.app.render.Renderer
 import com.kyopenscience.astral.app.ui.theme.AstralColors
 import com.kyopenscience.astral.core.chrome.ChromeMenuModel
 import com.kyopenscience.astral.core.chrome.MenuItem
+import kotlinx.serialization.json.JsonObject
 
 /**
  * The app root. The top bar is deliberately minimal and identical across clients
@@ -70,28 +71,85 @@ fun RootScaffold(
                 },
                 onRecentChats = { vm.goTo(Screen.History) },
                 onOpenItem = vm::openMenuItem,
+                onOpenSurface = { surface, params -> vm.openSurface(surface, params) },
                 onSignOut = onSignOut,
             )
         },
     ) { padding ->
         // Edge-to-edge (targetSdk 35): pad for the system bars the Scaffold
         // reports, mark them consumed, then let the input rise above the IME.
-        Box(modifier = Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding()) {
-            when (state.screen) {
-                Screen.Chat -> AdaptiveShell(vm, renderer)
-                Screen.Agents ->
-                    AgentsScreen(
-                        state.agents,
-                        state.agentsLoading,
-                        vm::setAgentEnabled,
-                        vm::setToolEnabled,
-                        vm::enableRecommended,
-                    )
-                Screen.History -> HistoryScreen(state.history, state.historyLoading, vm::openChat)
-                Screen.Audit -> AuditScreen(state.audit, state.auditLoading)
-                Screen.SurfacePlaceholder -> SurfacePlaceholderScreen(state.pendingSurfaceLabel)
-                Screen.Surface -> SurfaceScreen(state.pendingSurface, renderer)
+        Column(modifier = Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding()) {
+            // Connection + banner strips (feature 044): a degraded connection and
+            // server errors/notifications are visible, never silent.
+            connectionStripLabel(state.connection, state.everConnected)?.let { ConnectionStrip(it) }
+            state.banner?.let {
+                BannerBar(text = it, isError = state.bannerKind == "error", onDismiss = vm::dismissBanner)
             }
+            Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                when (state.screen) {
+                    Screen.Chat -> AdaptiveShell(vm, renderer)
+                    Screen.Agents ->
+                        AgentsScreen(
+                            state.agents,
+                            state.agentsLoading,
+                            vm::setAgentEnabled,
+                            vm::setToolEnabled,
+                            vm::enableRecommended,
+                        )
+                    Screen.History -> HistoryScreen(state.history, state.historyLoading, vm::openChat)
+                    Screen.Audit -> AuditScreen(state.audit, state.auditLoading)
+                    Screen.Surface ->
+                        SurfaceScreen(
+                            surface = state.pendingSurface,
+                            surfaceKey = state.pendingSurfaceKey,
+                            renderer = renderer,
+                            onRetry = vm::retryPendingSurface,
+                        )
+                }
+            }
+        }
+    }
+}
+
+/** The slim "Reconnecting…" strip shown while a previously-live session is degraded. */
+@Composable
+private fun ConnectionStrip(label: String) {
+    Surface(color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
+        Text(
+            label,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 12.sp,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 5.dp),
+        )
+    }
+}
+
+/** A dismissible one-line banner for server errors, offline drops, and notifications. */
+@Composable
+private fun BannerBar(
+    text: String,
+    isError: Boolean,
+    onDismiss: () -> Unit,
+) {
+    val bg = if (isError) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceVariant
+    val fg = if (isError) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurface
+    Surface(color = bg, modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(start = 14.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(text, color = fg, fontSize = 13.sp, modifier = Modifier.weight(1f))
+            Text(
+                "✕",
+                color = fg,
+                fontSize = 14.sp,
+                modifier =
+                    Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable(onClick = onDismiss)
+                        .padding(horizontal = 8.dp, vertical = 2.dp),
+            )
         }
     }
 }
@@ -102,6 +160,7 @@ private fun AstralTopBar(
     onNewChat: () -> Unit,
     onRecentChats: () -> Unit,
     onOpenItem: (MenuItem) -> Unit,
+    onOpenSurface: (String, JsonObject) -> Unit,
     onSignOut: () -> Unit,
 ) {
     Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 2.dp) {
@@ -121,8 +180,23 @@ private fun AstralTopBar(
                 modifier = Modifier.size(30.dp).clip(RoundedCornerShape(8.dp)),
             )
             Box(modifier = Modifier.weight(1f))
+            // Server-owned action controls (pulse / timeline, feature 042/044 T037):
+            // rendered from the model so they're actually reachable — no client
+            // hard-coding. Each opens its surface via chrome_open.
+            model?.topbarActions?.forEach { control ->
+                topBarActionView(control)?.let { view ->
+                    IconButton(onClick = { onOpenSurface(view.surface, view.params) }) {
+                        Icon(
+                            painter = painterResource(topBarActionIcon(view.icon)),
+                            contentDescription = view.label,
+                            tint = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.size(22.dp),
+                        )
+                    }
+                }
+            }
+            // Form-factor chat nav (kept — New/Recent are Android-specific).
             NewChatButton(onClick = onNewChat)
-            // Recent chats.
             IconButton(onClick = onRecentChats) {
                 Icon(
                     painter = painterResource(R.drawable.ic_history),
@@ -136,6 +210,14 @@ private fun AstralTopBar(
         }
     }
 }
+
+/** Map a resolved top-bar action glyph to a drawable (T037). */
+private fun topBarActionIcon(icon: TopBarIcon): Int =
+    when (icon) {
+        TopBarIcon.SPARKLE -> R.drawable.ic_sparkle
+        TopBarIcon.HISTORY -> R.drawable.ic_history
+        TopBarIcon.GENERIC -> R.drawable.ic_menu
+    }
 
 /**
  * The Settings gear + its dropdown, rendered from the server-owned model.

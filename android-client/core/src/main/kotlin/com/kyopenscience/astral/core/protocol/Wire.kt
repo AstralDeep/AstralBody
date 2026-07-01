@@ -129,6 +129,12 @@ object Wire {
                     body = root.str("body"),
                     level = root.str("level"),
                 )
+            // Stored preferences at boot ({preferences:{theme:{…}}}); the app folds
+            // `theme` into the live palette (US5 restyle).
+            "user_preferences" -> Inbound.UserPreferences(theme = root.obj("preferences")?.obj("theme"))
+            // Read-only workspace timeline toggle ({active}); `on` is tolerated.
+            "workspace_timeline_mode" ->
+                Inbound.WorkspaceTimelineMode(active = root.bool("active") ?: root.bool("on") ?: false)
             else -> Inbound.Unknown(type)
         }
 

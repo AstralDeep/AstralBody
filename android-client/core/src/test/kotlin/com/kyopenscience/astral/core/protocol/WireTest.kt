@@ -200,6 +200,30 @@ class WireTest {
     }
 
     @Test
+    fun decodes_user_preferences_theme() {
+        val r =
+            assertIs<Inbound.UserPreferences>(
+                Wire.decode("""{"type":"user_preferences","preferences":{"theme":{"preset":"ocean"},"other":1}}"""),
+            )
+        assertEquals("ocean", r.theme?.get("preset")?.jsonPrimitive?.contentOrNull)
+    }
+
+    @Test
+    fun user_preferences_without_theme_is_null_theme() {
+        val r = assertIs<Inbound.UserPreferences>(Wire.decode("""{"type":"user_preferences","preferences":{"locale":"en"}}"""))
+        assertEquals(null, r.theme)
+    }
+
+    @Test
+    fun decodes_workspace_timeline_mode() {
+        assertEquals(true, assertIs<Inbound.WorkspaceTimelineMode>(Wire.decode("""{"type":"workspace_timeline_mode","active":true}""")).active)
+        assertEquals(false, assertIs<Inbound.WorkspaceTimelineMode>(Wire.decode("""{"type":"workspace_timeline_mode","active":false}""")).active)
+        // `on` is tolerated as an alias; a bare frame defaults to inactive.
+        assertEquals(true, assertIs<Inbound.WorkspaceTimelineMode>(Wire.decode("""{"type":"workspace_timeline_mode","on":true}""")).active)
+        assertEquals(false, assertIs<Inbound.WorkspaceTimelineMode>(Wire.decode("""{"type":"workspace_timeline_mode"}""")).active)
+    }
+
+    @Test
     fun unknown_type_falls_back() {
         val r = assertIs<Inbound.Unknown>(Wire.decode("""{"type":"totally_new_primitive"}"""))
         assertEquals("totally_new_primitive", r.type)

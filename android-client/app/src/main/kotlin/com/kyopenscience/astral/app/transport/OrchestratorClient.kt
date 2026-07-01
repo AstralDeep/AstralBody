@@ -182,6 +182,9 @@ class OrchestratorClient(
         enqueueOrSend(action, Wire.encodeUiEvent(action, sessionId, payload))
     }
 
+    /** The actions currently queued offline — a test seam to assert what was (not) sent. */
+    internal fun pendingActions(): List<String> = synchronized(pending) { pending.map { it.action } }
+
     companion object {
         private const val TAG = "OrchestratorClient"
         private const val NORMAL_CLOSE = 1000
