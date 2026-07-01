@@ -31,6 +31,7 @@ Auto-generated from all feature plans. Last updated: 2026-06-30
 ```text
 backend/        # Python FastAPI backend (orchestrator, agents, webrender, tests)
 windows-client/ # Standalone Windows desktop client (PyInstaller + tkinter)
+android-client/ # Native Android SDUI client (Kotlin + Jetpack Compose, feature 041)
 docs/           # Additional documentation
 specs/          # Feature specification documents (speckit)
 ```
