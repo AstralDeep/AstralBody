@@ -172,3 +172,49 @@ def fetch_bytes(url: str, token: str, *, timeout: int = 60, opener=urllib.reques
         raise RestError(exc.code, exc.reason or "HTTP error")
     except Exception as exc:  # noqa: BLE001 — transport failure, surfaced to the UI
         raise RestError(0, str(exc))
+
+
+# --- feature 044: server-revoking sign-out (FR-005) -------------------------- #
+
+def native_logout(http_base: str, token: str, refresh_token: str, client_id: str,
+                  *, timeout: int = 10, opener=urllib.request.urlopen) -> bool:
+    """POST /api/auth/logout — ask the backend to revoke this client's refresh
+    credential (offline-tolerant: the server queues the revocation when the IdP
+    is unreachable). Returns True when the server accepted the sign-out."""
+    body = json.dumps({"refresh_token": refresh_token, "client_id": client_id}).encode("utf-8")
+    req = urllib.request.Request(
+        http_base.rstrip("/") + "/api/auth/logout",
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": f"Bearer {token}",
+        },
+    )
+    try:
+        with opener(req, timeout=timeout) as r:
+            return 200 <= getattr(r, "status", getattr(r, "code", 0)) < 300
+    except Exception:  # noqa: BLE001 — best-effort; caller falls back / logs
+        return False
+
+
+def keycloak_logout(authority: str, client_id: str, refresh_token: str,
+                    *, timeout: int = 10, opener=urllib.request.urlopen) -> bool:
+    """Direct-IdP fallback when the backend is unreachable: POST the refresh
+    token to Keycloak's end-session endpoint (public client — no secret)."""
+    if not authority or not refresh_token:
+        return False
+    body = urlencode(
+        {"client_id": client_id, "refresh_token": refresh_token}).encode("utf-8")
+    req = urllib.request.Request(
+        authority.rstrip("/") + "/protocol/openid-connect/logout",
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with opener(req, timeout=timeout) as r:
+            return 200 <= getattr(r, "status", getattr(r, "code", 0)) < 300
+    except Exception:  # noqa: BLE001 — best-effort; caller logs
+        return False

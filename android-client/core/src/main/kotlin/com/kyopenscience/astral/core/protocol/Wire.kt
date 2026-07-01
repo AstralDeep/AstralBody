@@ -93,6 +93,42 @@ object Wire {
                     components = Component.listFromJson(root.arr("components")),
                 )
             "auth_required" -> Inbound.AuthRequired(root.str("reason"))
+            // Server error replies arrive in three shapes: {code,message},
+            // {payload:{message}}, {message} — normalize; never silent (FR-002).
+            "error" ->
+                Inbound.ErrorFrame(
+                    code = root.str("code"),
+                    message = root.str("message") ?: root.obj("payload")?.str("message") ?: "Something went wrong.",
+                )
+            "chat_step" -> {
+                val step = root.obj("step")
+                Inbound.ChatStep(
+                    id = step?.str("id"),
+                    name = step?.str("name") ?: step?.str("kind"),
+                    status = step?.str("status"),
+                )
+            }
+            "tool_progress" -> {
+                // Compose a short human label from whatever fields arrived (all
+                // optional): "tool: message (pct%)".
+                val head = listOfNotNull(root.str("tool_name"), root.str("message")).joinToString(": ")
+                val pct = root.str("percentage")?.let { " ($it%)" }.orEmpty()
+                Inbound.ToolProgress(label = (head + pct).ifBlank { "Working…" })
+            }
+            // Task frames nest their fields under `payload` (older emitters were flat).
+            "task_started" ->
+                Inbound.TaskStarted(root.obj("payload")?.str("task_id") ?: root.str("task_id"))
+            "task_completed" ->
+                Inbound.TaskCompleted(
+                    taskId = root.obj("payload")?.str("task_id") ?: root.str("task_id"),
+                    chatId = root.obj("payload")?.str("chat_id") ?: root.str("chat_id"),
+                )
+            "notification" ->
+                Inbound.Notification(
+                    title = root.str("title"),
+                    body = root.str("body"),
+                    level = root.str("level"),
+                )
             else -> Inbound.Unknown(type)
         }
 

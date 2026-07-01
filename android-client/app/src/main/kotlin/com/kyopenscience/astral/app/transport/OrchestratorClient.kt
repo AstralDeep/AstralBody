@@ -5,11 +5,15 @@ import com.kyopenscience.astral.core.protocol.ChatAttachment
 import com.kyopenscience.astral.core.protocol.DeviceCapabilities
 import com.kyopenscience.astral.core.protocol.Inbound
 import com.kyopenscience.astral.core.protocol.Wire
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.emitAll
@@ -50,12 +54,20 @@ class OrchestratorClient(
     private val url: String,
     private val client: OkHttpClient = defaultClient(),
 ) {
+    /** An outbound frame queued while offline (its `action` kept for the drop notice). */
+    private data class Queued(val action: String, val frame: String)
+
     @Volatile private var socket: WebSocket? = null
 
     @Volatile private var open = false
-    private val pending = ArrayDeque<String>()
+    private val pending = ArrayDeque<Queued>()
     private val _state = MutableStateFlow(ConnectionState.Disconnected)
     val state: StateFlow<ConnectionState> = _state.asStateFlow()
+
+    private val _dropped = MutableSharedFlow<String>(extraBufferCapacity = 8, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+
+    /** The `action` of each frame dropped from the full offline queue — overflow is never silent (T014). */
+    val dropped: SharedFlow<String> = _dropped.asSharedFlow()
 
     /** Reconnecting inbound stream. Collect this for the life of the session. */
     fun stream(
@@ -133,19 +145,24 @@ class OrchestratorClient(
 
     private fun flushPending(webSocket: WebSocket) {
         synchronized(pending) {
-            while (pending.isNotEmpty()) webSocket.send(pending.removeFirst())
+            while (pending.isNotEmpty()) webSocket.send(pending.removeFirst().frame)
         }
     }
 
-    private fun enqueueOrSend(frame: String) {
+    private fun enqueueOrSend(
+        action: String,
+        frame: String,
+    ) {
         val s = socket
         if (open && s != null) {
             s.send(frame)
         } else {
+            val droppedActions = mutableListOf<String>()
             synchronized(pending) {
-                pending.addLast(frame)
-                while (pending.size > MAX_QUEUE) pending.removeFirst()
+                pending.addLast(Queued(action, frame))
+                while (pending.size > MAX_QUEUE) droppedActions.add(pending.removeFirst().action)
             }
+            droppedActions.forEach { _dropped.tryEmit(it) }
         }
     }
 
@@ -154,7 +171,7 @@ class OrchestratorClient(
         chatId: String?,
         attachments: List<ChatAttachment> = emptyList(),
     ) {
-        enqueueOrSend(Wire.encodeChatMessage(message, chatId, attachments))
+        enqueueOrSend("chat_message", Wire.encodeChatMessage(message, chatId, attachments))
     }
 
     fun sendEvent(
@@ -162,7 +179,7 @@ class OrchestratorClient(
         sessionId: String?,
         payload: JsonObject = JsonObject(emptyMap()),
     ) {
-        enqueueOrSend(Wire.encodeUiEvent(action, sessionId, payload))
+        enqueueOrSend(action, Wire.encodeUiEvent(action, sessionId, payload))
     }
 
     companion object {

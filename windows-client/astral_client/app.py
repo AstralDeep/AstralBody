@@ -14,10 +14,13 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import logging
 import os
 import sys
 import threading
 from typing import Dict, List, Optional
+
+logger = logging.getLogger("astral.client")
 
 from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt, QSettings, Signal
 from PySide6.QtWidgets import (
@@ -53,10 +56,24 @@ from . import confirm as _confirm
 from . import integrity as _integrity
 from . import __version__ as _APP_VERSION
 from .protocol import OrchestratorClient, device_caps
+from .protocol_manifest import is_classified, is_handled
 from .renderer import RenderContext, render, supported_types as native_types, _scoped
 from .streaming import stream_error_ops, stream_frame_to_ops, subscribe_ack_ops
 from .chrome import chrome_render_notice
 from . import rest
+
+
+def normalize_error(msg: dict) -> str:
+    """Feature 044 (FR-002): collapse the three historical server error shapes —
+    ``{code,message}`` | ``{payload:{message}}`` | ``{message}`` — into one
+    human string for the error banner."""
+    text = (
+        msg.get("message")
+        or (msg.get("payload") or {}).get("message")
+        or "Something went wrong."
+    )
+    code = msg.get("code")
+    return f"{text} ({code})" if code and code != "internal" else str(text)
 
 
 # Feature 040 (US5): slash-command discovery. Mirrors the web client's typeahead
@@ -827,14 +844,21 @@ class MainWindow(QMainWindow):
     # Audit-log page fetched off-thread -> GUI thread (dict payload).
     _audit_loaded = Signal(object)
     _download_done = Signal(object)
+    # Sign-out revocation resolved off-thread -> GUI thread (outcome string).
+    _signed_out = Signal(str)
+    # Interactive re-auth completed off-thread -> GUI thread (Session or None).
+    _reauth_done = Signal(object)
 
-    def __init__(self, url: str, token: str, session=None):
+    def __init__(self, url: str, token: str, session=None, login_params=None):
         super().__init__()
         self.setWindowTitle("AstralBody — Windows")
         self.resize(1280, 860)
         self.active_chat: Optional[str] = None
         self._url = url
         self._auth_session = session
+        # Login params (authority/client_id/bff) so an expired-and-unrefreshable
+        # session can run a fresh interactive login (FR-004) instead of dead-ending.
+        self._login_params = login_params or {}
         self._reauth_tries = 0
         self._agents: List[dict] = []
         self._agents_dialog: Optional[AgentsDialog] = None
@@ -846,6 +870,10 @@ class MainWindow(QMainWindow):
         self._token = token
         self._audit_dialog: Optional[AuditDialog] = None
         self._surface_dialog: Optional[SurfaceDialog] = None  # feature 043 (SDUI settings)
+        # Feature 044 turn/UI state.
+        self._turn_active = False
+        self._timeline_mode = False
+        self._user_prefs: dict = {}
 
         ctx = RenderContext(emit=self._emit, download=self._download)
         self.client = OrchestratorClient(
@@ -896,12 +924,27 @@ class MainWindow(QMainWindow):
         bottom.addWidget(self._input, 1)
         bottom.addWidget(send)
 
+        # Feature 044 (FR-002/FR-003): a dismissible banner strip under the top
+        # bar for connection state + server errors + queue-drop notices. Hidden
+        # until there is something to say.
+        self._banner = QLabel("")
+        self._banner.setWordWrap(True)
+        self._banner.setVisible(False)
+        self._banner.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._banner.setStyleSheet(
+            f"background:{T.SURFACE_2}; color:{T.TEXT}; border-bottom:1px solid {T.BORDER};"
+            "padding:6px 14px; font-size:12px;"
+        )
+        # Click to dismiss (errors/notices); the reconnect banner re-asserts itself.
+        self._banner.mousePressEvent = lambda _ev: self._hide_banner()
+
         root = QWidget()
         root.setObjectName("root")
         rl = QVBoxLayout(root)
         rl.setContentsMargins(0, 0, 0, 0)
         rl.setSpacing(0)
         rl.addWidget(self.topbar)
+        rl.addWidget(self._banner)
         rl.addWidget(split, 1)
         rl.addLayout(bottom)
         self.setCentralWidget(root)
@@ -926,6 +969,10 @@ class MainWindow(QMainWindow):
         self._integrity_notice.connect(self._on_integrity_notice)
         self._audit_loaded.connect(self._on_audit_loaded)
         self._download_done.connect(self._on_download_done)
+        self._signed_out.connect(self._finish_sign_out)
+        self._reauth_done.connect(self._on_reauth_done)
+        self._signing_out_done = False
+        self._connected_once = False
         self._start_integrity_check()
 
     def _wrap(self, inner: QWidget, title: str) -> QWidget:
@@ -941,6 +988,45 @@ class MainWindow(QMainWindow):
         lay.addWidget(head)
         lay.addWidget(inner, 1)
         return w
+
+    def _apply_theme_pref(self, theme) -> None:
+        """Apply a stored/pushed theme preference (feature 044 US5). The live
+        restyle lives in the theme module; this routes the preference to it when
+        available and is a safe no-op until then (the preset is retained in
+        ``self._user_prefs`` so a later apply can pick it up)."""
+        if not theme:
+            return
+        applier = getattr(T, "apply_theme", None)
+        if callable(applier):
+            try:
+                if applier(theme):
+                    self._restyle_all()
+            except Exception:
+                logger.debug("theme apply failed", exc_info=True)
+
+    def _restyle_all(self) -> None:
+        """Re-apply the app stylesheet + re-render open surfaces after a theme
+        change (feature 044 US5). Extended alongside the dynamic palette."""
+        app = QApplication.instance()
+        if app is not None and hasattr(T, "build_stylesheet"):
+            app.setStyleSheet(T.build_stylesheet() + getattr(T, "ROOT_BG_STYLE", ""))
+
+    # --- banner (connection state / errors / notices) ------------------- #
+    def _show_banner(self, text: str, kind: str = "info") -> None:
+        color = {
+            "error": T.VARIANT_COLORS["error"][0],
+            "warning": T.VARIANT_COLORS["warning"][0],
+        }.get(kind, T.TEXT)
+        self._banner.setText(text)
+        self._banner.setStyleSheet(
+            f"background:{T.SURFACE_2}; color:{color}; border-bottom:1px solid {T.BORDER};"
+            "padding:6px 14px; font-size:12px;"
+        )
+        self._banner.setVisible(True)
+
+    def _hide_banner(self) -> None:
+        self._banner.setVisible(False)
+        self._banner.setText("")
 
     # --- chrome actions -------------------------------------------------- #
     def _new_chat(self) -> None:
@@ -1093,6 +1179,43 @@ class MainWindow(QMainWindow):
             != QMessageBox.StandardButton.Yes
         ):
             return
+        # Feature 044 (FR-005): server-revoking sign-out. Capture the refresh
+        # credential BEFORE tearing down, then revoke best-effort on a worker
+        # thread (backend → direct-Keycloak fallback → local-only) so the UI
+        # never blocks; the app quits when revocation resolves or times out.
+        sess = self._auth_session
+        refresh_token = getattr(sess, "refresh_token", None) if sess else None
+        client_id = getattr(sess, "client_id", "astral-desktop") if sess else "astral-desktop"
+        token_url = getattr(sess, "token_url", "") if sess else ""
+        access = self._current_token()
+        http_base = _http_base(self._url)
+        self._show_banner("Signing out…")
+
+        def _revoke() -> None:
+            outcome = "local-only"
+            if refresh_token:
+                if rest.native_logout(http_base, access, refresh_token, client_id):
+                    outcome = "revoked (server)"
+                else:
+                    authority = ""
+                    if token_url.endswith("/protocol/openid-connect/token"):
+                        authority = token_url[: -len("/protocol/openid-connect/token")]
+                    if authority and rest.keycloak_logout(authority, client_id, refresh_token):
+                        outcome = "revoked (keycloak)"
+                    else:
+                        outcome = "revocation failed — local sign-out only"
+            logger.info("sign-out: %s", outcome)
+            self._signed_out.emit(outcome)
+
+        threading.Thread(target=_revoke, daemon=True).start()
+        # Safety net: quit even if the network hangs past the request timeouts.
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(12000, self._finish_sign_out)
+
+    def _finish_sign_out(self, _outcome: str = "") -> None:
+        if getattr(self, "_signing_out_done", False):
+            return
+        self._signing_out_done = True
         try:
             self.client.stop()
         except Exception:
@@ -1123,6 +1246,18 @@ class MainWindow(QMainWindow):
 
     # --- inbound --------------------------------------------------------- #
     def _on_status(self, s: str) -> None:
+        # Feature 044: the transport now owns reconnect + a bounded outbound
+        # queue, so its status vocabulary widened to connecting / connected /
+        # reconnecting:<n> / closed:<why> / auth_required:<reason> /
+        # send_dropped:<action>. The connection banner mirrors it; errors and
+        # drop notices reuse the same banner.
+        if s.startswith("send_dropped:"):
+            action = s.split(":", 1)[1] or "message"
+            self._show_banner(
+                f"Couldn't send while offline: {action}. It was not queued — "
+                "reconnect and try again.", "warning")
+            return
+
         nice = {"connecting": "Connecting…", "connected": "Connected"}.get(s, s)
         color = (
             T.VARIANT_COLORS["success"][0]
@@ -1130,7 +1265,7 @@ class MainWindow(QMainWindow):
             else (
                 T.VARIANT_COLORS["error"][0]
                 if s.startswith(("closed", "auth_required"))
-                else T.MUTED
+                else T.VARIANT_COLORS["accent"][0]
             )
         )
         if s.startswith("closed"):
@@ -1139,11 +1274,21 @@ class MainWindow(QMainWindow):
             # register_external_agent on the next 'connected', or the win_agent
             # stays unreachable to the orchestrator until the app is relaunched.
             self._win_agent_registered = False
+            self._show_banner("Disconnected — reconnecting…", "warning")
+        elif s.startswith("reconnecting"):
+            attempt = s.split(":", 1)[1] if ":" in s else "?"
+            nice = "Reconnecting…"
+            self._show_banner(f"Reconnecting… (attempt {attempt})", "warning")
+        elif s == "connecting":
+            if self._connected_once:
+                self._show_banner("Reconnecting…", "warning")
         elif s.startswith("auth_required"):
             nice = "Re-authenticating…"
         self.topbar.set_status(nice, color)
         if s == "connected":
             self._reauth_tries = 0
+            self._connected_once = True
+            self._hide_banner()
             if not self._win_agent_registered:
                 self._win_agent_registered = True
                 url = f"http://{self._win_agent_host}:{self._win_agent_port}"
@@ -1151,15 +1296,17 @@ class MainWindow(QMainWindow):
             # Pull chrome state so the native dialogs + CTA are accurate.
             self.client.send_event("discover_agents", {})
             self.client.send_event("get_history", {})
-        elif (
-            s.startswith("auth_required")
-            and self._auth_session
-            and self._reauth_tries < 2
-        ):
-            self._reauth_tries += 1
-            new_token = self._auth_session.refresh()
+        elif s.startswith("auth_required"):
+            new_token = None
+            if self._auth_session and self._reauth_tries < 2:
+                self._reauth_tries += 1
+                new_token = self._auth_session.refresh()
             if new_token:
                 self._reconnect(new_token)
+            else:
+                # FR-004: never a dead session — offer an explicit sign-in
+                # instead of a frozen "Re-authenticating…" caption.
+                self._prompt_reauth()
 
     def _reconnect(self, token: str) -> None:
         try:
@@ -1174,6 +1321,51 @@ class MainWindow(QMainWindow):
         self.client.message.connect(self._on_message)
         self.client.status.connect(self._on_status)
         self.client.start()
+
+    def _prompt_reauth(self) -> None:
+        """FR-004: session expired and cannot silently refresh — offer an
+        explicit sign-in rather than a dead 'Re-authenticating…' caption."""
+        self.topbar.set_status("Signed out", T.VARIANT_COLORS["error"][0])
+        self._show_banner("Your session expired.", "error")
+        authority = self._login_params.get("authority")
+        if not authority:
+            # dev-token / no configured IdP — nothing to sign in against.
+            self._show_banner(
+                "Your session expired. Restart the app to sign in again.", "error")
+            return
+        if (
+            QMessageBox.question(self, "Session expired",
+                                 "Your session expired. Sign in again?")
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        self._show_banner("Opening your browser to sign in…")
+
+        def _login() -> None:
+            try:
+                from .auth import oidc_login
+                bff_base = (_http_base(self._url)
+                            if self._login_params.get("bff") else None)
+                session = oidc_login(
+                    authority,
+                    client_id=self._login_params.get("client_id", "astral-desktop"),
+                    bff_base=bff_base,
+                )
+                self._reauth_done.emit(session)
+            except Exception as exc:  # noqa: BLE001 — surfaced in the banner
+                logger.warning("interactive re-auth failed", exc_info=True)
+                self._reauth_done.emit(None)
+
+        threading.Thread(target=_login, daemon=True).start()
+
+    def _on_reauth_done(self, session: object) -> None:
+        if session is None:
+            self._show_banner("Sign-in failed. Try again from the menu.", "error")
+            return
+        self._auth_session = session
+        self._reauth_tries = 0
+        self._reconnect(session.access_token)
+        self._hide_banner()
 
     def _on_message(self, msg: dict) -> None:
         t = msg.get("type")
@@ -1227,12 +1419,61 @@ class MainWindow(QMainWindow):
             self._on_chrome_surface(msg)
         elif t == "chat_status":
             st = msg.get("status")
-            if st in ("thinking", "executing", "fixing"):
+            if st in ("thinking", "executing", "fixing", "processing_async",
+                      "combining", "condensing"):
+                self._turn_active = True
                 self.topbar.set_status(
                     msg.get("message") or st, T.VARIANT_COLORS["accent"][0]
                 )
             elif st == "done":
+                self._turn_active = False
                 self._on_status("connected")
+        elif t == "error":
+            # FR-002/SC-006 — never silent; resolve any stuck turn.
+            self._show_banner(normalize_error(msg), "error")
+            self._turn_active = False
+            self.topbar.set_status("Connected", T.VARIANT_COLORS["success"][0])
+        elif t == "notification":
+            title = msg.get("title") or ""
+            body = msg.get("body") or ""
+            self._show_banner(f"{title}: {body}" if title else body,
+                              "error" if msg.get("level") == "error" else "info")
+        elif t == "user_message_acked":
+            self._turn_active = True
+            self.topbar.set_status("Working…", T.VARIANT_COLORS["accent"][0])
+        elif t == "chat_step":
+            step = msg.get("step") or {}
+            name = step.get("name") or step.get("kind") or "step"
+            icon = {"completed": "✓", "errored": "✗"}.get(step.get("status"), "•")
+            self.topbar.set_status(f"{icon} {name}", T.VARIANT_COLORS["accent"][0])
+        elif t == "tool_progress":
+            label = (msg.get("label") or msg.get("tool_name")
+                     or msg.get("message") or "working")
+            self.topbar.set_status(str(label), T.VARIANT_COLORS["accent"][0])
+        elif t == "task_started":
+            self._show_banner("Working on this in the background…")
+        elif t == "task_completed":
+            self._turn_active = False
+            self._show_banner("Background task finished.")
+        elif t == "workspace_timeline_mode":
+            self._timeline_mode = bool(msg.get("active") or msg.get("on"))
+            if self._timeline_mode:
+                self._show_banner("Viewing workspace history (read-only).")
+            else:
+                self._hide_banner()
+        elif t == "user_preferences":
+            # Boot-time preferences; the theme lives under preferences.theme and
+            # is applied live by the theme surface (feature 044 US5). Retained
+            # so a restart honors the stored preset.
+            self._user_prefs = msg.get("preferences") or {}
+            self._apply_theme_pref(self._user_prefs.get("theme"))
+        else:
+            # Feature 044 (FR-002): classified-ignore is logged, not silent; a
+            # type that is neither handled nor classified is a drift signal.
+            if is_classified(t) and not is_handled(t):
+                logger.info("ignored frame type=%s", t)
+            elif not is_handled(t):
+                logger.warning("unhandled frame type=%s", t)
 
     # --- live streaming (push) + native chrome ----------------------------- #
     def _on_stream_data(self, msg: dict) -> None:
@@ -1716,7 +1957,12 @@ def main() -> int:
         args, settings=QSettings("AstralBody", "WindowsClient"), prompt=_prompt_config
     )
     token, session = resolve_auth(args)
-    win = MainWindow(args.url, token, session=session)
+    login_params = {
+        "authority": args.authority,
+        "client_id": args.client_id,
+        "bff": bool(getattr(args, "bff", False)),
+    }
+    win = MainWindow(args.url, token, session=session, login_params=login_params)
     win.show()
     win.raise_()
     win.activateWindow()

@@ -118,5 +118,23 @@ sealed interface Inbound {
 
     data class AuthRequired(val reason: String?) : Inbound
 
+    /** Feature 044 — a server `error` reply, normalized from its three wire shapes. */
+    data class ErrorFrame(val code: String?, val message: String) : Inbound
+
+    /** One step of the running turn's execution trail (`chat_step`). */
+    data class ChatStep(val id: String?, val name: String?, val status: String?) : Inbound
+
+    /** A live progress line from an executing tool (`tool_progress`), pre-composed. */
+    data class ToolProgress(val label: String) : Inbound
+
+    /** The turn detached into a background task (`task_started`). */
+    data class TaskStarted(val taskId: String?) : Inbound
+
+    /** A background task finished (`task_completed`). */
+    data class TaskCompleted(val taskId: String?, val chatId: String?) : Inbound
+
+    /** A scheduler/system push (`notification`, feature 044). */
+    data class Notification(val title: String?, val body: String?, val level: String?) : Inbound
+
     data class Unknown(val type: String) : Inbound
 }
