@@ -89,6 +89,7 @@ fun RootScaffold(
                 Screen.History -> HistoryScreen(state.history, state.historyLoading, vm::openChat)
                 Screen.Audit -> AuditScreen(state.audit, state.auditLoading)
                 Screen.SurfacePlaceholder -> SurfacePlaceholderScreen(state.pendingSurfaceLabel)
+                Screen.Surface -> SurfaceScreen(state.pendingSurface, renderer)
             }
         }
     }

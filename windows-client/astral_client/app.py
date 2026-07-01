@@ -266,6 +266,45 @@ class Canvas(QScrollArea):
             self._by_id[cid] = new_w
 
 
+class SurfaceDialog(QDialog):
+    """Feature 043 — a settings surface delivered as SDUI (``chrome_surface``),
+    rendered natively with the SAME component renderer used for the chat canvas.
+    Replaces the "coming soon" placeholder for the ported surfaces (theme, user
+    guide, LLM settings, personalization)."""
+
+    def __init__(self, parent, emit, download=None):
+        super().__init__(parent)
+        self.setModal(False)
+        self.resize(600, 560)
+        self._ctx = RenderContext(emit=emit, download=download)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(16, 14, 16, 14)
+        outer.setSpacing(10)
+        self._title = QLabel("Settings")
+        self._title.setStyleSheet(f"color:{T.TEXT}; font-size:15px; font-weight:600;")
+        outer.addWidget(self._title)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        self._inner = QWidget()
+        self._lay = QVBoxLayout(self._inner)
+        self._lay.setContentsMargins(0, 0, 0, 0)
+        self._lay.setSpacing(12)
+        self._lay.addStretch(1)
+        scroll.setWidget(self._inner)
+        outer.addWidget(scroll, 1)
+
+    def set_surface(self, title: str, components: list) -> None:
+        """Replace the modal body with a freshly-rendered component list."""
+        self.setWindowTitle(title or "Settings")
+        self._title.setText(title or "Settings")
+        while self._lay.count() > 1:
+            item = self._lay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        for comp in components or []:
+            self._lay.insertWidget(self._lay.count() - 1, render(comp, self._ctx))
+
+
 class TopBar(QFrame):
     """Native app chrome header, identical across clients (feature 042 —
     Constitution XII): a small brand mark · a New-chat button · a Recent-chats
@@ -787,6 +826,7 @@ class MainWindow(QMainWindow):
     _integrity_notice = Signal(str, str)
     # Audit-log page fetched off-thread -> GUI thread (dict payload).
     _audit_loaded = Signal(object)
+    _download_done = Signal(object)
 
     def __init__(self, url: str, token: str, session=None):
         super().__init__()
@@ -805,8 +845,9 @@ class MainWindow(QMainWindow):
         # Bearer token for REST surfaces (audit log); kept current on reconnect.
         self._token = token
         self._audit_dialog: Optional[AuditDialog] = None
+        self._surface_dialog: Optional[SurfaceDialog] = None  # feature 043 (SDUI settings)
 
-        ctx = RenderContext(emit=self._emit)
+        ctx = RenderContext(emit=self._emit, download=self._download)
         self.client = OrchestratorClient(
             url, token, device_caps(supported_types=native_types())
         )
@@ -884,6 +925,7 @@ class MainWindow(QMainWindow):
         # block launch. The verdict is surfaced in the top-bar status line.
         self._integrity_notice.connect(self._on_integrity_notice)
         self._audit_loaded.connect(self._on_audit_loaded)
+        self._download_done.connect(self._on_download_done)
         self._start_integrity_check()
 
     def _wrap(self, inner: QWidget, title: str) -> QWidget:
@@ -934,11 +976,14 @@ class MainWindow(QMainWindow):
         elif s == "workspace_timeline":
             self._open_history()
         else:
-            QMessageBox.information(
-                self,
-                label or "Settings",
-                f"“{label or s}” is coming to the desktop app soon.",
-            )
+            # Feature 043: request the SDUI surface and render it natively when
+            # the chrome_surface frame arrives (replaces the placeholder).
+            if self._surface_dialog is None:
+                self._surface_dialog = SurfaceDialog(self, self._emit, self._download)
+            self._surface_dialog.set_surface(label or s, [])
+            self._surface_dialog.show()
+            self._surface_dialog.raise_()
+            self.client.send_event("chrome_open", {"surface": s, "params": {}})
 
     def _open_history(self) -> None:
         if self._history_dialog is None:
@@ -953,6 +998,16 @@ class MainWindow(QMainWindow):
         self._audit_dialog.show()
         self._audit_dialog.raise_()
         self._query_audit({}, True)  # initial page (no filters)
+
+    def _on_chrome_surface(self, msg: dict) -> None:
+        """Feature 043 — render a pushed SDUI settings surface natively (open the
+        dialog if a re-render arrives for a surface the user opened)."""
+        if self._surface_dialog is None:
+            self._surface_dialog = SurfaceDialog(self, self._emit, self._download)
+        self._surface_dialog.set_surface(
+            msg.get("title") or "Settings", msg.get("components") or [])
+        self._surface_dialog.show()
+        self._surface_dialog.raise_()
 
     def _current_token(self) -> str:
         """The freshest bearer token: the OIDC session's (refreshed) access
@@ -984,6 +1039,39 @@ class MainWindow(QMainWindow):
                 self._audit_loaded.emit({"rows": [], "next_cursor": None, "error": str(exc)})
 
         threading.Thread(target=_work, daemon=True).start()
+
+    def _download(self, url: str, filename: str) -> None:
+        """Download an authed backend file (``/api/download/...``) to disk: open a
+        native Save dialog, then fetch with the session token on a background
+        thread and marshal the outcome back via ``_download_done``."""
+        fn = filename or "download"
+        save_path, _ = QFileDialog.getSaveFileName(self, "Save file", fn)
+        if not save_path:
+            return
+        full = str(url) if str(url).startswith("http") else _http_base(self._url) + str(url)
+        token = self._current_token()
+        self.topbar.set_status(f"Downloading {os.path.basename(save_path)}…", T.MUTED)
+
+        def _work() -> None:
+            try:
+                data = rest.fetch_bytes(full, token)
+                with open(save_path, "wb") as fh:
+                    fh.write(data)
+                self._download_done.emit({"path": save_path, "error": None})
+            except Exception as exc:  # noqa: BLE001 — surfaced in the status bar
+                self._download_done.emit({"path": None, "error": str(exc)})
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _on_download_done(self, result: object) -> None:
+        """GUI-thread handler for a finished download."""
+        if not isinstance(result, dict):
+            return
+        if result.get("error"):
+            self.topbar.set_status(f"Download failed: {result['error']}", T.VARIANT_COLORS["error"][0])
+        else:
+            self.topbar.set_status(
+                f"Saved {os.path.basename(str(result.get('path')))}", T.VARIANT_COLORS["success"][0])
 
     def _on_audit_loaded(self, result: object) -> None:
         """GUI-thread handler for a loaded audit page."""
@@ -1134,6 +1222,9 @@ class MainWindow(QMainWindow):
             # Feature 042: (re)build the Settings dropdown from the server-owned
             # menu model (pushed after register / on role/flag change).
             self.topbar.set_menu_model(msg.get("model") or {})
+        elif t == "chrome_surface":
+            # Feature 043: a settings surface delivered as SDUI components.
+            self._on_chrome_surface(msg)
         elif t == "chat_status":
             st = msg.get("status")
             if st in ("thinking", "executing", "fixing"):

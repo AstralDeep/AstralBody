@@ -23,10 +23,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import com.kyopenscience.astral.app.render.Renderer
 import com.kyopenscience.astral.app.rest.AuditEvent
 import com.kyopenscience.astral.app.transport.ConnectionState
 import com.kyopenscience.astral.core.protocol.Agent
 import com.kyopenscience.astral.core.protocol.ChatSummary
+import com.kyopenscience.astral.core.protocol.Inbound
 
 @Composable
 fun AgentsScreen(
@@ -237,6 +239,35 @@ fun SurfacePlaceholderScreen(label: String) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 10.dp),
         )
+    }
+}
+
+/**
+ * Feature 043 — a settings surface delivered as SDUI (chrome_surface), rendered
+ * natively with the SAME component renderer used for the chat canvas. Replaces
+ * the placeholder for the ported surfaces (theme, user guide, LLM, personalization).
+ */
+@Composable
+fun SurfaceScreen(
+    surface: Inbound.ChromeSurface?,
+    renderer: Renderer,
+) {
+    if (surface == null) {
+        SkeletonList()
+        return
+    }
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item {
+            Text(
+                surface.title.ifBlank { "Settings" },
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+        }
+        items(surface.components) { comp -> renderer.render(comp) }
     }
 }
 

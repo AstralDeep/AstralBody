@@ -11,7 +11,9 @@ The admin-only section is filtered server-side from both the TOC and the
 selectable bodies for non-admin sessions (FR-014 spirit; parity with the
 panel's ``adminOnly`` gating).
 """
+import html as _html
 import json
+import re
 
 from webrender.chrome import esc
 from webrender.chrome.guide_content import SECTIONS
@@ -79,3 +81,50 @@ async def render(orch, user_id, roles, params) -> str:
         f'<article class="astral-guide-article flex-1 min-w-0">{body}</article>'
         "</div>"
     )
+
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"[ \t]+")
+
+
+def _html_to_text(body_html: str) -> str:
+    """Best-effort plain text from a guide section's HTML (native has no HTML).
+
+    Block ends become paragraph breaks and ``<li>`` becomes a bullet, then tags
+    are stripped and entities unescaped. First-pass port — richer structure can
+    follow if ``guide_content`` gains a structured representation.
+    """
+    s = re.sub(r"(?i)<li[^>]*>", "\n• ", body_html or "")
+    s = re.sub(r"(?i)<br\s*/?>", "\n", s)
+    s = re.sub(r"(?i)</(p|div|li|h[1-6]|section|article|ul|ol)>", "\n\n", s)
+    s = _html.unescape(_TAG_RE.sub("", s))
+    lines = [_WS_RE.sub(" ", ln).strip() for ln in s.split("\n")]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
+async def components(orch, user_id, roles, params):
+    """Feature 043 — the User-guide surface as native SDUI components.
+
+    A TOC of ``chrome_open`` buttons (re-open with a ``section`` param, exactly
+    like the web) + the selected section's title and body (HTML flattened to
+    text paragraphs). Admin-only sections are filtered exactly as ``render()``.
+    """
+    from webrender.chrome.surfaces import _sdui
+    sections = _visible_sections(roles)
+    requested = str((params or {}).get("section") or "")
+    selected = next((s for s in sections if s["slug"] == requested), sections[0])
+    toc = [
+        _sdui.button(
+            s["title"], "chrome_open",
+            {"surface": "guide", "params": {"section": s["slug"]}},
+            variant="primary" if s["slug"] == selected["slug"] else "secondary")
+        for s in sections
+    ]
+    paras = [p for p in _html_to_text(selected["body_html"]).split("\n\n") if p.strip()]
+    out = [
+        _sdui.text("Sections", "h3"),
+        _sdui.container(toc, direction="column"),
+        _sdui.text(selected["title"], "h2"),
+    ]
+    out.extend(_sdui.text(p, "body") for p in (paras or ["…"]))
+    return out

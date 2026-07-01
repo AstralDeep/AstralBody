@@ -86,6 +86,12 @@ object Wire {
             "chrome_menu" ->
                 com.kyopenscience.astral.core.chrome.ChromeMenuModel.fromJson(root.obj("model"))
                     ?.let { Inbound.ChromeMenu(it) } ?: Inbound.Unknown(type)
+            "chrome_surface" ->
+                Inbound.ChromeSurface(
+                    surfaceKey = root.str("surface_key").orEmpty(),
+                    title = root.str("title").orEmpty(),
+                    components = Component.listFromJson(root.arr("components")),
+                )
             "auth_required" -> Inbound.AuthRequired(root.str("reason"))
             else -> Inbound.Unknown(type)
         }

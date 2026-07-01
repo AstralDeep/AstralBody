@@ -14,6 +14,7 @@ regardless of what the menu rendered (FR-014).
 """
 import json
 import logging
+import re
 
 logger = logging.getLogger("Orchestrator.Chrome")
 
@@ -59,9 +60,66 @@ async def _push_modal(orch, websocket, html: str):
     await orch._safe_send(websocket, ChromeRender(region="modal", html=html).to_json())
 
 
+# --- Feature 043: device-target-aware surface delivery -----------------------
+# Web (browser) → ChromeRender HTML modal (feature 027, unchanged). Native SDUI
+# (windows/android) → ChromeSurface: a ROTE-adapted astralprims component list
+# the client renders through its EXISTING renderer (contracts/chrome-surface.md).
+
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _device_type(orch, websocket) -> str:
+    """The connecting client's ROTE device type ('browser'|'windows'|'android')."""
+    try:
+        prof = orch.rote.get_profile(websocket)
+        return getattr(prof.device_type, "value", str(prof.device_type))
+    except Exception:
+        return "browser"
+
+
+def _strip_html(html: str) -> str:
+    """Best-effort plain text from a chrome notice's HTML (native has no HTML)."""
+    import html as _htmlmod
+    return _htmlmod.unescape(_TAG_RE.sub("", html or "")).strip()
+
+
+def _notice_components(notice_html: str) -> list:
+    """Map a handler's re-render notice (HTML) to a leading Alert component."""
+    text = _strip_html(notice_html)
+    if not text:
+        return []
+    low = (notice_html or "").lower()  # infer kind from the notice_block color class
+    variant = "error" if "red-" in low else "success" if "green-" in low else "info"
+    return [{"type": "alert", "variant": variant, "message": text}]
+
+
+async def _push_surface(orch, websocket, surface_key, title, admin_only, components):
+    from shared.protocol import ChromeSurface
+    await orch._safe_send(websocket, ChromeSurface(
+        region="modal", surface_key=surface_key, title=title,
+        admin_only=bool(admin_only), components=list(components or []),
+    ).to_json())
+
+
 async def _render_surface(orch, websocket, user_id, roles, surface_key: str,
                           params: dict, notice_html: str = ""):
-    """Render a surface into the modal (admin-gated; error block on failure)."""
+    """Render a surface into the modal, adapting to the connecting client.
+
+    Web → ChromeRender HTML (unchanged). Native SDUI (windows/android) →
+    ChromeSurface (ROTE-adapted astralprims components). Admin-gated and
+    gracefully-degrading on either path (Constitution X/XII, FR-014).
+    """
+    if _device_type(orch, websocket) in ("windows", "android"):
+        await _render_surface_sdui(orch, websocket, user_id, roles,
+                                   surface_key, params, notice_html)
+    else:
+        await _render_surface_html(orch, websocket, user_id, roles,
+                                   surface_key, params, notice_html)
+
+
+async def _render_surface_html(orch, websocket, user_id, roles, surface_key: str,
+                               params: dict, notice_html: str = ""):
+    """Web path — server-rendered HTML modal (feature 027; behavior unchanged)."""
     from webrender.chrome import chrome_error_block, render_modal_shell
     from webrender.chrome.surfaces import get_surface
 
@@ -87,6 +145,50 @@ async def _render_surface(orch, websocket, user_id, roles, surface_key: str,
         return
     await _push_modal(orch, websocket, render_modal_shell(
         getattr(mod, "TITLE", surface_key), (notice_html or "") + body, surface_key))
+
+
+async def _render_surface_sdui(orch, websocket, user_id, roles, surface_key: str,
+                               params: dict, notice_html: str = ""):
+    """Native SDUI path (feature 043) — a ROTE-adapted ChromeSurface frame."""
+    from webrender.chrome.surfaces import _sdui, get_surface
+
+    mod = get_surface(surface_key)
+    if mod is None:
+        logger.warning("chrome: unknown surface %r requested (native)", surface_key)
+        await _push_surface(orch, websocket, surface_key, "Not available", False,
+                            [_sdui.alert(f"Unknown settings surface: {surface_key}", "error")])
+        return
+    title = getattr(mod, "TITLE", surface_key)
+    if getattr(mod, "ADMIN_ONLY", False) and "admin" not in roles:
+        logger.warning("chrome: non-admin %s denied surface %s (native)", user_id, surface_key)
+        await _audit_admin_rejection(orch, websocket, user_id, surface_key)
+        await _push_surface(orch, websocket, surface_key, "Not authorized", True,
+                            [_sdui.alert("This area requires the admin role.", "error")])
+        return
+    builder = getattr(mod, "components", None)
+    if builder is None:
+        # Not yet converted to SDUI → a single labeled placeholder (FR-014),
+        # never the retired text placeholder and never a blank screen.
+        await _push_surface(orch, websocket, surface_key, title, False, [_sdui.placeholder(title)])
+        return
+    try:
+        comps = list(await builder(orch, user_id, roles, params or {}) or [])
+    except Exception:
+        logger.exception("chrome: surface %s components() failed", surface_key)
+        await _push_surface(orch, websocket, surface_key, title, False,
+                            [_sdui.alert("This surface failed to load. Please retry.", "error")])
+        return
+    payload = _notice_components(notice_html) + comps
+    # ROTE-adapt for this device. Use ComponentAdapter directly (not
+    # orch.rote.adapt) so surface components don't clobber the canvas
+    # re-adaptation cache (orch.rote._last_components).
+    try:
+        from rote.adapter import ComponentAdapter
+        payload = ComponentAdapter.adapt(payload, orch.rote.get_profile(websocket))
+    except Exception:
+        logger.debug("chrome: ROTE adapt failed; sending unadapted components", exc_info=True)
+    await _push_surface(orch, websocket, surface_key, title,
+                        getattr(mod, "ADMIN_ONLY", False), payload)
 
 
 async def _audit_admin_rejection(orch, websocket, user_id: str, what: str):
