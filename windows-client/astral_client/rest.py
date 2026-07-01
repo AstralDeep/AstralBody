@@ -158,3 +158,17 @@ def fetch_json(url: str, token: str, *, timeout: int = 20, opener=urllib.request
         return json.loads(raw.decode("utf-8", "replace"))
     except (ValueError, TypeError) as exc:
         raise RestError(0, f"bad JSON: {exc}")
+
+
+def fetch_bytes(url: str, token: str, *, timeout: int = 60, opener=urllib.request.urlopen) -> bytes:
+    """Authenticated GET returning the raw response bytes (for file downloads,
+    e.g. ``GET /api/download/{session}/{file}``). Raises :class:`RestError` on any
+    HTTP or transport error. ``opener`` is injectable for tests."""
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    try:
+        with opener(req, timeout=timeout) as r:
+            return r.read(64 * 1024 * 1024)  # 64 MB safety cap
+    except urllib.error.HTTPError as exc:
+        raise RestError(exc.code, exc.reason or "HTTP error")
+    except Exception as exc:  # noqa: BLE001 — transport failure, surfaced to the UI
+        raise RestError(0, str(exc))

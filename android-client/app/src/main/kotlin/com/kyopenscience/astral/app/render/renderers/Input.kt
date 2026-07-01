@@ -27,6 +27,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import com.kyopenscience.astral.app.render.Download
 import com.kyopenscience.astral.app.render.Emit
 import com.kyopenscience.astral.app.render.Renderer
 import com.kyopenscience.astral.core.sdui.Component
@@ -47,8 +48,8 @@ fun Renderer.registerInputRenderers(): Renderer =
         register("theme_apply") { } // feature 043: side-effect only, no visible UI
         register("code") { c -> CodePrimitive(c) }
         register("file_upload") { c -> FileActionButton(c, emit, c.str("label") ?: "Upload") }
-        register("file_download") { c -> FileActionButton(c, emit, c.str("label") ?: "Download") }
-        register("download_card") { c -> FileActionButton(c, emit, c.str("label") ?: "Download") }
+        register("file_download") { c -> FileDownloadPrimitive(c, download) }
+        register("download_card") { c -> FileDownloadPrimitive(c, download) }
     }
 
 @Composable
@@ -219,5 +220,20 @@ private fun FileActionButton(
     Button(
         onClick = { if (action != null) emit.event(action, c.payload()) },
         enabled = action != null,
+    ) { Text(label) }
+}
+
+/** Feature — a download button that fetches an authed backend file to the device. */
+@Composable
+private fun FileDownloadPrimitive(
+    c: Component,
+    download: Download,
+) {
+    val url = c.str("url") ?: c.str("download_url")
+    val filename = c.str("filename") ?: c.str("title") ?: "download"
+    val label = c.str("label") ?: "Download $filename"
+    Button(
+        onClick = { if (url != null) download.file(url, filename) },
+        enabled = url != null,
     ) { Text(label) }
 }
