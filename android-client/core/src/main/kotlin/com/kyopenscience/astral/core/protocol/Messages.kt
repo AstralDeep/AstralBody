@@ -109,6 +109,13 @@ sealed interface Inbound {
     /** Feature 042 — the server-owned chrome model (top bar + settings menu). */
     data class ChromeMenu(val model: ChromeMenuModel) : Inbound
 
+    /** Feature 043 — a settings surface delivered as SDUI components (native). */
+    data class ChromeSurface(
+        val surfaceKey: String,
+        val title: String,
+        val components: List<Component>,
+    ) : Inbound
+
     data class AuthRequired(val reason: String?) : Inbound
 
     data class Unknown(val type: String) : Inbound

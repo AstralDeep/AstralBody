@@ -21,9 +21,11 @@ class VocabularyParityTest {
             "input", "param_picker", "code", "file_upload", "file_download", "download_card",
             "bar_chart", "line_chart", "pie_chart", "plotly_chart",
             "image",
+            // Feature 043 — the theming primitives used by the native Theme surface.
+            "color_picker", "theme_apply",
         )
 
-    private val excluded = setOf("audio", "color_picker", "theme_apply", "generative")
+    private val excluded = setOf("audio", "generative")
 
     private fun renderer() = Renderer(Emit { _, _ -> }).registerAllRenderers()
 

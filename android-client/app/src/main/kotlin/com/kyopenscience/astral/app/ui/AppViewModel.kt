@@ -41,7 +41,7 @@ data class ChatTurn(val role: String, val text: String)
  * native Agents/Audit screens or, for a surface not yet native on Android, a
  * labeled [SurfacePlaceholder] (P2 replaces these with SDUI).
  */
-enum class Screen { Chat, Agents, History, Audit, SurfacePlaceholder }
+enum class Screen { Chat, Agents, History, Audit, SurfacePlaceholder, Surface }
 
 /** A paperclip-staged upload chip (feature 031). */
 data class StagedAttachment(
@@ -94,6 +94,8 @@ data class UiState(
     val chromeMenu: ChromeMenuModel? = null,
     // Label of the settings surface shown on the SurfacePlaceholder screen.
     val pendingSurfaceLabel: String = "",
+    /** Feature 043 — the SDUI settings surface currently delivered (native render). */
+    val pendingSurface: Inbound.ChromeSurface? = null,
 ) {
     /** What the canvas area actually renders (a history entry, or the live canvas). */
     val visibleCanvas: List<Component>
@@ -305,6 +307,7 @@ class AppViewModel(
             Screen.Audit -> loadAudit()
             Screen.Chat -> Unit
             Screen.SurfacePlaceholder -> Unit
+            Screen.Surface -> Unit
         }
     }
 
@@ -318,12 +321,17 @@ class AppViewModel(
         when (item.surface) {
             "agents" -> goTo(Screen.Agents)
             "audit" -> goTo(Screen.Audit)
-            else ->
+            else -> {
+                // Feature 043: request the SDUI surface; render it natively when the
+                // chrome_surface frame arrives (replaces the placeholder screen).
+                sendEvent("chrome_open", buildJsonObject { put("surface", item.surface) })
                 _state.value =
                     _state.value.copy(
-                        screen = Screen.SurfacePlaceholder,
+                        screen = Screen.Surface,
                         pendingSurfaceLabel = item.label,
+                        pendingSurface = null,
                     )
+            }
         }
     }
 
@@ -499,6 +507,7 @@ class AppViewModel(
             is Inbound.StreamErrorMsg ->
                 applyCanvasOps(s, streamErrorOps(msg))
             is Inbound.ChromeMenu -> s.copy(chromeMenu = msg.model)
+            is Inbound.ChromeSurface -> s.copy(pendingSurface = msg, screen = Screen.Surface)
             else -> s
         }
 
