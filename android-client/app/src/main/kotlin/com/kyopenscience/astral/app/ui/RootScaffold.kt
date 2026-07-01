@@ -12,8 +12,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -34,12 +36,12 @@ import com.kyopenscience.astral.app.R
 import com.kyopenscience.astral.app.render.Renderer
 import com.kyopenscience.astral.app.ui.theme.AstralColors
 
-private fun glyph(screen: Screen): String =
+private fun navIcon(screen: Screen): Int =
     when (screen) {
-        Screen.Chat -> "💬"
-        Screen.Agents -> "🧩"
-        Screen.History -> "🕘"
-        Screen.Audit -> "🛡"
+        Screen.Chat -> R.drawable.ic_chat
+        Screen.Agents -> R.drawable.ic_agents
+        Screen.History -> R.drawable.ic_history
+        Screen.Audit -> R.drawable.ic_audit
     }
 
 /**
@@ -96,7 +98,12 @@ private fun AstralTopBar(current: Screen, onNavigate: (Screen) -> Unit, onNewCha
             )
             Box(modifier = Modifier.weight(1f))
             Screen.entries.forEach { sc ->
-                NavGlyph(glyph = glyph(sc), selected = current == sc, onClick = { onNavigate(sc) })
+                NavGlyph(
+                    iconRes = navIcon(sc),
+                    contentDescription = sc.name,
+                    selected = current == sc,
+                    onClick = { onNavigate(sc) },
+                )
             }
             NewChatButton(onClick = onNewChat)
         }
@@ -104,7 +111,7 @@ private fun AstralTopBar(current: Screen, onNavigate: (Screen) -> Unit, onNewCha
 }
 
 @Composable
-private fun NavGlyph(glyph: String, selected: Boolean, onClick: () -> Unit) {
+private fun NavGlyph(iconRes: Int, contentDescription: String, selected: Boolean, onClick: () -> Unit) {
     val bg = if (selected) AstralColors.Indigo.copy(alpha = 0.22f) else Color.Transparent
     Box(
         modifier =
@@ -112,24 +119,36 @@ private fun NavGlyph(glyph: String, selected: Boolean, onClick: () -> Unit) {
                 .clip(RoundedCornerShape(10.dp))
                 .background(bg)
                 .clickable(onClick = onClick)
-                .padding(horizontal = 9.dp, vertical = 6.dp),
+                .padding(horizontal = 9.dp, vertical = 7.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Text(glyph, fontSize = 16.sp)
+        Icon(
+            painter = painterResource(iconRes),
+            contentDescription = contentDescription,
+            tint = if (selected) Color.White else AstralColors.Muted,
+            modifier = Modifier.size(20.dp),
+        )
     }
 }
 
 @Composable
 private fun NewChatButton(onClick: () -> Unit) {
-    Box(
+    Row(
         modifier =
             Modifier
                 .clip(RoundedCornerShape(14.dp))
                 .background(AstralColors.AccentBrush)
                 .clickable(onClick = onClick)
-                .padding(horizontal = 10.dp, vertical = 6.dp),
-        contentAlignment = Alignment.Center,
+                .padding(horizontal = 11.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        Text("＋ New", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Icon(
+            painter = painterResource(R.drawable.ic_plus),
+            contentDescription = null,
+            tint = Color.White,
+            modifier = Modifier.size(14.dp),
+        )
+        Text("New", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
     }
 }
