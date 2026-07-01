@@ -172,6 +172,7 @@ def build_menu_model(
     *,
     pulse_enabled: Optional[bool] = None,
     include_admin: bool = True,
+    include_tour: bool = True,
 ) -> ChromeModel:
     """Build the role-filtered, flag-resolved chrome model.
 
@@ -209,9 +210,16 @@ def build_menu_model(
     )
     topbar.append(TopBarControl("settings", "menu", label="Settings", icon="gear"))
 
+    # Feature 043: "Take the tour" is a web-only capability (a web-DOM-anchored
+    # walkthrough with no native analog). The native channels pass
+    # include_tour=False so the item is omitted server-side — exactly like the
+    # admin group below (Constitution XII v2.3.1 deliberate web-only carve-out).
+    help_items = _HELP_ITEMS if include_tour else tuple(
+        i for i in _HELP_ITEMS if i.surface != "tour"
+    )
     groups: List[MenuGroup] = [
         MenuGroup("account", "Account", _ACCOUNT_ITEMS),
-        MenuGroup("help", "Help", _HELP_ITEMS),
+        MenuGroup("help", "Help", help_items),
     ]
     if is_admin:
         groups.append(MenuGroup("admin", "Admin tools", _ADMIN_ITEMS, admin_only=True))
@@ -224,10 +232,17 @@ def menu_model_dict(
     *,
     pulse_enabled: Optional[bool] = None,
     include_admin: bool = True,
+    include_tour: bool = True,
 ) -> Dict:
     """Convenience: ``build_menu_model(...).to_dict()`` for the REST/WS channels.
 
     The native channels (``GET /api/chrome/menu`` + the ``chrome_menu`` WS frame)
-    pass ``include_admin=False`` — ADMIN TOOLS is web-only.
+    pass ``include_admin=False`` (ADMIN TOOLS is web-only) and
+    ``include_tour=False`` (feature 043 — "Take the tour" is web-only).
     """
-    return build_menu_model(roles, pulse_enabled=pulse_enabled, include_admin=include_admin).to_dict()
+    return build_menu_model(
+        roles,
+        pulse_enabled=pulse_enabled,
+        include_admin=include_admin,
+        include_tour=include_tour,
+    ).to_dict()
