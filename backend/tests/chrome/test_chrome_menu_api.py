@@ -68,8 +68,10 @@ def test_rest_body_equals_ws_frame_model():
     for roles in (["user"], ["admin", "user"]):
         c = _client({"realm_access": {"roles": roles}})
         rest = c.get("/api/chrome/menu").json()
-        # Both native channels omit admin (web-only) — include_admin=False.
-        frame = json.loads(ChromeMenu(model=menu_model_dict(roles, include_admin=False)).to_json())
+        # Both native channels omit admin AND tour (web-only) — mirroring the
+        # actual WS emission (orchestrator.py register_ui path, feature 043).
+        frame = json.loads(ChromeMenu(model=menu_model_dict(
+            roles, include_admin=False, include_tour=False)).to_json())
         assert frame["type"] == "chrome_menu"
         assert frame["model"] == rest
 

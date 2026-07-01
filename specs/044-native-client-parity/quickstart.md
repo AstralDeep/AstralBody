@@ -8,7 +8,9 @@ it is the *backend* that needs 3.11, which lives in the container).
 
 ```bash
 docker compose up -d                    # postgres + astralbody on :8001
-docker exec astralbody bash -c "cd /app/backend && python -m pytest -q -m 'not integration'"
+# Canonical suite run — unset the local research FF_* flags first (the local
+# .env enables ~58 experimental flags CI never sets; see defect D-031):
+docker exec astralbody bash -c "cd /app/backend && for v in \$(env | grep -E '^FF_' | cut -d= -f1); do unset \$v; done && python -m pytest -q -m 'not integration'"
 # sync an edit (source is baked; agents/ + knowledge/ are bind mounts):
 docker cp backend/<path> astralbody:/app/backend/<path>   # then restart if orchestrator code
 ```

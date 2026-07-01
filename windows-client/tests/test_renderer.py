@@ -112,20 +112,16 @@ def test_supported_types_published(qapp):
     assert "card" in types and "hero" in types and "table" in types
 
 
-# Drift guard: the backend's published primitive vocabulary is
-# `webrender.allowed_primitive_types()` (PRIMITIVE_RENDERERS.keys()). We embed a
-# checked-in snapshot of it here so this test breaks when a backend primitive is
-# added without either a native desktop renderer OR an explicit degradation
-# entry below. Refresh BACKEND_TYPES from backend/webrender/registry.py /
-# renderer.py when the vocabulary legitimately changes.
-BACKEND_TYPES = frozenset({
-    "container", "text", "button", "input", "param_picker", "card", "table",
-    "list", "alert", "progress", "metric", "code", "image", "grid", "tabs",
-    "divider", "collapsible", "bar_chart", "line_chart", "pie_chart",
-    "plotly_chart", "color_picker", "theme_apply", "file_upload",
-    "file_download", "audio", "badge", "hero", "keyvalue", "timeline",
-    "rating", "skeleton", "chat_history", "download_card", "generative",
-})
+# Drift guard: the backend's published primitive vocabulary is the committed
+# UI-protocol manifest (backend/shared/ui_protocol.json, feature 044), which the
+# backend's own tests keep equal to `webrender.allowed_primitive_types()`. This
+# test therefore breaks when a backend primitive is added without either a
+# native desktop renderer OR an explicit degradation entry below.
+import json as _json
+from pathlib import Path as _Path
+
+_MANIFEST = _Path(__file__).resolve().parents[2] / "backend" / "shared" / "ui_protocol.json"
+BACKEND_TYPES = frozenset(_json.loads(_MANIFEST.read_text(encoding="utf-8"))["component_types"])
 
 # Backend primitives intentionally NOT rendered natively on the desktop target
 # (they fall back to a labeled placeholder). Each must have a deliberate reason;
