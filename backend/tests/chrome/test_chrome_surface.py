@@ -162,6 +162,74 @@ def test_handler_rerender_is_chrome_surface_on_native(stub_surfaces):
     assert "button" in kinds  # plus the re-rendered surface components
 
 
+# --- feature 044: device-aware error/close paths (FR-002/FR-017) -------------
+
+@pytest.mark.parametrize("device", ["windows", "android"])
+def test_unknown_action_is_visible_on_native(stub_surfaces, device):
+    orch = FakeOrch(device=device)
+    handled = run(chrome_events.handle_chrome_event(
+        orch, orch.ws, "chrome_totally_bogus", {}, "u1"))
+    assert handled is True
+    frame = _last(orch, "chrome_surface")
+    assert frame["title"] == "Not available"
+    assert "Unknown action" in frame["components"][0]["message"]
+    assert not any(f.get("type") == "chrome_render" for f in orch.sent)
+
+
+def test_unknown_action_keeps_html_on_web(stub_surfaces):
+    orch = FakeOrch(device="browser")
+    run(chrome_events.handle_chrome_event(orch, orch.ws, "chrome_totally_bogus", {}, "u1"))
+    assert "Unknown action" in _last(orch, "chrome_render")["html"]
+
+
+@pytest.mark.parametrize("device", ["windows", "android"])
+def test_uncaught_handler_failure_is_visible_on_native(stub_surfaces, device, monkeypatch):
+    async def boom(orch, websocket, user_id, roles, payload):
+        raise RuntimeError("kaput")
+
+    handlers = dict(chrome_events._handlers())
+    handlers["chrome_boom"] = ("stub_sdui", boom)
+    monkeypatch.setattr(chrome_events, "_HANDLERS", handlers)
+
+    orch = FakeOrch(device=device)
+    handled = run(chrome_events.handle_chrome_event(orch, orch.ws, "chrome_boom", {}, "u1"))
+    assert handled is True
+    frame = _last(orch, "chrome_surface")
+    assert frame["title"] == "Something went wrong"
+    assert frame["components"][0]["type"] == "alert"
+    assert frame["components"][0]["variant"] == "error"
+
+
+def test_admin_denied_action_is_visible_on_native(stub_surfaces, monkeypatch):
+    async def noop(orch, websocket, user_id, roles, payload):
+        return None
+
+    handlers = dict(chrome_events._handlers())
+    handlers["chrome_admin_thing"] = ("admin_tools", noop)
+    monkeypatch.setattr(chrome_events, "_HANDLERS", handlers)
+
+    orch = FakeOrch(roles=("user",), device="android")
+    run(chrome_events.handle_chrome_event(orch, orch.ws, "chrome_admin_thing", {}, "u1"))
+    frame = _last(orch, "chrome_surface")
+    assert frame["title"] == "Not authorized"
+    assert "admin role" in frame["components"][0]["message"]
+
+
+@pytest.mark.parametrize("device", ["windows", "android"])
+def test_chrome_close_clears_native_modal_with_empty_components(stub_surfaces, device):
+    orch = FakeOrch(device=device)
+    run(chrome_events.handle_chrome_event(orch, orch.ws, "chrome_close", {}, "u1"))
+    frame = _last(orch, "chrome_surface")
+    assert frame["components"] == []  # documented clear-modal form
+    assert not any(f.get("type") == "chrome_render" for f in orch.sent)
+
+
+def test_chrome_close_still_clears_web_modal_html(stub_surfaces):
+    orch = FakeOrch(device="browser")
+    run(chrome_events.handle_chrome_event(orch, orch.ws, "chrome_close", {}, "u1"))
+    assert _last(orch, "chrome_render")["html"] == ""
+
+
 # --- _sdui helpers (FR + research D2) ----------------------------------------
 
 def test_sdui_form_is_parampicker_action_submit():

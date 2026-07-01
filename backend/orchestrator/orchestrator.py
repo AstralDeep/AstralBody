@@ -2296,6 +2296,17 @@ class Orchestrator:
         except Exception as e:
             import traceback
             logger.error(f"Error handling UI message: {e}\n{traceback.format_exc()}")
+            # Feature 044 (FR-002/SC-006): a generic ui_event failure must not be
+            # invisible — every client shows error frames, so the turn reaches a
+            # terminal state instead of a permanent "thinking".
+            try:
+                await self._safe_send(websocket, json.dumps({
+                    "type": "error",
+                    "code": "internal",
+                    "message": "The request failed on the server. Please retry.",
+                }))
+            except Exception:
+                logger.debug("error-frame emission failed", exc_info=True)
 
     # =========================================================================
     # COMPONENT COMBINING (LLM-powered)
