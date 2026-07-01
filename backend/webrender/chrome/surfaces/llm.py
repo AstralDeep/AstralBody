@@ -298,6 +298,53 @@ async def render(orch: Any, user_id: str, roles: Any, params: Any) -> str:
     )
 
 
+async def components(orch: Any, user_id: str, roles: Any, params: Any):
+    """Feature 043 — the LLM settings surface as native SDUI components.
+
+    A single ``ParamPicker`` action-submit form (base_url / api_key [password,
+    write-only] / model [text or select]) with Load-models / Test / Save action
+    buttons that all submit the collected fields to the SAME ``chrome_llm_*``
+    handlers the web uses, plus a Clear button when a config is saved.
+    """
+    from webrender.chrome.surfaces import _sdui
+    params = params if isinstance(params, dict) else {}
+    saved = _user_creds(orch, user_id)
+    base_url = str(params.get("base_url") or (getattr(saved, "base_url", "") if saved else "") or "")
+    model = str(params.get("model") or (getattr(saved, "model", "") if saved else "") or "")
+    models = params.get("models") if isinstance(params.get("models"), list) else None
+
+    if models:
+        listed = list(dict.fromkeys(str(m) for m in models if str(m).strip()))
+        if model and model not in listed:
+            listed.insert(0, model)
+        model_field = _sdui.field("model", "Model", "select", default=model, options=listed)
+    else:
+        model_field = _sdui.field("model", "Model", "text", default=model, help="e.g. gpt-4o-mini")
+
+    key_help = ("An API key is saved for this session; it is never displayed — leave blank to keep it."
+                if saved is not None else "Held in memory for this session only; never persisted.")
+    out = [
+        _sdui.text("Your personal LLM credentials are held in memory for this session only — "
+                   "never persisted server-side, discarded when the connection closes.", "caption"),
+        _sdui.badge("saved this session" if saved is not None else "not configured",
+                    "success" if saved is not None else "default"),
+        _sdui.form(
+            [_sdui.field("base_url", "Base URL", "text", default=base_url,
+                         help="https://api.openai.com/v1"),
+             _sdui.field("api_key", "API key", "password", help=key_help),
+             model_field],
+            actions=[
+                {"label": "Load models", "action": "chrome_llm_models"},
+                {"label": "Test connection", "action": "chrome_llm_test"},
+                {"label": "Save", "action": "chrome_llm_save", "variant": "primary"},
+            ],
+        ),
+    ]
+    if saved is not None:
+        out.append(_sdui.button("Clear saved config", "chrome_llm_clear", variant="secondary"))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
