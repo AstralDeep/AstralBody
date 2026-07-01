@@ -78,6 +78,10 @@ data class UiState(
     val agents: List<Agent> = emptyList(),
     val history: List<ChatSummary> = emptyList(),
     val audit: List<AuditEvent> = emptyList(),
+    // Per-surface "fetching its data" flags → skeletons on the list screens.
+    val agentsLoading: Boolean = false,
+    val historyLoading: Boolean = false,
+    val auditLoading: Boolean = false,
 ) {
     /** What the canvas area actually renders (a history entry, or the live canvas). */
     val visibleCanvas: List<Component>
@@ -139,6 +143,9 @@ class AppViewModel(
                                     turnActive = false,
                                     pendingReplace = false,
                                     pendingCanvas = emptyList(),
+                                    agentsLoading = false,
+                                    historyLoading = false,
+                                    auditLoading = false,
                                 )
                             } else {
                                 cur.copy(connection = c)
@@ -171,6 +178,19 @@ class AppViewModel(
     }
 
     fun sendEvent(action: String, payload: JsonObject = JsonObject(emptyMap())) {
+        // A rendered control that submits a chat turn (e.g. an example card) goes
+        // through sendEvent, not sendChat — mirror the optimistic turn-start so the
+        // canvas shows the skeleton the instant it's tapped, not only once the
+        // server acks the turn.
+        if (action == "chat_message") {
+            _state.value =
+                _state.value.copy(
+                    turnActive = true,
+                    pendingReplace = true,
+                    pendingCanvas = emptyList(),
+                    viewingIndex = null,
+                )
+        }
         client.sendEvent(action, _state.value.activeChatId, payload)
     }
 
@@ -245,9 +265,15 @@ class AppViewModel(
 
     // --- US4 surfaces -------------------------------------------------------
 
-    /** Switch surface and lazily fetch its data. */
+    /** Switch surface and lazily fetch its data (flagging it loading for a skeleton). */
     fun goTo(screen: Screen) {
-        _state.value = _state.value.copy(screen = screen)
+        _state.value =
+            _state.value.copy(
+                screen = screen,
+                agentsLoading = screen == Screen.Agents || _state.value.agentsLoading,
+                historyLoading = screen == Screen.History || _state.value.historyLoading,
+                auditLoading = screen == Screen.Audit || _state.value.auditLoading,
+            )
         when (screen) {
             Screen.Agents -> sendEvent("discover_agents")
             Screen.History -> sendEvent("get_history")
@@ -304,10 +330,14 @@ class AppViewModel(
     }
 
     private fun loadAudit() {
-        val t = token ?: return
+        val t = token
+        if (t == null) {
+            _state.value = _state.value.copy(auditLoading = false)
+            return
+        }
         viewModelScope.launch {
             val events = runCatching { rest.audit(t) }.getOrDefault(emptyList())
-            _state.value = _state.value.copy(audit = events)
+            _state.value = _state.value.copy(audit = events, auditLoading = false)
         }
     }
 
@@ -378,8 +408,8 @@ class AppViewModel(
                     statusText = null,
                 )
             is Inbound.ChatStatus -> reduceStatus(s, msg)
-            is Inbound.AgentList -> s.copy(agents = msg.agents)
-            is Inbound.HistoryList -> s.copy(history = msg.chats)
+            is Inbound.AgentList -> s.copy(agents = msg.agents, agentsLoading = false)
+            is Inbound.HistoryList -> s.copy(history = msg.chats, historyLoading = false)
             is Inbound.UiStreamData ->
                 applyCanvasOps(s, streamFrameToOps(msg, s.activeChatId, seqState))
             is Inbound.StreamSubscribed ->
