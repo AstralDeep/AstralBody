@@ -880,6 +880,14 @@ class Database:
                 attempts INTEGER DEFAULT 0
             )
         ''')
+        # Feature 044 — native logout: Keycloak only revokes a token for its
+        # issuing client, so queued retries must remember the originating
+        # first-party client id (NULL = pre-044 row → web client id).
+        # Rollback: ALTER TABLE auth_revocation_queue DROP COLUMN client_id.
+        cursor.execute('''
+            ALTER TABLE auth_revocation_queue
+            ADD COLUMN IF NOT EXISTS client_id TEXT
+        ''')
 
         # Per-turn full-state workspace snapshots (read-only timeline).
         # components carries message-grade content; lifecycle == the chat's.

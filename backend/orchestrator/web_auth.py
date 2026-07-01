@@ -657,15 +657,22 @@ def _error_page(nxt: str, reason: str, status: int = 200) -> HTMLResponse:
 # Revocation (D5) — best-effort with offline-tolerant queue
 # ---------------------------------------------------------------------------
 
-async def _revoke_refresh_token(refresh_token: str) -> bool:
-    """POST the refresh token to Keycloak's RFC 7009 revocation endpoint."""
+async def _revoke_refresh_token(refresh_token: str, client_id: str | None = None) -> bool:
+    """POST the refresh token to Keycloak's RFC 7009 revocation endpoint.
+
+    ``client_id`` overrides the configured web client for tokens minted to a
+    different first-party client (feature 044 native logout): Keycloak only
+    revokes a token for its issuing client, and the native clients
+    (astral-desktop / astral-mobile) are PUBLIC clients — no secret is sent
+    for them."""
     if not refresh_token:
         return True
-    authority, client_id, client_secret = _keycloak_config()
+    authority, web_client_id, client_secret = _keycloak_config()
     if not authority:
         return False
-    data = {"token": refresh_token, "token_type_hint": "refresh_token", "client_id": client_id}
-    if client_secret:
+    effective = (client_id or "").strip() or web_client_id
+    data = {"token": refresh_token, "token_type_hint": "refresh_token", "client_id": effective}
+    if client_secret and effective == web_client_id:
         data["client_secret"] = client_secret
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -675,20 +682,27 @@ async def _revoke_refresh_token(refresh_token: str) -> bool:
         return False
 
 
-async def _revoke_or_queue(user_id: str, refresh_token: str) -> None:
+async def _revoke_or_queue(user_id: str, refresh_token: str,
+                           client_id: str | None = None) -> str:
+    """Revoke now or queue for the background retrier.
+
+    Returns the outcome — ``"revoked" | "queued" | "failed" | "noop"`` — for
+    the 044 native-logout endpoint to report; the web logout path ignores it
+    (behavior unchanged)."""
     if not refresh_token:
-        return
-    if await _revoke_refresh_token(refresh_token):
-        return
+        return "noop"
+    if await _revoke_refresh_token(refresh_token, client_id=client_id):
+        return "revoked"
     store = _get_store()
     if store is not None:
         try:
-            store.enqueue_revocation(user_id, refresh_token)
+            store.enqueue_revocation(user_id, refresh_token, client_id=client_id)
             logger.info("web_auth: IdP unreachable — refresh-token revocation queued for %s", user_id)
-            return
+            return "queued"
         except Exception:
             logger.warning("web_auth: revocation enqueue failed", exc_info=True)
     logger.warning("web_auth: could not revoke or queue refresh token for %s", user_id)
+    return "failed"
 
 
 _MAX_REVOCATION_ATTEMPTS = 30
@@ -707,7 +721,8 @@ async def process_revocation_queue_once() -> int:
         logger.debug("web_auth: revocation queue read failed", exc_info=True)
         return 0
     for item in pending:
-        if await _revoke_refresh_token(item["refresh_token"]):
+        if await _revoke_refresh_token(item["refresh_token"],
+                                       client_id=item.get("client_id")):
             store.resolve_revocation(item["id"])
             resolved += 1
         elif item["attempts"] >= _MAX_REVOCATION_ATTEMPTS:

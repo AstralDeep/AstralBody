@@ -14,9 +14,80 @@ from astral_client.rest import (
     audit_url,
     chrome_menu_url,
     fetch_json,
+    keycloak_logout,
+    native_logout,
     parse_audit_response,
     parse_chrome_menu,
 )
+
+
+# ── feature 044: server-revoking sign-out (FR-005) ──────────────────────────
+
+class _FakeLogoutResp:
+    def __init__(self, status):
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self, *a):
+        return b""
+
+
+def test_native_logout_posts_bearer_and_body():
+    seen = {}
+
+    def opener(req, timeout=None):
+        seen["url"] = req.full_url
+        seen["method"] = req.get_method()
+        seen["auth"] = req.get_header("Authorization")
+        seen["body"] = req.data
+        return _FakeLogoutResp(200)
+
+    ok = native_logout("http://h:8001", "acc-tok", "rt-1", "astral-desktop", opener=opener)
+    assert ok is True
+    assert seen["url"] == "http://h:8001/api/auth/logout"
+    assert seen["method"] == "POST"
+    assert seen["auth"] == "Bearer acc-tok"
+    import json as _j
+    body = _j.loads(seen["body"])
+    assert body == {"refresh_token": "rt-1", "client_id": "astral-desktop"}
+
+
+def test_native_logout_false_on_error_status():
+    def opener(req, timeout=None):
+        return _FakeLogoutResp(500)
+
+    assert native_logout("http://h:8001", "t", "rt", "astral-desktop", opener=opener) is False
+
+
+def test_native_logout_false_on_transport_error():
+    def opener(req, timeout=None):
+        raise OSError("connection refused")
+
+    assert native_logout("http://h:8001", "t", "rt", "astral-desktop", opener=opener) is False
+
+
+def test_keycloak_logout_direct_fallback():
+    seen = {}
+
+    def opener(req, timeout=None):
+        seen["url"] = req.full_url
+        seen["body"] = req.data
+        return _FakeLogoutResp(204)
+
+    ok = keycloak_logout("https://iam.example/realms/Astral", "astral-desktop", "rt-9", opener=opener)
+    assert ok is True
+    assert seen["url"] == "https://iam.example/realms/Astral/protocol/openid-connect/logout"
+    assert b"refresh_token=rt-9" in seen["body"] and b"client_id=astral-desktop" in seen["body"]
+
+
+def test_keycloak_logout_noop_without_inputs():
+    assert keycloak_logout("", "c", "rt") is False
+    assert keycloak_logout("https://iam", "c", "") is False
 
 
 # ── feature 042: chrome menu model (single server-owned source of truth) ──────
