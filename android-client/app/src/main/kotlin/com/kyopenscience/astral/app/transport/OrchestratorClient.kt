@@ -1,6 +1,7 @@
 package com.kyopenscience.astral.app.transport
 
 import android.util.Log
+import com.kyopenscience.astral.core.protocol.ChatAttachment
 import com.kyopenscience.astral.core.protocol.DeviceCapabilities
 import com.kyopenscience.astral.core.protocol.Inbound
 import com.kyopenscience.astral.core.protocol.Wire
@@ -125,8 +126,8 @@ class OrchestratorClient(
         }
     }
 
-    fun sendChat(message: String, chatId: String?) {
-        enqueueOrSend(Wire.encodeChatMessage(message, chatId))
+    fun sendChat(message: String, chatId: String?, attachments: List<ChatAttachment> = emptyList()) {
+        enqueueOrSend(Wire.encodeChatMessage(message, chatId, attachments))
     }
 
     fun sendEvent(action: String, sessionId: String?, payload: JsonObject = JsonObject(emptyMap())) {

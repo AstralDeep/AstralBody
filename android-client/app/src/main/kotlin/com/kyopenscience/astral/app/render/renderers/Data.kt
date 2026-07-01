@@ -4,12 +4,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
@@ -113,14 +110,9 @@ private fun ChatHistoryPrimitive(c: Component) {
 
 @Composable
 private fun SkeletonPrimitive(c: Component) {
-    val count = (c.int("count") ?: 3).coerceIn(1, 12)
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        repeat(count) {
-            Surface(
-                shape = RoundedCornerShape(6.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                modifier = Modifier.fillMaxWidth().height(14.dp),
-            ) {}
-        }
-    }
+    // A `skeleton` is a LOADING placeholder. The native canvas commits only FINAL
+    // content (the app shows its own skeleton while a query is in flight), so a
+    // skeleton reaching the canvas is stray — a placeholder the model never filled.
+    // Render nothing rather than dead gray bars. (The reducer also drops top-level
+    // skeletons so they leave no gap; this handles any nested ones.)
 }

@@ -22,18 +22,28 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.kyopenscience.astral.app.AppConfig
+import com.kyopenscience.astral.app.BuildConfig
 import com.kyopenscience.astral.app.rest.AuditEvent
+import com.kyopenscience.astral.app.transport.ConnectionState
 import com.kyopenscience.astral.core.protocol.Agent
 import com.kyopenscience.astral.core.protocol.ChatSummary
 
 @Composable
 fun AgentsScreen(
     agents: List<Agent>,
+    loading: Boolean,
     onToggleAgent: (Agent, Boolean) -> Unit,
     onToggleTool: (Agent, String, Boolean) -> Unit,
     onEnableRecommended: () -> Unit,
 ) {
+    if (loading && agents.isEmpty()) {
+        SkeletonList()
+        return
+    }
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -121,7 +131,11 @@ private fun AgentCard(
 }
 
 @Composable
-fun HistoryScreen(chats: List<ChatSummary>, onOpen: (String) -> Unit) {
+fun HistoryScreen(chats: List<ChatSummary>, loading: Boolean, onOpen: (String) -> Unit) {
+    if (loading && chats.isEmpty()) {
+        SkeletonList()
+        return
+    }
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -142,7 +156,11 @@ fun HistoryScreen(chats: List<ChatSummary>, onOpen: (String) -> Unit) {
 }
 
 @Composable
-fun AuditScreen(events: List<AuditEvent>) {
+fun AuditScreen(events: List<AuditEvent>, loading: Boolean) {
+    if (loading && events.isEmpty()) {
+        SkeletonList()
+        return
+    }
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -183,3 +201,91 @@ private fun AuditCard(event: AuditEvent) {
         }
     }
 }
+
+@Composable
+fun SettingsScreen(
+    connection: ConnectionState,
+    onOpenAgents: () -> Unit,
+    onOpenAudit: () -> Unit,
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        item { Text("Settings", style = MaterialTheme.typography.titleLarge) }
+        item {
+            SettingsGroup("Account") {
+                SettingsLink("Agents & permissions", "Enable agents and tune their tools", onOpenAgents)
+                SettingsLink("Audit log", "Review what ran on your behalf", onOpenAudit)
+            }
+        }
+        item {
+            SettingsGroup("Connection") {
+                SettingsInfo("Status", connectionLabel(connection))
+                SettingsInfo("Server", AppConfig.API_BASE)
+            }
+        }
+        item {
+            SettingsGroup("About") {
+                SettingsInfo("Version", BuildConfig.VERSION_NAME)
+                SettingsInfo("Appearance", "Dark")
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsGroup(title: String, content: @Composable () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+            title.uppercase(),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 4.dp),
+        )
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(vertical = 4.dp)) { content() }
+        }
+    }
+}
+
+@Composable
+private fun SettingsLink(title: String, subtitle: String, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Text("›", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 20.sp)
+    }
+}
+
+@Composable
+private fun SettingsInfo(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text(label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+        Text(
+            value,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+private fun connectionLabel(c: ConnectionState): String =
+    when (c) {
+        ConnectionState.Connected -> "Connected"
+        ConnectionState.Connecting -> "Connecting…"
+        ConnectionState.Disconnected -> "Disconnected"
+        ConnectionState.AuthRequired -> "Re-authenticating…"
+    }
