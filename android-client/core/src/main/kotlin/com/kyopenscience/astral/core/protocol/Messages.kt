@@ -45,6 +45,18 @@ data class ChatSummary(val id: String, val title: String)
 
 data class ChatTurn(val role: String, val content: String)
 
+/**
+ * A staged upload referenced from an outbound `chat_message` (feature 031). The
+ * server resolves the [attachmentId] (ownership-validated) and injects the
+ * "Attachments on this turn" reader block. Mirrors the web payload shape
+ * `{attachment_id, filename, category}`.
+ */
+data class ChatAttachment(
+    val attachmentId: String,
+    val filename: String,
+    val category: String,
+)
+
 data class ChatTranscript(val id: String?, val messages: List<ChatTurn>)
 
 /**
@@ -79,6 +91,9 @@ sealed interface Inbound {
     data class StreamUnsubscribed(val toolName: String?) : Inbound
 
     data class ChatCreated(val chatId: String?) : Inbound
+
+    /** Authoritative "a new user turn has started" (emitted once per chat turn). */
+    data class UserMessageAcked(val chatId: String?, val messageId: String?) : Inbound
 
     data class ChatLoaded(val chat: ChatTranscript) : Inbound
 
