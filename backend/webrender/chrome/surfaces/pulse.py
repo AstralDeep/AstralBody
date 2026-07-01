@@ -24,6 +24,7 @@ from typing import Any, Dict, List
 
 from dreaming.pulse import build_digest, is_schedulable, propose_schedule, pulse_enabled
 from webrender.chrome import esc, notice_block, render_one
+from webrender.chrome.surfaces import _sdui
 
 logger = logging.getLogger("Orchestrator.Chrome.Pulse")
 
@@ -154,3 +155,36 @@ async def render(orch, user_id, roles, params) -> str:
     return (
         f'<div class="space-y-4">{_intro()}{body}{_scheduling_hint()}</div>'
     )
+
+
+async def components(orch, user_id, roles, params):
+    """Feature 044 — the Pulse digest as native SDUI components.
+
+    Same data as ``render()``: intro text + the ``build_digest`` card dicts
+    (already astralprims-shaped, so they render through the client's normal
+    component renderer). Flag OFF (``FF_PULSE_DIGEST``) → a single notice Alert
+    and nothing else, matching the web "feature is off" state. No new handlers.
+    The web ``render()`` HTML is unchanged (contract §3.2). Read-only,
+    strictly user-scoped (same repo the REST personalization endpoints use).
+    """
+    if not pulse_enabled():
+        # Flag OFF: intentionally empty except a single explanatory notice.
+        return [_sdui.alert("The Pulse digest is currently turned off. An administrator "
+                            "can enable it with the FF_PULSE_DIGEST setting.", "info")]
+    repo = _repo(orch)
+    if repo is None:
+        return [_sdui.alert("Personalization subsystem is not available.", "error")]
+    out = [_sdui.text("A quick read on what the assistant worked out from your recent "
+                      "activity — recurring topics, goals, and preferences it is keeping "
+                      "track of. Read-only.", "caption")]
+    cards = build_digest(_digest_items(repo, user_id))
+    if not cards:
+        out.append(_sdui.alert("Nothing to show yet — your digest fills in as you chat "
+                               "and the assistant notices recurring topics, goals, and "
+                               "preferences.", "info"))
+        return out
+    # build_digest returns astralprims-shaped card dicts — the same primitives
+    # render_one draws for the web canvas — so they ride the native renderer
+    # unchanged.
+    out.extend(cards)
+    return out

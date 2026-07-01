@@ -93,7 +93,7 @@ def test_revoke_or_queue_success_queues_nothing(db, store, monkeypatch):
     user_id = f"u-{uuid.uuid4()}"
     calls = []
 
-    async def ok(token):
+    async def ok(token, client_id=None):
         calls.append(token)
         return True
 
@@ -113,7 +113,7 @@ def test_revoke_or_queue_failure_enqueues_token(db, store, monkeypatch):
     user_id = f"u-{uuid.uuid4()}"
     token = f"rt-{uuid.uuid4()}"
 
-    async def fail(_token):
+    async def fail(_token, client_id=None):
         return False
 
     monkeypatch.setattr(web_auth, "_revoke_refresh_token", fail)
@@ -139,7 +139,7 @@ def test_revocation_queue_drains_on_success(db, store, monkeypatch):
         store.enqueue_revocation(user_id, t)
     _backdate_queue(db, user_id)  # ensure inside the limit-20 scan window
 
-    async def revoke(token):
+    async def revoke(token, client_id=None):
         return token in mine  # only resolve OUR rows — deterministic count
 
     monkeypatch.setattr(web_auth, "_revoke_refresh_token", revoke)
@@ -158,7 +158,7 @@ def test_revocation_queue_failure_bumps_attempts_and_keeps_row(db, store, monkey
     store.enqueue_revocation(user_id, token)
     _backdate_queue(db, user_id)
 
-    async def fail(_token):
+    async def fail(_token, client_id=None):
         return False
 
     monkeypatch.setattr(web_auth, "_revoke_refresh_token", fail)
@@ -183,7 +183,7 @@ def test_revocation_queue_drops_row_after_max_attempts(db, store, monkeypatch):
          web_auth._MAX_REVOCATION_ATTEMPTS),
     )
 
-    async def fail(_token):
+    async def fail(_token, client_id=None):
         return False
 
     monkeypatch.setattr(web_auth, "_revoke_refresh_token", fail)
@@ -211,7 +211,7 @@ def test_auth_logout_revokes_everything_and_redirects(db, store, monkeypatch, re
 
     revoked_tokens = []
 
-    async def ok(token):
+    async def ok(token, client_id=None):
         revoked_tokens.append(token)
         return True
 
@@ -253,7 +253,7 @@ def test_auth_logout_offline_idp_still_signs_out_and_queues(db, store, monkeypat
     store.create(sid, user_id=user_id, access_token="at", refresh_token=refresh,
                  hard_max_seconds=web_auth.HARD_MAX_SECONDS)
 
-    async def unreachable(_token):
+    async def unreachable(_token, client_id=None):
         return False
 
     monkeypatch.setattr(web_auth, "_revoke_refresh_token", unreachable)
@@ -331,7 +331,7 @@ def test_auth_callback_user_switch_revokes_prior_session(db, store, monkeypatch,
 
     revoke_attempts = []
 
-    async def unreachable(token):
+    async def unreachable(token, client_id=None):
         revoke_attempts.append(token)
         return False  # force the queue path so "revoked-or-queued" is provable
 
