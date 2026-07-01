@@ -105,7 +105,11 @@ private fun AgentCard(
             }
             if (expanded) {
                 if (agent.tools.isEmpty()) {
-                    Text("This agent exposes no tools.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        "This agent exposes no tools.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 agent.tools.forEach { tool ->
                     Row(
@@ -131,7 +135,11 @@ private fun AgentCard(
 }
 
 @Composable
-fun HistoryScreen(chats: List<ChatSummary>, loading: Boolean, onOpen: (String) -> Unit) {
+fun HistoryScreen(
+    chats: List<ChatSummary>,
+    loading: Boolean,
+    onOpen: (String) -> Unit,
+) {
     if (loading && chats.isEmpty()) {
         SkeletonList()
         return
@@ -156,7 +164,10 @@ fun HistoryScreen(chats: List<ChatSummary>, loading: Boolean, onOpen: (String) -
 }
 
 @Composable
-fun AuditScreen(events: List<AuditEvent>, loading: Boolean) {
+fun AuditScreen(
+    events: List<AuditEvent>,
+    loading: Boolean,
+) {
     if (loading && events.isEmpty()) {
         SkeletonList()
         return
@@ -195,7 +206,11 @@ private fun AuditCard(event: AuditEvent) {
                     Text("id: $it", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 if (event.outcomeDetail == null && event.detail == null) {
-                    Text("No additional detail recorded.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        "No additional detail recorded.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
         }
@@ -235,7 +250,10 @@ fun SettingsScreen(
 }
 
 @Composable
-private fun SettingsGroup(title: String, content: @Composable () -> Unit) {
+private fun SettingsGroup(
+    title: String,
+    content: @Composable () -> Unit,
+) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(
             title.uppercase(),
@@ -250,7 +268,11 @@ private fun SettingsGroup(title: String, content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun SettingsLink(title: String, subtitle: String, onClick: () -> Unit) {
+private fun SettingsLink(
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit,
+) {
     Row(
         modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -265,7 +287,10 @@ private fun SettingsLink(title: String, subtitle: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun SettingsInfo(label: String, value: String) {
+private fun SettingsInfo(
+    label: String,
+    value: String,
+) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,

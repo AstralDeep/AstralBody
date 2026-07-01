@@ -9,8 +9,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
-private fun comp(type: String): Component =
-    Component(type, null, Json.parseToJsonElement("""{"type":"$type"}""").jsonObject, emptyList())
+private fun comp(type: String): Component = Component(type, null, Json.parseToJsonElement("""{"type":"$type"}""").jsonObject, emptyList())
 
 private fun frame(
     streamId: String? = "s1",

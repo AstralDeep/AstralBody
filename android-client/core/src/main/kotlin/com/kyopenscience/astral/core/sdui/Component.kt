@@ -24,14 +24,14 @@ data class Component(
     companion object {
         fun fromJson(obj: JsonObject): Component {
             val type = (obj["type"] as? JsonPrimitive)?.contentOrNull.orEmpty()
-            val id = (obj["component_id"] as? JsonPrimitive)?.contentOrNull
-                ?: (obj["id"] as? JsonPrimitive)?.contentOrNull
+            val id =
+                (obj["component_id"] as? JsonPrimitive)?.contentOrNull
+                    ?: (obj["id"] as? JsonPrimitive)?.contentOrNull
             return Component(type = type, id = id, attributes = obj, children = childrenOf(obj))
         }
 
         /** Decode a JSON array of component objects (nulls / non-objects dropped). */
-        fun listFromJson(arr: JsonArray?): List<Component> =
-            arr?.mapNotNull { (it as? JsonObject)?.let(::fromJson) } ?: emptyList()
+        fun listFromJson(arr: JsonArray?): List<Component> = arr?.mapNotNull { (it as? JsonObject)?.let(::fromJson) } ?: emptyList()
 
         private fun childrenOf(obj: JsonObject): List<Component> =
             when (val raw = obj["content"] ?: obj["children"]) {

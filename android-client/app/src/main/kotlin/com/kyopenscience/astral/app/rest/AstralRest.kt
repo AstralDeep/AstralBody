@@ -29,10 +29,11 @@ data class AuditEvent(
     val detail: String? = null,
 )
 
-private val auditJson = Json {
-    ignoreUnknownKeys = true
-    isLenient = true
-}
+private val auditJson =
+    Json {
+        ignoreUnknownKeys = true
+        isLenient = true
+    }
 
 /**
  * Tolerant shaping of the `/api/audit` body — accepts a top-level array or an
@@ -48,8 +49,7 @@ fun parseAudit(raw: String): List<AuditEvent> {
             else -> JsonArray(emptyList())
         }
     return arr.mapNotNull { it as? JsonObject }.map { o ->
-        fun pick(vararg keys: String): String? =
-            keys.firstNotNullOfOrNull { (o[it] as? JsonPrimitive)?.contentOrNull }
+        fun pick(vararg keys: String): String? = keys.firstNotNullOfOrNull { (o[it] as? JsonPrimitive)?.contentOrNull }
         AuditEvent(
             id = pick("id", "event_id"),
             eventClass = pick("event_class", "class"),
