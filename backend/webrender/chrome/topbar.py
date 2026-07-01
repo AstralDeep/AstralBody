@@ -6,13 +6,21 @@ the session roles include ``admin`` — absent from the DOM for everyone else
 (UX-only gating, server-side checks stay authoritative). Entries whose
 availability rule fails are omitted; empty groups hide their heading.
 
+Feature 042: the menu structure is NOT defined here — it comes from the single
+server-owned :func:`webrender.chrome.menu_model.build_menu_model`, the same
+model the native clients consume over ``chrome_menu`` / ``GET /api/chrome/menu``
+(Constitution II/XII: one definition, every client renders it). This module is
+purely the *web renderer* of that model — it owns the HTML/CSS + web-specific
+presentation details (DOM ids, tooltips, tour targets, icon SVGs), not the
+inventory.
+
 Menu markup follows the WAI-ARIA menu pattern; the keyboard and open/close
 behavior lives in ``webrender/static/client.js``.
 """
 import json
 
-from dreaming.pulse import pulse_enabled
 from webrender import esc
+from webrender.chrome.menu_model import build_menu_model
 
 _GEAR_SVG = (
     '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
@@ -38,10 +46,6 @@ _HISTORY_SVG = (
     '<path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg>'
 )
 
-# chrome_open payload for the top-bar timeline button (the client injects the
-# active chat id into params at click time — see client.js).
-_TIMELINE_PAYLOAD = json.dumps({"surface": "workspace_timeline", "params": {}})
-
 # "sparkle" glyph for the Pulse digest button — a recognizable "here's what I
 # noticed" affordance. Only rendered when FF_PULSE_DIGEST is enabled.
 _PULSE_SVG = (
@@ -51,110 +55,80 @@ _PULSE_SVG = (
     'M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/><circle cx="12" cy="12" r="3"/></svg>'
 )
 
-# chrome_open payload for the Pulse top-bar button (no per-chat params needed —
-# the digest is computed from the user's current state).
-_PULSE_PAYLOAD = json.dumps({"surface": "pulse", "params": {}})
+# icon id (from the model) -> SVG glyph
+_ICON_SVG = {"gear": _GEAR_SVG, "history": _HISTORY_SVG, "sparkle": _PULSE_SVG}
+
+# Web-specific presentation for the interactive top-bar icon buttons, keyed by
+# the model control key. The MODEL owns presence/order/action; the web renderer
+# owns these DOM ids / tooltips / tour anchors.
+_TOPBAR_BTN_CHROME = {
+    "pulse": {
+        "id": "astral-pulse-btn",
+        "tour": "topbar.pulse",
+        "title": "Pulse — what the assistant worked out while you were away",
+    },
+    "timeline": {
+        "id": "astral-timeline-btn",
+        "tour": "topbar.timeline",
+        "title": "Workspace timeline — revisit an earlier version of this canvas",
+    },
+}
 
 
-def _pulse_button() -> str:
-    """The Pulse top-bar icon button — present ONLY when FF_PULSE_DIGEST is on
-    (default OFF). Fires the generic ``chrome_open`` delegation to surface
-    ``pulse``; absent from the DOM entirely when the flag is off."""
-    if not pulse_enabled():
-        return ""
+def _icon_button(control) -> str:
+    """Render a top-bar ``action`` control (pulse/timeline) as an icon button
+    that fires the generic ``chrome_open`` delegation (client.js injects the
+    active chat id into params where needed)."""
+    chrome = _TOPBAR_BTN_CHROME.get(control.key, {})
+    payload = json.dumps(control.action.to_dict()) if control.action else "{}"
+    svg = _ICON_SVG.get(control.icon or "", "")
+    btn_id = chrome.get("id", f"astral-{control.key}-btn")
+    tour = chrome.get("tour", f"topbar.{control.key}")
+    title = chrome.get("title", control.label or "")
     return (
-        '<button type="button" id="astral-pulse-btn" data-tour-target="topbar.pulse" '
+        f'<button type="button" id="{esc(btn_id)}" data-tour-target="{esc(tour)}" '
         'class="flex items-center justify-center p-1.5 rounded-lg text-astral-muted '
-        'hover:text-astral-text hover:bg-white/5" aria-label="Pulse digest" '
-        'title="Pulse — what the assistant worked out while you were away" '
+        'hover:text-astral-text hover:bg-white/5" '
+        f'aria-label="{esc(control.label or "")}" title="{esc(title)}" '
         'data-ui-action="chrome_open" '
-        f"data-ui-payload='{esc(_PULSE_PAYLOAD)}'>{_PULSE_SVG}</button>"
+        f"data-ui-payload='{esc(payload)}'>{svg}</button>"
     )
 
 
-def _menu_entries(roles):
-    """Grouped (label, entries) menu inventory, role/availability filtered.
-
-    Each entry: (key, label, surface, params) — ``surface=None`` marks the
-    sign-out link. Availability rules: all Account/Help entries are backed by
-    unconditional backends; Admin tools requires the admin role.
-    """
-    groups = [
-        ("Account", [
-            ("agents", "Agents & permissions", "agents", {}),
-            ("llm", "LLM settings", "llm", {}),
-            ("personalization", "Personalization", "personalization", {}),
-            ("audit", "Audit log", "audit", {}),
-            ("theme", "Theme", "theme", {}),
-            # The workspace timeline is a dedicated top-bar icon (see
-            # render_topbar), not a menu entry.
-        ]),
-        ("Help", [
-            ("tour", "Take the tour", "tour", {}),
-            ("guide", "User guide", "guide", {}),
-        ]),
-    ]
-    if "admin" in (roles or []):
-        groups.append(("Admin tools", [
-            ("tool-quality", "Tool quality", "admin_tools", {"tab": "quality"}),
-            ("tutorial-admin", "Tutorial admin", "admin_tools", {"tab": "tutorial"}),
-        ]))
-    # Drop empty groups (defensive — none are empty today).
-    return [(label, entries) for label, entries in groups if entries]
-
-
-def _menu_html(roles):
+def _menu_html(model) -> str:
+    """The settings dropdown inner HTML, rendered from the model's groups +
+    the sign-out entry."""
     items = []
-    for label, entries in _menu_entries(roles):
+    for group in model.menu:
         items.append(
             f'<div class="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider '
-            f'text-astral-muted" role="presentation">{esc(label)}</div>'
+            f'text-astral-muted" role="presentation">{esc(group.label)}</div>'
         )
-        for key, text, surface, params in entries:
-            payload = json.dumps({"surface": surface, "params": params})
+        for item in group.items:
+            payload = json.dumps({"surface": item.surface, "params": item.params})
             items.append(
                 f'<button type="button" role="menuitem" tabindex="-1" '
                 f'class="astral-menu-item w-full text-left px-3 py-2 text-sm text-astral-text '
                 f'hover:bg-white/5 focus:bg-white/10 focus:outline-none rounded-lg" '
-                f'data-menu-key="{esc(key)}" data-tour-target="sidebar.{esc(key)}" '
-                f"data-ui-action=\"chrome_open\" data-ui-payload='{esc(payload)}'>{esc(text)}</button>"
+                f'data-menu-key="{esc(item.key)}" data-tour-target="sidebar.{esc(item.key)}" '
+                f"data-ui-action=\"chrome_open\" data-ui-payload='{esc(payload)}'>{esc(item.label)}</button>"
             )
     # Session group — Sign out is a plain link so it works without JS
     # (logout semantics live behind GET /auth/logout).
+    so = model.signout
     items.append(
         '<div class="border-t border-white/5 mt-1 pt-1" role="presentation"></div>'
         '<a href="/auth/logout" role="menuitem" tabindex="-1" '
         'class="astral-menu-item block px-3 py-2 text-sm text-red-400 hover:bg-white/5 '
-        'focus:bg-white/10 focus:outline-none rounded-lg" data-menu-key="signout">Sign out</a>'
+        f'focus:bg-white/10 focus:outline-none rounded-lg" data-menu-key="{esc(so.key)}">'
+        f"{esc(so.label)}</a>"
     )
     return "".join(items)
 
 
-def render_topbar(roles=None) -> str:
-    """Inner HTML for ``<header id="astral-topbar">`` — brand, status, Settings.
-
-    Targets the web client only. ``roles`` comes from the server session at
-    shell-render time (mock auth ⇒ admin) — see ``web_auth.session_roles``.
-    """
+def _settings_html(model) -> str:
+    """The gear button + its dropdown, rendered from the model."""
     return (
-        '<div class="flex items-center justify-between px-4 py-3 w-full">'
-        '<div class="flex items-center gap-2" data-tour-target="topbar.brand">'
-        '<img src="/static/img/AstralDeep.png" alt="AstralDeep" '
-        'class="h-8 w-auto select-none" draggable="false"></div>'
-        '<div class="flex items-center gap-3">'
-        '<span id="astral-status" class="text-xs text-astral-muted" role="status"></span>'
-        # Pulse digest icon (033 C-U8) — present only when FF_PULSE_DIGEST is on.
-        # Reuses the generic `chrome_open` delegation (no new client wiring).
-        + _pulse_button() +
-        # Workspace-timeline icon next to Settings. Reuses the generic
-        # `chrome_open` delegation (client.js injects the active chat id into
-        # params at click time), so no new client wiring is needed.
-        '<button type="button" id="astral-timeline-btn" data-tour-target="topbar.timeline" '
-        'class="flex items-center justify-center p-1.5 rounded-lg text-astral-muted '
-        'hover:text-astral-text hover:bg-white/5" aria-label="Workspace timeline" '
-        'title="Workspace timeline — revisit an earlier version of this canvas" '
-        'data-ui-action="chrome_open" '
-        f"data-ui-payload='{esc(_TIMELINE_PAYLOAD)}'>{_HISTORY_SVG}</button>"
         '<div class="relative" id="astral-settings">'
         '<button type="button" id="astral-settings-btn" data-tour-target="topbar.settings" '
         'class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm text-astral-muted '
@@ -164,5 +138,41 @@ def render_topbar(roles=None) -> str:
         '<div id="astral-settings-menu" role="menu" aria-label="Settings" hidden '
         'class="absolute right-0 mt-2 w-64 max-h-[70vh] overflow-y-auto rounded-xl border '
         'border-white/10 bg-astral-surface shadow-2xl p-1.5 z-50">'
-        f"{_menu_html(roles)}</div></div></div></div>"
+        f"{_menu_html(model)}</div></div>"
+    )
+
+
+def render_topbar(roles=None) -> str:
+    """Inner HTML for ``<header id="astral-topbar">`` — brand, status, Settings.
+
+    Targets the web client only, but is rendered FROM the shared
+    :func:`build_menu_model` so it can never diverge from what the native
+    clients receive. ``roles`` comes from the server session at shell-render
+    time (mock auth ⇒ admin) — see ``web_auth.session_roles``.
+    """
+    model = build_menu_model(roles)
+
+    # Left cluster: brand. Right cluster: status + interactive controls + gear,
+    # in model order (status, [pulse], timeline, settings).
+    right_parts = []
+    for control in model.topbar:
+        if control.kind == "brand":
+            continue  # brand is the left cluster (below)
+        if control.kind == "status":
+            right_parts.append(
+                '<span id="astral-status" class="text-xs text-astral-muted" role="status"></span>'
+            )
+        elif control.kind == "action":
+            right_parts.append(_icon_button(control))
+        elif control.kind == "menu":  # the Settings gear + dropdown
+            right_parts.append(_settings_html(model))
+
+    return (
+        '<div class="flex items-center justify-between px-4 py-3 w-full">'
+        '<div class="flex items-center gap-2" data-tour-target="topbar.brand">'
+        '<img src="/static/img/AstralDeep.png" alt="AstralDeep" '
+        'class="h-8 w-auto select-none" draggable="false"></div>'
+        '<div class="flex items-center gap-3">'
+        + "".join(right_parts) +
+        '</div></div>'
     )

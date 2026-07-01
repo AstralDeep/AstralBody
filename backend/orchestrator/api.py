@@ -1486,6 +1486,39 @@ async def get_dashboard(
 
 
 # =============================================================================
+# Chrome Router  (Feature 042 — server-owned menu model, consumed by native clients)
+# =============================================================================
+
+chrome_router = APIRouter(prefix="/api/chrome", tags=["Chrome"])
+
+
+def _roles_from_payload(payload: dict) -> list:
+    """Realm + client roles from a validated JWT payload dict (mirrors
+    web_auth._roles_from_token / chrome_events._roles, but on a payload)."""
+    roles = list(((payload or {}).get("realm_access") or {}).get("roles") or [])
+    for client in ((payload or {}).get("resource_access") or {}).values():
+        roles.extend((client or {}).get("roles") or [])
+    return roles
+
+
+@chrome_router.get(
+    "/menu",
+    summary="Get the chrome menu model",
+    description=(
+        "Feature 042 — the single server-owned chrome model (top-bar controls + "
+        "settings menu), role-filtered and feature-flag-resolved for the caller. "
+        "Native clients (Windows/Android) render their chrome from this; it is the "
+        "same model the web shell renders and the `chrome_menu` WS frame carries "
+        "(Constitution XII: one definition, every client renders it). Admin items "
+        "are omitted for non-admins; server-side authorization stays authoritative."
+    ),
+)
+async def get_chrome_menu(payload: dict = Depends(get_current_user_payload)):
+    from webrender.chrome.menu_model import menu_model_dict
+    return menu_model_dict(_roles_from_payload(payload))
+
+
+# =============================================================================
 # Voice Router  (STT / TTS proxy to Speaches.ai)
 # =============================================================================
 
