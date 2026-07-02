@@ -173,21 +173,46 @@ fun themePaletteForSpec(
  */
 fun paletteToColorScheme(palette: ThemePalette): ColorScheme {
     val base = AstralDarkColors
+    val surface = hexToColor(palette.surface) ?: base.surface
+    val text = hexToColor(palette.text) ?: base.onSurface
+    val secondary = hexToColor(palette.secondary) ?: base.secondary
     return darkColorScheme(
         primary = hexToColor(palette.primary) ?: base.primary,
         onPrimary = base.onPrimary,
-        secondary = hexToColor(palette.secondary) ?: base.secondary,
+        secondary = secondary,
         tertiary = hexToColor(palette.accent) ?: base.tertiary,
         background = hexToColor(palette.bg) ?: base.background,
         onBackground = hexToColor(palette.text) ?: base.onBackground,
-        surface = hexToColor(palette.surface) ?: base.surface,
-        onSurface = hexToColor(palette.text) ?: base.onSurface,
-        surfaceVariant = hexToColor(palette.surface) ?: base.surfaceVariant,
+        surface = surface,
+        onSurface = text,
+        surfaceVariant = surface,
         onSurfaceVariant = hexToColor(palette.muted) ?: base.onSurfaceVariant,
         outline = base.outline,
         outlineVariant = base.outlineVariant,
+        // M3 components (Card, DropdownMenu, tonal buttons) actually draw on
+        // the container roles — left at the dark baseline they kept cards and
+        // menus DARK inside a light preset, so Daylight looked half-applied.
+        surfaceContainerLowest = surface,
+        surfaceContainerLow = surface,
+        surfaceContainer = surface,
+        surfaceContainerHigh = surface,
+        surfaceContainerHighest = surface,
+        secondaryContainer = tint(secondary, surface, 0.24f),
+        onSecondaryContainer = text,
     )
 }
+
+/** [fg] composited over [bg] at [alpha] — a subtle on-palette tint for tonal roles. */
+private fun tint(
+    fg: Color,
+    bg: Color,
+    alpha: Float,
+): Color =
+    Color(
+        red = fg.red * alpha + bg.red * (1 - alpha),
+        green = fg.green * alpha + bg.green * (1 - alpha),
+        blue = fg.blue * alpha + bg.blue * (1 - alpha),
+    )
 
 /**
  * Material 3 theme for the AstralBody client (dark-first, mirroring the web/Windows
