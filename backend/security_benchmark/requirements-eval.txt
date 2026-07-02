@@ -1,0 +1,19 @@
+# Security-benchmark harness — EVAL/TEST-ONLY dependencies (spec 047 FR-009).
+#
+# These packages are used ONLY by the harness runner and adapters. They are
+# NEVER imported by product runtime code (backend/orchestrator, backend/agents,
+# backend/shared) — the isolation_check guard asserts this and gates CI.
+# DO NOT add any of these to backend/requirements.txt (Constitution V).
+#
+# The harness core (adjudicator, envelope, report, synthetic driver) needs NONE
+# of these — it runs on the standard library, so CI's isolation + ablation gates
+# work with an empty install. The packages below are needed only to load the
+# REAL external corpora (ASTRAL_BENCH_LOAD_REAL=1) and for property generators.
+
+# Real benchmark corpora (optional; sample cases ship in-repo for offline/CI runs)
+agentdojo ; extra == "corpora"
+# agent-security-bench and injecagent are installed from their upstream repos
+# (no PyPI wheel pinned here); see README for the corpus-load instructions.
+
+# Optional: property-based generation for adjudicator fuzzing
+hypothesis>=6.0 ; extra == "fuzz"

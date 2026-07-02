@@ -395,3 +395,273 @@ class DelegationService:
         if not tool_scopes:
             return True
         return f"tool:{tool_name}" in tool_scopes
+
+
+# ===========================================================================
+# 048 — Recursive, provenance-bearing delegation chains (behind a flag)
+# ===========================================================================
+# Extends the single-hop exchange above with nested RFC 8693 `act` child
+# delegation tokens for sub-agent fan-out (035) and auto-created-agent
+# promotion (027/035). Four enforcement invariants hold at every hop:
+# monotonic scope attenuation, no privilege escalation, actor-chain
+# completeness (terminating at the human `sub`), and depth-bounding. A child
+# never outlives or exceeds its parent. Every hop emits a provenance record
+# for the hash-chained audit. Gated by FF_RECURSIVE_DELEGATION (default off,
+# fail-closed): with the flag off, callers use the single-hop path unchanged.
+# See specs/048-recursive-delegation-chains/. No new runtime dependency
+# (Constitution V) -- nested `act` rides the existing JWT/DPoP construction.
+
+# Configurable maximum chain depth (small by default). Depth 0 == the legacy
+# single-hop token; each child mint increments by one. Depth N allows N hops.
+DEFAULT_MAX_DELEGATION_DEPTH = 3
+
+# JWT claim names carrying the depth counter and the recorded bound, so a
+# verifier can reject an over-depth chain it receives (FR-005).
+DELEGATION_DEPTH_CLAIM = "delegation_depth"
+MAX_DEPTH_CLAIM = "max_delegation_depth"
+
+# Clock-skew tolerance for cross-hop expiry comparison, consistent with the
+# repo's existing token handling (spec 048 edge case: skew near expiry).
+_DELEGATION_CLOCK_SKEW_SECONDS = 60
+
+# Guard against a pathological/cyclic `act` nesting while walking a chain.
+_ACTOR_CHAIN_WALK_CAP = 64
+
+
+class RecursiveDelegationError(Exception):
+    """Base error for the recursive-delegation extension (spec 048)."""
+
+
+class DelegationDepthExceeded(RecursiveDelegationError):
+    """Raised when minting a child would exceed the maximum chain depth."""
+
+
+def recursive_delegation_enabled() -> bool:
+    """Return whether recursive delegation is enabled (FF_RECURSIVE_DELEGATION).
+
+    Fail-closed: any error reading the flag yields False, so the caller falls
+    back to the single-hop path (FR-009).
+    """
+    try:
+        from shared.feature_flags import flags
+        return bool(flags.is_enabled("recursive_delegation"))
+    except Exception:  # pragma: no cover - defensive, fail closed
+        return False
+
+
+def attenuate_scopes(parent_scopes, requested_scopes) -> List[str]:
+    """Intersect requested scopes with the parent's -- equal-or-narrower only.
+
+    The child receives exactly the scopes it both requested AND the parent
+    already holds; anything the parent lacks is dropped, never widened. This is
+    the monotonic-attenuation / no-escalation invariant at the scope level
+    (FR-002, FR-004). Returns a sorted list for deterministic tokens.
+    """
+    parent_set = set(parent_scopes or [])
+    requested_set = set(requested_scopes or [])
+    return sorted(parent_set & requested_set)
+
+
+def _token_scopes(token: dict) -> List[str]:
+    """Scope list from a token payload's space-delimited `scope` claim."""
+    return (token.get("scope", "") or "").split()
+
+
+def _token_depth(token: dict) -> int:
+    """Delegation depth of a token (absent claim == 0, the single-hop root)."""
+    try:
+        return int(token.get(DELEGATION_DEPTH_CLAIM, 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _walk_actor_chain(token: dict):
+    """Walk the nested `act` chain outermost -> innermost.
+
+    Returns ``(actors, complete)`` where ``actors`` lists the ``act.sub`` values
+    current-first and ``complete`` is False if a link is severed (an ``act``
+    present but not a well-formed ``{"sub": ...}`` node) or the cycle guard
+    trips. A clean chain terminates at a node with no nested ``act`` (whose
+    parent is the human ``sub`` on the top-level token).
+    """
+    actors: List[str] = []
+    node = token.get("act")
+    steps = 0
+    while isinstance(node, dict) and "sub" in node:
+        actors.append(node["sub"])
+        steps += 1
+        if steps > _ACTOR_CHAIN_WALK_CAP:
+            return actors, False
+        if "act" in node:
+            nxt = node["act"]
+            if not isinstance(nxt, dict) or "sub" not in nxt:
+                return actors, False  # severed / malformed prior-actor link
+            node = nxt
+        else:
+            return actors, True  # clean termination at the root agent
+    return actors, bool(actors)
+
+
+def actor_chain(token: dict) -> List[str]:
+    """Return the actor chain, current delegate first, root agent last (FR-003).
+
+    Every ``act.sub`` from the immediate actor up to the agent the human
+    directly authorized. The human principal itself is the top-level ``sub`` and
+    terminates the chain.
+    """
+    return _walk_actor_chain(token)[0]
+
+
+def mint_child_delegation(parent: dict, child_agent_id: str,
+                          requested_scopes, now: Optional[int] = None) -> dict:
+    """Mint a further-attenuated child delegation payload (FR-002/003/005/010).
+
+    The child: carries ``attenuate_scopes(parent, requested)`` (a subset of the
+    parent's scopes); nests the parent's ``act`` chain under its own actor claim
+    so the path back to the human ``sub`` is complete; inherits the human
+    ``sub``, ``aud``, ``iss`` and DPoP ``cnf`` binding (audience never widened);
+    caps ``exp`` at the parent's (a child never outlives its parent); and sets
+    depth = parent depth + 1, refusing beyond the maximum with
+    ``DelegationDepthExceeded`` (fail-closed).
+
+    Returns the decoded child payload dict -- the mechanism the enforcement path
+    and audit consume. Compact encoding/signing rides the existing construction
+    at the transport call site during integration.
+    """
+    now = int(now if now is not None else time.time())
+
+    child_depth = _token_depth(parent) + 1
+    max_depth = min(
+        int(parent.get(MAX_DEPTH_CLAIM, DEFAULT_MAX_DELEGATION_DEPTH)),
+        DEFAULT_MAX_DELEGATION_DEPTH,
+    )
+    if child_depth > max_depth:
+        raise DelegationDepthExceeded(
+            f"minting at depth {child_depth} exceeds maximum {max_depth}"
+        )
+
+    child_scopes = attenuate_scopes(_token_scopes(parent), requested_scopes)
+
+    # Nested actor claim: this child is the current actor; the parent's entire
+    # actor chain nests beneath it (never re-broadened).
+    child_act = {"sub": f"agent:{child_agent_id}"}
+    parent_act = parent.get("act")
+    if isinstance(parent_act, dict):
+        child_act["act"] = parent_act
+
+    parent_exp = int(parent.get("exp", now))
+    child: Dict = {
+        "sub": parent.get("sub"),                 # human principal, inherited
+        "act": child_act,
+        "scope": " ".join(child_scopes),
+        "iss": parent.get("iss", "mock-astral-delegation"),
+        "aud": parent.get("aud"),                 # audience never widened
+        "iat": now,
+        "exp": parent_exp,                        # capped at parent (never later)
+        "delegation": True,
+        DELEGATION_DEPTH_CLAIM: child_depth,
+        MAX_DEPTH_CLAIM: max_depth,
+    }
+    if "cnf" in parent:
+        child["cnf"] = parent["cnf"]              # RFC 9449 DPoP binding carried
+    return child
+
+
+def verify_delegation_chain(token: dict, now: Optional[int] = None,
+                            expected_human_sub: Optional[str] = None):
+    """Verify a received (possibly chained) delegation token, fail-closed.
+
+    Checks, in order: depth bound (reject over-depth, FR-005); actor-chain
+    completeness terminating at the human ``sub`` (FR-003); chain-of-custody
+    expiry within skew (a child cannot outlive its parent, FR-010); and, when
+    given, the expected human principal. Returns ``(ok, reason)`` -- ``reason``
+    is empty on success and human-readable on failure.
+    """
+    now = int(now if now is not None else time.time())
+
+    # 1) Depth bound first, so an over-depth forge reports a "depth" reason.
+    depth = _token_depth(token)
+    try:
+        recorded_max = int(token.get(MAX_DEPTH_CLAIM, DEFAULT_MAX_DELEGATION_DEPTH))
+    except (TypeError, ValueError):
+        recorded_max = DEFAULT_MAX_DELEGATION_DEPTH
+    max_depth = min(recorded_max, DEFAULT_MAX_DELEGATION_DEPTH)
+    if depth < 0:
+        return False, "negative delegation depth"
+    if depth > max_depth:
+        return False, f"delegation depth {depth} exceeds maximum {max_depth}"
+
+    # 2) Actor-chain completeness + termination at a human principal.
+    human_sub = token.get("sub")
+    if not human_sub or (isinstance(human_sub, str) and human_sub.startswith("agent:")):
+        return False, "chain does not terminate at a human principal"
+    actors, complete = _walk_actor_chain(token)
+    if not complete:
+        return False, "actor chain is broken or incomplete"
+    if len(actors) != depth + 1:
+        return False, (
+            f"actor-chain length {len(actors)} inconsistent with depth {depth}"
+        )
+    if expected_human_sub is not None and human_sub != expected_human_sub:
+        return False, "human principal does not match expected authorizer"
+
+    # 3) Chain-of-custody expiry (child exp was capped at mint; an unexpired
+    #    child therefore implies an unexpired parent within skew).
+    exp = token.get("exp")
+    if exp is not None:
+        try:
+            if now > int(exp) + _DELEGATION_CLOCK_SKEW_SECONDS:
+                return False, "delegation token expired"
+        except (TypeError, ValueError):
+            return False, "malformed expiry"
+
+    return True, ""
+
+
+def authorize_chained_tool_call(token: dict, tool_name: str,
+                                required_scope: str = "",
+                                now: Optional[int] = None):
+    """Per-tool-call authorization over the persistent transport (FR-006/007).
+
+    Re-derives authority from the presented (possibly chained) token on every
+    call -- no new user-token round trip -- by (1) verifying the whole chain and
+    (2) checking the tool against the token's attenuated scopes. Denials are
+    per-call and fail-closed; the caller keeps the session/socket open. Returns
+    ``(ok, reason)``.
+    """
+    ok, reason = verify_delegation_chain(token, now=now)
+    if not ok:
+        return False, reason
+    scopes = _token_scopes(token)
+    if not DelegationService.is_tool_in_scope(tool_name, scopes, required_scope):
+        acting = actor_chain(token)[:1]
+        return False, f"tool '{tool_name}' outside delegated scope for {acting}"
+    return True, ""
+
+
+def delegation_chain_audit_record(parent: dict, child: dict,
+                                  operation: str = "", tool: str = "",
+                                  now: Optional[int] = None) -> dict:
+    """Provenance/completion record for one delegation hop (FR-008, SC-007).
+
+    Maps field-by-field onto the HIPAA audit-trail checklist (spec 2.5) so the
+    authority path -- human -> parent actor -> acting agent -> tool effect -- is
+    reconstructable and tamper-evident once appended to the hash-chained audit
+    (``audit/pii.py::chain_hmac`` at the call site). Pure and DB-free by design:
+    it builds the record; the caller appends it to the chain.
+    """
+    now = int(now if now is not None else time.time())
+    child_act = child.get("act") or {}
+    parent_act = parent.get("act") or {}
+    return {
+        "event": "delegation_chain_hop",
+        "acting_agent": child_act.get("sub"),                     # who acted
+        "parent_actor": parent_act.get("sub"),                    # who delegated
+        "human_authorizer": child.get("sub") or parent.get("sub"),  # root principal
+        "operation": operation or tool,                           # what was done
+        "tool": tool or operation,
+        "scope": child.get("scope", ""),                          # scope/policy context
+        "delegation_depth": _token_depth(child),
+        "actor_chain": actor_chain(child),
+        "timestamp": now,                                         # tamper-evident once chained
+    }
