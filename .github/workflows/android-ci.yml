@@ -36,9 +36,19 @@ jobs:
 
       # Provides Gradle on PATH so we can build without committing the wrapper
       # jar (the wrapper is generated locally by Android Studio for `./gradlew`).
+      # The version is READ FROM the committed wrapper properties — the single
+      # source of truth — so CI can never drift from the repo toolchain again
+      # (a hard-pinned 8.11.1 broke the AGP 9.2.1 bump: AGP 9 needs Gradle ≥9.4.1).
+      - name: Resolve Gradle version from the committed wrapper
+        id: wrapper
+        run: |
+          v=$(sed -n 's/^distributionUrl=.*gradle-\([0-9][0-9.]*\)-\(bin\|all\)\.zip$/\1/p' gradle/wrapper/gradle-wrapper.properties)
+          test -n "$v" || { echo "could not parse Gradle version from wrapper properties" >&2; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.11.1'
+          gradle-version: ${{ steps.wrapper.outputs.version }}
 
       - name: Lint (ktlint + Android Lint)
         run: gradle ktlintCheck :app:lintDebug --no-daemon --stacktrace
@@ -72,9 +82,17 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # Same single-source-of-truth resolution as build-test (see above).
+      - name: Resolve Gradle version from the committed wrapper
+        id: wrapper
+        run: |
+          v=$(sed -n 's/^distributionUrl=.*gradle-\([0-9][0-9.]*\)-\(bin\|all\)\.zip$/\1/p' gradle/wrapper/gradle-wrapper.properties)
+          test -n "$v" || { echo "could not parse Gradle version from wrapper properties" >&2; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.11.1'
+          gradle-version: ${{ steps.wrapper.outputs.version }}
 
       - name: Enable KVM
         run: |
