@@ -303,3 +303,62 @@ def test_known_degraded_are_real_backend_types():
     # vocabulary, or one we since added a renderer for) should be cleaned up.
     assert KNOWN_DEGRADED <= BACKEND_TYPES
     assert not (KNOWN_DEGRADED & set(supported_types()))
+
+
+# --------------------------------------------------------------------------- #
+# container `direction:"row"` + minimal css (settings-surface parity)
+# --------------------------------------------------------------------------- #
+
+_SWATCH = {"type": "container", "children": [],
+           "css": {"background": "#22C55E", "height": "22px", "flex": "1"}}
+
+
+def test_container_css_swatch_leaf_renders_colored_box(qapp):
+    # A childless css-styled container (a Theme preset swatch cell) is a fixed-
+    # height colored frame — never blank space (web/Android parity).
+    w = render(dict(_SWATCH), _ctx())
+    assert isinstance(w, QFrame)
+    assert w.maximumHeight() == 22 and w.minimumHeight() == 22
+    assert "#22C55E" in w.styleSheet()
+
+
+def test_container_css_height_tolerates_garbage(qapp):
+    bad = {"type": "container", "children": [],
+           "css": {"background": "#111111", "height": "tall"}}
+    w = render(bad, _ctx())
+    assert w.maximumHeight() == 22  # default height kept
+
+
+def test_container_row_direction_is_horizontal(qapp):
+    from PySide6.QtWidgets import QHBoxLayout
+    w = render({"type": "container", "direction": "row", "children": [
+        {"type": "button", "label": "Soul", "action": "chrome_open"},
+        {"type": "button", "label": "Memory", "action": "chrome_open"}]}, _ctx())
+    lay = w.layout()
+    assert isinstance(lay, QHBoxLayout)
+    # two buttons + the left-aligning stretch
+    assert sum(1 for i in range(lay.count()) if lay.itemAt(i).widget()) == 2
+
+
+def test_container_swatch_row_stretches_proportionally(qapp):
+    w = render({"type": "container", "direction": "row",
+                "children": [dict(_SWATCH), dict(_SWATCH), dict(_SWATCH)]}, _ctx())
+    lay = w.layout()
+    widgets = [i for i in range(lay.count()) if lay.itemAt(i).widget()]
+    assert len(widgets) == 3
+    assert all(lay.stretch(i) == 1 for i in widgets)
+
+
+def test_container_default_stays_vertical(qapp):
+    from PySide6.QtWidgets import QVBoxLayout
+    w = render({"type": "container", "children": [
+        {"type": "text", "content": "hi"}]}, _ctx())
+    assert isinstance(w.layout(), QVBoxLayout)
+
+
+def test_button_label_ampersand_renders_literally(qapp):
+    # Qt eats a lone "&" as a mnemonic marker; server labels must show it
+    # verbatim ("Attachments & files") like the web/Android renderers do.
+    w = render({"type": "button", "label": "Attachments & files", "action": "x"}, _ctx())
+    assert isinstance(w, QPushButton)
+    assert w.text() == "Attachments && files"  # the Qt escape for a literal &
