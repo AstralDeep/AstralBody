@@ -72,6 +72,26 @@ def test_logout_rejects_bad_bodies(monkeypatch, body):
     assert c.post("/api/auth/logout", json=body).status_code == 400
 
 
+def test_logout_refuses_the_confidential_web_client(monkeypatch):
+    """Security: the native endpoint must NOT accept the web client id — that
+    would apply the server's confidential secret to a caller-supplied token
+    (a revocation oracle). The web app uses the cookie-bound /auth/logout."""
+    monkeypatch.setenv("VITE_KEYCLOAK_CLIENT_ID", "astral-frontend")
+
+    called = {"revoke": False}
+
+    async def fake_revoke(refresh_token, client_id=None):
+        called["revoke"] = True
+        return True
+
+    monkeypatch.setattr(web_auth, "_revoke_refresh_token", fake_revoke)
+    c = _client(monkeypatch)  # sets KEYCLOAK_ALLOWED_AZP=astral-desktop,astral-mobile
+    r = c.post("/api/auth/logout",
+               json={"refresh_token": "victim-web-rt", "client_id": "astral-frontend"})
+    assert r.status_code == 400
+    assert called["revoke"] is False  # never reached the secret-backed revoke
+
+
 def test_revocation_post_omits_secret_for_native_public_clients(monkeypatch):
     """Keycloak public clients (astral-desktop/mobile) must not receive the web
     client's secret; the web client keeps sending it."""
