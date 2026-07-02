@@ -180,9 +180,23 @@ private fun AstralTopBar(
                 modifier = Modifier.size(30.dp).clip(RoundedCornerShape(8.dp)),
             )
             Box(modifier = Modifier.weight(1f))
-            // Server-owned action controls (pulse / timeline, feature 042/044 T037):
-            // rendered from the model so they're actually reachable — no client
-            // hard-coding. Each opens its surface via chrome_open.
+            // Chat navigation first (form-factor affordances — New/Recent are
+            // Android-specific and not part of the server chrome model). Recent
+            // chats uses a speech-bubble glyph, NOT the clock — the clock belongs
+            // to the server "Workspace timeline" control below, and two clocks
+            // side by side read as a duplicate (feature 044 top-bar polish).
+            NewChatButton(onClick = onNewChat)
+            IconButton(onClick = onRecentChats) {
+                Icon(
+                    painter = painterResource(R.drawable.ic_chat),
+                    contentDescription = "Recent chats",
+                    tint = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.size(22.dp),
+                )
+            }
+            // Server-owned chrome cluster on the right (pulse / timeline, feature
+            // 042/044 T037): rendered from the model so they're actually reachable
+            // — no client hard-coding. Each opens its surface via chrome_open.
             model?.topbarActions?.forEach { control ->
                 topBarActionView(control)?.let { view ->
                     IconButton(onClick = { onOpenSurface(view.surface, view.params) }) {
@@ -194,16 +208,6 @@ private fun AstralTopBar(
                         )
                     }
                 }
-            }
-            // Form-factor chat nav (kept — New/Recent are Android-specific).
-            NewChatButton(onClick = onNewChat)
-            IconButton(onClick = onRecentChats) {
-                Icon(
-                    painter = painterResource(R.drawable.ic_history),
-                    contentDescription = "Recent chats",
-                    tint = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.size(22.dp),
-                )
             }
             // Settings gear → dropdown with ALL settings (from the server model).
             SettingsMenu(model = model, onOpenItem = onOpenItem, onSignOut = onSignOut)
