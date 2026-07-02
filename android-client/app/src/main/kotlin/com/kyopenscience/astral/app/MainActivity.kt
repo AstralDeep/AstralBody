@@ -207,15 +207,21 @@ class MainActivity : ComponentActivity() {
      * the fallback — so the refresh token dies even when the backend is down.
      */
     private fun signOut() {
+        // Clear the LOCAL session SYNCHRONOUSLY on the main thread first, so
+        // sign-out is durable even if the Activity is destroyed an instant later.
+        // (Doing the clear inside a cancellable lifecycleScope coroutine risked
+        // cancellation before store.clear() ran → the user silently still signed
+        // in on the next cold start.) Capture the refresh token BEFORE clearing.
+        val st = runCatching { store.load() }.getOrNull()
+        val access = authToken.value ?: st?.accessToken
+        val refresh = st?.refreshToken
+        store.clear()
+        signInError.value = null
+        authToken.value = null
+        if (refresh.isNullOrBlank()) return
+        // Best-effort server-side revocation off the main thread — fine to be
+        // cancelled at onDestroy, the local session is already gone.
         lifecycleScope.launch(Dispatchers.IO) {
-            // Capture BEFORE clearing — revocation needs the refresh token.
-            val st = runCatching { store.load() }.getOrNull()
-            val access = authToken.value ?: st?.accessToken
-            val refresh = st?.refreshToken
-            store.clear()
-            signInError.value = null
-            authToken.value = null
-            if (refresh.isNullOrBlank()) return@launch
             val viaBackend =
                 access != null &&
                     runCatching { rest.logout(access, refresh, AppConfig.OIDC_CLIENT_ID) }.getOrDefault(false)
