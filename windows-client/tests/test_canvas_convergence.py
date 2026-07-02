@@ -90,6 +90,39 @@ def test_apply_ops_upsert_replaces_in_place(qapp):
     assert c._lay.indexOf(w2) == idx       # replaced in the same slot
 
 
+def test_restyle_rerenders_retained_components(qapp):
+    """M5: a live theme change restyles the canvas by re-rendering the retained
+    component list (inline-styled SDUI content is styled at render time, so it
+    needs a rebuild — global QSS alone won't update it)."""
+    c = Canvas(_ctx())
+    c.set_components([_card("A"), _card("B")])
+    wa = c._by_id["A"]
+    c.restyle()
+    assert set(c._by_id) == {"A", "B"}       # same identities present
+    assert c._by_id["A"] is not wa           # fresh widgets (new palette applied)
+    assert c._lay.count() - 1 == 2           # both re-inserted (minus the stretch)
+
+
+def test_restyle_empty_canvas_is_safe(qapp):
+    c = Canvas(_ctx())
+    c.restyle()                              # nothing rendered yet — must not raise
+    assert c._by_id == {}
+
+
+def test_duplicate_id_in_one_payload_not_inserted_twice(qapp):
+    """Minor: two components sharing a component_id in one payload must not reuse
+    (or re-insert) the same widget object twice; the duplicate renders fresh."""
+    c = Canvas(_ctx())
+    c.set_components([_card("A")])
+    # a full render whose payload repeats id "A" (malformed but must be tolerated)
+    c.set_components([_card("A"), _card("A"), _card("B")])
+    assert set(c._by_id) == {"A", "B"}
+    # three components placed (both A widgets + B), each a distinct widget object
+    widgets = [c._lay.itemAt(i).widget() for i in range(c._lay.count() - 1)]
+    assert len(widgets) == 3
+    assert len(set(id(w) for w in widgets)) == 3   # no widget added twice
+
+
 def test_stream_seq_dedupe_drops_dup_and_stale(qapp):
     """The _on_stream_data path uses stream_frame_to_ops with a shared seq_state
     so out-of-order / duplicate frames are dropped (canvas not double-updated)."""

@@ -184,7 +184,30 @@ def test_send_maps_ready_chips_into_payload(win):
     # only the staged chip flows through; the still-uploading one is excluded
     assert sent["attachments"] == [
         {"attachment_id": "att-1", "filename": "a.csv", "category": "data"}]
-    assert win._attachments == []                 # strip cleared after send
+    # The sent (staged) chip is dropped, but the still-uploading chip is KEPT so
+    # a late _on_attachment_uploaded for it isn't silently dropped (minor fix).
+    assert [c["chip_id"] for c in win._attachments] == ["k2"]
+    assert win._attachments[0]["status"] == "uploading"
+
+
+def test_send_keeps_in_flight_upload_and_late_result_lands(win):
+    """A still-uploading chip survives a send, and its late upload result flips
+    it to staged (rather than being dropped because the chip vanished)."""
+    win._attachments = [
+        {"chip_id": "s1", "attachment_id": "att-1", "filename": "a.csv",
+         "category": "data", "parser_status": "covered", "status": "staged"},
+        {"chip_id": "u1", "attachment_id": None, "filename": "b.csv",
+         "category": "file", "parser_status": None, "status": "uploading"},
+    ]
+    win._input.setText("go")
+    win._send()
+    assert [c["chip_id"] for c in win._attachments] == ["u1"]
+    # the late upload result for the still-staged chip lands (not dropped)
+    win._on_attachment_uploaded({"chip_id": "u1", "error": None, "result": {
+        "attachment_id": "att-2", "filename": "b.csv",
+        "category": "data", "parser_status": "covered"}})
+    assert win._attachments[0]["status"] == "staged"
+    assert win._attachments[0]["attachment_id"] == "att-2"
 
 
 def test_send_attachment_only_turn(win):

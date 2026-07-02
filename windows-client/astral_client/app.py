@@ -88,6 +88,31 @@ def parser_status_glyph(status: str) -> tuple:
     }.get(status or "", ("•", "staged"))
 
 
+def _load_client_local_actions() -> set:
+    """The ui_event actions handled entirely in-app (never sent to the server, so
+    they never produce a server ``chrome_surface`` re-render). Read from the
+    committed UI-protocol manifest (`backend/shared/ui_protocol.json`
+    ``client_local_actions``) when reachable, else the known default. Used so a
+    surface's load-timeout bound is NOT armed for a client-local action (which
+    would wrongly fire and wipe the surface — feature 044 fix)."""
+    try:
+        from pathlib import Path
+
+        manifest = (Path(__file__).resolve().parents[2]
+                    / "backend" / "shared" / "ui_protocol.json")
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        actions = data.get("client_local_actions")
+        if isinstance(actions, list) and actions:
+            return {str(a) for a in actions}
+    except Exception:  # noqa: BLE001 — a packaged build has no repo tree; use default
+        pass
+    return {"attach_existing"}  # hard-coded default when the manifest isn't reachable
+
+
+#: ui_event actions handled in-app (see :func:`_load_client_local_actions`).
+_CLIENT_LOCAL_ACTIONS = _load_client_local_actions()
+
+
 # Feature 040 (US5): slash-command discovery. Mirrors the web client's typeahead
 # and the server's orchestrator/slash_commands.COMMANDS registry — the server
 # expands a typed "/command" into a normal prompt; this popup just lets users
@@ -268,6 +293,9 @@ class Canvas(QScrollArea):
         self._lay.addStretch(1)
         self.setWidget(self._inner)
         self._by_id: Dict[str, QWidget] = {}
+        # Retained last-rendered component list so a live theme change can rebuild
+        # inline-styled content with the new palette (feature 044 US5, restyle()).
+        self._last_components: list = []
 
     def _insert(self, widget: QWidget) -> None:
         self._lay.insertWidget(self._lay.count() - 1, widget)
@@ -283,6 +311,7 @@ class Canvas(QScrollArea):
         clobber bug where a full render threw away components the new set still
         contains (e.g. one just added via a `ui_upsert`)."""
         components = list(components or [])
+        self._last_components = components  # retained for restyle() (US5)
         new_ids = set()
         for comp in components:
             if isinstance(comp, dict):
@@ -306,12 +335,16 @@ class Canvas(QScrollArea):
         # Re-insert in the new order, reusing a kept widget by id or rendering
         # fresh. `_insert` appends before the stretch, so order follows the list.
         self._by_id = {}
+        placed: set = set()
         for comp in components:
             cid = None
             if isinstance(comp, dict):
                 raw = comp.get("component_id") or comp.get("id")
                 cid = str(raw) if raw else None
-            w = reusable.get(cid) if cid else None
+            # A component_id repeated within one payload must NOT reuse (or
+            # re-insert) the same widget twice — render the duplicate fresh so a
+            # single widget object is never added to the layout more than once.
+            w = reusable.get(cid) if (cid and cid not in placed) else None
             if w is None:
                 w = render(comp, self.ctx)
                 if cid:
@@ -319,6 +352,17 @@ class Canvas(QScrollArea):
             self._insert(w)
             if cid:
                 self._by_id[cid] = w
+                placed.add(cid)
+
+    def restyle(self) -> None:
+        """Re-render the retained components so inline-styled SDUI content (cards,
+        hero, alerts, badges — styled from the theme palette AT render time, not
+        via global QSS) picks up a live theme change (feature 044 US5). Identity
+        reconciliation would reuse the existing widgets, which keep their stale
+        inline CSS, so the id map is cleared to force a fresh rebuild."""
+        comps = self._last_components
+        self._by_id = {}  # force a fresh render (reused widgets keep stale inline CSS)
+        self.set_components(comps)
 
     def apply_ops(self, ops: list) -> None:
         """In-place workspace patch (a `ui_upsert`)."""
@@ -398,7 +442,10 @@ class SurfaceDialog(QDialog):
     def _emit_from_surface(self, action: str, payload: dict) -> None:
         self._raw_emit(action, payload)
         # A form submit re-renders the surface; show in-flight + re-arm the bound.
-        if action != "chat_message":
+        # But a client-local action (e.g. attach_existing) is handled in-app and
+        # never produces a server chrome_surface re-render, so arming the
+        # load-timeout would wrongly fire and wipe the surface — skip it.
+        if action != "chat_message" and action not in _CLIENT_LOCAL_ACTIONS:
             self._status.setText("Applying…")
             self._status.setVisible(True)
             self._timer.start()
@@ -1033,6 +1080,8 @@ class MainWindow(QMainWindow):
     _signed_out = Signal(str)
     # Interactive re-auth completed off-thread -> GUI thread (Session or None).
     _reauth_done = Signal(object)
+    # Silent token refresh resolved off-thread -> GUI thread (new token or None).
+    _silent_refresh_done = Signal(object)
 
     def __init__(self, url: str, token: str, session=None, login_params=None):
         super().__init__()
@@ -1045,6 +1094,8 @@ class MainWindow(QMainWindow):
         # session can run a fresh interactive login (FR-004) instead of dead-ending.
         self._login_params = login_params or {}
         self._reauth_tries = 0
+        # Guard so two auth_required frames don't fire two concurrent refreshes.
+        self._silent_refresh_active = False
         self._agents: List[dict] = []
         self._agents_dialog: Optional[AgentsDialog] = None
         self._history_dialog: Optional[HistoryDialog] = None
@@ -1185,6 +1236,7 @@ class MainWindow(QMainWindow):
         self._attachment_uploaded.connect(self._on_attachment_uploaded)
         self._signed_out.connect(self._finish_sign_out)
         self._reauth_done.connect(self._on_reauth_done)
+        self._silent_refresh_done.connect(self._on_silent_refresh_done)
         self._signing_out_done = False
         self._connected_once = False
         self._start_integrity_check()
@@ -1224,6 +1276,14 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None and hasattr(T, "build_stylesheet"):
             app.setStyleSheet(T.build_stylesheet() + getattr(T, "ROOT_BG_STYLE", ""))
+        # setStyleSheet above restyles the QSS-driven widgets (buttons, inputs,
+        # tables), but the SDUI canvas content is styled INLINE from the palette
+        # at render time, so re-render it to pick up the new palette (US5).
+        self.canvas.restyle()
+        # The chat-rail bubbles + top-bar chrome are also inline-styled and are
+        # not cheaply re-renderable, so they adopt the new palette on the NEXT
+        # message rather than retroactively — a deliberate, disclosed limitation
+        # (FR-019), not a silent no-op.
 
     # --- banner (connection state / errors / notices) ------------------- #
     def _show_banner(self, text: str, kind: str = "info") -> None:
@@ -1490,6 +1550,15 @@ class MainWindow(QMainWindow):
         self._attachments = []
         self._render_chips()
 
+    def _clear_sent_attachments(self) -> None:
+        """After a send, drop the chips that went out (staged) and any failed
+        ones, but KEEP still-uploading chips so a late ``_on_attachment_uploaded``
+        for one isn't silently dropped — they stay staged for the next turn."""
+        self._attachments = [
+            c for c in self._attachments if c.get("status") == "uploading"
+        ]
+        self._render_chips()
+
     def _sendable_attachments(self) -> List[dict]:
         """The staged (successfully uploaded) attachments to attach to a turn."""
         return [{"attachment_id": c["attachment_id"], "filename": c["filename"],
@@ -1612,7 +1681,9 @@ class MainWindow(QMainWindow):
             else:
                 self.rail.add_note("📎 " + names)
         self.client.send_chat(text, self.active_chat, attachments=atts or None)
-        self._clear_attachments()
+        # Clear only the chips that went out; keep still-uploading ones so a late
+        # upload result isn't lost (they remain staged for the next turn).
+        self._clear_sent_attachments()
 
     def _emit(self, action: str, payload: dict) -> None:
         if action == "attach_existing":
@@ -1685,21 +1756,67 @@ class MainWindow(QMainWindow):
             self.client.send_event("discover_agents", {})
             self.client.send_event("get_history", {})
         elif s.startswith("auth_required"):
-            new_token = None
-            if self._auth_session and self._reauth_tries < 2:
-                self._reauth_tries += 1
-                new_token = self._auth_session.refresh()
-            if new_token:
-                self._reconnect(new_token)
-            else:
-                # FR-004: never a dead session — offer an explicit sign-in
-                # instead of a frozen "Re-authenticating…" caption.
-                self._prompt_reauth()
+            self._begin_silent_refresh()
+
+    def _reset_status_line(self) -> None:
+        """Set the top-bar mark back to 'Connected' (green) WITHOUT the full
+        reconnect re-sync. Used to clear a per-turn status line (chat_status:done,
+        stream_unsubscribed): unlike the real ``connected`` transition it does not
+        hide banners or re-send discover_agents/get_history/win-agent
+        registration, which on every turn completion would wipe task/error/
+        notification banners and cause redundant round-trips (feature 044 fix)."""
+        self.topbar.set_status("Connected", T.VARIANT_COLORS["success"][0])
+
+    def _begin_silent_refresh(self) -> None:
+        """FR-004: silently refresh the session token OFF the GUI thread — the
+        refresh does a blocking urlopen (up to 15 s) that would freeze the GUI if
+        run here (this is a slot on the transport `status` signal). The new token
+        is marshaled back via ``_silent_refresh_done``; on success we reconnect,
+        on failure we offer an explicit sign-in. Bounded to ``_reauth_tries < 2``
+        and guarded so two ``auth_required`` frames don't fire two concurrent
+        refreshes. With no refreshable session (dev-token) we prompt immediately."""
+        if self._silent_refresh_active:
+            return
+        if not (self._auth_session and self._reauth_tries < 2):
+            # No session to refresh, or the retry bound is exhausted — never a
+            # dead session: offer an explicit sign-in (FR-004).
+            self._prompt_reauth()
+            return
+        self._reauth_tries += 1
+        self._silent_refresh_active = True
+        sess = self._auth_session
+
+        def _work() -> None:
+            try:
+                token = sess.refresh()
+            except Exception:  # noqa: BLE001 — treated as a failed refresh
+                token = None
+            self._silent_refresh_done.emit(token)
+
+        threading.Thread(target=_work, name="astral-silent-refresh", daemon=True).start()
+
+    def _on_silent_refresh_done(self, token: object) -> None:
+        """GUI-thread handler for a finished silent refresh (M1). Reconnect with
+        the new token, or fall through to the explicit sign-in prompt."""
+        self._silent_refresh_active = False
+        if isinstance(token, str) and token:
+            self._reconnect(token)
+        else:
+            # FR-004: never a dead session — offer an explicit sign-in instead of
+            # a frozen "Re-authenticating…" caption.
+            self._prompt_reauth()
 
     def _reconnect(self, token: str) -> None:
         try:
             self.client.stop()
         except Exception:
+            pass
+        # Detach the dead client's signals before swapping it out, so a late
+        # queued frame from the old transport thread can't drive the new UI.
+        try:
+            self.client.message.disconnect(self._on_message)
+            self.client.status.disconnect(self._on_status)
+        except (RuntimeError, TypeError, AttributeError):
             pass
         self._token = token
         self._win_agent_registered = False
@@ -1817,7 +1934,9 @@ class MainWindow(QMainWindow):
                 )
             elif st == "done":
                 self._turn_active = False
-                self._on_status("connected")
+                # A per-turn status reset ONLY — not the full reconnect re-sync
+                # (which would hide banners + re-fire discover/history every turn).
+                self._reset_status_line()
         elif t == "error":
             # FR-002/SC-006 — never silent; resolve any stuck turn.
             self._show_banner(normalize_error(msg), "error")
@@ -1900,8 +2019,9 @@ class MainWindow(QMainWindow):
                 text = payload.get("message") or msg.get("error") or "stream error"
                 self.topbar.set_status(f"Stream error: {text}", T.VARIANT_COLORS["error"][0])
         elif t == "stream_unsubscribed":
-            # Legacy teardown ack — clear the streaming status line.
-            self._on_status("connected")
+            # Legacy teardown ack — clear the streaming status line only (a
+            # per-turn reset, not the full reconnect re-sync).
+            self._reset_status_line()
         # stream_list: no native surface yet.
 
     def _on_chrome_render(self, msg: dict) -> None:

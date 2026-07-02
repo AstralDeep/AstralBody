@@ -170,9 +170,13 @@ class OrchestratorClient(QObject):
                 "device": self.device,
                 "resumed": False,
             }))
+            # Drain the offline queue FIFO BEFORE flipping `_connected`, so any
+            # queued frame goes out ahead of a new direct send. If `_connected`
+            # were set first, a frame sent by the "connected" handler could race
+            # ahead of the queued backlog and reorder reconnect delivery.
+            await self._flush_pending(ws)
             self._connected = True
             self._safe_status("connected")
-            await self._flush_pending(ws)
             async for raw in ws:
                 if self._stop:
                     break
@@ -197,8 +201,14 @@ class OrchestratorClient(QObject):
 
     def _send(self, obj: dict) -> None:
         frame = json.dumps(obj)
-        if self._connected and self._loop and self._ws:
-            asyncio.run_coroutine_threadsafe(self._ws.send(frame), self._loop)
+        # Snapshot `_ws`/`_loop` under the guard: the transport thread can null
+        # `_ws` between the check and the attribute access, which would raise an
+        # AttributeError inside a Qt slot (TOCTOU). If the snapshot is None after
+        # the guard, fall through to the queue path.
+        ws = self._ws
+        loop = self._loop
+        if self._connected and loop and ws:
+            asyncio.run_coroutine_threadsafe(ws.send(frame), loop)
             return
         # Disconnected: queue-and-flush with a bounded buffer; overflow is
         # dropped-oldest AND surfaced — an outbound frame never just vanishes.
