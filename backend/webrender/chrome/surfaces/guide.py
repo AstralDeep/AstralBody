@@ -121,10 +121,14 @@ async def components(orch, user_id, roles, params):
         for s in sections
     ]
     paras = [p for p in _html_to_text(selected["body_html"]).split("\n\n") if p.strip()]
-    out = [
-        _sdui.text("Sections", "h3"),
-        _sdui.container(toc, direction="column"),
-        _sdui.text(selected["title"], "h2"),
-    ]
+    # CONTENT FIRST, TOC after: on a native (phone-height) surface the 13+
+    # section buttons pushed the section body far below the fold, so tapping a
+    # section looked like a dead button — the newly delivered content was
+    # invisible. Leading with the selected section's title + body (the client
+    # scrolls each delivery to the top) makes every TOC tap visibly navigate;
+    # the web modal keeps its own layout (render() is unchanged).
+    out = [_sdui.text(selected["title"], "h2")]
     out.extend(_sdui.text(p, "body") for p in (paras or ["…"]))
+    out.append(_sdui.text("Sections", "h3"))
+    out.append(_sdui.container(toc, direction="column"))
     return out

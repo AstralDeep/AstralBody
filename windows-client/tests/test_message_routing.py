@@ -233,6 +233,39 @@ def test_topbar_actions_rebuilt_and_cleared(qapp):
     assert tb._action_buttons == []
 
 
+def test_settings_menu_shows_group_headers_and_literal_ampersand(qapp):
+    """The Settings dropdown must match the web/Android menus: visible ACCOUNT /
+    HELP group headers (a styled QWidgetAction — addSection() text is dropped by
+    Fusion) and a literal '&' in item labels (Qt mnemonic escaping)."""
+    from PySide6.QtWidgets import QLabel, QWidgetAction
+
+    from astral_client.app import TopBar
+
+    tb = TopBar("u", lambda: None, lambda: None, lambda s, ln: None, lambda: None)
+    tb.set_menu_model({
+        "topbar": [],
+        "menu": [
+            {"key": "account", "label": "Account", "items": [
+                {"key": "agents", "label": "Agents & permissions", "surface": "agents"},
+                {"key": "theme", "label": "Theme", "surface": "theme"}]},
+            {"key": "help", "label": "Help", "items": [
+                {"key": "guide", "label": "User guide", "surface": "guide"}]},
+        ],
+        "signout": {"label": "Sign out", "action": "logout"},
+    })
+    header_texts = [
+        wa.defaultWidget().text()
+        for wa in tb._menu.actions()
+        if isinstance(wa, QWidgetAction) and isinstance(wa.defaultWidget(), QLabel)
+    ]
+    assert "ACCOUNT" in header_texts and "HELP" in header_texts
+    assert "Sign out" in header_texts  # the red sign-out QWidgetAction
+    item_texts = [a.text() for a in tb._menu.actions() if a.text()]
+    # Qt escape "&&" renders a literal "&" — the label must not lose it.
+    assert "Agents && permissions" in item_texts
+    assert {"Theme", "User guide"} <= set(item_texts)
+
+
 # --- T040: settings surface load timeout + retry + in-flight ----------------
 
 def test_surface_dialog_timeout_shows_retry_and_arrival_cancels(qapp):
@@ -270,6 +303,30 @@ def test_surface_dialog_chrome_submit_shows_in_flight(qapp):
     # arrival of the re-render clears it
     dlg.set_surface("LLM", [])
     assert dlg._status.isHidden()
+    dlg.close()
+
+
+def test_surface_dialog_switch_removes_stale_widgets_immediately(qapp):
+    """Switching settings surfaces must not stack pages: `_clear_body` has to
+    detach the previous surface's widgets from the paint tree SYNCHRONOUSLY
+    (setParent(None)), not just deleteLater() them — a deferred delete doesn't
+    run during nested/synthetic event processing, which painted one surface's
+    components over the next (seen as Personalization bleeding into Theme)."""
+    from PySide6.QtWidgets import QLabel
+
+    from astral_client.app import SurfaceDialog
+
+    dlg = SurfaceDialog(None, emit=lambda a, p: None)
+    dlg.set_surface("Personalization", [{"type": "text", "content": "SOUL-TAB"}])
+    assert any("SOUL-TAB" in (w.text() or "") for w in dlg._inner.findChildren(QLabel))
+    dlg.set_surface("Theme", [{"type": "text", "content": "PRESETS"}])
+    texts = [(w.text() or "") for w in dlg._inner.findChildren(QLabel)]
+    assert any("PRESETS" in t for t in texts)
+    assert not any("SOUL-TAB" in t for t in texts), (
+        "previous surface's widgets still attached after set_surface switch"
+    )
+    # the body layout holds exactly the new component (+ the trailing stretch)
+    assert dlg._lay.count() == 2
     dlg.close()
 
 

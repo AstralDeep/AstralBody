@@ -436,8 +436,16 @@ class SurfaceDialog(QDialog):
     def _clear_body(self) -> None:
         while self._lay.count() > 1:
             item = self._lay.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            w = item.widget()
+            if w is not None:
+                # Reparent BEFORE deleteLater: a deferred delete only runs once
+                # control returns to the exec() loop, so during nested event
+                # processing (or a synthetic processEvents pump, e.g. the
+                # screenshot harness) the removed widget would otherwise keep
+                # painting over the next surface's components — visible as one
+                # settings page stacking on another when switching surfaces.
+                w.setParent(None)
+                w.deleteLater()
 
     def _emit_from_surface(self, action: str, payload: dict) -> None:
         self._raw_emit(action, payload)
@@ -619,11 +627,26 @@ class TopBar(QFrame):
     def _rebuild_menu(self, parsed: dict) -> None:
         self._menu.clear()
         for section in parsed.get("sections", []):
-            self._menu.addSection(section.get("label", ""))
+            heading = str(section.get("label", "")).strip()
+            if heading:
+                # A styled QWidgetAction, NOT addSection(): several QStyles
+                # (Fusion included) drop a section's text entirely, which hid
+                # the ACCOUNT / HELP group headers the web + Android menus show.
+                head = QLabel(heading.upper())
+                head.setStyleSheet(
+                    f"color:{T.MUTED}; font-size:10px; font-weight:700; "
+                    "letter-spacing:1px; padding:6px 24px 2px 24px; background:transparent;"
+                )
+                ha = QWidgetAction(self._menu)
+                ha.setDefaultWidget(head)
+                ha.setEnabled(False)
+                self._menu.addAction(ha)
             for item in section.get("items", []):
-                act = QAction(item.get("label", ""), self._menu)
-                surface = item.get("surface", "")
                 label = item.get("label", "")
+                # "&&" — Qt mnemonic escape: "Agents & permissions" must render
+                # its ampersand literally, exactly like the web/Android menus.
+                act = QAction(str(label).replace("&", "&&"), self._menu)
+                surface = item.get("surface", "")
                 act.triggered.connect(
                     lambda _checked=False, s=surface, ln=label: self._emit_open(s, ln)
                 )

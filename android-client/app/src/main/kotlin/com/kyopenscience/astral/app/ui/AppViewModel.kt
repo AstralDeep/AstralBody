@@ -266,7 +266,19 @@ class AppViewModel(
         // the already-uploaded file as a chip HERE — it is never forwarded to the
         // server (mirrors the web paperclip "Choose from your files", T047).
         if (action == "attach_existing") {
-            stageExistingAttachment(payload)
+            if (stageExistingAttachment(payload)) {
+                // The web modal CLOSES on Attach; the native twin returns to the
+                // chat so the staged chip is immediately visible in the composer.
+                // Staying on the surface gave no feedback at all — the button
+                // read as dead, and backing out via "+ New" wiped the chip.
+                val filename = (payload["filename"] as? JsonPrimitive)?.contentOrNull ?: "file"
+                _state.value =
+                    _state.value.copy(
+                        screen = Screen.Chat,
+                        banner = "Attached $filename — it will be sent with your next message",
+                        bannerKind = "info",
+                    )
+            }
             return
         }
         // Viewing the read-only timeline: refuse mutating events (T041); navigation
@@ -442,17 +454,22 @@ class AppViewModel(
     /**
      * Stage an already-uploaded attachment as a ready chip (feature 031, T047) from
      * the attachments library's `attach_existing {attachment_id, filename,
-     * category}` — no re-upload, no server frame. Blank/duplicate ids are ignored.
+     * category}` — no re-upload, no server frame. Returns whether the chip is
+     * staged after the call: `true` for newly staged AND for an already-staged
+     * duplicate (the user's intent — "use this file" — is satisfied either way,
+     * so the caller still navigates back to the composer); `false` only for a
+     * malformed payload (blank id), which stages nothing.
      */
-    private fun stageExistingAttachment(payload: JsonObject) {
-        val id = (payload["attachment_id"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() } ?: return
-        if (_state.value.staged.any { it.attachmentId == id }) return
+    private fun stageExistingAttachment(payload: JsonObject): Boolean {
+        val id = (payload["attachment_id"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() } ?: return false
+        if (_state.value.staged.any { it.attachmentId == id }) return true
         val filename = (payload["filename"] as? JsonPrimitive)?.contentOrNull ?: "attachment"
         val category = (payload["category"] as? JsonPrimitive)?.contentOrNull ?: "file"
         _state.value =
             _state.value.copy(
                 staged = _state.value.staged + StagedAttachment(++attachSeq, filename, category, id, "ready"),
             )
+        return true
     }
 
     /**

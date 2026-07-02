@@ -78,9 +78,13 @@ def _device_type(orch, websocket) -> str:
 
 
 def _strip_html(html: str) -> str:
-    """Best-effort plain text from a chrome notice's HTML (native has no HTML)."""
+    """Best-effort plain text from a chrome notice's HTML (native has no HTML).
+
+    Tags become SPACES (then whitespace collapses) so adjacent blocks don't
+    fuse into one word — the theme notice used to read
+    "Daylight theme saved.Theme applied" on native clients."""
     import html as _htmlmod
-    return _htmlmod.unescape(_TAG_RE.sub("", html or "")).strip()
+    return " ".join(_htmlmod.unescape(_TAG_RE.sub(" ", html or "")).split())
 
 
 def _notice_components(notice_html: str) -> list:

@@ -55,4 +55,49 @@ class AttachExistingTest {
         vm.sendEvent("attach_existing", payload)
         assertEquals(1, vm.state.value.staged.size)
     }
+
+    @Test
+    fun attach_from_the_library_returns_to_the_chat_with_a_banner() {
+        // The user is ON the attachments surface (paperclip → "Your files").
+        vm.openSurface("attachments")
+        assertEquals(Screen.Surface, vm.state.value.screen)
+        vm.sendEvent(
+            "attach_existing",
+            buildJsonObject {
+                put("attachment_id", "att-9")
+                put("filename", "data.csv")
+                put("category", "spreadsheet")
+            },
+        )
+        // Attach navigates back to the composer (the web modal closes on Attach)
+        // and confirms what was staged — staying on the surface read as a dead
+        // button, and leaving via "+ New" would wipe the staged chip.
+        assertEquals(Screen.Chat, vm.state.value.screen)
+        assertEquals(1, vm.state.value.staged.size)
+        assertTrue(vm.state.value.banner.orEmpty().contains("data.csv"))
+        assertEquals("info", vm.state.value.bannerKind)
+    }
+
+    @Test
+    fun a_duplicate_attach_still_returns_to_the_chat() {
+        val payload =
+            buildJsonObject {
+                put("attachment_id", "att-1")
+                put("filename", "a.pdf")
+                put("category", "document")
+            }
+        vm.sendEvent("attach_existing", payload) // staged from the chat
+        vm.openSurface("attachments")
+        vm.sendEvent("attach_existing", payload) // duplicate, from the library
+        assertEquals(1, vm.state.value.staged.size)
+        assertEquals(Screen.Chat, vm.state.value.screen) // intent satisfied → composer
+    }
+
+    @Test
+    fun a_malformed_attach_payload_stages_nothing_and_stays_put() {
+        vm.openSurface("attachments")
+        vm.sendEvent("attach_existing", buildJsonObject { put("filename", "x.pdf") })
+        assertEquals(0, vm.state.value.staged.size)
+        assertEquals(Screen.Surface, vm.state.value.screen)
+    }
 }

@@ -6,8 +6,8 @@
 # Android Studio sync if the SDK suggests bumps.
 
 [versions]
-agp = "8.7.3"
-kotlin = "2.0.21"
+agp = "9.2.1"
+kotlin = "2.2.10"
 coroutines = "1.9.0"
 serialization = "1.7.3"
 okhttp = "4.12.0"

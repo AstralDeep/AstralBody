@@ -6,6 +6,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -53,6 +55,10 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
 
+/** How long a ParamPicker shows "Saving…" before restoring its buttons when no
+ *  surface re-render arrives (the server normally replies well within this). */
+private const val SUBMIT_FAILSAFE_MS = 12_000L
+
 /** Register the input/code/file primitives (US2). */
 fun Renderer.registerInputRenderers(): Renderer =
     apply {
@@ -93,6 +99,7 @@ private fun InputPrimitive(
  * post the SAME `{fields: {...}}` payload to a `chrome_*` handler (action-submit),
  * or the single `submit_action`. Falls back to the legacy single-action button.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ParamPickerPrimitive(
     c: Component,
@@ -176,15 +183,28 @@ private fun ParamPickerPrimitive(
             val actions = c.arr("actions")?.mapNotNull { it as? JsonObject } ?: emptyList()
             // The submit is fire-and-forget (the server re-pushes the surface on
             // success, replacing this component). Until then show a transient
-            // "Saving…" so a tap is never silent (T039); a new surface resets it.
+            // "Saving…" so a tap is never silent (T039); a new surface resets it
+            // (SurfaceContent keys items per delivery), and a lost/failed
+            // re-render restores the buttons after a bounded wait — the form
+            // must never be stuck spinner-only with no way to resubmit.
             var submitting by remember(c) { mutableStateOf(false) }
             if (submitting) {
+                LaunchedEffect(Unit) {
+                    kotlinx.coroutines.delay(SUBMIT_FAILSAFE_MS)
+                    submitting = false
+                }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                     Text("Saving…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             } else {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                // Wrap, never overflow: three action buttons (LLM's Load / Test /
+                // Save) must not squeeze the last one into a vertical letter
+                // stack on a phone width — extra buttons flow to the next line.
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
                     if (actions.isNotEmpty()) {
                         actions.forEach { a ->
                             val action = (a["action"] as? JsonPrimitive)?.contentOrNull ?: return@forEach
