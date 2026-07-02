@@ -266,11 +266,17 @@ async def native_logout(request: Request,
     refresh_token = str(body.get("refresh_token") or "")
     client_id = str(body.get("client_id") or "").strip()
 
-    from shared.auth_clients import allowed_azps
-    if not refresh_token or not client_id or client_id not in allowed_azps():
+    # Accept ONLY the public native clients here — NOT the confidential web
+    # client. Otherwise this endpoint would apply the server's confidential
+    # client_secret to a caller-supplied refresh_token (a secret-backed
+    # revocation oracle); native clients (astral-desktop/mobile) are public and
+    # carry no secret. The web app revokes via the cookie-bound /auth/logout.
+    from shared.auth_clients import _primary_client_id, allowed_azps
+    native_clients = allowed_azps() - {_primary_client_id()}
+    if not refresh_token or not client_id or client_id not in native_clients:
         raise HTTPException(
             status_code=400,
-            detail="refresh_token and an allow-listed client_id are required",
+            detail="refresh_token and a public native client_id are required",
         )
 
     user_id = (payload or {}).get("sub") or "unknown"
