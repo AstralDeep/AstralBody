@@ -271,3 +271,138 @@ def test_surface_dialog_chrome_submit_shows_in_flight(qapp):
     dlg.set_surface("LLM", [])
     assert dlg._status.isHidden()
     dlg.close()
+
+
+# --- M3: a client-local action must NOT arm the surface load timeout ---------
+
+def test_surface_dialog_client_local_action_does_not_arm_timer(qapp):
+    """`attach_existing` (a client_local_actions entry) is handled in-app and
+    never yields a server chrome_surface re-render, so it must not arm the 10s
+    load timeout — which would wrongly fire and wipe the attachments surface."""
+    from astral_client.app import SurfaceDialog
+
+    sent = []
+    dlg = SurfaceDialog(None, emit=lambda a, p: sent.append((a, p)))
+    dlg.set_surface("Your files", [])
+    assert dlg._timer.isActive() is False
+    dlg._emit_from_surface("attach_existing", {"attachment_id": "att-1"})
+    assert sent == [("attach_existing", {"attachment_id": "att-1"})]  # raw emit still fires
+    assert dlg._timer.isActive() is False   # NOT armed for a client-local action
+    assert dlg._status.isHidden()           # no in-flight state shown
+    dlg.close()
+
+
+def test_client_local_actions_includes_attach_existing():
+    from astral_client.app import _CLIENT_LOCAL_ACTIONS
+
+    assert "attach_existing" in _CLIENT_LOCAL_ACTIONS
+
+
+# --- M4: chat_status:done is a per-turn reset, not a full reconnect re-sync ---
+
+def test_chat_status_done_does_not_clear_banner_or_resync(win):
+    # An error banner is showing (and a turn was active).
+    win._turn_active = True
+    win._on_message({"type": "error", "code": "internal", "message": "server fell over"})
+    assert not win._banner.isHidden()
+    win.client.sent.clear()  # ignore anything captured during setup
+    # A turn completing must NOT wipe the banner nor re-fire the reconnect re-sync.
+    win._on_message({"type": "chat_status", "status": "done"})
+    assert not win._banner.isHidden()
+    assert "server fell over" in win._banner.text()
+    actions = [a for a, _ in win.client.sent]
+    assert "discover_agents" not in actions
+    assert "get_history" not in actions
+    assert win._turn_active is False
+
+
+def test_stream_unsubscribed_does_not_resync(win):
+    win.client.sent.clear()
+    win._on_message({"type": "stream_unsubscribed", "stream_id": "s1"})
+    actions = [a for a, _ in win.client.sent]
+    assert "discover_agents" not in actions and "get_history" not in actions
+
+
+def test_real_connected_still_resyncs(win):
+    # The genuine (re)connect transition still does the full re-sync.
+    win.client.sent.clear()
+    win._on_status("connected")
+    actions = [a for a, _ in win.client.sent]
+    assert "discover_agents" in actions and "get_history" in actions
+
+
+# --- M1: silent token refresh runs OFF the GUI thread -----------------------
+
+def test_silent_refresh_done_reconnects_on_token(win, monkeypatch):
+    reconnected = []
+    monkeypatch.setattr(win, "_reconnect", lambda tok: reconnected.append(tok))
+    win._silent_refresh_active = True
+    win._on_silent_refresh_done("NEWTOKEN")
+    assert reconnected == ["NEWTOKEN"]
+    assert win._silent_refresh_active is False
+
+
+def test_silent_refresh_done_prompts_on_failure(win, monkeypatch):
+    prompted = []
+    monkeypatch.setattr(win, "_prompt_reauth", lambda: prompted.append(True))
+    win._silent_refresh_active = True
+    win._on_silent_refresh_done(None)
+    assert prompted == [True]
+    assert win._silent_refresh_active is False
+
+
+def test_auth_required_runs_refresh_off_gui_thread(win, qapp, monkeypatch):
+    """The silent refresh (a blocking urlopen up to 15s) must run on a worker
+    thread, not the GUI thread where _on_status is a slot (M1)."""
+    import threading
+
+    reconnected = []
+    monkeypatch.setattr(win, "_reconnect", lambda tok: reconnected.append(tok))
+    seen = {}
+    done = threading.Event()
+    main_thread = threading.current_thread()
+
+    class _Sess:
+        access_token = "old"
+        refresh_token = "r"
+        client_id = "astral-desktop"
+        token_url = ""
+
+        def refresh(self):
+            seen["thread"] = threading.current_thread()
+            done.set()
+            return "NEWTOKEN"
+
+    win._auth_session = _Sess()
+    win._reauth_tries = 0
+    win._on_status("auth_required:expired")
+    assert win._silent_refresh_active is True     # in flight — GUI thread not blocked
+    assert done.wait(3.0), "the refresh worker never ran"
+    assert seen["thread"] is not main_thread      # ran OFF the GUI thread
+    # deliver the queued result on the GUI thread → reconnect with the new token
+    for _ in range(100):
+        qapp.processEvents()
+        if reconnected:
+            break
+    assert reconnected == ["NEWTOKEN"]
+    assert win._silent_refresh_active is False
+
+
+def test_auth_required_bound_exhausted_prompts(win, monkeypatch):
+    prompted = []
+    monkeypatch.setattr(win, "_prompt_reauth", lambda: prompted.append(True))
+
+    class _Sess:
+        access_token = "old"
+        refresh_token = "r"
+        client_id = "c"
+        token_url = ""
+
+        def refresh(self):  # pragma: no cover — must not be called past the bound
+            raise AssertionError("refresh attempted past the retry bound")
+
+    win._auth_session = _Sess()
+    win._reauth_tries = 2  # bound already exhausted
+    win._on_status("auth_required:expired")
+    assert prompted == [True]
+    assert win._silent_refresh_active is False

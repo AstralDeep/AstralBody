@@ -188,6 +188,69 @@ def test_image_malformed_does_not_raise(qapp):
         assert isinstance(w, QWidget)
 
 
+# --- M2: remote images fetch OFF the GUI thread (never block render) ---------
+
+def test_image_http_url_renders_placeholder_synchronously(qapp, monkeypatch):
+    """A remote http(s) image renders an immediate alt-text placeholder and is
+    returned synchronously — the bytes are fetched off the GUI thread (a
+    synchronous urlopen here used to freeze the render up to 4s per image)."""
+    from astral_client import renderer as rmod
+    from astral_client.renderer import _AsyncImageLabel
+
+    # never touch the network from the test's auto-spawned fetch thread
+    monkeypatch.setattr(rmod, "_fetch_image_bytes", lambda url: None)
+    w = render({"type": "image", "url": "https://example.com/x.png",
+                "alt": "a picture"}, _ctx())
+    assert isinstance(w, QWidget)
+    lbl = w.findChild(_AsyncImageLabel)
+    assert lbl is not None
+    assert "a picture" in lbl.text()          # alt text shown immediately
+    assert lbl.pixmap().isNull()              # no image bytes yet
+
+
+def test_async_image_label_applies_fetched_pixmap(qapp, monkeypatch):
+    from PySide6.QtCore import QBuffer, QByteArray, QIODevice
+    from PySide6.QtGui import QPixmap
+
+    from astral_client import renderer as rmod
+
+    monkeypatch.setattr(rmod, "_fetch_image_bytes", lambda url: None)  # auto-thread no-op
+    # a valid in-memory PNG (Qt-encoded so loadFromData round-trips cleanly)
+    src = QPixmap(4, 4)
+    src.fill()
+    ba = QByteArray()
+    buf = QBuffer(ba)
+    buf.open(QIODevice.OpenModeFlag.WriteOnly)
+    src.save(buf, "PNG")
+    buf.close()
+    png = bytes(ba)
+
+    lbl = rmod._AsyncImageLabel("https://example.com/x.png", "alt", 480)
+    assert lbl.pixmap().isNull()              # placeholder (text) — no pixmap yet
+    lbl._apply_bytes(png)                     # simulate the fetched bytes arriving
+    assert not lbl.pixmap().isNull()          # QPixmap applied on the GUI thread
+    assert lbl.text() == ""                   # placeholder text cleared
+
+
+def test_async_image_label_failed_fetch_keeps_placeholder(qapp, monkeypatch):
+    from astral_client import renderer as rmod
+
+    monkeypatch.setattr(rmod, "_fetch_image_bytes", lambda url: None)
+    lbl = rmod._AsyncImageLabel("https://example.com/x.png", "alt text", 480)
+    lbl._apply_bytes(None)                    # a failed/empty fetch
+    assert lbl.pixmap().isNull()              # still no image
+    assert "alt text" in lbl.text()           # placeholder retained
+
+
+def test_fetch_image_bytes_rejects_non_http(qapp):
+    from astral_client.renderer import _fetch_image_bytes
+
+    # scheme-guarded: data:/ftp:/empty never hit urlopen (return None, no raise)
+    assert _fetch_image_bytes("") is None
+    assert _fetch_image_bytes("ftp://nope") is None
+    assert _fetch_image_bytes("data:image/png;base64,AAAA") is None
+
+
 def test_plotly_chart_renders_from_traces(qapp):
     w = render({"type": "plotly_chart", "title": "Fig",
                 "data": [{"x": [1, 2, 3], "y": [4, 5, 6], "type": "bar"}]}, _ctx())

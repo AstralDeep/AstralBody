@@ -18,10 +18,11 @@ from __future__ import annotations
 import base64
 import json
 import re
+import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -867,27 +868,19 @@ def _r_chart(c, ctx):
 
 
 def _image_pixmap(url: str):
-    """Best-effort ``QPixmap`` from a ``data:`` URI or an http(s) URL (bounded
-    synchronous fetch, 8 MB / 4 s caps). Returns ``None`` on any failure so the
-    caller falls back to the alt text — never raises."""
+    """Best-effort ``QPixmap`` from a ``data:`` URI ONLY (synchronous, fast, no
+    network). Returns ``None`` on any failure — and for http(s) URLs, which are
+    fetched OFF the GUI thread by :class:`_AsyncImageLabel` (a synchronous
+    urlopen here would freeze the render for up to 4 s per image). Never raises."""
     from PySide6.QtGui import QPixmap
 
     url = str(url or "")
-    if not url:
+    if not url.startswith("data:"):
         return None
     try:
-        if url.startswith("data:"):
-            header, _, payload = url.partition(",")
-            raw = (base64.b64decode(payload) if "base64" in header.lower()
-                   else payload.encode("utf-8"))
-        elif url.startswith(("http://", "https://")):
-            import urllib.request
-
-            req = urllib.request.Request(url, headers={"User-Agent": "AstralWindowsClient"})
-            with urllib.request.urlopen(req, timeout=4) as r:  # noqa: S310 — scheme-guarded
-                raw = r.read(8 * 1024 * 1024)
-        else:
-            return None
+        header, _, payload = url.partition(",")
+        raw = (base64.b64decode(payload) if "base64" in header.lower()
+               else payload.encode("utf-8"))
         pix = QPixmap()
         pix.loadFromData(raw)
         return pix if not pix.isNull() else None
@@ -895,21 +888,97 @@ def _image_pixmap(url: str):
         return None
 
 
+def _fetch_image_bytes(url: str):
+    """Fetch remote image bytes over http(s) (8 MB / 4 s bounds). Returns
+    ``None`` on any failure so the caller degrades to alt text — never raises.
+    Called ONLY from a worker thread (never the GUI thread)."""
+    url = str(url or "")
+    if not url.startswith(("http://", "https://")):
+        return None
+    try:
+        import urllib.request
+
+        req = urllib.request.Request(url, headers={"User-Agent": "AstralWindowsClient"})
+        with urllib.request.urlopen(req, timeout=4) as r:  # noqa: S310 — scheme-guarded
+            return r.read(8 * 1024 * 1024)
+    except Exception:  # noqa: BLE001 — image load is best-effort, degrade to alt
+        return None
+
+
+class _AsyncImageLabel(QLabel):
+    """A QLabel that shows its alt text immediately, then fetches a remote image
+    OFF the GUI thread and swaps in the QPixmap when the bytes arrive.
+
+    A synchronous ``urlopen`` during ``render()`` used to freeze the GUI thread
+    up to 4 s per remote image. The fetch runs on a daemon thread and the bytes
+    are marshaled back via the ``_loaded`` signal, so the widget is only ever
+    touched on the GUI thread (the worker never touches Qt state). A failed or
+    empty fetch keeps the alt-text placeholder."""
+
+    _loaded = Signal(object)  # raw image bytes, or None on failure
+
+    def __init__(self, url: str, alt: str, maxw: int, parent=None):
+        super().__init__(parent)
+        self._maxw = maxw
+        self.setText(alt or "🖼 image")
+        self.setWordWrap(True)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.setStyleSheet(f"color:{T.MUTED}; font-size:12px; background:transparent;")
+        self._loaded.connect(self._apply_bytes)
+        threading.Thread(
+            target=self._fetch, args=(url,), name="astral-image", daemon=True
+        ).start()
+
+    def _fetch(self, url: str) -> None:
+        raw = _fetch_image_bytes(url)
+        try:
+            self._loaded.emit(raw)
+        except RuntimeError:  # the C++ QLabel may be gone during teardown
+            pass
+
+    def _apply_bytes(self, raw: object) -> None:
+        """GUI-thread slot: turn fetched bytes into the displayed pixmap."""
+        if not raw:
+            return  # keep the alt-text placeholder
+        from PySide6.QtGui import QPixmap
+
+        pix = QPixmap()
+        pix.loadFromData(raw)
+        if pix.isNull():
+            return
+        if pix.width() > self._maxw:
+            pix = pix.scaledToWidth(self._maxw, Qt.TransformationMode.SmoothTransformation)
+        self.setText("")
+        self.setPixmap(pix)
+        self.setAlignment(Qt.AlignmentFlag.AlignLeft)
+
+
+def _image_max_width(c) -> int:
+    try:
+        maxw = int(c.get("width") or 0) or 480
+    except (TypeError, ValueError):
+        maxw = 480
+    return max(48, min(maxw, 900))
+
+
 def _r_image(c, ctx):
-    """Native image: decode a ``data:`` URI or fetch an http(s) URL into a
-    QPixmap (width-capped); show the alt text when unavailable. Parity with the
-    Android ``image`` renderer — a native improvement over the old placeholder."""
+    """Native image: decode a ``data:`` URI synchronously, or fetch an http(s)
+    URL OFF the GUI thread (immediate alt-text placeholder, QPixmap when ready);
+    show the alt text when unavailable. Parity with the Android ``image``
+    renderer — a native improvement over the old placeholder. The widget is
+    always returned synchronously (no blocking network on the render path)."""
     w = QWidget()
     lay = _vbox(4)
     w.setLayout(lay)
     alt = str(c.get("alt") or c.get("caption") or c.get("title") or "")
-    pix = _image_pixmap(c.get("url") or c.get("src") or "")
+    url = str(c.get("url") or c.get("src") or "")
+    maxw = _image_max_width(c)
+    if url.startswith(("http://", "https://")):
+        # Remote: placeholder now, real bytes fetched off-thread (never blocks).
+        lay.addWidget(_AsyncImageLabel(url, alt, maxw))
+        return w
+    pix = _image_pixmap(url)  # data: URIs decode synchronously (fast, no network)
     if pix is not None:
-        try:
-            maxw = int(c.get("width") or 0) or 480
-        except (TypeError, ValueError):
-            maxw = 480
-        maxw = max(48, min(maxw, 900))
         if pix.width() > maxw:
             pix = pix.scaledToWidth(maxw, Qt.TransformationMode.SmoothTransformation)
         img = QLabel()
