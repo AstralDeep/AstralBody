@@ -175,7 +175,21 @@ async def components(orch, user_id, roles, params):
     active = theme.get("preset") if theme.get("preset") in PRESETS else None
     colors = _effective_colors(theme)
 
-    out = [
+    out = []
+    # Native live restyle — the twin of the web notice's embedded theme_apply
+    # block: ship the effective theme as a `theme_apply` side-effect component
+    # so applying a preset restyles the RUNNING app immediately (the Android /
+    # Windows renderers consume theme_apply natively; without this the preset
+    # only persisted and the app never changed until restart). Skipped when the
+    # user has never saved a theme, leaving the client default palette alone.
+    if theme:
+        spec = {"type": "theme_apply", "message": "Theme applied"}
+        if active:
+            spec["preset"] = active
+        else:
+            spec["colors"] = dict(colors)
+        out.append(spec)
+    out += [
         _sdui.text(_summary_text(theme), "caption"),
         _sdui.text("Presets", "h3"),
         _sdui.text("Pick a preset to apply and save it.", "caption"),

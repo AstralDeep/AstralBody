@@ -262,7 +262,8 @@ def test_models_failure_renders_error_class(monkeypatch):
         orch, ws, "u1", ["user"], _payload(base_url="https://x.test/v1", api_key=SECRET),
     ))
     assert "transport_error" in notice
-    assert "&lt;fail&gt;" in notice and "<fail>" not in notice  # upstream text escaped
+    assert "reached" in notice  # actionable hint (check URL/network), not a raw dump
+    assert "dns" in notice and "<fail>" not in notice  # sanitized upstream snippet
     assert "models" not in params
 
 
@@ -340,8 +341,44 @@ def test_test_failure_renders_error_class_and_message(monkeypatch):
         _payload(base_url="https://x.test/v1", api_key=SECRET, model="gpt-x"),
     ))
     assert "auth_failed" in notice
-    assert "&lt;unauthorized&gt;" in notice and "<unauthorized>" not in notice
+    assert "rejected the API key" in notice  # actionable hint, not a raw dump
+    assert "401" in notice and "<unauthorized>" not in notice  # sanitized snippet
     assert params == {"base_url": "https://x.test/v1", "model": "gpt-x"}
+
+
+def test_test_failure_html_error_page_is_never_dumped(monkeypatch):
+    """A mistyped Base URL typically answers with a WEBSITE — the notice must
+    give the user a what-to-do hint, never the raw page markup (the pre-fix
+    behavior dumped `<!doctype html><html…` into the modal)."""
+    page = ('<!doctype html><html lang="en"><head><title>Example Domain</title>'
+            "<style>body{background:#eee}</style></head>"
+            "<body><h1>Example Domain</h1></body></html>")
+
+    async def fake_test(**kwargs):
+        return TestConnectionResponse(
+            ok=False, model="ddddd", probed_at="t",
+            error_class="other", upstream_message=page,
+        )
+
+    monkeypatch.setattr("llm_config.api.test_connection", fake_test)
+    orch = make_orch()
+    ws = FakeWS()
+    register(orch, ws)
+    _surface, _params, notice = run(llm_surface.HANDLERS["chrome_llm_test"](
+        orch, ws, "u1", ["user"],
+        _payload(base_url="http://example.com", api_key=SECRET, model="ddddd"),
+    ))
+    assert "doctype" not in notice.lower() and "Example Domain" not in notice
+    assert "Base URL" in notice  # the actionable guidance survived
+
+
+def test_clean_upstream_sanitizes_and_bounds():
+    assert llm_surface._clean_upstream("dns <fail>") == "dns"
+    assert llm_surface._clean_upstream("401 <unauthorized>") == "401"
+    assert llm_surface._clean_upstream("<!DOCTYPE html><html><body>x</body></html>") == ""
+    assert llm_surface._clean_upstream("  Error   code: 404 - model missing ") == "Error code: 404 - model missing"
+    assert len(llm_surface._clean_upstream("y" * 5000)) == llm_surface._UPSTREAM_SNIPPET_LEN
+    assert llm_surface._clean_upstream("") == ""
 
 
 def test_test_requires_all_fields():

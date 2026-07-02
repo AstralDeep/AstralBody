@@ -82,6 +82,32 @@ def test_theme_components_marks_active_preset():
     assert "Applied" in labels  # the ocean preset card is marked active
 
 
+def test_theme_components_ship_theme_apply_for_live_restyle():
+    # A saved preset rides as a leading theme_apply side-effect component, so a
+    # native client restyles the RUNNING app on open AND right after a preset
+    # apply (the re-render) — not only on the next restart.
+    from webrender.chrome.surfaces import theme
+    comps = run(theme.components(_orch({"theme": {"preset": "ocean"}}), "u1", ["user"], {}))
+    assert comps[0]["type"] == "theme_apply"
+    assert comps[0]["preset"] == "ocean"
+
+
+def test_theme_components_theme_apply_colors_when_no_preset():
+    from webrender.chrome.surfaces import theme
+    comps = run(theme.components(
+        _orch({"theme": {"colors": {"primary": "#22C55E"}}}), "u1", ["user"], {}))
+    assert comps[0]["type"] == "theme_apply"
+    assert comps[0]["colors"]["primary"] == "#22C55E"
+    assert "preset" not in comps[0]
+
+
+def test_theme_components_no_theme_apply_when_nothing_saved():
+    # Never fight the client's default palette when the user never saved one.
+    from webrender.chrome.surfaces import theme
+    comps = run(theme.components(_orch(), "u1", ["user"], {}))
+    assert "theme_apply" not in _types(comps)
+
+
 # --- guide (T019) ------------------------------------------------------------
 
 def test_guide_components_valid_with_toc_and_body():
@@ -102,6 +128,21 @@ def test_guide_admin_section_filtered_for_non_admin():
     non_admin = run(guide.components(_orch(), "u1", ["user"], {}))
     admin = run(guide.components(_orch(), "a1", ["admin"], {}))
     assert toc_count(admin) > toc_count(non_admin)   # admin sees the extra admin section
+
+
+def test_guide_components_lead_with_section_content_not_toc():
+    # Content FIRST, TOC after: a phone-height surface must show the newly
+    # opened section immediately — 13+ TOC buttons above the body made every
+    # section tap look like a dead button.
+    from webrender.chrome.surfaces import guide
+    comps = run(guide.components(_orch(), "u1", ["user"], {"section": "signing-in"}))
+    assert comps[0]["type"] == "text" and comps[0].get("variant") == "h2"
+    types_ = [c.get("type") for c in comps]
+    assert all(t == "text" for t in types_[: types_.index("container")])
+    # active section chip is primary, the rest secondary (visible selection)
+    toc = [c for c in _flat(comps) if c.get("action") == "chrome_open"]
+    assert any(b.get("variant") == "primary" for b in toc)
+    assert any(b.get("variant") == "secondary" for b in toc)
 
 
 # --- llm (T022) --------------------------------------------------------------
