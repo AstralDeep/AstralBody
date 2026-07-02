@@ -280,14 +280,17 @@ class WebSessionStore:
         cur = self.db.execute("DELETE FROM web_session WHERE hard_expires_at <= ?", (now,))
         return getattr(cur, "rowcount", 0)
 
-    # ── revocation queue (FR-013) ────────────────────────────────────────
-    def enqueue_revocation(self, user_id: str, refresh_token: str) -> None:
+    # ── revocation queue (FR-013; client_id added by feature 044) ────────
+    def enqueue_revocation(self, user_id: str, refresh_token: str,
+                           client_id: str | None = None) -> None:
         if not refresh_token:
             return
         self.db.execute(
-            "INSERT INTO auth_revocation_queue (user_id, refresh_token_enc, enqueued_at, attempts) "
-            "VALUES (?, ?, ?, 0)",
-            (user_id, self._enc(refresh_token), int(time.time())),
+            "INSERT INTO auth_revocation_queue "
+            "(user_id, refresh_token_enc, enqueued_at, attempts, client_id) "
+            "VALUES (?, ?, ?, 0, ?)",
+            (user_id, self._enc(refresh_token), int(time.time()),
+             (client_id or "").strip() or None),
         )
 
     def pending_revocations(self, limit: int = 20) -> list:
@@ -302,6 +305,8 @@ class WebSessionStore:
                 "refresh_token": self._dec(r["refresh_token_enc"]),
                 "attempts": int(r.get("attempts") or 0),
                 "enqueued_at": int(r["enqueued_at"]),
+                # NULL for pre-044 rows → retrier falls back to the web client id.
+                "client_id": r.get("client_id"),
             })
         return out
 

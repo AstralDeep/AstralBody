@@ -2,7 +2,7 @@
 
 **Feature Branch**: `041-android-sdui-client`
 **Created**: 2026-06-30
-**Status**: Draft
+**Status**: Complete
 **Input**: User description: "Native Android client for AstralBody — a new ROTE/webrender SDUI target built in Kotlin + Jetpack Compose with NO web view. Renders the orchestrator's server-driven UI natively by consuming the same structured `components` wire the Windows client uses (ui_render / ui_upsert / ui_stream_data) over WebSocket, registering as an Android device (mobile/tablet) so output is device-adapted. Core deliverable is the SDUI-primitive → Compose mapping (the Android twin of the Windows renderer), with unknown types degrading to a labeled placeholder; consumes live push streaming (in place, seq-deduped, session-filtered, terminal-finalized); ONE responsive layout across phone/tablet/foldable; OIDC PKCE sign-in via the system browser with a dedicated public client + silent refresh (dev-token path for mock auth); native chrome surfaces driven by existing data actions/REST (agents, history, audit) — never the web HTML chrome; minimal additive server changes (auth allow-list + confirm an Android device profile); Gradle project with JVM unit tests for all pure logic + an Android CI job. Car/automotive, an on-device tools agent, offline mode, and push notifications are explicit non-goals for v1. Success = a phone AND tablet can authenticate, chat, manage agents, and render the full SDUI canvas (incl. streaming + audit viewer) natively, adapting to screen size, at parity with the Windows client's shipped surfaces."
 
 ## User Scenarios & Testing *(mandatory)*

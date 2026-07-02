@@ -1,5 +1,7 @@
 # Tasks: Native SDUI Settings Surfaces
 
+**Status**: Shipped (PR #100); the settings-action round-trips, theme live-restyle, and cross-client live verification left open here were completed and verified under feature 044 (see specs/044-native-client-parity/).
+
 **Input**: Design documents from `specs/043-sdui-settings-surfaces/`
 **Prerequisites**: plan.md, spec.md, research.md, data-model.md, contracts/chrome-surface.md
 
@@ -25,8 +27,8 @@ Feature 042 delivered the server-owned menu to native clients (`chrome_menu`) an
 - [x] T001 Add a `ChromeSurface` dataclass scaffold to `backend/shared/protocol.py` (fields `region, surface_key, title, admin_only, components, mode`; `to_json()`), beside `ChromeRender`/`ChromeMenu`. No delivery wiring yet.
 - [x] T002 [P] Create `backend/webrender/chrome/surfaces/_sdui.py` scaffold (module docstring + empty helper signatures: `surface(...)`, `form(...)`, `button(...)`, `notice_alert(...)`, `placeholder(...)`).
 - [x] T003 [P] Create backend test skeletons `backend/orchestrator/tests/test_chrome_surface.py` and `backend/webrender/chrome/tests/test_surface_components.py` (import targets, no assertions yet).
-- [ ] T004 [P] Android `:core` scaffold: add `Inbound.ChromeSurface(...)` to `core/protocol/Messages.kt` + a `Wire.decode` case scaffold in `core/protocol/Wire.kt` + `core/src/test/.../protocol/ChromeSurfaceDecodeTest.kt` skeleton.
-- [ ] T005 [P] Windows scaffold: a `render_surface_modal(...)` stub in `windows-client/astral_client/chrome.py` + `windows-client/tests/test_surface_host.py` skeleton.
+- [X] T004 [P] Android `:core` scaffold: add `Inbound.ChromeSurface(...)` to `core/protocol/Messages.kt` + a `Wire.decode` case scaffold in `core/protocol/Wire.kt` + `core/src/test/.../protocol/ChromeSurfaceDecodeTest.kt` skeleton.
+- [X] T005 [P] Windows scaffold: a `render_surface_modal(...)` stub in `windows-client/astral_client/chrome.py` + `windows-client/tests/test_surface_host.py` skeleton.
 
 ---
 
@@ -39,14 +41,14 @@ Feature 042 delivered the server-owned menu to native clients (`chrome_menu`) an
 - [x] T007 Branch `backend/orchestrator/chrome_events.py::_render_surface` (`:62-89`) on the session device target (`orch.ui_sessions[websocket].device_type`): `browser` → existing `chrome_render` HTML (unchanged); `windows`/`android` → call `mod.components(...)`, ROTE-adapt, push `chrome_surface`. A surface without `components()` → a single labeled placeholder component (`_sdui.placeholder`).
 - [x] T008 Branch the handler re-render path (`chrome_events.py:140-165`): on a native session re-render via the `chrome_surface` path with the `notice_html` mapped to a prepended `Alert` component; web unchanged. Preserve the server-side `ADMIN_ONLY` re-check for both paths.
 - [x] T009 Implement `backend/webrender/chrome/surfaces/_sdui.py` helpers: `surface(title, [components])`; `form(fields, submit_action, submit_payload, submit_label)` → a `ParamPicker` action-submit dict; `button(label, action, payload, variant)`; `notice_alert(kind, text)`; `placeholder(label)`. Emit plain `astralprims` `.to_dict()` shapes.
-- [ ] T010 astralprims `ParamPicker` **action-submit** extension (`submit_action`/`submit_payload` + `password`/`textarea` field kinds) per `data-model.md`; make `backend/webrender/renderer.py` render the action-submit variant and `backend/webrender/static/client.js` post `ui_event{action, payload:{fields}}` on submit (web parity — **no visual change**). Backward-compatible (no `submit_action` ⇒ existing chat-message submit).
-- [ ] T011 Confirm `backend/webrender/renderer.py` renders `color_picker`/`theme_apply` (already registered `:1111-1112`); `allowed_primitive_types()` set unchanged. Document the extended `param_picker` + the two theming primitives in the renderer docs (Constitution VI/VIII).
+- [X] T010 astralprims `ParamPicker` **action-submit** extension (`submit_action`/`submit_payload` + `password`/`textarea` field kinds) per `data-model.md`; make `backend/webrender/renderer.py` render the action-submit variant and `backend/webrender/static/client.js` post `ui_event{action, payload:{fields}}` on submit (web parity — **no visual change**). Backward-compatible (no `submit_action` ⇒ existing chat-message submit).
+- [X] T011 Confirm `backend/webrender/renderer.py` renders `color_picker`/`theme_apply` (already registered `:1111-1112`); `allowed_primitive_types()` set unchanged. Document the extended `param_picker` + the two theming primitives in the renderer docs (Constitution VI/VIII).
 - [x] T012 [P] Backend tests `test_chrome_surface.py`: `chrome_open` on a `windows`/`android` session → `chrome_surface` with valid `astralprims` dicts; `browser` session → `chrome_render` HTML; unconverted surface → placeholder component; non-admin `admin_tools` open on a native session refused + audited; a `ParamPicker` action-submit round-trips to `payload.fields`.
 
 ### Native hosts
 - [x] T013 Windows `renderer.py`: add `color_picker` + `theme_apply` builders; honor the `ParamPicker` action-submit (submit → `ctx.emit(submit_action, {fields, …})`); expose a `render_components(list) -> QWidget` entry for the modal host.
 - [x] T014 Windows `chrome.py` + `app.py`: implement the surface host (`render_surface_modal` builds a modal from `chrome_surface.components` via `renderer.render_components`); route the four ported surfaces in `_open_surface` (`app.py:924-941`) to emit `chrome_open` + render the returned `chrome_surface` (replace the `QMessageBox` placeholder); consume the `chrome_surface` frame in `_on_message` (`app.py:1090-1145`); retire `chrome_render_notice` (`chrome.py:29-45`).
-- [ ] T015 [P] Windows tests `test_surface_host.py`: a `chrome_surface` frame → modal with the expected widgets (incl. an unknown-type `_r_fallback` placeholder); a submit/button → `send_event` with the right action+payload.
+- [X] T015 [P] Windows tests `test_surface_host.py`: a `chrome_surface` frame → modal with the expected widgets (incl. an unknown-type `_r_fallback` placeholder); a submit/button → `send_event` with the right action+payload.
 - [x] T016 Android `:core`: complete `Inbound.ChromeSurface` + `Wire.decode` mapping; add a reducer case in `:app` `AppViewModel.reduce` storing the decoded surface in `UiState` (twin of `Inbound.ChromeMenu` at `AppViewModel.kt:501`).
 - [x] T017 Android `:app`: add a `Screen.Surface` host that renders the held `chrome_surface.components` via the existing `render/Renderer.kt` in a modal/sheet; route `AppViewModel.openMenuItem` (`:317-328`) `else` for the four ported surfaces to it (replace `SurfacePlaceholderScreen`); add `color_picker`/`theme_apply` composables + `ParamPicker` action-submit (`emit.event(submit_action, {fields})`).
 - [x] T018 [P] Android `:core`/`:app` tests: `ChromeSurface` decode (unknown-field tolerant); surface-host maps a component list to the renderer; submit/button → `sendEvent` payload. (`:core` logic Kover ≥90%.)
@@ -69,8 +71,8 @@ Feature 042 delivered the server-owned menu to native clients (`chrome_menu`) an
 - [x] T022 [US1] `surfaces/llm.py::components()` — one `ParamPicker` action-submit form (base_url `text`, api_key `password` write-only, model `text`/`select` when `params["models"]`) + action `Button`s (Load models/Test/Save/Clear) + saved/not-configured `Badge`. Reuse `_user_creds`/`_model_field`.
 - [x] T023 [US1] `surfaces/personalization.py::components()` — `Tabs` (soul/memory/skills/schedule/dreaming) → per-tab bodies: soul `ParamPicker` (profession/goals `textarea`/notes `textarea`); memory `List_` of per-row edit (`ParamPicker` + `Button`s); skills catalog rows (`Button` toggles, reason text when scope not granted); schedule job `Card`s (`Badge` status + Pause/Resume/Run/Delete `Button`s + run history); dreaming toggle+trigger `Button`s. Reuse every existing data read.
 - [x] T024 [P] [US1] Backend tests `test_surface_components.py`: each `components()` returns valid `astralprims` dicts using only allowed types; audience filtering (guide admin section); **no `render()` HTML change** (snapshot before/after — all four keep their web HTML); the native menu omits `tour` while the web menu keeps it.
-- [ ] T025 [P] [US1] Client render tests: Windows `test_surface_host.py` + Android surface-host test render each surface's `components()` sample into widgets/composables (no live backend).
-- [ ] T026 [US1] Live: open all five on web (unchanged), Windows (launched), Android (emulator) — each renders natively, no placeholder; screenshot per surface per client for the parity comparison (SC-002).
+- [X] T025 [P] [US1] Client render tests: Windows `test_surface_host.py` + Android surface-host test render each surface's `components()` sample into widgets/composables (no live backend).
+- [X] T026 [US1] Live: open all five on web (unchanged), Windows (launched), Android (emulator) — each renders natively, no placeholder; screenshot per surface per client for the parity comparison (SC-002).
 
 **Checkpoint**: US1 shippable — all five render natively on both clients; zero placeholders, zero web views (SC-001).
 
@@ -84,13 +86,13 @@ Feature 042 delivered the server-owned menu to native clients (`chrome_menu`) an
 
 *(Handlers are reused unchanged — `collect_handlers()`; US2 wires + verifies each surface's round-trip and the native re-render-with-`Alert`.)*
 
-- [ ] T027 [P] [US2] Theme: preset `Button` → `chrome_theme_preset` persists to `user_preferences` and the re-render reflects the choice; native re-render carries the success `Alert`. (Live restyle is US3.)
-- [ ] T028 [P] [US2] Verify **"Take the tour" is absent** from the native menu on Windows + Android (and present + unchanged on the web) — the documented parity exception (spec FR-009). No native tour action exists.
-- [ ] T029 [US2] LLM: `chrome_llm_models`/`_test`/`_save`/`_clear` round-trip from the native form; the `ParamPicker` `fields` shape matches `_fields` (`llm.py:60-78`); api-key write-only (blank keeps); Save then re-open reflects base_url/model; Test shows latency/error `Alert`.
-- [ ] T030 [US2] Personalization: profile save (PHI-gated), memory update/delete, skill toggle (scope-bounded — denied when scope not granted), job pause/resume/run_now/delete, dreaming toggle/trigger — each persists and the re-rendered tab reflects it with a notice `Alert`.
-- [ ] T031 [P] [US2] Backend tests: each surface's emitted actions resolve to their existing handler; the `ParamPicker` action-submit `payload.fields` is accepted by `chrome_llm_save`/`chrome_profile_save`/`chrome_memory_update`; PHI/scope gates + audit rows fire identically to the web (no native bypass).
-- [ ] T032 [P] [US2] Client tests: Windows + Android — each surface's button/submit emits the correct `ui_event{action, payload}` (fake transport); a returned `chrome_surface` re-render replaces the modal with the notice `Alert`.
-- [ ] T033 [US2] Live: perform each surface's primary action (quickstart §5) on Windows + Android; confirm effect + `Alert` + reflected on re-open, matching the web.
+- [X] T027 [P] [US2] Theme: preset `Button` → `chrome_theme_preset` persists to `user_preferences` and the re-render reflects the choice; native re-render carries the success `Alert`. (Live restyle is US3.)
+- [X] T028 [P] [US2] Verify **"Take the tour" is absent** from the native menu on Windows + Android (and present + unchanged on the web) — the documented parity exception (spec FR-009). No native tour action exists.
+- [X] T029 [US2] LLM: `chrome_llm_models`/`_test`/`_save`/`_clear` round-trip from the native form; the `ParamPicker` `fields` shape matches `_fields` (`llm.py:60-78`); api-key write-only (blank keeps); Save then re-open reflects base_url/model; Test shows latency/error `Alert`.
+- [X] T030 [US2] Personalization: profile save (PHI-gated), memory update/delete, skill toggle (scope-bounded — denied when scope not granted), job pause/resume/run_now/delete, dreaming toggle/trigger — each persists and the re-rendered tab reflects it with a notice `Alert`.
+- [X] T031 [P] [US2] Backend tests: each surface's emitted actions resolve to their existing handler; the `ParamPicker` action-submit `payload.fields` is accepted by `chrome_llm_save`/`chrome_profile_save`/`chrome_memory_update`; PHI/scope gates + audit rows fire identically to the web (no native bypass).
+- [X] T032 [P] [US2] Client tests: Windows + Android — each surface's button/submit emits the correct `ui_event{action, payload}` (fake transport); a returned `chrome_surface` re-render replaces the modal with the notice `Alert`.
+- [X] T033 [US2] Live: perform each surface's primary action (quickstart §5) on Windows + Android; confirm effect + `Alert` + reflected on re-open, matching the web.
 
 **Checkpoint**: US2 shippable — every surface's actions work natively through the same gates/audit as the web (SC-003).
 
@@ -102,22 +104,22 @@ Feature 042 delivered the server-owned menu to native clients (`chrome_menu`) an
 
 **Independent Test**: pick a preset on a native client → its colors update live; open another client → it loads with the preset from first paint.
 
-- [ ] T034 [US3] Backend: include the user's active theme (7 channels from `PRESETS`) in the register bootstrap, and have `chrome_theme_preset` ship the chosen preset's channels to native (a `theme_apply`-style side-effect payload) alongside the re-render.
-- [ ] T035 [US3] Windows `theme.py`: make the palette tokens a runtime object driven by the active preset's channels; re-apply `APP_STYLESHEET`/`ROOT_BG_STYLE` on preset change (`app.py:1454-1466`); theme correctly on connect.
-- [ ] T036 [US3] Android `ui/theme/Theme.kt`: `AstralTheme` takes a dynamic `ColorScheme` from the VM-held preset (replace fixed `AstralDarkColors`); recompose live on preset change; theme on connect.
-- [ ] T037 [P] [US3] Tests: preset persistence + channel delivery; Windows palette rebuild from channels; Android `ColorScheme` mapping; theme-on-connect from the bootstrap.
-- [ ] T038 [US3] Live: pick a preset on one native client → restyles live; open a second client → opens with the preset (SC-004), verified across web + Windows + Android.
+- [X] T034 [US3] Backend: include the user's active theme (7 channels from `PRESETS`) in the register bootstrap, and have `chrome_theme_preset` ship the chosen preset's channels to native (a `theme_apply`-style side-effect payload) alongside the re-render.
+- [X] T035 [US3] Windows `theme.py`: make the palette tokens a runtime object driven by the active preset's channels; re-apply `APP_STYLESHEET`/`ROOT_BG_STYLE` on preset change (`app.py:1454-1466`); theme correctly on connect.
+- [X] T036 [US3] Android `ui/theme/Theme.kt`: `AstralTheme` takes a dynamic `ColorScheme` from the VM-held preset (replace fixed `AstralDarkColors`); recompose live on preset change; theme on connect.
+- [X] T037 [P] [US3] Tests: preset persistence + channel delivery; Windows palette rebuild from channels; Android `ColorScheme` mapping; theme-on-connect from the bootstrap.
+- [X] T038 [US3] Live: pick a preset on one native client → restyles live; open a second client → opens with the preset (SC-004), verified across web + Windows + Android.
 
 ---
 
 ## Phase 6: Polish & Verification (cross-cutting)
 
-- [ ] T039 [P] Update `CLAUDE.md` (manual-additions section) + `docs/` with the `chrome_surface` frame, the `components()` surface contract, and the `ParamPicker` action-submit extension.
-- [ ] T040 [P] Cross-reference `specs/042-cross-client-chrome-parity/tasks.md` — mark its deferred Phase-5 (US3) surface tasks delivered by feature 043.
-- [ ] T041 astralprims: publish the `ParamPicker` action-submit extension (version-gated, push main) + document the primitive change; adjust `requirements.txt` floor if the wheel is required in-image (else the orchestrator keeps emitting the dict — feature-029 precedent).
-- [ ] T042 Run `quickstart.md` end-to-end: backend up; web screenshots (confirm **unchanged**, SC-006); Windows launch + per-surface screenshots; Android build + emulator per-surface screenshots (or JVM tests + CI instrumented); side-by-side parity (SC-001..SC-007).
-- [ ] T043 Coverage: backend changed-line ≥90% (diff-cover) — add tests where short; Android `:core:koverVerify` ≥90%; ktlint + Android Lint clean; `:app:assembleDebug` green; ruff clean.
-- [ ] T044 Push branch, open PR; drive `CI` + `android-ci` green; trigger the Android `instrumented` job via `workflow_dispatch`; confirm the Windows release workflow builds on `workflow_dispatch`.
+- [ ] T039 [P] Update `CLAUDE.md` (manual-additions section) + `docs/` with the `chrome_surface` frame, the `components()` surface contract, and the `ParamPicker` action-submit extension. <!-- deferred: the chrome_surface runtime shipped and is live-verified under feature 044, but the CLAUDE.md/docs architecture note has not been added yet -->
+- [X] T040 [P] Cross-reference `specs/042-cross-client-chrome-parity/tasks.md` — mark its deferred Phase-5 (US3) surface tasks delivered by feature 043.
+- [ ] T041 astralprims: publish the `ParamPicker` action-submit extension (version-gated, push main) + document the primitive change; adjust `requirements.txt` floor if the wheel is required in-image (else the orchestrator keeps emitting the dict — feature-029 precedent). <!-- deferred: no astralprims wheel was published; the orchestrator emits param_picker as a plain dict (feature-029 precedent) so no in-image floor bump was needed — publish still deferred -->
+- [X] T042 Run `quickstart.md` end-to-end: backend up; web screenshots (confirm **unchanged**, SC-006); Windows launch + per-surface screenshots; Android build + emulator per-surface screenshots (or JVM tests + CI instrumented); side-by-side parity (SC-001..SC-007).
+- [X] T043 Coverage: backend changed-line ≥90% (diff-cover) — add tests where short; Android `:core:koverVerify` ≥90%; ktlint + Android Lint clean; `:app:assembleDebug` green; ruff clean.
+- [X] T044 Push branch, open PR; drive `CI` + `android-ci` green; trigger the Android `instrumented` job via `workflow_dispatch`; confirm the Windows release workflow builds on `workflow_dispatch`.
 
 ---
 

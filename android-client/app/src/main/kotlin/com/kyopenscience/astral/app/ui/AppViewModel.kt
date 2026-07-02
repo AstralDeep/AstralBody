@@ -1,5 +1,6 @@
 package com.kyopenscience.astral.app.ui
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
@@ -8,6 +9,8 @@ import com.kyopenscience.astral.app.rest.AstralRest
 import com.kyopenscience.astral.app.rest.AuditEvent
 import com.kyopenscience.astral.app.transport.ConnectionState
 import com.kyopenscience.astral.app.transport.OrchestratorClient
+import com.kyopenscience.astral.app.ui.theme.ThemePalette
+import com.kyopenscience.astral.app.ui.theme.themePaletteForSpec
 import com.kyopenscience.astral.core.chrome.ChromeMenuModel
 import com.kyopenscience.astral.core.chrome.MenuItem
 import com.kyopenscience.astral.core.protocol.Agent
@@ -15,6 +18,7 @@ import com.kyopenscience.astral.core.protocol.ChatAttachment
 import com.kyopenscience.astral.core.protocol.ChatSummary
 import com.kyopenscience.astral.core.protocol.DeviceCapabilities
 import com.kyopenscience.astral.core.protocol.Inbound
+import com.kyopenscience.astral.core.protocol.ProtocolManifest
 import com.kyopenscience.astral.core.sdui.Canvas
 import com.kyopenscience.astral.core.sdui.CanvasOp
 import com.kyopenscience.astral.core.sdui.Component
@@ -38,10 +42,10 @@ data class ChatTurn(val role: String, val text: String)
 /**
  * The top-level navigable surfaces. Settings is no longer a screen — it is the
  * server-driven dropdown from the top-bar gear (feature 042); items route to the
- * native Agents/Audit screens or, for a surface not yet native on Android, a
- * labeled [SurfacePlaceholder] (P2 replaces these with SDUI).
+ * native Agents/Audit screens or, for any other surface, the SDUI [Surface] screen
+ * (chrome_open → chrome_surface, rendered natively).
  */
-enum class Screen { Chat, Agents, History, Audit, SurfacePlaceholder, Surface }
+enum class Screen { Chat, Agents, History, Audit, Surface }
 
 /** A paperclip-staged upload chip (feature 031). */
 data class StagedAttachment(
@@ -82,6 +86,16 @@ data class UiState(
     // --- input / chrome ---
     val staged: List<StagedAttachment> = emptyList(),
     val statusText: String? = null,
+    /** Transient dismissible banner (server errors, offline drops, notifications). */
+    val banner: String? = null,
+    /** Banner severity — "error" | "info" — drives the bar's styling. */
+    val bannerKind: String = "error",
+    /** The running turn's execution trail (chat_step/tool_progress lines), capped. */
+    val stepTrail: List<String> = emptyList(),
+    /** The turn detached into a background task (task_started) — UI can relax. */
+    val asyncDetached: Boolean = false,
+    /** True once this session has connected — gates the "Reconnecting…" strip. */
+    val everConnected: Boolean = false,
     val agents: List<Agent> = emptyList(),
     val history: List<ChatSummary> = emptyList(),
     val audit: List<AuditEvent> = emptyList(),
@@ -92,10 +106,17 @@ data class UiState(
     // The server-owned chrome model (top bar + settings menu). Rendered verbatim
     // (already role-filtered by the server) — the client never hard-codes the menu.
     val chromeMenu: ChromeMenuModel? = null,
-    // Label of the settings surface shown on the SurfacePlaceholder screen.
-    val pendingSurfaceLabel: String = "",
+    /** The surface key the client asked to open — used to retry a stalled surface (T039). */
+    val pendingSurfaceKey: String = "",
+    /** The params the surface was opened with — retried verbatim so a stalled
+     *  surface reopens in the same state (e.g. a specific tab), not its default. */
+    val pendingSurfaceParams: JsonObject = JsonObject(emptyMap()),
     /** Feature 043 — the SDUI settings surface currently delivered (native render). */
     val pendingSurface: Inbound.ChromeSurface? = null,
+    /** Live theme palette (feature 044 US5); null = the default brand dark scheme. */
+    val themePalette: ThemePalette? = null,
+    /** Feature 028/044 — the read-only workspace timeline is being viewed (mutations paused). */
+    val timelineReadOnly: Boolean = false,
 ) {
     /** What the canvas area actually renders (a history entry, or the live canvas). */
     val visibleCanvas: List<Component>
@@ -110,7 +131,24 @@ data class UiState(
      */
     val showSkeleton: Boolean
         get() = pendingReplace && viewingIndex == null
+
+    /**
+     * Mutating affordances are locked while the read-only workspace timeline is
+     * being viewed (T041) — the composer/send and component re-execution are
+     * disabled until the live view is restored.
+     */
+    val mutationsLocked: Boolean get() = timelineReadOnly
 }
+
+/**
+ * The `ui_event` actions refused while the read-only workspace-timeline snapshot
+ * is active (T041). Covers the real mutation entry points reachable from rendered
+ * components — chat send, component actions, table pagination, and theme saves.
+ * Navigation (chrome_open, load_chat, discover_agents, …) and the timeline-exit
+ * action stay allowed so the user is never trapped. Pure → unit-tested.
+ */
+internal fun isTimelineMutation(action: String): Boolean =
+    action in setOf("chat_message", "component_action", "table_paginate", "save_theme")
 
 /**
  * Owns the connection + derived UI state. Folds each [Inbound] into [state] and
@@ -154,26 +192,45 @@ class AppViewModel(
                         // area never gets stuck showing skeletons forever.
                         val cur = _state.value
                         _state.value =
-                            if (c == ConnectionState.Disconnected) {
-                                cur.copy(
-                                    connection = c,
-                                    turnActive = false,
-                                    pendingReplace = false,
-                                    pendingCanvas = emptyList(),
-                                    agentsLoading = false,
-                                    historyLoading = false,
-                                    auditLoading = false,
-                                )
-                            } else {
-                                cur.copy(connection = c)
+                            when (c) {
+                                ConnectionState.Disconnected ->
+                                    cur.copy(
+                                        connection = c,
+                                        turnActive = false,
+                                        pendingReplace = false,
+                                        pendingCanvas = emptyList(),
+                                        agentsLoading = false,
+                                        historyLoading = false,
+                                        auditLoading = false,
+                                    )
+                                ConnectionState.Connected -> cur.copy(connection = c, everConnected = true)
+                                else -> cur.copy(connection = c)
                             }
+                    }
+                }
+                launch {
+                    // A frame dropped from the full offline queue is never silent
+                    // (T014): tell the user which action was lost.
+                    client.dropped.collect { action ->
+                        _state.value =
+                            _state.value.copy(
+                                banner = "Not sent while offline: $action (queue full)",
+                                bannerKind = "error",
+                            )
                     }
                 }
             }
     }
 
+    /** Dismiss the transient banner (the ✕ on the banner bar). */
+    fun dismissBanner() {
+        _state.value = _state.value.copy(banner = null)
+    }
+
     fun sendChat(text: String) {
         val s = _state.value
+        // Viewing the read-only timeline: refuse a new turn (mutations paused, T041).
+        if (s.timelineReadOnly) return
         val ready = s.staged.filter { it.state == "ready" && it.attachmentId != null }
         if (text.isBlank() && ready.isEmpty()) return
         val bubble =
@@ -192,6 +249,9 @@ class AppViewModel(
                 staged = emptyList(),
                 viewingIndex = null,
                 statusText = null,
+                banner = null,
+                stepTrail = emptyList(),
+                asyncDetached = false,
             )
         val attachments = ready.map { ChatAttachment(it.attachmentId!!, it.filename, it.category) }
         client.sendChat(text, _state.value.activeChatId, attachments)
@@ -201,6 +261,17 @@ class AppViewModel(
         action: String,
         payload: JsonObject = JsonObject(emptyMap()),
     ) {
+        // `attach_existing` is a CLIENT-LOCAL action (ui_protocol.json
+        // client_local_actions): the attachments library's "Attach" button stages
+        // the already-uploaded file as a chip HERE — it is never forwarded to the
+        // server (mirrors the web paperclip "Choose from your files", T047).
+        if (action == "attach_existing") {
+            stageExistingAttachment(payload)
+            return
+        }
+        // Viewing the read-only timeline: refuse mutating events (T041); navigation
+        // and the timeline-exit action still flow so the user is never trapped.
+        if (_state.value.timelineReadOnly && isTimelineMutation(action)) return
         // A rendered control that submits a chat turn (e.g. an example card) goes
         // through sendEvent, not sendChat — mirror the optimistic turn-start so the
         // canvas shows the skeleton the instant it's tapped, not only once the
@@ -212,6 +283,9 @@ class AppViewModel(
                     pendingReplace = true,
                     pendingCanvas = emptyList(),
                     viewingIndex = null,
+                    banner = null,
+                    stepTrail = emptyList(),
+                    asyncDetached = false,
                 )
         }
         client.sendEvent(action, _state.value.activeChatId, payload)
@@ -234,6 +308,9 @@ class AppViewModel(
                 pendingLabel = "",
                 staged = emptyList(),
                 statusText = null,
+                banner = null,
+                stepTrail = emptyList(),
+                asyncDetached = false,
             )
         sendEvent("new_chat")
     }
@@ -306,33 +383,86 @@ class AppViewModel(
             Screen.History -> sendEvent("get_history")
             Screen.Audit -> loadAudit()
             Screen.Chat -> Unit
-            Screen.SurfacePlaceholder -> Unit
             Screen.Surface -> Unit
         }
     }
 
     /**
-     * Route a settings-menu item (from the server-owned model) to its
-     * destination: the native Agents/Audit screens where they exist, otherwise
-     * a labeled placeholder for a surface not yet native on Android (P2 delivers
-     * these as SDUI). The menu structure itself always matches the web exactly.
+     * Route a settings-menu item (from the server-owned model) to its surface.
+     * The menu structure itself always matches the web exactly.
      */
-    fun openMenuItem(item: MenuItem) {
-        when (item.surface) {
+    fun openMenuItem(item: MenuItem) = openSurface(item.surface, item.params)
+
+    /**
+     * Open a chrome surface by key — from a settings-menu item OR a top-bar action
+     * (pulse/timeline, T037). Native Agents/Audit screens where they exist,
+     * otherwise request the SDUI surface (chrome_open) and render it natively when
+     * the chrome_surface frame arrives (feature 043).
+     */
+    fun openSurface(
+        surface: String,
+        params: JsonObject = JsonObject(emptyMap()),
+    ) {
+        when (surface) {
             "agents" -> goTo(Screen.Agents)
             "audit" -> goTo(Screen.Audit)
             else -> {
-                // Feature 043: request the SDUI surface; render it natively when the
-                // chrome_surface frame arrives (replaces the placeholder screen).
-                sendEvent("chrome_open", buildJsonObject { put("surface", item.surface) })
+                sendEvent(
+                    "chrome_open",
+                    buildJsonObject {
+                        put("surface", surface)
+                        put("params", params)
+                    },
+                )
                 _state.value =
                     _state.value.copy(
                         screen = Screen.Surface,
-                        pendingSurfaceLabel = item.label,
+                        pendingSurfaceKey = surface,
+                        pendingSurfaceParams = params,
                         pendingSurface = null,
                     )
             }
         }
+    }
+
+    /** Re-request the pending SDUI surface after a load timeout (T039 retry). */
+    fun retryPendingSurface() {
+        val st = _state.value
+        if (st.pendingSurfaceKey.isNotBlank()) {
+            sendEvent(
+                "chrome_open",
+                buildJsonObject {
+                    put("surface", st.pendingSurfaceKey)
+                    put("params", st.pendingSurfaceParams)
+                },
+            )
+        }
+    }
+
+    /**
+     * Stage an already-uploaded attachment as a ready chip (feature 031, T047) from
+     * the attachments library's `attach_existing {attachment_id, filename,
+     * category}` — no re-upload, no server frame. Blank/duplicate ids are ignored.
+     */
+    private fun stageExistingAttachment(payload: JsonObject) {
+        val id = (payload["attachment_id"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() } ?: return
+        if (_state.value.staged.any { it.attachmentId == id }) return
+        val filename = (payload["filename"] as? JsonPrimitive)?.contentOrNull ?: "attachment"
+        val category = (payload["category"] as? JsonPrimitive)?.contentOrNull ?: "file"
+        _state.value =
+            _state.value.copy(
+                staged = _state.value.staged + StagedAttachment(++attachSeq, filename, category, id, "ready"),
+            )
+    }
+
+    /**
+     * Apply a theme spec locally (feature 044 US5) — from a `theme_apply` component,
+     * an interactive `color_picker`, or the local echo of `save_theme`.
+     * Recomposition restyles the whole app; the server persists it in parallel, so
+     * this is a pure UI mirror (fail-safe: a bad hex leaves the palette unchanged).
+     */
+    fun applyTheme(spec: JsonObject) {
+        _state.value = _state.value.copy(themePalette = themePaletteForSpec(_state.value.themePalette, spec))
     }
 
     fun openChat(chatId: String) {
@@ -406,7 +536,8 @@ class AppViewModel(
 
     // --- reducer ------------------------------------------------------------
 
-    private fun reduce(
+    /** Fold one inbound frame into state. `internal` so the JVM unit test can drive it. */
+    internal fun reduce(
         s: UiState,
         msg: Inbound,
     ): UiState =
@@ -436,13 +567,28 @@ class AppViewModel(
                         }
                     val s2 = if (reasoningTurns.isEmpty()) s else s.copy(turns = s.turns + reasoningTurns)
                     when {
-                        canvasComps.isEmpty() -> s2
                         // In-turn renders are ADDITIVE overlays (native clients skip
-                        // the designer); merge by identity so they never wipe the
-                        // round's upserted components (charts/tables/etc.).
+                        // the designer): buffer-merge by identity so they never wipe
+                        // the round's ui_upsert-added components (charts/tables/etc.).
+                        // This buffering is the actual "clobber" fix (FR-013); an
+                        // empty in-turn frame has nothing to add, so it's a no-op.
                         s2.pendingReplace ->
-                            s2.copy(pendingCanvas = Canvas.apply(s2.pendingCanvas, renderToOps(canvasComps)))
-                        // Out-of-turn full canvas (load_chat rehydration): commit now.
+                            if (canvasComps.isEmpty()) {
+                                s2
+                            } else {
+                                s2.copy(pendingCanvas = Canvas.apply(s2.pendingCanvas, renderToOps(canvasComps)))
+                            }
+                        // Out-of-turn canvas render (load_chat rehydration, combine/
+                        // condense reconcile, timeline view/back-to-live, update_device
+                        // re-adapt, or an explicit clear): the server sends the COMPLETE
+                        // authoritative canvas (guaranteed by the backend full-render
+                        // contract), so this is a wholesale REPLACE — components absent
+                        // from the frame are removed, and an empty frame clears the
+                        // canvas (the server pushes [] to clear). Compose re-keys the
+                        // render by component id, so surviving components keep their
+                        // state. A union/merge here would leak combined-away cards and
+                        // mash timeline snapshots onto the live canvas — matching the
+                        // web reference (setHTML replace) and the Windows twin.
                         else -> s2.copy(canvas = canvasComps, pendingCanvas = emptyList())
                     }
                 }
@@ -496,6 +642,8 @@ class AppViewModel(
                     canvasLabel = "",
                     pendingLabel = "",
                     statusText = null,
+                    stepTrail = emptyList(),
+                    asyncDetached = false,
                 )
             is Inbound.ChatStatus -> reduceStatus(s, msg)
             is Inbound.AgentList -> s.copy(agents = msg.agents, agentsLoading = false)
@@ -507,9 +655,102 @@ class AppViewModel(
             is Inbound.StreamErrorMsg ->
                 applyCanvasOps(s, streamErrorOps(msg))
             is Inbound.ChromeMenu -> s.copy(chromeMenu = msg.model)
-            is Inbound.ChromeSurface -> s.copy(pendingSurface = msg, screen = Screen.Surface)
+            is Inbound.ChromeSurface ->
+                // Only accept the surface the user is currently awaiting: a late or
+                // duplicate chrome_surface (for a surface they navigated away from)
+                // must not yank them back to Screen.Surface with the wrong content.
+                if (s.screen == Screen.Surface && s.pendingSurfaceKey == msg.surfaceKey) {
+                    s.copy(pendingSurface = msg)
+                } else {
+                    s
+                }
+            // Stored preferences at boot: fold `theme` into the live palette so the
+            // app opens in the user's saved theme (US5 restyle).
+            is Inbound.UserPreferences -> s.copy(themePalette = themePaletteForSpec(s.themePalette, msg.theme))
+            // Read-only workspace timeline toggled: lock/unlock mutations (T041).
+            is Inbound.WorkspaceTimelineMode -> s.copy(timelineReadOnly = msg.active)
+            // A server error reply is never silent (FR-002): banner it and resolve
+            // any in-flight turn so nothing stays stuck "thinking" (SC-006).
+            is Inbound.ErrorFrame ->
+                s.copy(
+                    banner =
+                        if (msg.code != null && msg.code != "internal") {
+                            "${msg.message} (${msg.code})"
+                        } else {
+                            msg.message
+                        },
+                    bannerKind = "error",
+                    turnActive = false,
+                    pendingReplace = false,
+                    pendingCanvas = emptyList(),
+                    agentsLoading = false,
+                    historyLoading = false,
+                    auditLoading = false,
+                    statusText = null,
+                    asyncDetached = false,
+                )
+            is Inbound.ChatStep ->
+                s.copy(stepTrail = trailUpsert(s.stepTrail, stepLine(msg)))
+            is Inbound.ToolProgress ->
+                s.copy(stepTrail = trailUpsert(s.stepTrail, "• ${msg.label}"))
+            // The turn detached into a background task: keep the turn alive but let
+            // the UI relax — results will arrive when the task completes.
+            is Inbound.TaskStarted ->
+                s.copy(statusText = "Working in the background…", asyncDetached = true)
+            is Inbound.TaskCompleted ->
+                commitTurn(s).copy(banner = "Background task finished", bannerKind = "info")
+            is Inbound.Notification -> {
+                val text =
+                    listOfNotNull(
+                        msg.title?.takeIf { it.isNotBlank() },
+                        msg.body?.takeIf { it.isNotBlank() },
+                    ).joinToString(": ")
+                if (text.isBlank()) {
+                    s
+                } else {
+                    s.copy(banner = text, bannerKind = if (msg.level == "error") "error" else "info")
+                }
+            }
+            is Inbound.Unknown -> {
+                // A deliberately-ignored frame (parity matrix) is a quiet drop; a
+                // truly unclassified type warns so drift is visible (FR-001).
+                if (ProtocolManifest.isClassified(msg.type)) {
+                    Log.i(TAG, "ignored frame type=${msg.type}")
+                } else {
+                    Log.w(TAG, "unhandled frame type=${msg.type}")
+                }
+                s
+            }
             else -> s
         }
+
+    /** Web-parity step line: ✓ completed · ✗ errored · • otherwise, then the name. */
+    private fun stepLine(step: Inbound.ChatStep): String {
+        val icon =
+            when (step.status) {
+                "completed" -> "✓"
+                "errored" -> "✗"
+                else -> "•"
+            }
+        return "$icon ${step.name ?: "step"}"
+    }
+
+    /** The trail-line identity: the text sans glyph and sans a trailing percent. */
+    private fun trailKey(line: String): String = line.substringAfter(" ").replace(TRAIL_PCT, "")
+
+    /**
+     * Append a trail line, updating in place when the same step/tool advances
+     * (mirrors the web's per-step element update); bounded to [MAX_TRAIL].
+     */
+    private fun trailUpsert(
+        trail: List<String>,
+        line: String,
+    ): List<String> {
+        val key = trailKey(line)
+        val idx = trail.indexOfLast { trailKey(it) == key }
+        val next = if (idx >= 0) trail.toMutableList().also { it[idx] = line } else trail + line
+        return next.takeLast(MAX_TRAIL)
+    }
 
     /** Route streaming/patch ops to the buffer (mid-replace-turn) or live canvas. */
     private fun applyCanvasOps(
@@ -557,10 +798,16 @@ class AppViewModel(
      */
     private fun commitTurn(s: UiState): UiState {
         if (!s.pendingReplace) {
-            return s.copy(turnActive = false, statusText = null)
+            return s.copy(turnActive = false, statusText = null, stepTrail = emptyList(), asyncDetached = false)
         }
         if (s.pendingCanvas.isEmpty()) {
-            return s.copy(turnActive = false, pendingReplace = false, statusText = null)
+            return s.copy(
+                turnActive = false,
+                pendingReplace = false,
+                statusText = null,
+                stepTrail = emptyList(),
+                asyncDetached = false,
+            )
         }
         val newHistory =
             if (s.canvas.isNotEmpty()) {
@@ -581,6 +828,8 @@ class AppViewModel(
             turnActive = false,
             pendingReplace = false,
             statusText = null,
+            stepTrail = emptyList(),
+            asyncDetached = false,
         )
     }
 
@@ -614,6 +863,14 @@ class AppViewModel(
         }
 
     companion object {
+        private const val TAG = "AppViewModel"
+
+        /** The step trail is a live glance, not a log — keep only the tail. */
+        private const val MAX_TRAIL = 20
+
+        /** A trailing " (40%)"/" (40.5%)" progress suffix (stripped for trail identity). */
+        private val TRAIL_PCT = Regex("""\s*\(\d+(\.\d+)?%\)$""")
+
         // The server pairs a canvas doc card with a "…full write-up is on the
         // canvas" lead in the chat. On mobile we route the full answer to the chat
         // instead, so that paired lead is suppressed to avoid duplication.

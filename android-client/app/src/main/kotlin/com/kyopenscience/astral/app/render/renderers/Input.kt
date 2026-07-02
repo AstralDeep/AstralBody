@@ -1,20 +1,30 @@
 package com.kyopenscience.astral.app.render.renderers
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -22,6 +32,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -30,6 +41,9 @@ import androidx.compose.ui.unit.dp
 import com.kyopenscience.astral.app.render.Download
 import com.kyopenscience.astral.app.render.Emit
 import com.kyopenscience.astral.app.render.Renderer
+import com.kyopenscience.astral.app.render.ThemeSink
+import com.kyopenscience.astral.app.ui.theme.channelSwatchOptions
+import com.kyopenscience.astral.app.ui.theme.hexToColor
 import com.kyopenscience.astral.core.sdui.Component
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -44,8 +58,8 @@ fun Renderer.registerInputRenderers(): Renderer =
     apply {
         register("input") { c -> InputPrimitive(c, emit) }
         register("param_picker") { c -> ParamPickerPrimitive(c, emit) }
-        register("color_picker") { c -> ColorPickerPrimitive(c) }
-        register("theme_apply") { } // feature 043: side-effect only, no visible UI
+        register("color_picker") { c -> ColorPickerPrimitive(c, emit, theme) }
+        register("theme_apply") { c -> ThemeApplyPrimitive(c, theme) } // US5: apply the emitted palette live
         register("code") { c -> CodePrimitive(c) }
         register("file_upload") { c -> FileActionButton(c, emit, c.str("label") ?: "Upload") }
         register("file_download") { c -> FileDownloadPrimitive(c, download) }
@@ -160,19 +174,36 @@ private fun ParamPickerPrimitive(
                 }
             }
             val actions = c.arr("actions")?.mapNotNull { it as? JsonObject } ?: emptyList()
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (actions.isNotEmpty()) {
-                    actions.forEach { a ->
-                        val action = (a["action"] as? JsonPrimitive)?.contentOrNull ?: return@forEach
-                        val alabel = (a["label"] as? JsonPrimitive)?.contentOrNull ?: "Submit"
-                        val extra = (a["payload"] as? JsonObject) ?: JsonObject(emptyMap())
-                        Button(onClick = { emit.event(action, collect(extra)) }) { Text(alabel) }
-                    }
-                } else {
-                    c.str("submit_action")?.let { sa ->
-                        val extra = (c.attributes["submit_payload"] as? JsonObject) ?: JsonObject(emptyMap())
-                        Button(onClick = { emit.event(sa, collect(extra)) }) {
-                            Text(c.str("submit_label") ?: "Save")
+            // The submit is fire-and-forget (the server re-pushes the surface on
+            // success, replacing this component). Until then show a transient
+            // "Saving…" so a tap is never silent (T039); a new surface resets it.
+            var submitting by remember(c) { mutableStateOf(false) }
+            if (submitting) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                    Text("Saving…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            } else {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (actions.isNotEmpty()) {
+                        actions.forEach { a ->
+                            val action = (a["action"] as? JsonPrimitive)?.contentOrNull ?: return@forEach
+                            val alabel = (a["label"] as? JsonPrimitive)?.contentOrNull ?: "Submit"
+                            val extra = (a["payload"] as? JsonObject) ?: JsonObject(emptyMap())
+                            Button(onClick = {
+                                submitting = true
+                                emit.event(action, collect(extra))
+                            }) { Text(alabel) }
+                        }
+                    } else {
+                        c.str("submit_action")?.let { sa ->
+                            val extra = (c.attributes["submit_payload"] as? JsonObject) ?: JsonObject(emptyMap())
+                            Button(onClick = {
+                                submitting = true
+                                emit.event(sa, collect(extra))
+                            }) {
+                                Text(c.str("submit_label") ?: "Save")
+                            }
                         }
                     }
                 }
@@ -181,21 +212,91 @@ private fun ParamPickerPrimitive(
     }
 }
 
-/** Feature 043 — a theme channel readout (label + hex) for the Theme surface. */
+/**
+ * Feature 044 US5 — an INTERACTIVE theme channel picker. Shows the channel's
+ * swatch + hex; tapping opens a menu of on-brand choices (the presets' values for
+ * this channel). Picking one restyles the app instantly ([ThemeSink]) AND persists
+ * it (`save_theme {theme:{color_key, color_value}}`), matching the web round-trip.
+ */
 @Composable
-private fun ColorPickerPrimitive(c: Component) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(c.str("label") ?: c.str("color_key").orEmpty(), style = MaterialTheme.typography.bodyMedium)
-        Text(
-            c.str("value") ?: "",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(start = 8.dp),
-        )
+private fun ColorPickerPrimitive(
+    c: Component,
+    emit: Emit,
+    theme: ThemeSink,
+) {
+    val key = c.str("color_key").orEmpty()
+    val label = c.str("label") ?: key
+    var current by remember(c) { mutableStateOf(c.str("value") ?: "") }
+    var open by remember { mutableStateOf(false) }
+    Box {
+        Row(
+            modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .clickable(enabled = key.isNotBlank()) { open = true }
+                    .padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            ColorSwatch(current)
+            Text(label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+            Text(
+                current,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            channelSwatchOptions(key, current).forEach { hex ->
+                DropdownMenuItem(
+                    text = {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            ColorSwatch(hex)
+                            Text(hex, color = MaterialTheme.colorScheme.onSurface)
+                        }
+                    },
+                    onClick = {
+                        open = false
+                        current = hex
+                        val spec =
+                            buildJsonObject {
+                                put("color_key", key)
+                                put("color_value", hex)
+                            }
+                        theme.apply(spec) // restyle live
+                        emit.event("save_theme", buildJsonObject { put("theme", spec) }) // persist
+                    },
+                )
+            }
+        }
     }
+}
+
+/** A small rounded color chip; falls back to the surface tint for a bad hex. */
+@Composable
+private fun ColorSwatch(hex: String) {
+    val color = hexToColor(hex) ?: MaterialTheme.colorScheme.surfaceVariant
+    Box(
+        modifier =
+            Modifier
+                .size(18.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(color)
+                .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(4.dp)),
+    )
+}
+
+/**
+ * Feature 044 US5 — `theme_apply` is a side-effect component: when it appears it
+ * pushes its palette spec (preset|colors|color_key+value) to the [ThemeSink] so the
+ * app restyles live. It renders no visible UI.
+ */
+@Composable
+private fun ThemeApplyPrimitive(
+    c: Component,
+    theme: ThemeSink,
+) {
+    LaunchedEffect(c) { theme.apply(c.attributes) }
 }
 
 @Composable

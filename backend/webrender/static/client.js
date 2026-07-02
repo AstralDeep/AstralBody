@@ -305,11 +305,46 @@
       case "user_preferences":
         if (data.preferences && data.preferences.theme) applyTheme(data.preferences.theme);
         break;
+      case "error": { // feature 044 FR-002 — server error replies are never silent
+        var em = errorMessage(data);
+        showToast(em, "error");
+        setStatus(""); // resolve any stuck "Thinking…" state (SC-006)
+        break;
+      }
+      case "notification": // scheduler push (feature 044 parity matrix)
+        showToast((data.title ? data.title + ": " : "") + (data.body || ""), data.level === "error" ? "error" : "info");
+        break;
       case "rote_config": case "system_config": case "agent_list": case "agent_registered":
       case "history_list": case "heartbeat": case "llm_config_ack": case "saved_components_list":
         break; // not needed for the core flow
       default: break;
     }
+  }
+
+  // Normalize the three historical error-frame shapes (see
+  // backend/shared/ui_protocol.json): {code,message} | {payload:{message}} | {message}.
+  function errorMessage(data) {
+    var m = data.message || (data.payload && data.payload.message) || "Something went wrong.";
+    return data.code && data.code !== "internal" ? m + " (" + data.code + ")" : m;
+  }
+
+  var toastHost = null;
+  function showToast(message, kind) {
+    if (!message) return;
+    if (!toastHost) {
+      toastHost = document.createElement("div");
+      toastHost.id = "astral-toasts";
+      toastHost.setAttribute("role", "status");
+      toastHost.style.cssText = "position:fixed;bottom:16px;right:16px;z-index:9999;display:flex;flex-direction:column;gap:8px;max-width:360px;";
+      document.body.appendChild(toastHost);
+    }
+    var t = document.createElement("div");
+    t.className = "astral-toast astral-toast-" + (kind || "info");
+    t.style.cssText = "padding:10px 14px;border-radius:8px;font-size:13px;color:#fff;box-shadow:0 4px 14px rgba(0,0,0,.4);"
+      + (kind === "error" ? "background:#7f1d1d;border:1px solid #b91c1c;" : "background:#1e293b;border:1px solid #334155;");
+    t.textContent = message;
+    toastHost.appendChild(t);
+    setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, 6000);
   }
 
   function escapeText(s) { var d = document.createElement("div"); d.textContent = s == null ? "" : String(s); return d.innerHTML; }

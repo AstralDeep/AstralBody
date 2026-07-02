@@ -264,7 +264,7 @@ def test_callback_no_access_role_refused(db, store, monkeypatch, real_auth_env):
 
     revoke_attempts = []
 
-    async def revoked(token):
+    async def revoked(token, client_id=None):
         revoke_attempts.append(token)
         return True
 
