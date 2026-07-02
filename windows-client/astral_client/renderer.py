@@ -187,11 +187,70 @@ def _r_card(c, ctx):
     return frame
 
 
+def _css_of(c: dict) -> dict:
+    """The component's astralprims ``css`` styling dict ({} when absent/bad)."""
+    v = c.get("css")
+    return v if isinstance(v, dict) else {}
+
+
+def _css_px(css: dict, key: str, default: int) -> int:
+    """A ``"22px"``/``"22"`` css length as int, tolerant of garbage."""
+    try:
+        raw = str(css.get(key, "")).strip().lower().replace("px", "")
+        n = int(float(raw)) if raw else default
+        return n if n > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _css_flex(css: dict) -> int:
+    """The css ``flex`` grow factor as a Qt stretch (0 = unset)."""
+    try:
+        return max(0, int(float(str(css.get("flex") or 0))))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _css_swatch(c: dict) -> Optional[QWidget]:
+    """A childless css-styled container is a colored box — e.g. the Theme
+    surface's preset swatch cells. The web applies the astralprims ``css``
+    field as inline styles; natively we honor the same minimal subset
+    (background / height / flex) so those strips are never blank. Mirrors the
+    Android twin (Attrs.kt containerMode / Basic.kt SwatchBox)."""
+    css = _css_of(c)
+    bg = str(css.get("background") or "").strip()
+    if _children(c) or not bg:
+        return None
+    f = QFrame()
+    _scoped(f, f"background:{bg}; border-radius:3px;")
+    f.setFixedHeight(_css_px(css, "height", 22))
+    f.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    return f
+
+
 def _r_container(c, ctx):
+    swatch = _css_swatch(c)
+    if swatch is not None:
+        return swatch
     w = QWidget()
+    kids = _children(c)
+    if (c.get("direction") or "") == "row":
+        # The web flex row (tab bars, per-row action buttons, swatch strips).
+        lay = QHBoxLayout()
+        lay.setSpacing(8)
+        lay.setContentsMargins(0, 0, 0, 0)
+        w.setLayout(lay)
+        flexed = False
+        for child in kids:
+            stretch = _css_flex(_css_of(child))
+            flexed = flexed or stretch > 0
+            lay.addWidget(render(child, ctx), stretch)
+        if not flexed:
+            lay.addStretch(1)  # plain rows left-align instead of spreading
+        return w
     lay = _vbox(10)
     w.setLayout(lay)
-    _render_into(lay, _children(c), ctx)
+    _render_into(lay, kids, ctx)
     return w
 
 
@@ -373,8 +432,15 @@ def _r_alert(c, ctx):
     return frame
 
 
+def _btn_label(label) -> str:
+    """Literal button text: Qt treats a lone ``&`` as a mnemonic marker and
+    swallows it ("Attachments & files" → "Attachments files"), so server-provided
+    labels escape it. Android/web render the ampersand verbatim — parity."""
+    return str(label).replace("&", "&&")
+
+
 def _r_button(c, ctx):
-    btn = QPushButton(str(c.get("label", "Button")))
+    btn = QPushButton(_btn_label(c.get("label", "Button")))
     if c.get("variant", "primary") == "primary":
         btn.setObjectName("primary")
     action = c.get("action")
@@ -452,7 +518,7 @@ def _r_param_picker(c, ctx):
             row = QHBoxLayout()
             row.setSpacing(6)
             for opt in field.get("options") or []:
-                btn = QPushButton(str(opt))
+                btn = QPushButton(_btn_label(opt))
                 btn.setCheckable(True)
                 btn.setChecked(opt in sel)
                 row.addWidget(btn)
@@ -510,7 +576,7 @@ def _r_param_picker(c, ctx):
         for a in actions:
             if not isinstance(a, dict) or not a.get("action"):
                 continue
-            btn = QPushButton(str(a.get("label") or "Submit"))
+            btn = QPushButton(_btn_label(a.get("label") or "Submit"))
             if (a.get("variant") or "") == "primary":
                 btn.setObjectName("primary")
             btn.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
@@ -518,7 +584,7 @@ def _r_param_picker(c, ctx):
             row.addWidget(btn)
     else:
         template = c.get("submit_message_template", "")
-        submit = QPushButton(str(c.get("submit_label", "Submit")))
+        submit = QPushButton(_btn_label(c.get("submit_label", "Submit")))
         submit.setObjectName("primary")
         submit.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
 
@@ -546,7 +612,7 @@ def _r_input(c, ctx):
     if c.get("placeholder"):
         edit.setPlaceholderText(str(c["placeholder"]))
     template = c.get("submit_message_template", "")
-    submit = QPushButton(str(c.get("submit_label", "Submit")))
+    submit = QPushButton(_btn_label(c.get("submit_label", "Submit")))
     submit.setObjectName("primary")
     submit.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
 
@@ -592,7 +658,7 @@ def _r_file_upload(c, ctx):
     accept = c.get("accept", "")
     action = c.get("action")
     payload = c.get("payload") or {}
-    btn = QPushButton(str(label))
+    btn = QPushButton(_btn_label(label))
     btn.setObjectName("primary")
     btn.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
     chosen = _label("", color=T.MUTED, size=12)
@@ -641,7 +707,7 @@ def _r_file_download(c, ctx):
     filename = c.get("filename") or c.get("title")
     label = c.get("label") or (f"Download {filename}" if filename else "Download File")
     valid = bool(url) and url != "#" and str(url).startswith(("http", "/"))
-    btn = QPushButton(str(label))
+    btn = QPushButton(_btn_label(label))
     btn.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
     if valid:
         btn.setObjectName("primary")
@@ -1066,7 +1132,7 @@ def _r_chat_history(c, ctx):
         if not isinstance(item, dict):
             continue
         cid = item.get("chat_id") or item.get("id")
-        btn = QPushButton(str(item.get("title", "Chat")))
+        btn = QPushButton(_btn_label(item.get("title", "Chat")))
         btn.setStyleSheet("text-align:left; padding:8px;")
         if cid:
             btn.clicked.connect(

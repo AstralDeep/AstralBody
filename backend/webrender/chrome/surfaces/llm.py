@@ -28,7 +28,9 @@ re-render ``params`` dict or HTML attribute.
 """
 from __future__ import annotations
 
+import html as _htmlmod
 import logging
+import re
 from types import SimpleNamespace
 from typing import Any, Dict, Optional, Tuple
 
@@ -183,12 +185,47 @@ def _validation_message(exc: ValidationError) -> str:
         return "Invalid input."
 
 
+_MARKUP_RE = re.compile(r"<[^>]+>")
+
+#: error_class → what the user should actually DO about it (FR-friendly copy;
+#: the raw upstream body — often a whole HTML error page — is NOT user help).
+_FAILURE_HINTS = {
+    "auth_failed": "the endpoint rejected the API key. Re-check the key "
+                   "(it is never displayed after saving — re-enter it to replace it).",
+    "model_not_found": "the endpoint doesn't offer that model id. "
+                       "Use “Load models” to pick from the models it actually serves.",
+    "transport_error": "the endpoint couldn't be reached. Check the Base URL, "
+                       "your network, and any VPN/proxy.",
+    "contract_violation": "that address answered, but not like an OpenAI-compatible "
+                          "API. Point the Base URL at an API root "
+                          "(usually ending in /v1, e.g. https://api.openai.com/v1), "
+                          "not a website.",
+}
+_FAILURE_HINT_DEFAULT = ("the endpoint's reply wasn't usable. Double-check the "
+                         "Base URL (e.g. https://api.openai.com/v1), the model id, "
+                         "and the API key.")
+
+
+def _clean_upstream(raw: str) -> str:
+    """A human-safe upstream snippet: markup stripped, whitespace collapsed,
+    bounded. An HTML *document* (doctype/page soup — what a mistyped Base URL
+    typically returns) yields ``""``: dumping a website into the notice helps
+    no one (the pre-fix behavior this replaces)."""
+    raw = (raw or "").strip()
+    if raw.lower().startswith(("<!doctype", "<html")) or "<html" in raw[:200].lower():
+        return ""  # an HTML page, not a message
+    text = " ".join(_htmlmod.unescape(_MARKUP_RE.sub(" ", raw)).split())
+    return text[:_UPSTREAM_SNIPPET_LEN]
+
+
 def _failure_notice(prefix: str, error_class: Optional[str], upstream_message: Optional[str]) -> str:
-    """Error notice carrying the probe taxonomy class + upstream snippet."""
-    detail = (upstream_message or "")[:_UPSTREAM_SNIPPET_LEN]
-    msg = f"{prefix} ({error_class or 'unknown'})"
+    """User-actionable error notice: taxonomy class + a WHAT-TO-DO hint, plus a
+    sanitized upstream snippet only when it adds signal (never raw page HTML)."""
+    hint = _FAILURE_HINTS.get(error_class or "", _FAILURE_HINT_DEFAULT)
+    msg = f"{prefix} ({error_class or 'unknown'}) — {hint}"
+    detail = _clean_upstream(upstream_message or "")
     if detail:
-        msg = f"{msg}: {detail}"
+        msg = f"{msg} Upstream said: “{detail}”"
     return notice_block("error", msg)
 
 

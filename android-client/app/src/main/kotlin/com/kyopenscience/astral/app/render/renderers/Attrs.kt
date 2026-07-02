@@ -13,6 +13,8 @@ import kotlinx.serialization.json.intOrNull
 // renderer modules.
 internal fun Component.str(key: String): String? = (attributes[key] as? JsonPrimitive)?.contentOrNull
 
+internal fun Component.obj(key: String): JsonObject? = attributes[key] as? JsonObject
+
 internal fun Component.int(key: String): Int? = (attributes[key] as? JsonPrimitive)?.intOrNull
 
 internal fun Component.dbl(key: String): Double? = (attributes[key] as? JsonPrimitive)?.doubleOrNull
@@ -32,6 +34,51 @@ internal fun Component.rows(key: String): List<List<String>> =
     arr(key)?.mapNotNull { row ->
         (row as? JsonArray)?.map { (it as? JsonPrimitive)?.contentOrNull ?: "" }
     } ?: emptyList()
+
+// --- minimal native `css` support (settings-surface parity) -----------------
+// The web renderer applies the astralprims `css` styling field as inline CSS;
+// the native clients honor the tiny subset the settings surfaces actually use
+// (the Theme preset swatch strips): background, height ("22px"), flex ("1").
+// Mirrored by the Windows twin (renderer.py _r_container).
+
+internal fun Component.cssBackground(): String? =
+    (obj("css")?.get("background") as? JsonPrimitive)?.contentOrNull?.takeIf {
+        it.isNotBlank()
+    }
+
+internal fun Component.cssHeightPx(default: Int): Int =
+    (obj("css")?.get("height") as? JsonPrimitive)?.contentOrNull
+        ?.filter { it.isDigit() || it == '.' }
+        ?.toDoubleOrNull()?.toInt()?.takeIf { it > 0 } ?: default
+
+internal fun Component.cssFlex(default: Float): Float =
+    (obj("css")?.get("flex") as? JsonPrimitive)?.contentOrNull?.toFloatOrNull()?.takeIf {
+        it > 0f
+    } ?: default
+
+/** How a `container` renders natively (pure — JVM unit-tested). */
+internal enum class ContainerMode { SwatchBox, SwatchRow, WrapRow, Column }
+
+/** A childless css-styled container is a colored box (e.g. a Theme swatch cell). */
+internal fun Component.isSwatchLeaf(): Boolean = children.isEmpty() && cssBackground() != null
+
+/**
+ * Container layout rule: a css-styled leaf renders as a colored box; a
+ * `direction:"row"` whose children are ALL styled leaves is a proportional
+ * swatch strip; any other row wraps its children (buttons/tab bars never
+ * overflow a phone width); everything else stays the default column.
+ */
+internal fun containerMode(c: Component): ContainerMode =
+    when {
+        c.isSwatchLeaf() -> ContainerMode.SwatchBox
+        c.str("direction") == "row" ->
+            if (c.children.isNotEmpty() && c.children.all { it.isSwatchLeaf() }) {
+                ContainerMode.SwatchRow
+            } else {
+                ContainerMode.WrapRow
+            }
+        else -> ContainerMode.Column
+    }
 
 // --- table pagination (T027) -----------------------------------------------
 

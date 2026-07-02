@@ -9,6 +9,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
@@ -32,6 +34,7 @@ import com.kyopenscience.astral.core.protocol.Agent
 import com.kyopenscience.astral.core.protocol.ChatSummary
 import com.kyopenscience.astral.core.protocol.Inbound
 import kotlinx.coroutines.delay
+import java.util.concurrent.atomic.AtomicInteger
 
 @Composable
 fun AgentsScreen(
@@ -272,23 +275,39 @@ fun SurfaceScreen(
     }
 }
 
+/** Monotonic id per delivered `chrome_surface` frame (drives item-state reset). */
+private val surfaceRevision = AtomicInteger()
+
 @Composable
 private fun SurfaceContent(
     surface: Inbound.ChromeSurface,
     renderer: Renderer,
 ) {
+    // Each server push is a NEW delivery: scroll back to the top (so a
+    // re-render's leading notice — e.g. a failed LLM save — or a guide
+    // section's fresh content is actually SEEN) and key every item by the
+    // delivery revision so per-item composable state resets. Without the
+    // reset, a re-delivered component that compares EQUAL to its predecessor
+    // kept its old state — the LLM form stayed stuck on "Saving…" with its
+    // buttons gone after an error re-render.
+    val revision = remember(surface) { surfaceRevision.incrementAndGet() }
+    val listState = rememberLazyListState()
+    LaunchedEffect(revision) { listState.scrollToItem(0) }
     LazyColumn(
+        state = listState,
         modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        item {
+        item(key = "$revision-title") {
             Text(
                 surface.title.ifBlank { "Settings" },
                 style = MaterialTheme.typography.titleLarge,
                 color = MaterialTheme.colorScheme.onSurface,
             )
         }
-        items(surface.components) { comp -> renderer.render(comp) }
+        itemsIndexed(surface.components, key = { i, _ -> "$revision-$i" }) { _, comp ->
+            renderer.render(comp)
+        }
     }
 }
 
