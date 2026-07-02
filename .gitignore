@@ -6,6 +6,12 @@ backend/tmp/
 # Covers the default backend/security_benchmark/_artifacts/ and any stray
 # mis-pathed copy (e.g. backend/backend/... from an accidental --out run).
 **/security_benchmark/_artifacts/
+# Verification & build-verification bundles (screenshots, contact sheets,
+# PR bodies, review sheets) - generated for review, not needed in the repo.
+verification-*/
+windows-client/build_verify*/
+# Stray mis-pathed directory from an accidental run (contents already covered).
+backend/backend/
 docs/*
 # Defense-track thesis artifacts (specs 045-049) are version-controlled and
 # citable by downstream specs; re-include them despite the docs/* ignore.
