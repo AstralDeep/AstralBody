@@ -29,6 +29,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -112,12 +114,15 @@ private fun StackedShell(
             onBackToLive = vm::backToLiveCanvas,
             modifier = Modifier.fillMaxWidth().weight(1f),
         )
+        if (state.turnActive) StepTrail(state.stepTrail)
         MessagesPanel(turns = state.turns, statusText = state.statusText)
         InputBar(
             staged = state.staged,
+            readOnly = state.mutationsLocked,
             onSend = vm::sendChat,
             onStageFile = vm::stageAttachment,
             onRemoveAttachment = vm::removeAttachment,
+            onOpenAttachments = { vm.openSurface("attachments") },
         )
     }
 }
@@ -136,11 +141,14 @@ private fun SplitShell(
         Column(modifier = Modifier.width(360.dp).fillMaxHeight()) {
             PanelHeader("Conversation")
             ChatList(state.turns, Modifier.fillMaxWidth().weight(1f))
+            if (state.turnActive) StepTrail(state.stepTrail)
             InputBar(
                 staged = state.staged,
+                readOnly = state.mutationsLocked,
                 onSend = vm::sendChat,
                 onStageFile = vm::stageAttachment,
                 onRemoveAttachment = vm::removeAttachment,
+                onOpenAttachments = { vm.openSurface("attachments") },
             )
         }
         VerticalDivider()
@@ -455,6 +463,25 @@ private fun MessagesPanel(
     }
 }
 
+/**
+ * The running turn's execution trail (chat_step/tool_progress) — a few small
+ * muted lines by the status indicator while the orchestrator works (T021).
+ */
+@Composable
+private fun StepTrail(lines: List<String>) {
+    if (lines.isEmpty()) return
+    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+        lines.takeLast(4).forEach { line ->
+            Text(
+                line,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 11.sp,
+                maxLines = 1,
+            )
+        }
+    }
+}
+
 @Composable
 private fun PanelHeader(title: String) {
     Surface(color = MaterialTheme.colorScheme.surface) {
@@ -549,11 +576,14 @@ private fun ReasoningSnippet(text: String) {
 @Composable
 private fun InputBar(
     staged: List<StagedAttachment>,
+    readOnly: Boolean,
     onSend: (String) -> Unit,
     onStageFile: (String, String?, ByteArray) -> Unit,
     onRemoveAttachment: (Long) -> Unit,
+    onOpenAttachments: () -> Unit,
 ) {
     var input by rememberSaveable { mutableStateOf("") }
+    var attachMenuOpen by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -592,6 +622,15 @@ private fun InputBar(
 
     Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 2.dp) {
         Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp)) {
+            // Viewing the read-only timeline pauses composing (T041).
+            if (readOnly) {
+                Text(
+                    "Viewing history — messaging is paused. Return to the live view to continue.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
+                )
+            }
             if (staged.isNotEmpty()) {
                 AttachmentChips(staged, onRemoveAttachment)
                 Spacer(Modifier.height(6.dp))
@@ -601,18 +640,41 @@ private fun InputBar(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                GlyphButton(iconRes = R.drawable.ic_mic, contentDescription = "Voice input", onClick = ::launchMic)
+                GlyphButton(iconRes = R.drawable.ic_mic, contentDescription = "Voice input", enabled = !readOnly, onClick = ::launchMic)
                 OutlinedTextField(
                     value = input,
                     onValueChange = { input = it },
                     modifier = Modifier.weight(1f),
+                    enabled = !readOnly,
                     placeholder = { Text("Message AstralBody…") },
                     maxLines = 4,
                     shape = RoundedCornerShape(22.dp),
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
                 )
-                GlyphButton(iconRes = R.drawable.ic_paperclip, contentDescription = "Attach a file") { filePicker.launch("*/*") }
-                SendButton(enabled = input.isNotBlank() || staged.any { it.state == "ready" }, onClick = ::doSend)
+                // Paperclip → a menu mirroring the web: Upload a file, or Choose
+                // from your files (opens the attachments surface, T047).
+                Box {
+                    GlyphButton(iconRes = R.drawable.ic_paperclip, contentDescription = "Attach a file", enabled = !readOnly) {
+                        attachMenuOpen = true
+                    }
+                    DropdownMenu(expanded = attachMenuOpen, onDismissRequest = { attachMenuOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Upload a file") },
+                            onClick = {
+                                attachMenuOpen = false
+                                filePicker.launch("*/*")
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Choose from your files") },
+                            onClick = {
+                                attachMenuOpen = false
+                                onOpenAttachments()
+                            },
+                        )
+                    }
+                }
+                SendButton(enabled = !readOnly && (input.isNotBlank() || staged.any { it.state == "ready" }), onClick = ::doSend)
             }
         }
     }
@@ -622,13 +684,15 @@ private fun InputBar(
 private fun GlyphButton(
     iconRes: Int,
     contentDescription: String,
+    enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
-    IconButton(onClick = onClick) {
+    val base = MaterialTheme.colorScheme.onSurfaceVariant
+    IconButton(onClick = onClick, enabled = enabled) {
         Icon(
             painter = painterResource(iconRes),
             contentDescription = contentDescription,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            tint = if (enabled) base else base.copy(alpha = 0.4f),
             modifier = Modifier.size(22.dp),
         )
     }

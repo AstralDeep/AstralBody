@@ -101,6 +101,32 @@ async def _push_surface(orch, websocket, surface_key, title, admin_only, compone
     ).to_json())
 
 
+async def _push_error_notice(orch, websocket, title: str, message: str,
+                             surface_key: str = ""):
+    """Device-aware error notice (feature 044, FR-002/FR-017).
+
+    Web keeps the feature-027 HTML modal; native SDUI clients get a
+    ``chrome_surface`` carrying an error Alert — an HTML frame would be
+    invisible to them (the pre-044 gap)."""
+    if _device_type(orch, websocket) in ("windows", "android"):
+        from webrender.chrome.surfaces import _sdui
+        await _push_surface(orch, websocket, surface_key or "error", title, False,
+                            [_sdui.alert(message, "error")])
+    else:
+        from webrender.chrome import chrome_error_block, render_modal_shell
+        await _push_modal(orch, websocket, render_modal_shell(
+            title, chrome_error_block(message, surface_key or None)))
+
+
+async def _push_close(orch, websocket):
+    """Device-aware modal close: web clears the HTML modal region; native SDUI
+    clients receive the documented empty-components ``chrome_surface`` form."""
+    if _device_type(orch, websocket) in ("windows", "android"):
+        await _push_surface(orch, websocket, "", "", False, [])
+    else:
+        await _push_modal(orch, websocket, "")
+
+
 async def _render_surface(orch, websocket, user_id, roles, surface_key: str,
                           params: dict, notice_html: str = ""):
     """Render a surface into the modal, adapting to the connecting client.
@@ -225,7 +251,7 @@ async def handle_chrome_event(orch, websocket, action: str, payload: dict,
 
     try:
         if action == "chrome_close":
-            await _push_modal(orch, websocket, "")
+            await _push_close(orch, websocket)
             return True
 
         if action == "chrome_open":
@@ -242,9 +268,8 @@ async def handle_chrome_event(orch, websocket, action: str, payload: dict,
         entry = _handlers().get(action)
         if entry is None:
             logger.warning("chrome: unknown chrome action %r", action)
-            from webrender.chrome import chrome_error_block, render_modal_shell
-            await _push_modal(orch, websocket, render_modal_shell(
-                "Not available", chrome_error_block(f"Unknown action: {action}")))
+            await _push_error_notice(orch, websocket, "Not available",
+                                     f"Unknown action: {action}")
             return True
 
         surface_key, fn = entry
@@ -254,9 +279,8 @@ async def handle_chrome_event(orch, websocket, action: str, payload: dict,
         if owner is not None and getattr(owner, "ADMIN_ONLY", False) and "admin" not in roles:
             logger.warning("chrome: non-admin %s denied action %s", user_id, action)
             await _audit_admin_rejection(orch, websocket, user_id, action)
-            from webrender.chrome import chrome_error_block, render_modal_shell
-            await _push_modal(orch, websocket, render_modal_shell(
-                "Not authorized", chrome_error_block("This action requires the admin role.")))
+            await _push_error_notice(orch, websocket, "Not authorized",
+                                     "This action requires the admin role.")
             return True
 
         result = await fn(orch, websocket, user_id, roles, payload)
@@ -269,10 +293,8 @@ async def handle_chrome_event(orch, websocket, action: str, payload: dict,
     except Exception:
         logger.exception("chrome: action %s failed", action)
         try:
-            from webrender.chrome import chrome_error_block, render_modal_shell
-            await _push_modal(orch, websocket, render_modal_shell(
-                "Something went wrong",
-                chrome_error_block("The action failed. Please retry.")))
+            await _push_error_notice(orch, websocket, "Something went wrong",
+                                     "The action failed. Please retry.")
         except Exception:
             logger.debug("chrome: error-notice push failed", exc_info=True)
         return True

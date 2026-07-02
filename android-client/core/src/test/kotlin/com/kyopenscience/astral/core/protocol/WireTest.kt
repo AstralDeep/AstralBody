@@ -112,6 +112,118 @@ class WireTest {
     }
 
     @Test
+    fun decodes_error_code_message_shape() {
+        val r = assertIs<Inbound.ErrorFrame>(Wire.decode("""{"type":"error","code":"forbidden","message":"Nope"}"""))
+        assertEquals("forbidden", r.code)
+        assertEquals("Nope", r.message)
+    }
+
+    @Test
+    fun decodes_error_payload_shape() {
+        val r = assertIs<Inbound.ErrorFrame>(Wire.decode("""{"type":"error","payload":{"message":"Task t1 not found"}}"""))
+        assertEquals(null, r.code)
+        assertEquals("Task t1 not found", r.message)
+    }
+
+    @Test
+    fun decodes_error_bare_message_shape() {
+        val r = assertIs<Inbound.ErrorFrame>(Wire.decode("""{"type":"error","message":"boom"}"""))
+        assertEquals("boom", r.message)
+    }
+
+    @Test
+    fun decodes_error_with_no_message_to_default() {
+        val r = assertIs<Inbound.ErrorFrame>(Wire.decode("""{"type":"error"}"""))
+        assertEquals("Something went wrong.", r.message)
+    }
+
+    @Test
+    fun decodes_chat_step() {
+        val r =
+            assertIs<Inbound.ChatStep>(
+                Wire.decode(
+                    """{"type":"chat_step","chat_id":"c1","step":{"id":"s1","name":"web_search","kind":"tool_call","status":"completed"}}""",
+                ),
+            )
+        assertEquals("s1", r.id)
+        assertEquals("web_search", r.name)
+        assertEquals("completed", r.status)
+    }
+
+    @Test
+    fun chat_step_tolerates_missing_fields() {
+        val kindOnly = assertIs<Inbound.ChatStep>(Wire.decode("""{"type":"chat_step","step":{"kind":"tool_call"}}"""))
+        assertEquals("tool_call", kindOnly.name)
+        val bare = assertIs<Inbound.ChatStep>(Wire.decode("""{"type":"chat_step"}"""))
+        assertEquals(null, bare.id)
+        assertEquals(null, bare.name)
+        assertEquals(null, bare.status)
+    }
+
+    @Test
+    fun decodes_tool_progress_label() {
+        val r =
+            assertIs<Inbound.ToolProgress>(
+                Wire.decode("""{"type":"tool_progress","tool_name":"web_search","agent_id":"a1","message":"fetching results","percentage":40}"""),
+            )
+        assertEquals("web_search: fetching results (40%)", r.label)
+        val bare = assertIs<Inbound.ToolProgress>(Wire.decode("""{"type":"tool_progress"}"""))
+        assertEquals("Working…", bare.label)
+    }
+
+    @Test
+    fun decodes_task_started_and_completed_payload_shape() {
+        val started = assertIs<Inbound.TaskStarted>(Wire.decode("""{"type":"task_started","payload":{"task_id":"t1","chat_id":"c1","status":"queued"}}"""))
+        assertEquals("t1", started.taskId)
+        val done = assertIs<Inbound.TaskCompleted>(Wire.decode("""{"type":"task_completed","payload":{"task_id":"t1","chat_id":"c1","status":"completed"}}"""))
+        assertEquals("t1", done.taskId)
+        assertEquals("c1", done.chatId)
+    }
+
+    @Test
+    fun decodes_task_frames_flat_shape() {
+        assertEquals("t2", assertIs<Inbound.TaskStarted>(Wire.decode("""{"type":"task_started","task_id":"t2"}""")).taskId)
+        val done = assertIs<Inbound.TaskCompleted>(Wire.decode("""{"type":"task_completed","task_id":"t2","chat_id":"c2"}"""))
+        assertEquals("t2", done.taskId)
+        assertEquals("c2", done.chatId)
+    }
+
+    @Test
+    fun decodes_notification() {
+        val r =
+            assertIs<Inbound.Notification>(
+                Wire.decode("""{"type":"notification","level":"info","source":"schedule","job_id":"j1","chat_id":"c1","title":"Daily brief","body":"Ready"}"""),
+            )
+        assertEquals("Daily brief", r.title)
+        assertEquals("Ready", r.body)
+        assertEquals("info", r.level)
+    }
+
+    @Test
+    fun decodes_user_preferences_theme() {
+        val r =
+            assertIs<Inbound.UserPreferences>(
+                Wire.decode("""{"type":"user_preferences","preferences":{"theme":{"preset":"ocean"},"other":1}}"""),
+            )
+        assertEquals("ocean", r.theme?.get("preset")?.jsonPrimitive?.contentOrNull)
+    }
+
+    @Test
+    fun user_preferences_without_theme_is_null_theme() {
+        val r = assertIs<Inbound.UserPreferences>(Wire.decode("""{"type":"user_preferences","preferences":{"locale":"en"}}"""))
+        assertEquals(null, r.theme)
+    }
+
+    @Test
+    fun decodes_workspace_timeline_mode() {
+        assertEquals(true, assertIs<Inbound.WorkspaceTimelineMode>(Wire.decode("""{"type":"workspace_timeline_mode","active":true}""")).active)
+        assertEquals(false, assertIs<Inbound.WorkspaceTimelineMode>(Wire.decode("""{"type":"workspace_timeline_mode","active":false}""")).active)
+        // `on` is tolerated as an alias; a bare frame defaults to inactive.
+        assertEquals(true, assertIs<Inbound.WorkspaceTimelineMode>(Wire.decode("""{"type":"workspace_timeline_mode","on":true}""")).active)
+        assertEquals(false, assertIs<Inbound.WorkspaceTimelineMode>(Wire.decode("""{"type":"workspace_timeline_mode"}""")).active)
+    }
+
+    @Test
     fun unknown_type_falls_back() {
         val r = assertIs<Inbound.Unknown>(Wire.decode("""{"type":"totally_new_primitive"}"""))
         assertEquals("totally_new_primitive", r.type)

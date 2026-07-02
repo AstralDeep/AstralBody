@@ -12,13 +12,17 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import com.kyopenscience.astral.app.ui.theme.AstralColors
 
 /**
  * A small, dependency-free Markdown renderer for Compose — the Android analogue of
@@ -100,12 +104,32 @@ private fun CodeBlock(code: String) {
     }
 }
 
-/** Parse inline **bold**, *italic*, _italic_, and `code` into an AnnotatedString. */
+/** Parse inline **bold**, *italic*, _italic_, `code`, and [links](url) into an AnnotatedString. */
 fun inlineMarkdown(text: String): AnnotatedString =
     buildAnnotatedString {
         var i = 0
         while (i < text.length) {
             when {
+                // A `[label](url)` link → a clickable, underlined accent span (T029).
+                // A Text rendering this AnnotatedString handles the tap automatically.
+                text[i] == '[' -> {
+                    val close = text.indexOf(']', i + 1)
+                    val open = close + 1
+                    val paren = if (close > i && open < text.length && text[open] == '(') text.indexOf(')', open + 1) else -1
+                    if (paren > open) {
+                        val label = text.substring(i + 1, close)
+                        val url = text.substring(open + 1, paren)
+                        withLink(LinkAnnotation.Url(url)) {
+                            withStyle(SpanStyle(color = AstralColors.Cyan, textDecoration = TextDecoration.Underline)) {
+                                append(label)
+                            }
+                        }
+                        i = paren + 1
+                    } else {
+                        append(text[i])
+                        i++
+                    }
+                }
                 text.startsWith("**", i) -> {
                     val end = text.indexOf("**", i + 2)
                     if (end >= 0) {

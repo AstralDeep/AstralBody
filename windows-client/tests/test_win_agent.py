@@ -2,7 +2,23 @@
 SDUI components, and the A2A dispatch mirrors the backend MCPServer contract."""
 from __future__ import annotations
 
+import pytest
+
 from win_agent import agent, tools
+
+
+def _clipboard_available() -> bool:
+    """True only where a real OS clipboard mechanism exists. The clipboard
+    round-trip test needs one — present on the Windows client's target platform,
+    absent on the headless Linux CI runner (no pyperclip backend / no powershell),
+    where the test is skipped rather than failed."""
+    try:
+        import pyperclip
+
+        pyperclip.paste()
+        return True
+    except Exception:
+        return False
 
 
 def _types(result):
@@ -30,6 +46,7 @@ def test_list_directory_bad_path():
     assert r["_ui_components"][0]["variant"] == "error"
 
 
+@pytest.mark.skipif(not _clipboard_available(), reason="no OS clipboard mechanism (headless CI)")
 def test_write_then_read_clipboard():
     # round-trips through the real Windows clipboard (harmless).
     w = tools.write_clipboard(text="astral-test-123")

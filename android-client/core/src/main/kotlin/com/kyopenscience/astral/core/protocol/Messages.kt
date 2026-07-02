@@ -3,6 +3,7 @@ package com.kyopenscience.astral.core.protocol
 import com.kyopenscience.astral.core.chrome.ChromeMenuModel
 import com.kyopenscience.astral.core.sdui.CanvasOp
 import com.kyopenscience.astral.core.sdui.Component
+import kotlinx.serialization.json.JsonObject
 
 /**
  * Device capabilities reported in `register_ui` (maps to the server-side
@@ -117,6 +118,38 @@ sealed interface Inbound {
     ) : Inbound
 
     data class AuthRequired(val reason: String?) : Inbound
+
+    /** Feature 044 — a server `error` reply, normalized from its three wire shapes. */
+    data class ErrorFrame(val code: String?, val message: String) : Inbound
+
+    /** One step of the running turn's execution trail (`chat_step`). */
+    data class ChatStep(val id: String?, val name: String?, val status: String?) : Inbound
+
+    /** A live progress line from an executing tool (`tool_progress`), pre-composed. */
+    data class ToolProgress(val label: String) : Inbound
+
+    /** The turn detached into a background task (`task_started`). */
+    data class TaskStarted(val taskId: String?) : Inbound
+
+    /** A background task finished (`task_completed`). */
+    data class TaskCompleted(val taskId: String?, val chatId: String?) : Inbound
+
+    /** A scheduler/system push (`notification`, feature 044). */
+    data class Notification(val title: String?, val body: String?, val level: String?) : Inbound
+
+    /**
+     * Boot/refresh of stored user preferences (`user_preferences`, feature 044).
+     * [theme] is the raw `preferences.theme` object (preset|colors|color_key+value);
+     * the :app reducer interprets it into the live palette (US5 restyle).
+     */
+    data class UserPreferences(val theme: JsonObject?) : Inbound
+
+    /**
+     * The read-only workspace timeline is being entered/left
+     * (`workspace_timeline_mode`, feature 028/044). While [active], the client
+     * disables mutating affordances (input/send + component actions).
+     */
+    data class WorkspaceTimelineMode(val active: Boolean) : Inbound
 
     data class Unknown(val type: String) : Inbound
 }

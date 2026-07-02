@@ -10,6 +10,7 @@ import json
 from datetime import datetime, timezone
 
 from webrender import esc
+from webrender.chrome.surfaces import _sdui
 
 TITLE = "Workspace timeline"
 ADMIN_ONLY = False
@@ -86,6 +87,55 @@ async def render(orch, user_id, roles, params) -> str:
     return header + '<div class="space-y-0.5">' + "".join(rows) + "</div>" + nav_html
 
 
+async def components(orch, user_id, roles, params):
+    """Feature 044 — the workspace timeline as native SDUI components.
+
+    Mirrors ``render()`` exactly (same data + the SAME actions): a snapshot
+    list newest-first ("#n · <cause> · <timestamp>") whose rows fire
+    ``chrome_workspace_timeline_view``, Newer/Older paging via ``chrome_open``,
+    and a ``chrome_workspace_timeline_live`` "Back to live" button. The web
+    ``render()`` HTML is unchanged (contract §3.1); the paging payloads match
+    the web nav so history navigation behaves identically on either target.
+    """
+    chat_id = str((params or {}).get("chat_id") or "")
+    page = max(0, int((params or {}).get("page") or 0))
+    if not chat_id:
+        return [_sdui.alert("Open a chat first — the timeline shows that chat's "
+                            "workspace as it was at each turn.", "info")]
+    snaps = orch.workspace.list_snapshots(chat_id, user_id, limit=_PAGE_SIZE, offset=page * _PAGE_SIZE)
+    total = orch.workspace.count_snapshots(chat_id, user_id)
+    if not snaps:
+        return [_sdui.alert("No workspace history yet for this chat. Snapshots appear "
+                            "as turns produce or update components.", "info")]
+    out = [
+        _sdui.text("Viewing the past never changes the live workspace.", "caption"),
+        _sdui.button("Back to live", "chrome_workspace_timeline_live",
+                     {"chat_id": chat_id}, variant="primary"),
+    ]
+    # Newest-first list; number entries as turns counting back from total —
+    # identical to render().
+    for i, s in enumerate(snaps):
+        n = total - (page * _PAGE_SIZE) - i
+        label = _CAUSE_LABELS.get(s.get("cause"), s.get("cause", ""))
+        out.append(_sdui.button(
+            f"#{n} · {label} · {_fmt_ts(s.get('created_at'))}".rstrip(" ·"),
+            "chrome_workspace_timeline_view",
+            {"chat_id": chat_id, "snapshot_id": s["id"]},
+            variant="secondary"))
+    nav = []
+    if page > 0:
+        nav.append(_sdui.button("Newer", "chrome_open",
+                                {"surface": "workspace_timeline",
+                                 "params": {"chat_id": chat_id, "page": page - 1}}))
+    if (page + 1) * _PAGE_SIZE < total:
+        nav.append(_sdui.button("Older", "chrome_open",
+                                {"surface": "workspace_timeline",
+                                 "params": {"chat_id": chat_id, "page": page + 1}}))
+    if nav:
+        out.append(_sdui.container(nav, direction="row"))
+    return out
+
+
 def _banner_components(snapshot, chat_id):
     """Read-only banner prepended to a historical canvas render."""
     label = _CAUSE_LABELS.get(snapshot.get("cause"), snapshot.get("cause", ""))
@@ -156,9 +206,12 @@ async def _view(orch, websocket, user_id, roles, payload):
         snap_components = body
     components = _banner_components(snap, chat_id) + snap_components
     await orch.send_ui_render(websocket, components)
-    # Close the modal so the historical canvas is visible.
-    from shared.protocol import ChromeRender
-    await orch._safe_send(websocket, ChromeRender(region="modal", html="").to_json())
+    # Close the modal so the historical canvas is visible. Feature 044: the
+    # close is device-aware (contract §2/§3.1) — web clears the HTML modal
+    # region, native SDUI clients (windows/android) get the documented
+    # empty-components ChromeSurface (was a web-only ChromeRender the natives
+    # couldn't read). Reuses the same helper the chrome_close action uses.
+    await _close_modal(orch, websocket)
     return None
 
 
@@ -180,9 +233,21 @@ async def _live(orch, websocket, user_id, roles, payload):
         except Exception:
             import logging
             logging.getLogger("Orchestrator.Chrome").exception("back-to-live render failed")
-    from shared.protocol import ChromeRender
-    await orch._safe_send(websocket, ChromeRender(region="modal", html="").to_json())
+    # Feature 044: device-aware modal close (see _view).
+    await _close_modal(orch, websocket)
     return None
+
+
+async def _close_modal(orch, websocket):
+    """Feature 044 — device-aware modal close shared by ``_view``/``_live``.
+
+    Delegates to the chrome dispatcher's ``_push_close`` so the frame is
+    IDENTICAL to the ``chrome_close`` action: an empty-HTML ``chrome_render``
+    for web, an empty-components ``chrome_surface`` for native SDUI
+    (windows/android). Imported lazily to avoid an import cycle (chrome_events
+    imports the surface registry)."""
+    from orchestrator.chrome_events import _push_close
+    await _push_close(orch, websocket)
 
 
 HANDLERS = {

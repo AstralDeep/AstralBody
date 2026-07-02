@@ -33,8 +33,6 @@ android {
 
     buildTypes {
         debug {
-            // The debug-only dev-token path (FR-002) is gated behind BuildConfig.DEBUG
-            // and lives in src/debug — it is absent from release builds.
             isMinifyEnabled = false
         }
         release {
@@ -73,7 +71,6 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)
-    implementation(libs.androidx.navigation.compose)
     implementation(libs.androidx.window)
     implementation(libs.androidx.security.crypto)
     implementation(libs.androidx.datastore.preferences)

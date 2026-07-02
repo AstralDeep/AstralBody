@@ -15,6 +15,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -22,6 +23,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.kyopenscience.astral.app.render.Renderer
 import com.kyopenscience.astral.app.rest.AuditEvent
@@ -29,6 +31,7 @@ import com.kyopenscience.astral.app.transport.ConnectionState
 import com.kyopenscience.astral.core.protocol.Agent
 import com.kyopenscience.astral.core.protocol.ChatSummary
 import com.kyopenscience.astral.core.protocol.Inbound
+import kotlinx.coroutines.delay
 
 @Composable
 fun AgentsScreen(
@@ -215,47 +218,65 @@ private fun AuditCard(event: AuditEvent) {
     }
 }
 
-/**
- * Placeholder for a settings surface not yet rendered natively on Android. The
- * menu item is present (matching the web exactly, feature 042); its SDUI surface
- * arrives in P2. FR-013 graceful degradation — a labeled placeholder, never a
- * blank or broken screen.
- */
-@Composable
-fun SurfacePlaceholderScreen(label: String) {
-    Column(
-        modifier = Modifier.fillMaxSize().padding(28.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
-    ) {
-        Text(
-            label.ifBlank { "Settings" },
-            style = MaterialTheme.typography.titleLarge,
-            color = MaterialTheme.colorScheme.onSurface,
-        )
-        Text(
-            "This settings screen is coming to the Android app soon.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(top = 10.dp),
-        )
+/** The three states of an SDUI settings surface while/after it is requested (T039). */
+enum class SurfaceViewState { Loaded, Loading, TimedOut }
+
+/** Pure state rule: a delivered surface wins; else loading until the timeout fires. */
+fun surfaceViewState(
+    hasSurface: Boolean,
+    timedOut: Boolean,
+): SurfaceViewState =
+    when {
+        hasSurface -> SurfaceViewState.Loaded
+        timedOut -> SurfaceViewState.TimedOut
+        else -> SurfaceViewState.Loading
     }
-}
+
+/** How long to wait for a `chrome_surface` before offering Retry (T039). */
+private const val SURFACE_TIMEOUT_MS = 10_000L
 
 /**
- * Feature 043 — a settings surface delivered as SDUI (chrome_surface), rendered
- * natively with the SAME component renderer used for the chat canvas. Replaces
- * the placeholder for the ported surfaces (theme, user guide, LLM, personalization).
+ * Feature 043/044 — a settings surface delivered as SDUI (chrome_surface),
+ * rendered natively with the SAME component renderer used for the chat canvas.
+ * While waiting, a skeleton shows; if no surface arrives within
+ * [SURFACE_TIMEOUT_MS] the screen offers a Retry that re-requests it (T039), so a
+ * dropped/blocked surface never leaves an INFINITE skeleton.
  */
 @Composable
 fun SurfaceScreen(
     surface: Inbound.ChromeSurface?,
+    surfaceKey: String,
+    renderer: Renderer,
+    onRetry: () -> Unit,
+) {
+    var attempt by remember(surfaceKey) { mutableStateOf(0) }
+    var timedOut by remember(surfaceKey) { mutableStateOf(false) }
+    val hasSurface = surface != null
+    LaunchedEffect(surfaceKey, attempt, hasSurface) {
+        if (!hasSurface) {
+            timedOut = false
+            delay(SURFACE_TIMEOUT_MS)
+            timedOut = true
+        }
+    }
+    when (surfaceViewState(hasSurface, timedOut)) {
+        SurfaceViewState.Loaded -> SurfaceContent(surface!!, renderer)
+        SurfaceViewState.Loading -> SkeletonList()
+        SurfaceViewState.TimedOut ->
+            SurfaceTimeout(
+                onRetry = {
+                    attempt += 1 // re-arm the loading timer
+                    onRetry()
+                },
+            )
+    }
+}
+
+@Composable
+private fun SurfaceContent(
+    surface: Inbound.ChromeSurface,
     renderer: Renderer,
 ) {
-    if (surface == null) {
-        SkeletonList()
-        return
-    }
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -271,6 +292,30 @@ fun SurfaceScreen(
     }
 }
 
+@Composable
+private fun SurfaceTimeout(onRetry: () -> Unit) {
+    Column(
+        modifier = Modifier.fillMaxSize().padding(28.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Text(
+            "Couldn't load this settings screen",
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+            textAlign = TextAlign.Center,
+        )
+        Text(
+            "The server didn't send it in time. Check your connection and try again.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(top = 8.dp, bottom = 16.dp),
+        )
+        Button(onClick = onRetry) { Text("Retry") }
+    }
+}
+
 /** Human-readable connection status shown in the top bar. */
 fun connectionLabel(c: ConnectionState): String =
     when (c) {
@@ -278,4 +323,19 @@ fun connectionLabel(c: ConnectionState): String =
         ConnectionState.Connecting -> "Connecting…"
         ConnectionState.Disconnected -> "Disconnected"
         ConnectionState.AuthRequired -> "Re-authenticating…"
+    }
+
+/**
+ * The slim connection strip's label; null = hidden. Shows only once a session
+ * has been live and then degrades — a visible reconnect, never a silent stall
+ * (feature 044 T014). Pure → unit-tested.
+ */
+fun connectionStripLabel(
+    c: ConnectionState,
+    everConnected: Boolean,
+): String? =
+    when {
+        !everConnected || c == ConnectionState.Connected -> null
+        c == ConnectionState.AuthRequired -> connectionLabel(c)
+        else -> "Reconnecting…"
     }

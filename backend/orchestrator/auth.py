@@ -238,6 +238,74 @@ async def require_user_id(
     return user_id
 
 
+# =============================================================================
+# Feature 044 — native-client sign-out (FR-005 / SC-004)
+# =============================================================================
+
+@auth_router.post(
+    "/api/auth/logout",
+    tags=["Auth"],
+    summary="Native-client sign-out: revoke the refresh credential server-side",
+    description=(
+        "The token-holding native clients' twin of the cookie-bound web "
+        "/auth/logout — identical semantics: RFC 7009 refresh-token revocation "
+        "with the offline-tolerant retry queue, feature-025 offline-grant "
+        "revocation, and an auth.logout audit record. The body's client_id must "
+        "be an allow-listed first-party client (KEYCLOAK_ALLOWED_AZP) because "
+        "Keycloak only revokes a token for its issuing client."
+    ),
+)
+async def native_logout(request: Request,
+                        payload: dict = Depends(get_current_user_payload)):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    refresh_token = str(body.get("refresh_token") or "")
+    client_id = str(body.get("client_id") or "").strip()
+
+    # Accept ONLY the public native clients here — NOT the confidential web
+    # client. Otherwise this endpoint would apply the server's confidential
+    # client_secret to a caller-supplied refresh_token (a secret-backed
+    # revocation oracle); native clients (astral-desktop/mobile) are public and
+    # carry no secret. The web app revokes via the cookie-bound /auth/logout.
+    from shared.auth_clients import _primary_client_id, allowed_azps
+    native_clients = allowed_azps() - {_primary_client_id()}
+    if not refresh_token or not client_id or client_id not in native_clients:
+        raise HTTPException(
+            status_code=400,
+            detail="refresh_token and a public native client_id are required",
+        )
+
+    user_id = (payload or {}).get("sub") or "unknown"
+    from orchestrator import web_auth
+    outcome = await web_auth._revoke_or_queue(user_id, refresh_token, client_id=client_id)
+
+    # Feature-025 offline grants die with the sign-out, matching web logout.
+    try:
+        from orchestrator.offline_grant import OfflineGrantStore
+        OfflineGrantStore().revoke_for_user(user_id)
+    except Exception:
+        logger.debug("native logout: offline-grant revocation failed", exc_info=True)
+
+    try:
+        from audit.hooks import record_auth_event
+        await record_auth_event(
+            claims=payload or {},
+            action="logout",
+            description=f"Native sign-out ({client_id}); refresh credential {outcome}",
+            outcome="success" if outcome in ("revoked", "queued") else "failure",
+        )
+    except Exception:
+        logger.debug("native logout: audit record failed", exc_info=True)
+
+    return {"outcome": outcome,
+            "revoked": outcome == "revoked",
+            "queued": outcome == "queued"}
+
+
 async def get_download_user_payload(
     request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(security),

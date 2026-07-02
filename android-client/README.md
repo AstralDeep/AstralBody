@@ -58,8 +58,9 @@ orchestrator (`wss://<host>/ws`) and sign in via the system browser (OIDC
 Authorization-Code + PKCE), registering as `device_type=android`. See
 [`docs/keycloak-android-client-setup.md`](../docs/keycloak-android-client-setup.md).
 
-**Debug-only shortcut** (NOT in release builds): a `BuildConfig.DEBUG`-gated
-dev-token path may be used against a mock-auth orchestrator for local testing.
+The app authenticates **only** via Keycloak OIDC (AppAuth PKCE) — there is no
+dev-token or mock-auth shortcut (the unused `DevAuth` path was removed in feature
+044).
 
 ## Instrumented / UI tests (emulator)
 

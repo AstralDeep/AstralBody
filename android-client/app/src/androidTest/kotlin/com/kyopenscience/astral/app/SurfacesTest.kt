@@ -27,7 +27,10 @@ class SurfacesTest {
                 onEnableRecommended = {},
             )
         }
-        rule.onNodeWithText("Weather").assertIsDisplayed()
+        // AgentCard prefixes the name with an expand caret ("▶ Weather"), so match
+        // the substring (feature 044: this instrumented test was nightly-only and
+        // its exact-match assertion had been silently broken since the 043 caret).
+        rule.onNodeWithText("Weather", substring = true).assertIsDisplayed()
     }
 
     @Test
