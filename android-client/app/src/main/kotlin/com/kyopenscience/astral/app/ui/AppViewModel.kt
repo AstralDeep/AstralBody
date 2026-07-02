@@ -108,6 +108,9 @@ data class UiState(
     val chromeMenu: ChromeMenuModel? = null,
     /** The surface key the client asked to open — used to retry a stalled surface (T039). */
     val pendingSurfaceKey: String = "",
+    /** The params the surface was opened with — retried verbatim so a stalled
+     *  surface reopens in the same state (e.g. a specific tab), not its default. */
+    val pendingSurfaceParams: JsonObject = JsonObject(emptyMap()),
     /** Feature 043 — the SDUI settings surface currently delivered (native render). */
     val pendingSurface: Inbound.ChromeSurface? = null,
     /** Live theme palette (feature 044 US5); null = the default brand dark scheme. */
@@ -138,12 +141,14 @@ data class UiState(
 }
 
 /**
- * The `ui_event` actions refused while the read-only timeline is active (T041):
- * the two mutation entry points on the native client. Navigation (chrome_open,
- * load_chat, discover_agents, …) and the timeline-exit action stay allowed so the
- * user is never trapped. Pure → unit-tested.
+ * The `ui_event` actions refused while the read-only workspace-timeline snapshot
+ * is active (T041). Covers the real mutation entry points reachable from rendered
+ * components — chat send, component actions, table pagination, and theme saves.
+ * Navigation (chrome_open, load_chat, discover_agents, …) and the timeline-exit
+ * action stay allowed so the user is never trapped. Pure → unit-tested.
  */
-internal fun isTimelineMutation(action: String): Boolean = action == "chat_message" || action == "component_action"
+internal fun isTimelineMutation(action: String): Boolean =
+    action in setOf("chat_message", "component_action", "table_paginate", "save_theme")
 
 /**
  * Owns the connection + derived UI state. Folds each [Inbound] into [state] and
@@ -413,6 +418,7 @@ class AppViewModel(
                     _state.value.copy(
                         screen = Screen.Surface,
                         pendingSurfaceKey = surface,
+                        pendingSurfaceParams = params,
                         pendingSurface = null,
                     )
             }
@@ -421,8 +427,16 @@ class AppViewModel(
 
     /** Re-request the pending SDUI surface after a load timeout (T039 retry). */
     fun retryPendingSurface() {
-        val key = _state.value.pendingSurfaceKey
-        if (key.isNotBlank()) sendEvent("chrome_open", buildJsonObject { put("surface", key) })
+        val st = _state.value
+        if (st.pendingSurfaceKey.isNotBlank()) {
+            sendEvent(
+                "chrome_open",
+                buildJsonObject {
+                    put("surface", st.pendingSurfaceKey)
+                    put("params", st.pendingSurfaceParams)
+                },
+            )
+        }
     }
 
     /**
@@ -553,22 +567,29 @@ class AppViewModel(
                         }
                     val s2 = if (reasoningTurns.isEmpty()) s else s.copy(turns = s.turns + reasoningTurns)
                     when {
-                        canvasComps.isEmpty() -> s2
                         // In-turn renders are ADDITIVE overlays (native clients skip
-                        // the designer); merge by identity so they never wipe the
-                        // round's upserted components (charts/tables/etc.).
+                        // the designer): buffer-merge by identity so they never wipe
+                        // the round's ui_upsert-added components (charts/tables/etc.).
+                        // This buffering is the actual "clobber" fix (FR-013); an
+                        // empty in-turn frame has nothing to add, so it's a no-op.
                         s2.pendingReplace ->
-                            s2.copy(pendingCanvas = Canvas.apply(s2.pendingCanvas, renderToOps(canvasComps)))
-                        // Out-of-turn canvas render (load_chat rehydration, or a
-                        // mid-session push): RECONCILE BY IDENTITY over the current
-                        // canvas rather than wholesale-replacing it (FR-013). A
-                        // wholesale replace dropped earlier ui_upsert-added
-                        // components the render didn't re-list (the known clobber);
-                        // Canvas.apply upserts each incoming component in place (or
-                        // appends) and leaves untouched ids intact. On load_chat the
-                        // canvas was already reset, so this merges onto empty = the
-                        // incoming set.
-                        else -> s2.copy(canvas = Canvas.apply(s2.canvas, renderToOps(canvasComps)), pendingCanvas = emptyList())
+                            if (canvasComps.isEmpty()) {
+                                s2
+                            } else {
+                                s2.copy(pendingCanvas = Canvas.apply(s2.pendingCanvas, renderToOps(canvasComps)))
+                            }
+                        // Out-of-turn canvas render (load_chat rehydration, combine/
+                        // condense reconcile, timeline view/back-to-live, update_device
+                        // re-adapt, or an explicit clear): the server sends the COMPLETE
+                        // authoritative canvas (guaranteed by the backend full-render
+                        // contract), so this is a wholesale REPLACE — components absent
+                        // from the frame are removed, and an empty frame clears the
+                        // canvas (the server pushes [] to clear). Compose re-keys the
+                        // render by component id, so surviving components keep their
+                        // state. A union/merge here would leak combined-away cards and
+                        // mash timeline snapshots onto the live canvas — matching the
+                        // web reference (setHTML replace) and the Windows twin.
+                        else -> s2.copy(canvas = canvasComps, pendingCanvas = emptyList())
                     }
                 }
             is Inbound.UiUpsert ->
@@ -634,7 +655,15 @@ class AppViewModel(
             is Inbound.StreamErrorMsg ->
                 applyCanvasOps(s, streamErrorOps(msg))
             is Inbound.ChromeMenu -> s.copy(chromeMenu = msg.model)
-            is Inbound.ChromeSurface -> s.copy(pendingSurface = msg, screen = Screen.Surface)
+            is Inbound.ChromeSurface ->
+                // Only accept the surface the user is currently awaiting: a late or
+                // duplicate chrome_surface (for a surface they navigated away from)
+                // must not yank them back to Screen.Surface with the wrong content.
+                if (s.screen == Screen.Surface && s.pendingSurfaceKey == msg.surfaceKey) {
+                    s.copy(pendingSurface = msg)
+                } else {
+                    s
+                }
             // Stored preferences at boot: fold `theme` into the live palette so the
             // app opens in the user's saved theme (US5 restyle).
             is Inbound.UserPreferences -> s.copy(themePalette = themePaletteForSpec(s.themePalette, msg.theme))
