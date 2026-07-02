@@ -138,7 +138,7 @@ then user stories in spec priority order (US1, US2 = P1; US3, US4 = P2; US5, US6
 ## Phase 9: Polish & Final Gates
 
 - [X] T057 Full suites: backend in-container (default + module + agent suites), windows-client pytest, android :core/:app unit + ktlint/lint, ruff repo-root, workflows valid — all green (SC-009)
-- [ ] T058 Open PR to main (spec/task IDs referenced, dependency note "zero new third-party runtime deps; one removal", migration evidence for the queue column) and drive the Principle XI gate set green
+- [X] T058 Open PR to main (spec/task IDs referenced, dependency note "zero new third-party runtime deps; one removal", migration evidence for the queue column) and drive the Principle XI gate set green
 
 ## Dependencies & Execution Order
 
