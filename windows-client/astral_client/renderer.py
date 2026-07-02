@@ -1141,14 +1141,32 @@ REGISTRY: Dict[str, Callable[[dict, RenderContext], QWidget]] = {
 def _apply_theme_and_restyle(spec) -> None:
     """Feature 044 (US5) — apply a theme spec to the live palette and restyle the
     running app. Self-contained (imports Qt lazily) so any renderer can trigger a
-    live restyle without a handle to the MainWindow; fail-open."""
-    try:
-        if T.apply_theme(spec):
-            from PySide6.QtWidgets import QApplication
+    live restyle without a handle to the MainWindow; fail-open.
 
-            app = QApplication.instance()
-            if app is not None:
+    The palette mutation is synchronous (pure, no Qt) so the surface that carried
+    the ``theme_apply`` renders in the new colours immediately. The global
+    ``setStyleSheet`` is DEFERRED to the next event-loop turn (``QTimer.singleShot``)
+    rather than run inline: doing a global re-polish from *inside* a render pass is
+    re-entrant and crashes headless Qt (offscreen), and deferring keeps it off the
+    render call stack. In a unit test (no running event loop) the deferred restyle
+    simply never fires — the palette assertion still holds and nothing segfaults."""
+    try:
+        if not T.apply_theme(spec):
+            return
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        if app is None:
+            return
+
+        def _restyle() -> None:
+            try:
                 app.setStyleSheet(T.build_stylesheet() + getattr(T, "ROOT_BG_STYLE", ""))
+            except Exception:  # noqa: BLE001
+                pass
+
+        QTimer.singleShot(0, _restyle)
     except Exception:  # noqa: BLE001 — theming must never break a render pass
         pass
 
