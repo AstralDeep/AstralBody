@@ -96,6 +96,15 @@ class FeatureFlags:
             # defined flow), always through the permission/audit/PHI rails. A
             # "/"-prefixed message is ordinary chat when OFF (fail-open). Default ON.
             "slash_commands": self._read("FF_SLASH_COMMANDS", True),
+            # 048-recursive-delegation-chains: gates minting/enforcing NESTED,
+            # further-attenuated RFC 8693 `act` delegation tokens for sub-agent
+            # fan-out and auto-created agents, bound to the persistent WebSocket
+            # transport with per-hop provenance in the hash-chained audit. FAIL
+            # CLOSED — default OFF; with the flag off the orchestrator uses the
+            # single-hop delegation path unchanged (no regression). The mechanism
+            # + four enforcement invariants live in orchestrator/delegation.py.
+            # See specs/048-recursive-delegation-chains/.
+            "recursive_delegation": self._read("FF_RECURSIVE_DELEGATION", False),
         }
 
     @staticmethod

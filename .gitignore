@@ -2,7 +2,14 @@ data/
 plans/
 tmp_uploads/
 backend/tmp/
+# Security-benchmark run artifacts (spec 047) - generated, never committed.
+# Covers the default backend/security_benchmark/_artifacts/ and any stray
+# mis-pathed copy (e.g. backend/backend/... from an accidental --out run).
+**/security_benchmark/_artifacts/
 docs/*
+# Defense-track thesis artifacts (specs 045-049) are version-controlled and
+# citable by downstream specs; re-include them despite the docs/* ignore.
+!docs/thesis/
 /.ruff_cache/
 Qualifying_Exam/
 .docker-cache/
@@ -10,6 +17,7 @@ backend/knowledge/*
 backend/knowledge/_index.md
 tasks.xlsx
 CLAUDE-FABLE-5.md
+THESIS-DIRECTION-2026-07.md
 
 bikerides_day.csv
 dataset_soft.csv

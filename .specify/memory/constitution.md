@@ -1,6 +1,53 @@
 <!--
   Sync Impact Report
   ==================
+  Version change: 2.3.1 → 2.4.0 (MINOR — Principle XIII added: documentation
+    & research integrity; Principle V expanded: eval/benchmark-only dependency
+    tier; Principle VII expanded: recursive provenance-bearing delegation;
+    Principle XI clarified: eval-harness tooling carve-out)
+
+  Amendment (2026-07-02, v2.4.0) — sanctions the thesis defense-track
+    (specs 045–049):
+    XIII. Documentation & Research Integrity (NEW) — a feature whose diff is
+        confined to documentation/research/decision artifacts and its own spec,
+        touching no product runtime code/schema/wire/client, is a
+        "documentation/research-only" feature: exempt from the code-execution
+        gates (III changed-code coverage; the test-suite/boot-smoke/image-
+        behavior checks of X and XI) that have no code to exercise, but bound
+        instead to a documentation-integrity bar — every external claim traced
+        to a pinned, dated citation; no fabricated source, quotation, or
+        decision outcome; decision records that honestly reflect PENDING vs.
+        RATIFIED; self-claims that match the code as merged; no committed
+        secret. Lint, secret-scan, and image-build gates still apply repo-wide.
+        Sanctions specs 045 (framing memo + lock record), 046 (AIP
+        differential), 049 (I-D decision brief + pending record).
+    V. Dependency Management (EXPANDED) — a test-, eval-, or benchmark-only
+        dependency (property-test generator, external attack-benchmark corpus)
+        MAY be introduced without counting as a product-runtime dependency when
+        it is declared in a separate manifest (e.g. requirements-eval.txt) never
+        installed into the runtime layer, never imported by any product module,
+        and enforced by an automated isolation guard that fails CI on a product
+        import — still documented in the PR; promotion into the runtime still
+        needs lead-dev approval. Sanctions spec 047 (requirements-eval.txt +
+        isolation_check.py).
+    VII. Security (EXPANDED) — delegation MAY be recursive: a delegated token
+        MAY mint a further-attenuated nested-`act` child (no new token format)
+        for a sub-agent or dynamically-created agent, subject to four
+        property-tested invariants (monotonic attenuation, no escalation,
+        actor-chain completeness, depth-bounding), a child that never outlives
+        or exceeds its parent, per-hop provenance in the hash-chained audit, and
+        a fail-closed flag (default off; flag-off = unchanged single-hop).
+        Sanctions spec 048.
+    XI. Continuous Integration (CLARIFIED) — the "CI-only tooling" carve-out
+        explicitly covers an eval/benchmark harness's isolated dependencies,
+        provided the Principle V isolation guard gates them.
+    Templates requiring updates:
+      ✅ .specify/templates/plan-template.md — generic Constitution Check, compatible
+      ✅ .specify/templates/spec-template.md — generic, compatible
+      ✅ .specify/templates/tasks-template.md — generic, compatible
+    Follow-up TODOs: None
+
+  -- Prior amendment (2026-07-01, v2.3.1) --------------------------------
   Version change: 2.3.0 → 2.3.1 (PATCH — Principle XII: deliberate,
     documented, server-enforced web-only capability carve-out clarified)
 
@@ -259,6 +306,18 @@ approval from a lead developer.
 - First-party packages owned by the project (e.g.,
   `astralprims`) are not third-party dependencies, but their
   introduction MUST still be documented in the PR.
+- A **test-, eval-, or benchmark-only dependency** (for
+  example, a property-based-testing generator, or an external
+  attack-benchmark corpus adapted by a measurement harness) MAY
+  be introduced WITHOUT counting as a product-runtime
+  dependency, PROVIDED it is: (a) declared in a separate
+  manifest (e.g., `requirements-eval.txt`) that is never
+  installed into the product image's runtime layer; (b) never
+  imported by any product-runtime module; (c) enforced by an
+  automated isolation guard that fails CI if a product module
+  imports it; and (d) documented in the PR. Promoting such a
+  dependency into the product runtime still requires
+  lead-developer approval under this principle.
 
 ### VI. Documentation
 
@@ -308,6 +367,26 @@ system boundaries.
   marking and every transition MUST be recorded in the audit
   log, and the marking MUST be reset when the agent's code is
   revised (re-approval required).
+- Delegation MAY be recursive: an agent holding a delegated
+  token MAY mint a further-attenuated child token for a
+  sub-agent or a dynamically-created agent, expressed as a
+  nested RFC 8693 `act` chain within the existing token
+  construction — no new token format. Recursive delegation MUST
+  preserve four invariants at every hop: monotonic scope
+  attenuation (child scope ⊆ parent, child expiry ≤ parent), no
+  privilege escalation (no scope, tool, audience, or relaxed
+  security flag the parent lacks), actor-chain completeness (the
+  nested `act` chain records every actor and terminates at the
+  human principal), and depth-bounding (a configurable maximum,
+  enforced at mint AND at verify). A child MUST NOT outlive,
+  exceed, or survive revocation of its parent. These invariants
+  MUST be property-tested, and every mint and every enforced use
+  MUST append a provenance record — carrying the acting agent,
+  the human authorizer, the operation, the scope/policy context,
+  and a tamper-evident timestamp — to the hash-chained audit.
+  Recursive delegation MUST ship behind a fail-closed feature
+  flag (default off); with the flag off, the single-hop
+  delegation path MUST be unchanged.
 - Secrets MUST NOT be committed to version control.
 
 ### VIII. User Experience
@@ -429,7 +508,10 @@ constitution requires it.
 - CI-only tooling (linters, coverage tools, scanners) installed
   in the pipeline environment is not a product dependency under
   Principle V, but adding one MUST still be documented in the
-  PR that introduces it.
+  PR that introduces it. This carve-out also covers the
+  isolated dependencies of an eval/benchmark harness (Principle
+  V), PROVIDED the automated isolation guard proves no
+  product-runtime module imports them.
 - No branch may merge to main with a failing required gate.
 
 **Rationale**: Principles III, IV, VII, and X are only as real
@@ -492,6 +574,50 @@ server-owned definition and one shared renderer makes
 recurring manual reconciliation, and keeps new client targets
 cheap and faithful.
 
+### XIII. Documentation & Research Integrity
+
+Some features deliver documentation, research, or decision
+records rather than runtime code (for example, thesis-defense
+artifacts, related-work analyses, and go/no-go decision briefs).
+Such deliverables are fully governed, but the gates that assume
+executable code apply only where code exists.
+
+- A feature whose diff is confined to documentation, research,
+  or decision artifacts (plus its own spec) and touches no
+  product runtime code, database schema, wire protocol, or
+  client is a **documentation/research-only** feature. It is
+  exempt from Principle III (changed-code coverage) and from the
+  code-execution gates of Principles X and XI (the test suite,
+  boot smoke, and image-behavior checks) to the precise extent
+  that it introduces no code for those gates to exercise. The
+  lint, secret-scan, and image-build gates continue to apply to
+  the repository as a whole.
+- In exchange, such deliverables MUST meet a
+  documentation-integrity bar: every external claim MUST be
+  traceable to a cited source; citations to living documents
+  (IETF drafts, arXiv papers, package releases) MUST be pinned
+  with identifier, status, and retrieval date; no source,
+  quotation, or decision outcome may be fabricated; a decision
+  record MUST honestly reflect its state (e.g., PENDING versus
+  RATIFIED) and MUST NOT assert an outcome not yet made; and no
+  secret may be committed.
+- Where a documentation deliverable makes a claim about the
+  system's own behavior, that claim MUST match the code as
+  merged. A differential or benchmark that overclaims relative
+  to verified evidence MUST be refined down to the evidence.
+- Documentation/research features remain subject to review
+  (Governance) and to Principle VI wherever they document APIs
+  or primitives.
+
+**Rationale**: A research program produces durable prose —
+framing memos, related-work differentials, decision records —
+whose correctness is a matter of sourcing and honesty, not test
+coverage. Holding those artifacts to a citation-and-honesty bar,
+while exempting them from gates that presuppose runtime code,
+keeps the constitution meaningful for both kinds of work and
+prevents either a vacuous "90% coverage of zero code" ritual or
+an ungoverned back channel for unverified claims.
+
 ## Technology Stack
 
 - **Backend**: Python (FastAPI or equivalent ASGI framework)
@@ -508,6 +634,12 @@ cheap and faithful.
 - **Continuous Integration**: GitHub Actions running the
   Principle XI gate set; container images published to GitHub
   Container Registry
+- **Eval/Benchmark Harnesses**: eval-only dependency manifests
+  (e.g., `requirements-eval.txt`) kept out of the product
+  runtime and enforced by an automated isolation guard
+  (Principle V); harness principals namespaced and torn down
+- **Defense-track Documentation**: version-controlled research
+  and decision artifacts under `docs/thesis/` (Principle XIII)
 - **Containerization**: Docker / Docker Compose
 - **License**: Apache 2.0
 
@@ -557,4 +689,4 @@ guidance when conflicts arise.
   adherence to these principles. Violations MUST be resolved
   before merge.
 
-**Version**: 2.3.1 | **Ratified**: 2026-03-11 | **Last Amended**: 2026-07-01
+**Version**: 2.4.0 | **Ratified**: 2026-03-11 | **Last Amended**: 2026-07-02
