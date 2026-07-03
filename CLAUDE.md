@@ -1,6 +1,6 @@
 # AstralBody Development Guidelines
 
-Auto-generated from all feature plans. Last updated: 2026-06-30
+Auto-generated from all feature plans. Last updated: 2026-07-02
 
 ## Active Technologies
 - Python 3.11+ (backend), TypeScript 5.x (frontend, Vite + React 18) + FastAPI, websockets, existing OpenAI-compatible LLM client (`_call_llm`); React 18, Tailwind, framer-motion, lucide-react, existing `fetchJson` helper. **No new third-party libraries** (Constitution V). (013-agent-visibility-tool-picker)
@@ -129,15 +129,25 @@ shell commands, and other important information, read the current plan at
 - [specs/012-fix-agent-flows/plan.md](specs/012-fix-agent-flows/plan.md)
 - [specs/013-agent-visibility-tool-picker/plan.md](specs/013-agent-visibility-tool-picker/plan.md)
 - [specs/014-progress-notifications/plan.md](specs/014-progress-notifications/plan.md)
+- [specs/015-external-ai-agents/plan.md](specs/015-external-ai-agents/plan.md)
 - [specs/016-persistent-login/plan.md](specs/016-persistent-login/plan.md)
 - [specs/025-agentic-soul-integration/plan.md](specs/025-agentic-soul-integration/plan.md)
 - [specs/026-frontend-removal-astralprims/plan.md](specs/026-frontend-removal-astralprims/plan.md)
 - [specs/027-agentic-creation-settings/plan.md](specs/027-agentic-creation-settings/plan.md)
+- [specs/028-workspace-auth-revival/plan.md](specs/028-workspace-auth-revival/plan.md)
+- [specs/029-agents-adaptive-ui-ci/plan.md](specs/029-agents-adaptive-ui-ci/plan.md)
+- [specs/030-finish-soul-integration/plan.md](specs/030-finish-soul-integration/plan.md)
 - [specs/031-attachment-upload-parsing/plan.md](specs/031-attachment-upload-parsing/plan.md)
+- [specs/032-attachment-sdui-verification/plan.md](specs/032-attachment-sdui-verification/plan.md)
 - [specs/033-frontier-techniques-research/plan.md](specs/033-frontier-techniques-research/plan.md)
 - [specs/040-inprocess-agents-skills-commands/plan.md](specs/040-inprocess-agents-skills-commands/plan.md)
 - [specs/041-android-sdui-client/plan.md](specs/041-android-sdui-client/plan.md)
 - [specs/042-cross-client-chrome-parity/plan.md](specs/042-cross-client-chrome-parity/plan.md)
 - [specs/043-sdui-settings-surfaces/plan.md](specs/043-sdui-settings-surfaces/plan.md)
 - [specs/044-native-client-parity/plan.md](specs/044-native-client-parity/plan.md)
+- [specs/045-thesis-framing-memo/plan.md](specs/045-thesis-framing-memo/plan.md)
+- [specs/046-aip-differential-analysis/plan.md](specs/046-aip-differential-analysis/plan.md)
+- [specs/047-security-benchmark-harness/plan.md](specs/047-security-benchmark-harness/plan.md)
+- [specs/048-recursive-delegation-chains/plan.md](specs/048-recursive-delegation-chains/plan.md)
+- [specs/049-ietf-id-decision/plan.md](specs/049-ietf-id-decision/plan.md)
 <!-- SPECKIT END -->
