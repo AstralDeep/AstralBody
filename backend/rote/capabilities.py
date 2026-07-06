@@ -26,6 +26,8 @@ class DeviceType(str, Enum):
     BROWSER = "browser"  # Full desktop browser
     WINDOWS = "windows"  # Native Windows desktop app (renders structured components natively)
     ANDROID = "android"  # Native Android app (phone/tablet/foldable; renders structured components natively)
+    IOS     = "ios"      # Native iOS/iPadOS app (renders structured components natively; 051)
+    MACOS   = "macos"    # Native macOS desktop app (renders structured components natively; 051)
     TABLET  = "tablet"   # iPad / Android tablet (~768-1024px)
     MOBILE  = "mobile"   # Phone (<=480px viewport)
     WATCH   = "watch"    # Smartwatch (<=200px viewport, or explicit)
@@ -58,6 +60,20 @@ _BASE_HOST_CONFIG: Dict[str, dict] = {
     # web-oriented mobile/tablet density limits (which would, e.g., strip code on
     # a phone). Operators can still tune it via the ROTE_HOST_CONFIG env override.
     "android": dict(max_grid_columns=6, supports_charts=True, supports_tables=True,
+                    supports_code=True, supports_file_io=True, supports_tabs=True,
+                    max_text_chars=0, max_table_rows=0, max_table_cols=0,
+                    max_actions=0, supports_interactivity=True),
+    # Native Apple clients (051): full-capability native surfaces exactly like
+    # `windows`/`android` — the client owns its own responsive layout (iPhone/
+    # iPad size classes; AppKit windows), so ROTE applies `supported_types`
+    # substitution, not web density limits. The watch target is NOT here on
+    # purpose: watchOS registers the existing `watch` profile, which is the
+    # degradation authority for the wearable.
+    "ios":     dict(max_grid_columns=6, supports_charts=True, supports_tables=True,
+                    supports_code=True, supports_file_io=True, supports_tabs=True,
+                    max_text_chars=0, max_table_rows=0, max_table_cols=0,
+                    max_actions=0, supports_interactivity=True),
+    "macos":   dict(max_grid_columns=6, supports_charts=True, supports_tables=True,
                     supports_code=True, supports_file_io=True, supports_tabs=True,
                     max_text_chars=0, max_table_rows=0, max_table_cols=0,
                     max_actions=0, supports_interactivity=True),
