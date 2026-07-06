@@ -76,3 +76,36 @@ Generate Fernet keys with
   feature-025 offline grants revoked → Keycloak end-session redirect.
 - A different user signing in on the same browser revokes the prior user's
   session first.
+
+## Feature 051 — native Apple clients (`astral-ios`, `astral-macos`, `astral-watch`)
+
+Three additional **public** clients (no secret, PKCE S256), following the
+`astral-desktop`/`astral-mobile` pattern:
+
+| Client | Flow | Redirect URIs |
+|---|---|---|
+| `astral-ios` | Standard flow + PKCE (system browser session) | `astral://oauth2redirect` |
+| `astral-macos` | Standard flow + PKCE (system browser session) | `astral://oauth2redirect`, `http://127.0.0.1:*` (loopback) |
+| `astral-watch` | **OAuth 2.0 Device Authorization Grant only** | — (no redirect; approval happens on another device) |
+
+Setup:
+
+1. Create the three clients as *public*; enable **Proof Key for Code Exchange**
+   (S256) on `astral-ios`/`astral-macos`.
+2. On `astral-watch`: Capability config → enable **OAuth 2.0 Device
+   Authorization Grant**; Standard/Direct-access flows OFF. The realm's
+   well-known must then advertise `device_authorization_endpoint` — the
+   orchestrator's device-login broker fails closed (HTTP 503) until it does.
+3. Append the ids you deploy to `KEYCLOAK_ALLOWED_AZP`, and keep
+   `KEYCLOAK_DEVICE_CLIENTS=astral-watch` (only the watch may use the device
+   grant through the broker).
+4. Session semantics (research D7): the device-grant approval is an
+   interactive login. The realm's **SSO Session Max** / client-session-max
+   caps bound how long silent refresh can carry any native session — set them
+   to the operator's 365-day policy so watch sessions match web semantics.
+5. Optional hygiene: on `astral-watch` set *OAuth 2.0 Device Code Lifespan*
+   (default 600 s) and *Device Polling Interval* (default 5 s) — the broker
+   relays whatever the realm issues and enforces the pacing server-side.
+
+Watch sign-out uses the existing native logout (`POST /api/auth/logout`,
+`client_id=astral-watch`) with the offline-tolerant revocation queue (044).

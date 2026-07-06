@@ -1,0 +1,466 @@
+"""Feature 051 — RFC 8628 device-login broker (watch QR sign-in).
+
+The watch never talks to the IdP: it calls ``/api/auth/device/start`` (backend
+requests the device authorization from Keycloak, renders the QR first-party via
+``shared.qr``, and returns an opaque Fernet *poll handle*), then polls
+``/api/auth/device/poll`` until the user approves from another device. See
+specs/051-apple-native-clients/contracts/device-login.md.
+
+Posture (FR-020..FR-027):
+
+* **Fail-closed** — ``FF_DEVICE_LOGIN`` off, no encryption key, IdP
+  unreachable, or a realm without the device grant all yield
+  ``DeviceLoginUnavailable`` (HTTP 503) with an actionable message.
+* **Stateless** — everything poll needs rides inside the encrypted handle
+  (device_code, client, expiry, interval); per-handle throttle/single-use
+  bookkeeping is in-memory (the orchestrator is single-process; see
+  data-model.md Constitution IX fallback).
+* **Server-authoritative pacing** — early polls are answered locally with
+  ``slow_down`` (no IdP call); ``start`` is rate-limited per client address.
+* **Role gate before token release** — a token whose realm/client roles lack
+  ``user``/``admin`` is refused (``denied_no_access``) and its refresh token
+  revoked at the IdP, matching the web callback posture (028).
+* **Audited** — ``auth`` class: device_login_{started,approved,denied,expired}.
+  Token material is never logged or audited.
+
+HTTP seams (``http_post_form`` / ``http_get_json``) are injectable for tests;
+defaults use httpx with verified TLS, lazily imported.
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import logging
+import os
+import time
+from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
+
+logger = logging.getLogger("orchestrator.device_login")
+
+__all__ = [
+    "DeviceLoginError", "DeviceLoginUnavailable", "UnknownClient",
+    "InvalidHandle", "RateLimited", "start", "poll", "refresh",
+    "flag_on", "reset_state",
+]
+
+_SCOPE = "openid profile email offline_access"
+_DISCOVERY_TTL_SECONDS = 300
+_START_WINDOW_SECONDS = 60
+_START_MAX_PER_WINDOW = int(os.getenv("DEVICE_LOGIN_START_RATE", "10"))
+_DEFAULT_INTERVAL = 5
+_SLOW_DOWN_BUMP = 5  # RFC 8628 §3.5: increase interval by 5s on slow_down
+
+# Token-response keys the broker will relay to the device — nothing else.
+_TOKEN_KEYS = (
+    "access_token", "refresh_token", "expires_in", "refresh_expires_in",
+    "token_type", "id_token", "scope",
+)
+
+HttpPostForm = Callable[[str, Dict[str, str]], Awaitable[Tuple[int, Dict[str, Any]]]]
+HttpGetJson = Callable[[str], Awaitable[Tuple[int, Dict[str, Any]]]]
+
+
+class DeviceLoginError(Exception):
+    status = 500
+    code = "device_login_error"
+
+
+class DeviceLoginUnavailable(DeviceLoginError):
+    status = 503
+    code = "device_login_unavailable"
+
+
+class UnknownClient(DeviceLoginError):
+    status = 400
+    code = "unknown_client"
+
+
+class InvalidHandle(DeviceLoginError):
+    status = 400
+    code = "invalid_handle"
+
+
+class RateLimited(DeviceLoginError):
+    status = 429
+    code = "rate_limited"
+
+
+class RefreshRejected(DeviceLoginError):
+    status = 401
+    code = "invalid_grant"
+
+
+# ---------------------------------------------------------------------------
+# In-memory state (single-process; reset_state() for tests).
+# ---------------------------------------------------------------------------
+
+_START_HITS: Dict[str, list] = {}
+# handle digest -> {"next_ok": float, "interval": int, "used": bool}
+_POLL_STATE: Dict[str, Dict[str, Any]] = {}
+_DISCOVERY: Dict[str, Any] = {"at": 0.0, "data": None}
+
+
+def reset_state() -> None:
+    _START_HITS.clear()
+    _POLL_STATE.clear()
+    _DISCOVERY["at"] = 0.0
+    _DISCOVERY["data"] = None
+
+
+# ---------------------------------------------------------------------------
+# Config / plumbing.
+# ---------------------------------------------------------------------------
+
+def flag_on() -> bool:
+    """``FF_DEVICE_LOGIN`` — default ON (spec FR-026); any explicit falsey
+    value kills the surface."""
+    return os.getenv("FF_DEVICE_LOGIN", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _authority() -> str:
+    authority = (
+        os.getenv("VITE_KEYCLOAK_AUTHORITY", "") or os.getenv("KEYCLOAK_AUTHORITY", "")
+    ).rstrip("/")
+    if not authority:
+        raise DeviceLoginUnavailable(
+            "KEYCLOAK_AUTHORITY is not configured; device login requires the IdP realm URL"
+        )
+    return authority
+
+
+def device_grant_clients() -> set:
+    """Public clients allowed to use the device grant (default the watch).
+
+    Must also be allow-listed azps and never the confidential web client —
+    the same posture as the 044 native logout endpoint."""
+    raw = os.getenv("KEYCLOAK_DEVICE_CLIENTS", "astral-watch")
+    return {c.strip() for c in raw.split(",") if c.strip()}
+
+
+def _validate_client(client: str) -> str:
+    client = (client or "").strip()
+    from shared.auth_clients import _primary_client_id, allowed_azps
+    if (
+        not client
+        or client not in device_grant_clients()
+        or client == _primary_client_id()
+        or client not in allowed_azps()
+    ):
+        raise UnknownClient(
+            "client must be an allow-listed public device-grant client "
+            "(KEYCLOAK_DEVICE_CLIENTS ∩ KEYCLOAK_ALLOWED_AZP)"
+        )
+    return client
+
+
+def _fernet():
+    key = os.getenv("WEB_SESSION_ENC_KEY") or os.getenv("OFFLINE_GRANT_ENC_KEY")
+    if not key:
+        raise DeviceLoginUnavailable(
+            "WEB_SESSION_ENC_KEY (or OFFLINE_GRANT_ENC_KEY) is unset — the poll "
+            "handle cannot be protected; device login is disabled"
+        )
+    try:
+        from cryptography.fernet import Fernet
+        return Fernet(key.encode() if isinstance(key, str) else key)
+    except Exception as exc:  # bad key material == unavailable, never plaintext
+        raise DeviceLoginUnavailable(f"session encryption key unusable: {exc}") from None
+
+
+async def _default_post_form(url: str, data: Dict[str, str]) -> Tuple[int, Dict[str, Any]]:
+    import httpx
+    async with httpx.AsyncClient(timeout=10.0) as client:  # verified TLS default
+        resp = await client.post(url, data=data)
+        try:
+            body = resp.json()
+        except Exception:
+            body = {}
+        return resp.status_code, body if isinstance(body, dict) else {}
+
+
+async def _default_get_json(url: str) -> Tuple[int, Dict[str, Any]]:
+    import httpx
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(url)
+        try:
+            body = resp.json()
+        except Exception:
+            body = {}
+        return resp.status_code, body if isinstance(body, dict) else {}
+
+
+async def _discover(http_get: Optional[HttpGetJson]) -> Dict[str, str]:
+    """Realm OIDC discovery, cached. A realm that does not advertise
+    ``device_authorization_endpoint`` has the grant disabled — fail closed."""
+    now = time.time()
+    if _DISCOVERY["data"] and now - _DISCOVERY["at"] < _DISCOVERY_TTL_SECONDS:
+        return _DISCOVERY["data"]
+    url = f"{_authority()}/.well-known/openid-configuration"
+    getter = http_get or _default_get_json
+    try:
+        status, body = await getter(url)
+    except DeviceLoginError:
+        raise
+    except Exception as exc:
+        raise DeviceLoginUnavailable(f"IdP discovery failed: {exc}") from None
+    if status != 200 or not isinstance(body, dict) or not body.get("token_endpoint"):
+        raise DeviceLoginUnavailable(f"IdP discovery failed (HTTP {status})")
+    if not body.get("device_authorization_endpoint"):
+        raise DeviceLoginUnavailable(
+            "the realm does not advertise device_authorization_endpoint — enable "
+            "the OAuth 2.0 Device Authorization Grant on the device client "
+            "(docs/keycloak-realm-settings.md)"
+        )
+    data = {
+        "device_authorization_endpoint": body["device_authorization_endpoint"],
+        "token_endpoint": body["token_endpoint"],
+    }
+    _DISCOVERY.update(at=now, data=data)
+    return data
+
+
+def _handle_digest(handle: str) -> str:
+    return hashlib.sha256(handle.encode()).hexdigest()[:32]
+
+
+def _jwt_claims(token: str) -> Dict[str, Any]:
+    """Non-validating claims decode. The token arrived directly from the IdP
+    over verified TLS in the same call — the same trust the web callback
+    places in its token response (028)."""
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload))
+    except Exception:
+        return {}
+
+
+def _has_entry_role(claims: Dict[str, Any]) -> bool:
+    roles = set(claims.get("realm_access", {}).get("roles", []) or [])
+    for client_roles in (claims.get("resource_access", {}) or {}).values():
+        roles.update(client_roles.get("roles", []) or [])
+    return bool(roles & {"user", "admin"})
+
+
+async def _audit(action: str, sub: str, description: str, *, outcome: str = "success") -> None:
+    """auth-class audit row; never carries token material."""
+    try:
+        from audit.hooks import record_auth_event
+        await record_auth_event(
+            claims={"sub": sub or "anonymous"},
+            action=action,
+            description=description,
+            outcome=outcome,
+        )
+    except Exception:
+        logger.debug("device_login: audit hook unavailable for %s", action, exc_info=True)
+
+
+async def _revoke_refresh(refresh_token: str, client_id: str) -> None:
+    try:
+        from orchestrator import web_auth
+        await web_auth._revoke_refresh_token(refresh_token, client_id=client_id)
+    except Exception:
+        logger.warning("device_login: refresh-token revocation failed", exc_info=True)
+
+
+def _check_start_rate(ip: str) -> None:
+    now = time.time()
+    hits = [t for t in _START_HITS.get(ip, []) if now - t < _START_WINDOW_SECONDS]
+    if len(hits) >= _START_MAX_PER_WINDOW:
+        _START_HITS[ip] = hits
+        raise RateLimited("too many device-login starts; retry later")
+    hits.append(now)
+    _START_HITS[ip] = hits
+
+
+# ---------------------------------------------------------------------------
+# Public operations.
+# ---------------------------------------------------------------------------
+
+async def start(
+    client: str,
+    ip: str,
+    *,
+    http_post: Optional[HttpPostForm] = None,
+    http_get: Optional[HttpGetJson] = None,
+) -> Dict[str, Any]:
+    """Begin a device sign-in: returns the QR + short code + opaque handle."""
+    if not flag_on():
+        raise DeviceLoginUnavailable("FF_DEVICE_LOGIN is off")
+    fernet = _fernet()
+    client = _validate_client(client)
+    _check_start_rate(ip or "unknown")
+    disco = await _discover(http_get)
+
+    poster = http_post or _default_post_form
+    try:
+        status, body = await poster(
+            disco["device_authorization_endpoint"],
+            {"client_id": client, "scope": _SCOPE},
+        )
+    except DeviceLoginError:
+        raise
+    except Exception as exc:
+        raise DeviceLoginUnavailable(f"IdP device authorization failed: {exc}") from None
+    if status != 200 or not body.get("device_code") or not body.get("user_code"):
+        raise DeviceLoginUnavailable(f"IdP refused device authorization (HTTP {status})")
+
+    user_code = str(body["user_code"])
+    verification_uri = str(body.get("verification_uri", ""))
+    verification_uri_complete = str(
+        body.get("verification_uri_complete", "")
+        or (f"{verification_uri}?user_code={user_code}" if verification_uri else "")
+    )
+    if not verification_uri_complete:
+        raise DeviceLoginUnavailable("IdP response lacked a verification URI")
+    expires_in = int(body.get("expires_in", 600))
+    interval = max(int(body.get("interval", _DEFAULT_INTERVAL)), 1)
+
+    now = time.time()
+    handle = fernet.encrypt(json.dumps({
+        "dc": str(body["device_code"]),
+        "client": client,
+        "iat": now,
+        "exp": now + expires_in,
+        "interval": interval,
+    }).encode()).decode("ascii")
+    _POLL_STATE[_handle_digest(handle)] = {
+        "next_ok": now + interval, "interval": interval, "used": False,
+    }
+
+    from shared.qr import encode_matrix, qr_png_base64
+    await _audit(
+        "device_login_started", "anonymous",
+        f"Device sign-in started for {client}; user_code {user_code}",
+    )
+    return {
+        "handle": handle,
+        "user_code": user_code,
+        "verification_uri": verification_uri,
+        "verification_uri_complete": verification_uri_complete,
+        "expires_in": expires_in,
+        "interval": interval,
+        "qr_png_base64": qr_png_base64(verification_uri_complete, scale=6, border=2),
+        "qr_matrix": encode_matrix(verification_uri_complete),
+    }
+
+
+async def poll(
+    handle: str,
+    ip: str,
+    *,
+    http_post: Optional[HttpPostForm] = None,
+    http_get: Optional[HttpGetJson] = None,
+) -> Dict[str, Any]:
+    """Poll a pending device sign-in. Terminal states are terminal (SC-009)."""
+    if not flag_on():
+        raise DeviceLoginUnavailable("FF_DEVICE_LOGIN is off")
+    fernet = _fernet()
+    try:
+        blob = json.loads(fernet.decrypt((handle or "").encode()))
+        device_code = blob["dc"]
+        client = blob["client"]
+        exp = float(blob["exp"])
+    except Exception:
+        raise InvalidHandle("poll handle is invalid") from None
+
+    digest = _handle_digest(handle)
+    now = time.time()
+    state = _POLL_STATE.setdefault(digest, {
+        "next_ok": 0.0, "interval": int(blob.get("interval", _DEFAULT_INTERVAL)),
+        "used": False,
+    })
+    if state["used"]:
+        raise InvalidHandle("poll handle already completed")
+    if now >= exp:
+        state["used"] = True
+        await _audit("device_login_expired", "anonymous",
+                     f"Device sign-in expired for {client}", outcome="failure")
+        return {"status": "expired"}
+    # Server-authoritative pacing: early polls never reach the IdP.
+    if now < state["next_ok"]:
+        return {"status": "slow_down", "interval": state["interval"]}
+
+    disco = await _discover(http_get)
+    poster = http_post or _default_post_form
+    try:
+        status, body = await poster(disco["token_endpoint"], {
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            "device_code": device_code,
+            "client_id": client,
+        })
+    except DeviceLoginError:
+        raise
+    except Exception as exc:
+        raise DeviceLoginUnavailable(f"IdP token poll failed: {exc}") from None
+
+    if status == 200 and body.get("access_token"):
+        claims = _jwt_claims(str(body["access_token"]))
+        sub = str(claims.get("sub", "") or "anonymous")
+        state["used"] = True
+        if not _has_entry_role(claims):
+            # Same gate as the web callback (028): no user/admin role — no
+            # session, and the fresh refresh credential is revoked at the IdP.
+            await _revoke_refresh(str(body.get("refresh_token", "")), client)
+            await _audit("device_login_denied", sub,
+                         f"Device sign-in refused for {client}: token has no "
+                         "user/admin role", outcome="failure")
+            return {"status": "denied", "reason": "denied_no_access"}
+        await _audit("device_login_approved", sub,
+                     f"Device sign-in approved for {client}")
+        return {"status": "approved",
+                "tokens": {k: body[k] for k in _TOKEN_KEYS if k in body}}
+
+    error = str(body.get("error", "") or "")
+    if error == "authorization_pending":
+        state["next_ok"] = now + state["interval"]
+        return {"status": "pending", "interval": state["interval"]}
+    if error == "slow_down":
+        state["interval"] += _SLOW_DOWN_BUMP
+        state["next_ok"] = now + state["interval"]
+        return {"status": "slow_down", "interval": state["interval"]}
+    if error in ("expired_token", "invalid_grant"):
+        state["used"] = True
+        await _audit("device_login_expired", "anonymous",
+                     f"Device sign-in expired for {client}", outcome="failure")
+        return {"status": "expired"}
+    if error == "access_denied":
+        state["used"] = True
+        await _audit("device_login_denied", "anonymous",
+                     f"Device sign-in denied by the user for {client}",
+                     outcome="failure")
+        return {"status": "denied", "reason": "access_denied"}
+    raise DeviceLoginUnavailable(f"IdP token poll failed (HTTP {status}, {error or 'no error code'})")
+
+
+async def refresh(
+    client: str,
+    refresh_token: str,
+    *,
+    http_post: Optional[HttpPostForm] = None,
+    http_get: Optional[HttpGetJson] = None,
+) -> Dict[str, Any]:
+    """Proxy a refresh-token grant for a device-grant client (the watch keeps a
+    single TLS peer; iOS/macOS refresh directly like Windows — research D7)."""
+    if not flag_on():
+        raise DeviceLoginUnavailable("FF_DEVICE_LOGIN is off")
+    client = _validate_client(client)
+    if not (refresh_token or "").strip():
+        raise RefreshRejected("refresh_token is required")
+    disco = await _discover(http_get)
+    poster = http_post or _default_post_form
+    try:
+        status, body = await poster(disco["token_endpoint"], {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": client,
+        })
+    except DeviceLoginError:
+        raise
+    except Exception as exc:
+        raise DeviceLoginUnavailable(f"IdP refresh failed: {exc}") from None
+    if status == 200 and body.get("access_token"):
+        return {k: body[k] for k in _TOKEN_KEYS if k in body}
+    raise RefreshRejected("the IdP rejected the refresh token")

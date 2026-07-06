@@ -306,6 +306,73 @@ async def native_logout(request: Request,
             "queued": outcome == "queued"}
 
 
+# =============================================================================
+# Feature 051 — watch QR sign-in: RFC 8628 device-login broker endpoints.
+# Pre-auth surface (no token yet); the broker is fail-closed + rate-limited
+# (FF_DEVICE_LOGIN, orchestrator/device_login.py; contract in
+# specs/051-apple-native-clients/contracts/device-login.md).
+# =============================================================================
+
+def _device_login_http_error(exc) -> HTTPException:
+    return HTTPException(
+        status_code=getattr(exc, "status", 500),
+        detail={"error": getattr(exc, "code", "device_login_error"), "detail": str(exc)},
+    )
+
+
+async def _json_body(request: Request) -> dict:
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return body if isinstance(body, dict) else {}
+
+
+@auth_router.post(
+    "/api/auth/device/start",
+    tags=["Auth"],
+    summary="Begin a device (watch) sign-in: backend-generated QR + short code",
+)
+async def device_login_start(request: Request):
+    from orchestrator import device_login
+    body = await _json_body(request)
+    ip = request.client.host if request.client else "unknown"
+    try:
+        return await device_login.start(str(body.get("client", "")), ip)
+    except device_login.DeviceLoginError as exc:
+        raise _device_login_http_error(exc)
+
+
+@auth_router.post(
+    "/api/auth/device/poll",
+    tags=["Auth"],
+    summary="Poll a pending device sign-in (server-authoritative pacing)",
+)
+async def device_login_poll(request: Request):
+    from orchestrator import device_login
+    body = await _json_body(request)
+    ip = request.client.host if request.client else "unknown"
+    try:
+        return await device_login.poll(str(body.get("handle", "")), ip)
+    except device_login.DeviceLoginError as exc:
+        raise _device_login_http_error(exc)
+
+
+@auth_router.post(
+    "/api/auth/device/refresh",
+    tags=["Auth"],
+    summary="Proxy a refresh-token grant for a device-grant client (watch)",
+)
+async def device_login_refresh(request: Request):
+    from orchestrator import device_login
+    body = await _json_body(request)
+    try:
+        return await device_login.refresh(
+            str(body.get("client", "")), str(body.get("refresh_token", "")))
+    except device_login.DeviceLoginError as exc:
+        raise _device_login_http_error(exc)
+
+
 async def get_download_user_payload(
     request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(security),
