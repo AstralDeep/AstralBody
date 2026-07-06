@@ -1,6 +1,36 @@
 <!--
   Sync Impact Report
   ==================
+  Version change: 2.4.0 → 2.5.0 (MINOR — Principle VII expanded: Cresco
+    external-infrastructure integration sanctioned; Technology Stack gains
+    a Cresco Integration entry; Defense-track Documentation entry corrected
+    to note the docs/ tree is gitignored)
+
+  Amendment (2026-07-06, v2.5.0) — sanctions spec 050 (Cresco integration):
+    VII. Security (EXPANDED) — Cresco (the CrescoEdge distributed
+        edge-computing fabric) is an APPROVED external-infrastructure
+        integration, reached only via a first-party Python bridge agent over
+        the fabric's wsapi WebSocket seam using existing dependencies (no new
+        third-party library; pycrescolib not adopted at runtime), behind a
+        fail-closed flag (FF_CRESCO, default off). The JVM/OSGi + ActiveMQ
+        fabric stays external infrastructure — never embedded in the product
+        image, used as an internal message bus, or allowed to replace the
+        A2A/WebSocket agent protocol (Principle I). Fabric credentials are
+        runtime-only secrets; dial-out is egress-validated with verified TLS;
+        executor-wrapping tools are system-scoped, default-deny, and
+        hard-security-flagged.
+    Technology Stack — added "Cresco Integration"; corrected the
+        "Defense-track Documentation" entry to note the docs/ tree is
+        gitignored (research/decision artifacts kept outside the public
+        repository). Principle XIII is unchanged and still governs any
+        documentation/research-only feature.
+    Templates requiring updates:
+      ✅ .specify/templates/plan-template.md — generic Constitution Check, compatible
+      ✅ .specify/templates/spec-template.md — generic, compatible
+      ✅ .specify/templates/tasks-template.md — generic, compatible
+    Follow-up TODOs: None
+
+  -- Prior amendment (2026-07-02, v2.4.0) --------------------------------
   Version change: 2.3.1 → 2.4.0 (MINOR — Principle XIII added: documentation
     & research integrity; Principle V expanded: eval/benchmark-only dependency
     tier; Principle VII expanded: recursive provenance-bearing delegation;
@@ -387,6 +417,22 @@ system boundaries.
   Recursive delegation MUST ship behind a fail-closed feature
   flag (default off); with the flag off, the single-hop
   delegation path MUST be unchanged.
+- **Cresco** (the CrescoEdge distributed edge-computing fabric) is
+  an approved external-infrastructure integration. It MUST be
+  reached ONLY through a first-party Python bridge agent over the
+  fabric's `wsapi` WebSocket seam, using existing dependencies (no
+  new third-party library; `pycrescolib` MUST NOT be adopted at
+  runtime), behind a fail-closed feature flag (`FF_CRESCO`, default
+  off). The Cresco fabric (a JVM/OSGi + ActiveMQ system) MUST remain
+  external infrastructure: it MUST NOT be embedded in the product
+  image, used as an internal message bus, or allowed to replace the
+  A2A/WebSocket agent protocol (Principle I). Fabric credentials
+  (`CRESCO_SERVICE_KEY`) are runtime-only secrets configured via the
+  environment and never committed; dial-out MUST be egress-validated
+  (`shared/external_http`) with verified TLS (no global verification
+  bypass); and any tool wrapping Cresco's arbitrary-shell `executor`
+  MUST be system-scoped, default-deny, and hard-security-flagged,
+  never enabled by the safe-agent baseline.
 - Secrets MUST NOT be committed to version control.
 
 ### VIII. User Experience
@@ -638,8 +684,16 @@ an ungoverned back channel for unverified claims.
   (e.g., `requirements-eval.txt`) kept out of the product
   runtime and enforced by an automated isolation guard
   (Principle V); harness principals namespaced and torn down
-- **Defense-track Documentation**: version-controlled research
-  and decision artifacts under `docs/thesis/` (Principle XIII)
+- **Cresco Integration**: the CrescoEdge edge-computing fabric is
+  approved external infrastructure, reached only via a first-party
+  Python bridge agent over its `wsapi` WebSocket seam (existing
+  `websockets` dependency; no new third-party library), behind
+  `FF_CRESCO` (default off); the JVM fabric is never embedded in the
+  product image (Principles I, VII)
+- **Defense-track Documentation**: documentation/research-only
+  artifacts are governed by Principle XIII; the `docs/` tree is
+  gitignored, so any such artifacts are kept outside the public
+  repository (not version-controlled here)
 - **Containerization**: Docker / Docker Compose
 - **License**: Apache 2.0
 
@@ -689,4 +743,4 @@ guidance when conflicts arise.
   adherence to these principles. Violations MUST be resolved
   before merge.
 
-**Version**: 2.4.0 | **Ratified**: 2026-03-11 | **Last Amended**: 2026-07-02
+**Version**: 2.5.0 | **Ratified**: 2026-03-11 | **Last Amended**: 2026-07-06

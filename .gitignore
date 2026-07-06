@@ -13,9 +13,6 @@ windows-client/build_verify*/
 # Stray mis-pathed directory from an accidental run (contents already covered).
 backend/backend/
 docs/*
-# Defense-track thesis artifacts (specs 045-049) are version-controlled and
-# citable by downstream specs; re-include them despite the docs/* ignore.
-!docs/thesis/
 /.ruff_cache/
 Qualifying_Exam/
 .docker-cache/
