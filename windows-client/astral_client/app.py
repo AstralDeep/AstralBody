@@ -18,7 +18,7 @@ import logging
 import os
 import sys
 import threading
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt, QSettings, QTimer, Signal
 from PySide6.QtWidgets import (
@@ -54,8 +54,14 @@ from . import confirm as _confirm
 from . import integrity as _integrity
 from . import __version__ as _APP_VERSION
 from .protocol import OrchestratorClient, device_caps
-from .protocol_manifest import is_classified, is_handled
-from .renderer import RenderContext, render, supported_types as native_types, _scoped
+from .protocol_manifest import CLIENT_LOCAL_ACTIONS, is_classified, is_handled
+from .renderer import (
+    RenderContext,
+    render,
+    supported_types as native_types,
+    _btn_label,
+    _scoped,
+)
 from .streaming import stream_error_ops, stream_frame_to_ops, subscribe_ack_ops
 from .chrome import chrome_render_notice
 from . import rest
@@ -88,29 +94,13 @@ def parser_status_glyph(status: str) -> tuple:
     }.get(status or "", ("•", "staged"))
 
 
-def _load_client_local_actions() -> set:
-    """The ui_event actions handled entirely in-app (never sent to the server, so
-    they never produce a server ``chrome_surface`` re-render). Read from the
-    committed UI-protocol manifest (`backend/shared/ui_protocol.json`
-    ``client_local_actions``) when reachable, else the known default. Used so a
-    surface's load-timeout bound is NOT armed for a client-local action (which
-    would wrongly fire and wipe the surface — feature 044 fix)."""
-    try:
-        from pathlib import Path
-
-        manifest = (Path(__file__).resolve().parents[2]
-                    / "backend" / "shared" / "ui_protocol.json")
-        data = json.loads(manifest.read_text(encoding="utf-8"))
-        actions = data.get("client_local_actions")
-        if isinstance(actions, list) and actions:
-            return {str(a) for a in actions}
-    except Exception:  # noqa: BLE001 — a packaged build has no repo tree; use default
-        pass
-    return {"attach_existing"}  # hard-coded default when the manifest isn't reachable
-
-
-#: ui_event actions handled in-app (see :func:`_load_client_local_actions`).
-_CLIENT_LOCAL_ACTIONS = _load_client_local_actions()
+#: ui_event actions handled entirely in-app (never sent to the server, so they
+#: never produce a server ``chrome_surface`` re-render) — a surface's
+#: load-timeout bound is NOT armed for them (which would wrongly fire and wipe
+#: the surface, feature 044 fix). A committed constant mirroring the manifest's
+#: ``client_local_actions`` (a packaged build has no repo tree to probe);
+#: tests/test_protocol_manifest.py asserts the sync.
+_CLIENT_LOCAL_ACTIONS = CLIENT_LOCAL_ACTIONS
 
 
 # Feature 040 (US5): slash-command discovery. Mirrors the web client's typeahead
@@ -293,6 +283,11 @@ class Canvas(QScrollArea):
         self._lay.addStretch(1)
         self.setWidget(self._inner)
         self._by_id: Dict[str, QWidget] = {}
+        # Source component payload per id, so a full render that re-delivers an
+        # existing id with CHANGED content (timeline snapshots, combine/condense)
+        # renders fresh instead of reusing the stale widget (parity with the
+        # Android twin's in-place update).
+        self._rendered: Dict[str, Any] = {}
         # Retained last-rendered component list so a live theme change can rebuild
         # inline-styled content with the new palette (feature 044 US5, restyle()).
         self._last_components: list = []
@@ -312,29 +307,35 @@ class Canvas(QScrollArea):
         contains (e.g. one just added via a `ui_upsert`)."""
         components = list(components or [])
         self._last_components = components  # retained for restyle() (US5)
-        new_ids = set()
+        # A widget is reusable only when its id survives into the new set AND
+        # the incoming component payload equals what it was rendered from — a
+        # re-delivered id with CHANGED content (timeline snapshots, combine/
+        # condense) must render fresh, not keep showing stale live data.
+        reusable: Dict[str, QWidget] = {}
         for comp in components:
             if isinstance(comp, dict):
-                cid = comp.get("component_id") or comp.get("id")
-                if cid:
-                    new_ids.add(str(cid))
-        # Detach every current child (keep the trailing stretch), remembering the
-        # keyed widgets whose id survives into the new set so we can reuse them.
+                raw = comp.get("component_id") or comp.get("id")
+                cid = str(raw) if raw else None
+                if (cid and cid not in reusable and cid in self._by_id
+                        and self._rendered.get(cid) == comp):
+                    reusable[cid] = self._by_id[cid]
+        # Detach every current child (keep the trailing stretch); widgets not
+        # reused (unkeyed, dropped ids, changed content) are deleted.
         detached: List[QWidget] = []
         while self._lay.count() > 1:
             item = self._lay.takeAt(0)
             w = item.widget()
             if w is not None:
                 detached.append(w)
-        reusable = {cid: w for cid, w in self._by_id.items() if cid in new_ids}
         reused = set(reusable.values())
         for w in detached:
-            if w not in reused:  # unkeyed, or an id dropped from the new set
+            if w not in reused:
                 w.setParent(None)
                 w.deleteLater()
         # Re-insert in the new order, reusing a kept widget by id or rendering
         # fresh. `_insert` appends before the stretch, so order follows the list.
         self._by_id = {}
+        rendered: Dict[str, Any] = {}
         placed: set = set()
         for comp in components:
             cid = None
@@ -352,7 +353,10 @@ class Canvas(QScrollArea):
             self._insert(w)
             if cid:
                 self._by_id[cid] = w
+                if cid not in placed:
+                    rendered[cid] = comp
                 placed.add(cid)
+        self._rendered = rendered
 
     def restyle(self) -> None:
         """Re-render the retained components so inline-styled SDUI content (cards,
@@ -361,7 +365,10 @@ class Canvas(QScrollArea):
         reconciliation would reuse the existing widgets, which keep their stale
         inline CSS, so the id map is cleared to force a fresh rebuild."""
         comps = self._last_components
-        self._by_id = {}  # force a fresh render (reused widgets keep stale inline CSS)
+        # Force a fresh render (reused widgets keep stale inline CSS); the
+        # payload map is cleared with the id map so reuse can't kick in.
+        self._by_id = {}
+        self._rendered = {}
         self.set_components(comps)
 
     def apply_ops(self, ops: list) -> None:
@@ -371,6 +378,7 @@ class Canvas(QScrollArea):
             cid = op.get("component_id")
             if kind == "remove":
                 w = self._by_id.pop(cid, None)
+                self._rendered.pop(cid, None)
                 if w:
                     w.deleteLater()
                 continue
@@ -385,6 +393,7 @@ class Canvas(QScrollArea):
             else:
                 self._insert(new_w)
             self._by_id[cid] = new_w
+            self._rendered[cid] = comp  # keep the payload map in sync
 
 
 class SurfaceDialog(QDialog):
@@ -396,7 +405,7 @@ class SurfaceDialog(QDialog):
     #: How long to wait for a `chrome_surface` before showing the retry error.
     LOAD_TIMEOUT_MS = 10000
 
-    def __init__(self, parent, emit, download=None, on_retry=None):
+    def __init__(self, parent, emit, download=None, on_retry=None, apply_theme=None):
         super().__init__(parent)
         self.setModal(False)
         self.resize(600, 560)
@@ -406,8 +415,10 @@ class SurfaceDialog(QDialog):
         self._params: dict = {}
         # Feature 044 (T040): actions submitted from inside the surface show an
         # in-flight state and re-arm the load bound (the server replies with a
-        # chrome_surface re-render that cancels it).
-        self._ctx = RenderContext(emit=self._emit_from_surface, download=download)
+        # chrome_surface re-render that cancels it). `apply_theme` routes the
+        # Theme surface's theme_apply/color-pick to the app's single theme path.
+        self._ctx = RenderContext(emit=self._emit_from_surface, download=download,
+                                  apply_theme=apply_theme)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(16, 14, 16, 14)
         outer.setSpacing(10)
@@ -643,9 +654,9 @@ class TopBar(QFrame):
                 self._menu.addAction(ha)
             for item in section.get("items", []):
                 label = item.get("label", "")
-                # "&&" — Qt mnemonic escape: "Agents & permissions" must render
-                # its ampersand literally, exactly like the web/Android menus.
-                act = QAction(str(label).replace("&", "&&"), self._menu)
+                # Qt mnemonic escape: "Agents & permissions" must render its
+                # ampersand literally, exactly like the web/Android menus.
+                act = QAction(_btn_label(label), self._menu)
                 surface = item.get("surface", "")
                 act.triggered.connect(
                     lambda _checked=False, s=surface, ln=label: self._emit_open(s, ln)
@@ -1136,7 +1147,8 @@ class MainWindow(QMainWindow):
         # Feature 044 (US4): staged chat attachments (chip records) for the turn.
         self._attachments: List[dict] = []
 
-        ctx = RenderContext(emit=self._emit, download=self._download)
+        ctx = RenderContext(emit=self._emit, download=self._download,
+                            apply_theme=self._apply_theme_pref)
         self.client = OrchestratorClient(
             url, token, device_caps(supported_types=native_types())
         )
@@ -1279,17 +1291,22 @@ class MainWindow(QMainWindow):
         return w
 
     def _apply_theme_pref(self, theme) -> None:
-        """Apply a stored/pushed theme preference (feature 044 US5). The live
-        restyle lives in the theme module; this routes the preference to it when
-        available and is a safe no-op until then (the preset is retained in
-        ``self._user_prefs`` so a later apply can pick it up)."""
+        """Apply a stored/pushed/surface-emitted theme spec (feature 044 US5) —
+        the app's SINGLE theme-apply implementation. Boot (`user_preferences`),
+        the Theme surface's `theme_apply` component and the color picker (both
+        via ``RenderContext.apply_theme``) all route here. The palette mutation
+        is synchronous; the global restyle is DEFERRED to the next event-loop
+        turn because this can be reached from *inside* a render pass, where a
+        global re-polish is re-entrant and segfaults headless Qt (commit
+        7a3ea3e). In a unit test with no running event loop the deferred
+        restyle simply never fires — palette assertions still hold."""
         if not theme:
             return
         applier = getattr(T, "apply_theme", None)
         if callable(applier):
             try:
                 if applier(theme):
-                    self._restyle_all()
+                    QTimer.singleShot(0, self._restyle_all)
             except Exception:
                 logger.debug("theme apply failed", exc_info=True)
 
@@ -1359,23 +1376,22 @@ class MainWindow(QMainWindow):
 
     def _open_surface(self, surface: str, label: str) -> None:
         """Route a settings-menu item (from the server-owned model) to its native
-        surface. Agents/Audit/timeline have native dialogs today; other surfaces
-        are delivered as SDUI in a later slice — until then a clear placeholder
-        (FR-013), never a dead menu entry."""
+        surface. Agents/Audit have native dialogs today; every other surface
+        (workspace_timeline included — its SDUI snapshot list/view/back-to-live
+        is server-driven) goes through the generic SDUI chrome_open round-trip."""
         s = (surface or "").strip()
         if s == "agents":
             self._open_agents()
         elif s == "audit":
             self._open_audit()
-        elif s == "workspace_timeline":
-            self._open_history()
         else:
             # Feature 043: request the SDUI surface and render it natively when
             # the chrome_surface frame arrives (replaces the placeholder).
             # Feature 044 (T040): show an in-flight state + bound the wait.
             if self._surface_dialog is None:
                 self._surface_dialog = SurfaceDialog(
-                    self, self._emit, self._download, on_retry=self._retry_surface)
+                    self, self._emit, self._download, on_retry=self._retry_surface,
+                    apply_theme=self._apply_theme_pref)
             self._surface_dialog.begin_load(s, {}, title=label or s)
             self._surface_dialog.show()
             self._surface_dialog.raise_()
@@ -1403,12 +1419,24 @@ class MainWindow(QMainWindow):
     def _on_chrome_surface(self, msg: dict) -> None:
         """Feature 043 — render a pushed SDUI settings surface natively (open the
         dialog if a re-render arrives for a surface the user opened). Feature 044
-        (T040): arrival cancels the load-timeout bound (via set_surface)."""
+        (T040): arrival cancels the load-timeout bound (via set_surface).
+
+        An empty ``surface_key`` + empty ``components`` is the server's CLOSE
+        instruction (shared/protocol.py: "Empty components clears/closes the
+        modal", sent after workspace-timeline view/live and chrome_close) —
+        close the dialog if one is open; never lazily create one just to show
+        a blank "Settings" page."""
+        components = msg.get("components") or []
+        if not msg.get("surface_key") and not components:
+            if self._surface_dialog is not None:
+                self._surface_dialog.close()
+            return
         if self._surface_dialog is None:
             self._surface_dialog = SurfaceDialog(
-                self, self._emit, self._download, on_retry=self._retry_surface)
+                self, self._emit, self._download, on_retry=self._retry_surface,
+                apply_theme=self._apply_theme_pref)
         self._surface_dialog.set_surface(
-            msg.get("title") or "Settings", msg.get("components") or [])
+            msg.get("title") or "Settings", components)
         self._surface_dialog.show()
         self._surface_dialog.raise_()
 

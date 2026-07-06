@@ -170,13 +170,7 @@ class OrchestratorClient(QObject):
                 "device": self.device,
                 "resumed": False,
             }))
-            # Drain the offline queue FIFO BEFORE flipping `_connected`, so any
-            # queued frame goes out ahead of a new direct send. If `_connected`
-            # were set first, a frame sent by the "connected" handler could race
-            # ahead of the queued backlog and reorder reconnect delivery.
-            await self._flush_pending(ws)
-            self._connected = True
-            self._safe_status("connected")
+            await self._finish_open(ws)
             async for raw in ws:
                 if self._stop:
                     break
@@ -191,6 +185,21 @@ class OrchestratorClient(QObject):
                         self._auth_hold = True
                         self._safe_status(f"auth_required:{msg.get('reason', '')}")
                     self._safe_message(msg)
+
+    async def _finish_open(self, ws) -> None:
+        """Post-register open sequence. Drain the offline queue FIFO BEFORE
+        flipping `_connected`, so any queued frame goes out ahead of a new
+        direct send. If `_connected` were set first, a frame sent by the
+        "connected" handler could race ahead of the queued backlog and reorder
+        reconnect delivery. Then drain ONCE MORE after the flip: a frame
+        appended to `_pending` between the first drain and the flip would
+        otherwise sit unflushed while the connection stays healthy — once
+        `_connected` is True no new frame enters the queue, so the second
+        drain deterministically closes that window (FR-003)."""
+        await self._flush_pending(ws)
+        self._connected = True
+        await self._flush_pending(ws)
+        self._safe_status("connected")
 
     # --- outbound -------------------------------------------------------- #
     async def _flush_pending(self, ws) -> None:
@@ -208,10 +217,30 @@ class OrchestratorClient(QObject):
         ws = self._ws
         loop = self._loop
         if self._connected and loop and ws:
-            asyncio.run_coroutine_threadsafe(ws.send(frame), loop)
+            fut = asyncio.run_coroutine_threadsafe(ws.send(frame), loop)
+            # The socket can die AFTER the `_connected` check with the flag
+            # still True — a fire-and-forget send would then vanish silently.
+            # Re-queue a failed fast-path send through the offline path so it
+            # goes out on the next (re)connect. The callback runs on the
+            # asyncio loop thread; deque appends are thread-safe.
+            fut.add_done_callback(lambda f: self._on_fast_send_done(f, frame))
             return
-        # Disconnected: queue-and-flush with a bounded buffer; overflow is
-        # dropped-oldest AND surfaced — an outbound frame never just vanishes.
+        self._queue_frame(frame)
+
+    def _on_fast_send_done(self, fut, frame: str) -> None:
+        """Done-callback for a connected fast-path send: on failure the frame is
+        re-queued so an outbound frame never just vanishes (FR-003)."""
+        try:
+            failed = fut.cancelled() or fut.exception() is not None
+        except Exception:  # noqa: BLE001 — treat an unreadable future as failed
+            failed = True
+        if failed:
+            self._queue_frame(frame)
+
+    def _queue_frame(self, frame: str) -> None:
+        """Queue a frame for the (re)connect flush with a bounded buffer;
+        overflow is dropped-oldest AND surfaced — an outbound frame never just
+        vanishes."""
         self._pending.append(frame)
         while len(self._pending) > MAX_QUEUE:
             dropped = self._pending.popleft()

@@ -183,11 +183,14 @@ async def components(orch, user_id, roles, params):
     # only persisted and the app never changed until restart). Skipped when the
     # user has never saved a theme, leaving the client default palette alone.
     if theme:
-        spec = {"type": "theme_apply", "message": "Theme applied"}
+        # Always ship the fully-resolved channel map (feature 044): clients
+        # apply `colors` directly instead of needing a hand-copied preset hex
+        # table; `preset` rides along as metadata (every client gives a KNOWN
+        # preset precedence, and an unknown one falls through to `colors`).
+        spec = {"type": "theme_apply", "message": "Theme applied",
+                "colors": dict(colors)}
         if active:
             spec["preset"] = active
-        else:
-            spec["colors"] = dict(colors)
         out.append(spec)
     out += [
         _sdui.text(_summary_text(theme), "caption"),

@@ -53,11 +53,15 @@ class RenderContext:
     """Carried through a render pass. `emit` posts a ui_event back to the server;
     `download` (optional) fetches an authed backend file URL and saves it natively;
     `chat_id` (optional, kept current by the app) scopes component actions such
-    as table pagination to the active conversation."""
+    as table pagination to the active conversation; `apply_theme` (optional,
+    wired by the MainWindow to its `_apply_theme_pref` path) is the app's single
+    theme-apply implementation — the `theme_apply` component and the color
+    picker route their specs through it (feature 044 US5)."""
 
     emit: Callable[[str, dict], None]
     download: Optional[Callable[[str, str], None]] = None
     chat_id: Optional[str] = None
+    apply_theme: Optional[Callable[[Any], None]] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -1204,35 +1208,20 @@ REGISTRY: Dict[str, Callable[[dict, RenderContext], QWidget]] = {
 }
 
 
-def _apply_theme_and_restyle(spec) -> None:
-    """Feature 044 (US5) — apply a theme spec to the live palette and restyle the
-    running app. Self-contained (imports Qt lazily) so any renderer can trigger a
-    live restyle without a handle to the MainWindow; fail-open.
-
-    The palette mutation is synchronous (pure, no Qt) so the surface that carried
-    the ``theme_apply`` renders in the new colours immediately. The global
-    ``setStyleSheet`` is DEFERRED to the next event-loop turn (``QTimer.singleShot``)
-    rather than run inline: doing a global re-polish from *inside* a render pass is
-    re-entrant and crashes headless Qt (offscreen), and deferring keeps it off the
-    render call stack. In a unit test (no running event loop) the deferred restyle
-    simply never fires — the palette assertion still holds and nothing segfaults."""
+def _apply_theme_via_ctx(spec, ctx) -> None:
+    """Feature 044 (US5) — route a theme spec to the app's SINGLE theme-apply
+    implementation: ``RenderContext.apply_theme``, wired by the MainWindow to
+    its ``_apply_theme_pref`` path (which mutates the palette synchronously and
+    DEFERS the global restyle to the next event-loop turn — a global re-polish
+    from *inside* a render pass is re-entrant and segfaults headless Qt).
+    Without a wired callback (bare unit renders) only the palette mutates;
+    theming must never break a render pass (fail-open)."""
     try:
-        if not T.apply_theme(spec):
-            return
-        from PySide6.QtCore import QTimer
-        from PySide6.QtWidgets import QApplication
-
-        app = QApplication.instance()
-        if app is None:
-            return
-
-        def _restyle() -> None:
-            try:
-                app.setStyleSheet(T.build_stylesheet() + getattr(T, "ROOT_BG_STYLE", ""))
-            except Exception:  # noqa: BLE001
-                pass
-
-        QTimer.singleShot(0, _restyle)
+        cb = getattr(ctx, "apply_theme", None)
+        if callable(cb):
+            cb(spec)
+        else:
+            T.apply_theme(spec)
     except Exception:  # noqa: BLE001 — theming must never break a render pass
         pass
 
@@ -1276,7 +1265,7 @@ def _r_color_picker(c, ctx):
         readout.setText(hexv)
         if key:
             ctx.emit("save_theme", {"theme": {"color_key": key, "color_value": hexv}})
-            _apply_theme_and_restyle({"color_key": key, "color_value": hexv})
+            _apply_theme_via_ctx({"color_key": key, "color_value": hexv}, ctx)
 
     swatch.clicked.connect(_pick)
     lay.addWidget(swatch)
@@ -1288,9 +1277,9 @@ def _r_color_picker(c, ctx):
 
 def _r_theme_apply(c, ctx):
     """Feature 043/044 — the ``theme_apply`` side-effect carries the chosen
-    preset/colors for the client to apply. Apply it to the live palette (US5)
-    and return a zero-height spacer (no visible UI)."""
-    _apply_theme_and_restyle(c)
+    preset/colors for the client to apply. Route it to the app's theme path
+    (US5) and return a zero-height spacer (no visible UI)."""
+    _apply_theme_via_ctx(c, ctx)
     w = QWidget()
     w.setFixedHeight(0)
     return w

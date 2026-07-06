@@ -6,6 +6,8 @@ offline path) so they are testable without networking.
 """
 import asyncio
 import json
+import threading
+import time
 
 import pytest
 
@@ -83,3 +85,61 @@ def test_auth_required_holds_reconnect(qapp):
     # simulate the inbound handling contract: transport flags the hold
     c._auth_hold = True
     assert c._should_reconnect() is False
+
+
+def test_frame_sent_in_connect_window_is_delivered(qapp):
+    """A frame composed between the connect path's queue drain and the flip of
+    `_connected` must still go out on THIS connection (the second drain), not
+    sit queued until the next reconnect."""
+    c = _client(qapp)
+    sent: list[str] = []
+
+    class FakeWs:
+        async def send(self, frame):
+            sent.append(frame)
+
+    orig_flush = c._flush_pending
+    calls = {"n": 0}
+
+    async def flush(ws):
+        calls["n"] += 1
+        await orig_flush(ws)
+        if calls["n"] == 1:
+            # a Qt-thread send lands exactly in the race window: after the
+            # first drain, before `_connected` flips True → queued.
+            c.send_event("raced", {})
+
+    c._flush_pending = flush
+    asyncio.run(c._finish_open(FakeWs()))
+    assert [json.loads(f)["action"] for f in sent] == ["raced"]
+    assert not c._pending
+    assert c._connected is True
+
+
+def test_failed_fast_path_send_requeues(qapp):
+    """A connected fast-path send whose ws.send raises (socket died with
+    `_connected` still True) re-queues the frame through the offline path —
+    an outbound frame never just vanishes (FR-003)."""
+    c = _client(qapp)
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        class DeadWs:
+            async def send(self, frame):
+                raise ConnectionError("socket died")
+
+        c._loop = loop
+        c._ws = DeadWs()
+        c._connected = True
+        c.send_event("chat_message", {"message": "hi"})
+        # the done-callback runs on the loop thread; wait for the re-queue
+        deadline = time.time() + 3.0
+        while not c._pending and time.time() < deadline:
+            time.sleep(0.01)
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=2.0)
+        loop.close()
+    assert len(c._pending) == 1
+    assert json.loads(c._pending[0])["action"] == "chat_message"

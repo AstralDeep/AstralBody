@@ -81,14 +81,24 @@ def teardown(conn, run_id: str) -> int:
     like = ns + "%"
     deleted = 0
     with conn.cursor() as cur:
+        # Commit per table: a failed DELETE would otherwise poison the shared
+        # transaction (later statements raise InFailedSqlTransaction and the
+        # final commit would roll back everything while ``deleted`` still
+        # reported the rowcounts). Rolling back on failure keeps the remaining
+        # tables purgeable and ``deleted`` counting only committed work.
         for table in _DELETABLE_USER_TABLES:
             try:
                 cur.execute(
                     f"DELETE FROM {table} WHERE user_id LIKE %s", (like,)
                 )
-                deleted += cur.rowcount or 0
+                count = cur.rowcount or 0
+                conn.commit()
+                deleted += count
             except Exception as exc:  # table may not exist in a given schema rev
                 logger.debug("teardown skip %s: %s", table, exc)
-        conn.commit()
+                try:
+                    conn.rollback()
+                except Exception:
+                    logger.debug("teardown rollback failed for %s", table, exc_info=True)
     logger.info("teardown removed %d row(s) for run %s", deleted, ns)
     return deleted

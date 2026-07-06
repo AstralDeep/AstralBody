@@ -59,6 +59,17 @@ def test_apply_colors_map():
     assert "#123456" in T.build_stylesheet()
 
 
+def test_colors_map_overrides_preset_name():
+    """W7: a spec carrying BOTH a preset name and a resolved ``colors`` map
+    applies the colors — the server always sends the resolved channel map
+    alongside the preset, and it is authoritative; the local preset table is
+    only a fallback for old servers that send the name alone."""
+    assert T.apply_theme({"preset": "midnight",
+                          "colors": dict(T.PRESETS["ocean"])}) is True
+    assert T.PALETTE == T.PRESETS["ocean"]
+    assert T.PRIMARY == T.PRESETS["ocean"]["primary"]
+
+
 def test_apply_single_color_key():
     assert T.apply_theme({"color_key": "accent", "color_value": "#FF8800"}) is True
     assert T.PALETTE["accent"] == "#FF8800"
@@ -124,3 +135,32 @@ def test_theme_apply_component_applies_live(qapp):
     render({"type": "theme_apply", "preset": "forest", "message": "applied"},
            RenderContext(emit=lambda *a: None))
     assert T.PALETTE["primary"] == T.PRESETS["forest"]["primary"]
+
+
+# --- W5: renderer theme path routes through the app's single implementation --
+
+def test_theme_apply_routes_through_ctx_callback(qapp):
+    """The renderer's theme path must call the app-injected
+    ``RenderContext.apply_theme`` (wired to MainWindow._apply_theme_pref — the
+    single theme-apply implementation, which also restyles the canvas) instead
+    of a private duplicate. The callback owns the palette mutation."""
+    seen = []
+    before = dict(T.PALETTE)
+    render({"type": "theme_apply", "preset": "ocean"},
+           RenderContext(emit=lambda *a: None,
+                         apply_theme=lambda spec: seen.append(spec)))
+    assert seen and seen[0]["preset"] == "ocean"
+    assert T.PALETTE == before        # the app callback owns the mutation
+
+
+def test_color_picker_routes_through_ctx_callback(qapp, monkeypatch):
+    from PySide6.QtWidgets import QPushButton
+
+    monkeypatch.setattr(rmod, "_choose_color", lambda *a, **k: "#FF8800")
+    seen = []
+    ctx = RenderContext(emit=lambda a, p: None,
+                        apply_theme=lambda spec: seen.append(spec))
+    w = render({"type": "color_picker", "color_key": "accent",
+                "value": "#06B6D4", "label": "Accent"}, ctx)
+    w.findChild(QPushButton).click()
+    assert seen == [{"color_key": "accent", "color_value": "#FF8800"}]
