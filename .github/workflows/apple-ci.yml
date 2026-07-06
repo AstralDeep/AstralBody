@@ -1,0 +1,31 @@
+# Feature 051 — Apple clients CI (additive; Constitution XI).
+# Mirrors how android-ci.yml was introduced in 041: its own workflow, no
+# change to the existing gates. Runs the AstralCore test suite (including
+# the ui_protocol.json drift guard) on a macOS runner. The xcodebuild
+# app-target job lands with the committed Xcode project (tasks.md T052).
+name: apple-ci
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apple-clients/**"
+      - "backend/shared/ui_protocol.json"
+      - ".github/workflows/apple-ci.yml"
+  pull_request:
+    paths:
+      - "apple-clients/**"
+      - "backend/shared/ui_protocol.json"
+      - ".github/workflows/apple-ci.yml"
+
+jobs:
+  core-tests:
+    name: AstralCore swift test (drift guard)
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift version
+        run: swift --version
+      - name: Run AstralCore tests
+        run: swift test --package-path apple-clients/AstralCore
