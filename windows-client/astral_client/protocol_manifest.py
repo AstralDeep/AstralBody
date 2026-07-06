@@ -17,6 +17,14 @@ from __future__ import annotations
 HANDLED = "handled"
 IGNORED = "ignored"
 
+#: ui_event actions handled entirely in-app (never sent for a server
+#: ``chrome_surface`` re-render), so a surface's load-timeout bound must NOT be
+#: armed for them. Committed mirror of ``backend/shared/ui_protocol.json``
+#: ``client_local_actions`` — a packaged build has no repo tree to probe, so
+#: the value lives here and ``tests/test_protocol_manifest.py`` asserts the two
+#: stay in sync.
+CLIENT_LOCAL_ACTIONS: frozenset[str] = frozenset({"attach_existing"})
+
 CLASSIFICATION: dict[str, str] = {
     # bootstrap
     "rote_config": IGNORED,           # natives are full-capability; profile unused

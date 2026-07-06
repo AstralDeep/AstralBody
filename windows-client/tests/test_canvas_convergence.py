@@ -39,15 +39,35 @@ def test_identity_preserved_across_full_renders(qapp):
 
 
 def test_clobber_sequence_upsert_then_full_render(qapp):
-    """The known clobber: a ui_upsert adds A, then a full render of A+B must keep
-    A rather than throwing it away and rebuilding."""
+    """The known clobber: a ui_upsert adds A, then a full render re-delivering
+    the SAME A (+ B) must keep A rather than throwing it away and rebuilding."""
     c = Canvas(_ctx())
-    c.apply_ops([{"op": "upsert", "component_id": "A",
-                  "component": {"type": "text", "content": "hi"}}])
+    c.apply_ops([{"op": "upsert", "component_id": "A", "component": _card("A")}])
     wa = c._by_id["A"]
     c.set_components([_card("A"), _card("B")])
     assert "A" in c._by_id and "B" in c._by_id
     assert c._by_id["A"] is wa   # A survived, not clobbered
+
+
+def test_out_of_turn_render_updates_a_matching_id_in_place(qapp):
+    """Mirrors the Android twin (CanvasClobberTest
+    'out_of_turn_render_updates_a_matching_id_in_place'): the same id delivered
+    as a card then as an ALERT across two full renders must show the alert —
+    id-only reuse would keep the stale card widget (timeline snapshots,
+    combine/condense re-deliver ids with changed content)."""
+    from PySide6.QtWidgets import QLabel
+
+    c = Canvas(_ctx())
+    c.set_components([{"type": "card", "component_id": "A",
+                       "title": "Live data", "content": []}])
+    w1 = c._by_id["A"]
+    c.set_components([{"type": "alert", "component_id": "A",
+                       "variant": "info", "message": "SNAPSHOT"}])
+    w2 = c._by_id["A"]
+    assert w2 is not w1                      # changed content -> fresh widget
+    texts = [(lab.text() or "") for lab in w2.findChildren(QLabel)]
+    assert any("SNAPSHOT" in t for t in texts)
+    assert not any("Live data" in t for t in texts)
 
 
 def test_full_render_removes_absent_id(qapp):

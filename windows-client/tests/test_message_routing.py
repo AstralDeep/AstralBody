@@ -330,6 +330,46 @@ def test_surface_dialog_switch_removes_stale_widgets_immediately(qapp):
     dlg.close()
 
 
+# --- W1: an empty chrome_surface frame is the server's CLOSE instruction -----
+
+def test_chrome_surface_close_frame_closes_open_dialog(win):
+    """chrome_surface {surface_key:"", title:"", components:[]} is a CLOSE
+    (shared/protocol.py: empty components clears/closes the modal) — it must
+    close the open SurfaceDialog, not repaint it as a blank Settings page."""
+    win._on_message({"type": "chrome_surface", "surface_key": "theme",
+                     "title": "Theme",
+                     "components": [{"type": "text", "content": "PRESETS"}]})
+    assert win._surface_dialog is not None
+    assert not win._surface_dialog.isHidden()
+    win._on_message({"type": "chrome_surface", "surface_key": "", "title": "",
+                     "components": []})
+    assert win._surface_dialog.isHidden()
+
+
+def test_chrome_surface_close_frame_does_not_create_dialog(win):
+    """A close frame with no dialog open must not lazily create one (the old
+    handler popped a blank modal over the canvas)."""
+    assert win._surface_dialog is None
+    win._on_message({"type": "chrome_surface", "surface_key": "", "title": "",
+                     "components": []})
+    assert win._surface_dialog is None
+
+
+# --- W4: workspace_timeline opens the SDUI timeline surface ------------------
+
+def test_workspace_timeline_routes_to_sdui_surface(win):
+    """The timeline menu/topbar entry must open the SDUI workspace-timeline
+    surface (chrome_open round-trip), NOT the legacy Recent-chats dialog —
+    otherwise the snapshot list/view/back-to-live surface is unreachable."""
+    win.client.sent.clear()
+    win._open_surface("workspace_timeline", "Workspace timeline")
+    assert ("chrome_open",
+            {"surface": "workspace_timeline", "params": {}}) in win.client.sent
+    assert win._surface_dialog is not None       # SDUI dialog, in-flight state
+    assert win._history_dialog is None           # legacy dialog NOT opened
+    assert ("get_history", {}) not in win.client.sent
+
+
 # --- M3: a client-local action must NOT arm the surface load timeout ---------
 
 def test_surface_dialog_client_local_action_does_not_arm_timer(qapp):
@@ -386,6 +426,34 @@ def test_real_connected_still_resyncs(win):
     win._on_status("connected")
     actions = [a for a, _ in win.client.sent]
     assert "discover_agents" in actions and "get_history" in actions
+
+
+# --- W5: theme apply from the canvas restyles via the app path (deferred) ----
+
+def test_theme_apply_component_triggers_app_restyle(win, qapp, monkeypatch):
+    """A theme_apply component rendered on the canvas routes through the
+    MainWindow's single theme path (RenderContext.apply_theme) and triggers the
+    full restyle — DEFERRED out of the render pass (headless-Qt segfault
+    protection), delivered on the next event-loop turn."""
+    import astral_client.theme as T
+
+    restyled = []
+    monkeypatch.setattr(win, "_restyle_all", lambda: restyled.append(True))
+    snap = dict(T.PALETTE)
+    try:
+        win.canvas.set_components([{"type": "theme_apply", "preset": "forest"}])
+        assert T.PALETTE["primary"] == T.PRESETS["forest"]["primary"]
+        assert restyled == []          # deferred, never inside the render pass
+        for _ in range(100):
+            qapp.processEvents()
+            if restyled:
+                break
+        assert restyled == [True]      # the ONE restyle path ran
+    finally:
+        T.PALETTE.clear()
+        T.PALETTE.update(snap)
+        T._derive()
+        T.APP_STYLESHEET = T.build_stylesheet()
 
 
 # --- M1: silent token refresh runs OFF the GUI thread -----------------------

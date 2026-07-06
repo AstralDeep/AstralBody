@@ -61,10 +61,3 @@ class InjecAgentAdapter(BenchmarkAdapter):
             self.corpus_version = "injecagent-real"
         cases = _sample_cases()
         return cases[:limit] if limit else cases
-
-
-ADAPTERS = {
-    "agentdojo": "security_benchmark.adapters.agentdojo:AgentDojoAdapter",
-    "asb": "security_benchmark.adapters.asb:ASBAdapter",
-    "injecagent": "security_benchmark.adapters.injecagent:InjecAgentAdapter",
-}

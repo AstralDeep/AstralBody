@@ -147,8 +147,9 @@ data class UiState(
  * Navigation (chrome_open, load_chat, discover_agents, …) and the timeline-exit
  * action stay allowed so the user is never trapped. Pure → unit-tested.
  */
-internal fun isTimelineMutation(action: String): Boolean =
-    action in setOf("chat_message", "component_action", "table_paginate", "save_theme")
+internal fun isTimelineMutation(action: String): Boolean = action in TIMELINE_MUTATIONS
+
+private val TIMELINE_MUTATIONS = setOf("chat_message", "component_action", "table_paginate", "save_theme")
 
 /**
  * Owns the connection + derived UI state. Folds each [Inbound] into [state] and
@@ -673,13 +674,37 @@ class AppViewModel(
                 applyCanvasOps(s, streamErrorOps(msg))
             is Inbound.ChromeMenu -> s.copy(chromeMenu = msg.model)
             is Inbound.ChromeSurface ->
-                // Only accept the surface the user is currently awaiting: a late or
-                // duplicate chrome_surface (for a surface they navigated away from)
-                // must not yank them back to Screen.Surface with the wrong content.
-                if (s.screen == Screen.Surface && s.pendingSurfaceKey == msg.surfaceKey) {
-                    s.copy(pendingSurface = msg)
-                } else {
-                    s
+                when {
+                    // The documented CLOSE instruction (chrome_close, workspace-
+                    // timeline view/live): a blank key with no components pops the
+                    // surface screen back to the chat it was opened over, so the
+                    // user is never stuck on a stale surface hiding the canvas.
+                    msg.surfaceKey.isBlank() && msg.components.isEmpty() ->
+                        if (s.screen == Screen.Surface) {
+                            s.copy(
+                                screen = Screen.Chat,
+                                pendingSurface = null,
+                                pendingSurfaceKey = "",
+                                pendingSurfaceParams = JsonObject(emptyMap()),
+                            )
+                        } else {
+                            s
+                        }
+                    // The surface the user is currently awaiting.
+                    s.screen == Screen.Surface && s.pendingSurfaceKey == msg.surfaceKey ->
+                        s.copy(pendingSurface = msg)
+                    // A mismatched key (chrome error notices arrive keyed "error":
+                    // unknown action, admin-denied, handler failures) must not yank
+                    // the user to Screen.Surface with the wrong content — but it is
+                    // never a SILENT drop either (FR-002): surface its alert text
+                    // through the banner, mirroring Inbound.ErrorFrame.
+                    else -> {
+                        val text =
+                            listOf(msg.title, noticeText(msg.components))
+                                .filter { it.isNotBlank() }
+                                .joinToString(": ")
+                        if (text.isBlank()) s else s.copy(banner = text, bannerKind = "error")
+                    }
                 }
             // Stored preferences at boot: fold `theme` into the live palette so the
             // app opens in the user's saved theme (US5 restyle).
@@ -869,6 +894,17 @@ class AppViewModel(
                     ?: (c.attributes["text"] as? JsonPrimitive)?.contentOrNull
                     ?: ""
             (own + "\n" + flattenText(c.children)).trim()
+        }.trim()
+
+    /** Notice text from a chrome_surface's components — Alerts carry `message`. */
+    private fun noticeText(components: List<Component>): String =
+        components.joinToString("\n") { c ->
+            val own =
+                (c.attributes["message"] as? JsonPrimitive)?.contentOrNull
+                    ?: (c.attributes["content"] as? JsonPrimitive)?.contentOrNull
+                    ?: (c.attributes["text"] as? JsonPrimitive)?.contentOrNull
+                    ?: ""
+            (own + "\n" + noticeText(c.children)).trim()
         }.trim()
 
     private fun parserNote(status: String?): String? =

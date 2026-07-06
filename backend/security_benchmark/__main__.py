@@ -13,6 +13,7 @@ import sys
 from typing import List, Optional
 
 from security_benchmark.config import RunConfig
+from security_benchmark.report import compute_stats
 from security_benchmark.runner import check_regression, run
 
 
@@ -56,13 +57,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         labels = list(rec.adjudications.keys())
         if not labels:
             continue
-        from security_benchmark.report import compute_stats
         base = compute_stats(rec.adjudications[labels[0]]).asr
         full = compute_stats(rec.adjudications[labels[-1]]).asr
         print(f"  {rec.key.benchmark}: baseline ASR={base:.3f} → full-envelope ASR={full:.3f}")
 
-    if args.asr_threshold is not None:
-        offenders = check_regression(records, args.asr_threshold)
+    if config.asr_threshold is not None:
+        offenders = check_regression(records, config.asr_threshold)
         if offenders:
             print("CI REGRESSION GATE TRIPPED:")
             for o in offenders:

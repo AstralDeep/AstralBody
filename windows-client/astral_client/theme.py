@@ -182,20 +182,23 @@ def apply_theme(theme) -> bool:
     if not isinstance(theme, dict):
         return False
     before = dict(PALETTE)
+    # Preset name first (the fallback for old servers), then an explicit
+    # ``colors`` map wins per channel — the server resolves the preset to its
+    # channel map and sends it alongside the name, and the resolved colors are
+    # authoritative (the local preset table is only a fallback).
     preset = theme.get("preset")
     if isinstance(preset, str) and preset in PRESETS:
         PALETTE.update(PRESETS[preset])
-    else:
-        colors = theme.get("colors")
-        if isinstance(colors, dict):
-            for key in list(PALETTE.keys()):
-                hexv = _normalize_hex(colors.get(key))
-                if hexv:
-                    PALETTE[key] = hexv
-        key = theme.get("color_key")
-        hexv = _normalize_hex(theme.get("color_value"))
-        if isinstance(key, str) and key in PALETTE and hexv:
-            PALETTE[key] = hexv
+    colors = theme.get("colors")
+    if isinstance(colors, dict):
+        for key in list(PALETTE.keys()):
+            hexv = _normalize_hex(colors.get(key))
+            if hexv:
+                PALETTE[key] = hexv
+    key = theme.get("color_key")
+    hexv = _normalize_hex(theme.get("color_value"))
+    if isinstance(key, str) and key in PALETTE and hexv:
+        PALETTE[key] = hexv
     if PALETTE == before:
         return False
     _derive()

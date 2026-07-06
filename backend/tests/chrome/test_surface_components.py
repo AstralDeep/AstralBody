@@ -90,6 +90,9 @@ def test_theme_components_ship_theme_apply_for_live_restyle():
     comps = run(theme.components(_orch({"theme": {"preset": "ocean"}}), "u1", ["user"], {}))
     assert comps[0]["type"] == "theme_apply"
     assert comps[0]["preset"] == "ocean"
+    # Feature 044: the fully-resolved channel map ALWAYS rides along, so
+    # clients need no hand-copied preset hex tables (preset stays metadata).
+    assert comps[0]["colors"] == theme.PRESETS["ocean"]
 
 
 def test_theme_components_theme_apply_colors_when_no_preset():
@@ -98,6 +101,7 @@ def test_theme_components_theme_apply_colors_when_no_preset():
         _orch({"theme": {"colors": {"primary": "#22C55E"}}}), "u1", ["user"], {}))
     assert comps[0]["type"] == "theme_apply"
     assert comps[0]["colors"]["primary"] == "#22C55E"
+    assert comps[0]["colors"]["bg"] == theme.PRESETS["midnight"]["bg"]  # defaults fill unset keys
     assert "preset" not in comps[0]
 
 
