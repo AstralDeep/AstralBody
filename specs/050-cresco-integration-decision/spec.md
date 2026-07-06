@@ -15,7 +15,7 @@ This feature evaluated whether and how to integrate Cresco, and the evaluation i
 - **GO on a narrow, first-party Python bridge agent** that reaches a Cresco fabric through its `wsapi` seam, treating the fabric as **external infrastructure** (the same posture as Keycloak). This is what this spec now specifies for implementation.
 - **DEFER a Cresco-side bridge plugin** (Java, presenting an AgentCard to AstralBody) unless the fabric must *initiate* toward AstralBody.
 
-The evaluation findings and the implementation plan are folded into this spec (below and in [plan.md](plan.md)); tasks are in [tasks.md](tasks.md). Unlike the evaluation phase, the bridge is **product code**: Constitution Principles III (coverage), X (production readiness), and XI (CI) apply in full.
+The evaluation findings and the implementation plan are folded into this spec (below and in [plan.md](plan.md)); tasks are in [tasks.md](tasks.md). Supporting design artifacts: [research.md](research.md) (long-form evaluation + SHA-pinned facts), [data-model.md](data-model.md) (config/wire/tool entities; no schema change), [quickstart.md](quickstart.md) (fabric bring-up + verification runbook), and [contracts/](contracts/) (wsapi-client, tool, and audit contracts). Unlike the evaluation phase, the bridge is **product code**: Constitution Principles III (coverage), X (production readiness), and XI (CI) apply in full.
 
 ## Evaluation findings (verified 2026-07-06)
 

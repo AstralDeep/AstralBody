@@ -32,17 +32,23 @@ Gate result: **PASS** (build-time gates to be satisfied by the implementation + 
 
 ## Project Structure
 
+Filenames follow the in-process-agent discovery convention (feature 040): the class module MUST be `<dir>/<dir>_agent.py`, and the tool registry lives in `mcp_tools.py` behind an `mcp_server.py` router — mirroring `agents/summarizer/` exactly. Agent id is pinned **`cresco-1`** (dir → id convention; it is the `local_agents` dispatch key and the ECIES key stem).
+
 ```
 backend/agents/cresco/
-├── __init__.py
-├── agent.py            # first-party BaseA2AAgent subclass; tool registry (tiered scopes)
-├── wsapi_client.py     # JSON-over-WSS client on `websockets` + stdlib; envelope encode/decode; TLS ctx; egress-validated dial
-└── tools.py            # read/write/executor tool handlers (thin wrappers over the client)
+├── __init__.py            # re-exports (class, MCPServer, tools, TOOL_REGISTRY)
+├── cresco_agent.py        # class CrescoAgent(BaseA2AAgent), agent_id="cresco-1"; __init__ → super().__init__(MCPServer(), …)
+├── mcp_server.py          # MCPServer: self.tools = TOOL_REGISTRY; process_request() router (copy of summarizer)
+├── mcp_tools.py           # read/write/executor handlers (**kwargs, astralprims out) + TOOL_REGISTRY (function/description/input_schema/scope)
+├── wsapi_client.py        # JSON-over-WSS client on `websockets` + stdlib; envelope encode/decode; verified-TLS ctx; egress-validated dial
+└── tests/                 # wsapi client + tool unit/integration tests (mocked socket, pinned fixtures)
 
-backend/orchestrator/local_agents.py   # register cresco under BUILT_IN_AGENT_DIRS (flag-gated)
-backend/shared/feature_flags.py        # FF_CRESCO (default off)
-backend/agents/cresco/tests/           # wsapi client + tool unit/integration tests
+backend/orchestrator/local_agents.py   # add "cresco" to BUILT_IN_AGENT_DIRS + a FF_CRESCO `continue` guard in the register loop
+backend/shared/feature_flags.py        # FF_CRESCO (default off, fail-closed)
+backend/shared/database.py             # add 'cresco-1' to _FIRST_PARTY_PUBLIC_AGENT_IDS (UI visibility when flag on)
 ```
+
+Supporting design artifacts: [research.md](research.md) (evaluation + pinned facts), [data-model.md](data-model.md) (config/wire/tool entities, no schema), [quickstart.md](quickstart.md) (fabric bring-up + verification runbook), [contracts/](contracts/) (wsapi-client / tool / audit contracts).
 
 ## Phased Approach
 

@@ -7,14 +7,30 @@
 FROM python:3.11-slim
 WORKDIR /app
 
-# System packages required by file-upload parsing (feature 002-file-uploads):
+# System packages.
+#
+# Runtime (file-upload parsing, feature 002-file-uploads):
 #   poppler-utils  - PDF rendering used by pdf2image (image-only PDFs are
 #                    handed to the vision model)
 #   libmagic1      - libmagic bindings used by python-magic for content-type sniffing
+#
+# Build toolchain (build-essential + cmake + git):
+#   Required to compile source-only wheels. On linux/arm64 — which Docker Desktop
+#   builds by default on Apple Silicon Macs — some medical-imaging deps publish no
+#   prebuilt wheel and build from source. aicspylibczi in particular uses a
+#   CMake/pybind11 build that (a) fails with "No such file or directory: 'cmake'"
+#   without cmake, and (b) fetches its vendored libCZI sources over git, so git is
+#   needed too (verified: build-essential+cmake+git compiles aicspylibczi 3.3.1 on
+#   arm64). On amd64 (typical Linux/Windows CI + prod) a prebuilt wheel is used and
+#   this toolchain is never invoked. Installing it keeps `docker compose build`
+#   green on every architecture — Mac, Windows, and Linux alike.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         poppler-utils \
         libmagic1 \
+        build-essential \
+        cmake \
+        git \
     && rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip and install wheel/setuptools first to ensure binary wheels are downloaded

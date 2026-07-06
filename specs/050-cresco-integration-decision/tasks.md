@@ -1,20 +1,22 @@
 # Tasks: Cresco Integration (Bridge Agent)
 
 **Feature**: 050-cresco-integration-decision | **Plan**: [plan.md](plan.md) | **Spec**: [spec.md](spec.md)
+**Design artifacts**: [research.md](research.md) · [data-model.md](data-model.md) · [quickstart.md](quickstart.md) · [contracts/](contracts/) (wsapi-client / tool / audit).
 Product feature — implementation tasks. Verification is end-to-end against a local single-node Cresco fabric plus unit/integration tests (Constitution III/X/XI apply).
 
 ## Phase 0 — Scaffold
 
-- [ ] T001 Create `backend/agents/cresco/` package (`__init__.py`, `agent.py`, `wsapi_client.py`, `tools.py`, `tests/`).
+- [ ] T001 Create `backend/agents/cresco/` package matching the feature-040 discovery convention: `__init__.py`, **`cresco_agent.py`** (`class CrescoAgent(BaseA2AAgent)`, `agent_id="cresco-1"`), **`mcp_server.py`** (router; `self.tools = TOOL_REGISTRY`), **`mcp_tools.py`** (handlers + `TOOL_REGISTRY`), `wsapi_client.py`, `tests/`. (Discovery requires `<dir>/<dir>_agent.py`; do **not** name it `agent.py`.)
 - [ ] T002 Add `FF_CRESCO` (default off, fail-closed) to `backend/shared/feature_flags.py`.
-- [ ] T003 Register the agent under `BUILT_IN_AGENT_DIRS` in `backend/orchestrator/local_agents.py`, gated on `FF_CRESCO`; seeded **not** safe (owner approval required). Flag-off ⇒ not registered (SC-001).
+- [ ] T003 Register the agent: add `"cresco"` to `BUILT_IN_AGENT_DIRS` in `backend/orchestrator/local_agents.py` **and** add a `FF_CRESCO` `continue` guard in the `register_built_ins` loop (no per-agent flag pattern exists yet — introduce one). Seeded **not** safe (owner approval required). Flag-off ⇒ not registered (SC-001).
+- [ ] T003a Add `'cresco-1'` to `_FIRST_PARTY_PUBLIC_AGENT_IDS` in `backend/shared/database.py` so the agent is visible in the Agents UI when the flag is on. (Do **not** add it to `_UNTRUSTED_AGENTS` in `taint.py` — Cresco data is fabric-internal, not open-web content.)
 
 ## Phase 1 — wsapi client (P1 foundation)
 
 - [ ] T004 [wsapi_client] Connect to `wss://{CRESCO_WSAPI_URL}/api/apisocket` with the `cresco_service_key` header using the existing `websockets` library; **no new dependency** (FR-002, SC-005).
 - [ ] T005 [wsapi_client] Implement the RPC envelope `{message_info:{message_type, message_event_type, is_rpc}, message_payload:{action,…}}` and gzip+base64 param (de)coding with stdlib (`json`/`gzip`/`base64`).
-- [ ] T006 [wsapi_client] Verified-TLS `ssl` context (trusted CA or pinned fingerprint); **never** a global verification bypass; reject self-signed unless configured (FR-007, SC-006).
-- [ ] T007 [wsapi_client] Validate the wsapi host via `shared/external_http.py::validate_egress_url` before dialing (documented private-host override for on-prem fabrics) (FR-007).
+- [ ] T006 [wsapi_client] Verified-TLS `ssl` context — system trust by default, `CRESCO_CA_BUNDLE` (trusted CA) or `CRESCO_TLS_FINGERPRINT` (pinned SHA-256); **never** `CERT_NONE`/global bypass; reject self-signed unless configured (FR-007, SC-006). This is the concrete divergence from `pycrescolib` (verify-off default).
+- [ ] T007 [wsapi_client] Validate the wsapi host via `shared/external_http.py::validate_egress_url` before dialing; on-prem private hosts allowed only via the host-scoped `CRESCO_ALLOW_PRIVATE_HOST` opt-in (not a global bypass) (FR-007).
 - [ ] T008 [wsapi_client] Bounded connect/RPC timeouts + stdlib reconnect/backoff (no `backoff` dependency); fail-safe on unexpected frames with a diagnostic (edge cases).
 - [ ] T009 [tests] Unit-test the client against a mocked socket using the frame shapes captured in the evaluation (envelope, gzip params, TLS context, egress validation, fail-safe).
 
