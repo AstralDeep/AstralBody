@@ -7256,7 +7256,20 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     logger.exception("webrender: ui_upsert fragment render failed")
                 wire_ops.append({"op": "upsert", "component_id": cid,
                                  "component": adapted, "html": html})
-            await self._safe_send(ws, UIUpsert(chat_id=chat_id, ops=wire_ops).to_json())
+            # Feature 051: watch sockets hear the upserted content too. One
+            # utterance per delivery, built from the adapted components; the
+            # viewport re-adapt path (_readapt_targeted) deliberately does NOT
+            # attach speech — re-adapting old content must never re-speak it.
+            speech = None
+            try:
+                from orchestrator.watch_speech import speech_for_profile
+                speech = speech_for_profile(profile, [
+                    o.get("component") for o in wire_ops
+                    if o.get("op") == "upsert" and isinstance(o.get("component"), dict)
+                ])
+            except Exception:
+                logger.debug("watch_speech unavailable for ui_upsert", exc_info=True)
+            await self._safe_send(ws, UIUpsert(chat_id=chat_id, ops=wire_ops, speech=speech).to_json())
 
     async def _handle_tool_progress(self, msg) -> None:
         """Route a long-running job's ToolProgress to the job's CHAT.
@@ -7487,7 +7500,16 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 html = render_for_target(target_for_profile(profile), adapted, profile)
         except Exception:
             logger.exception("webrender: failed to render UI (sending structured components only)")
-        msg = UIRender(components=adapted, target=target, html=html)
+        # Feature 051: watch-profile sockets additionally hear the delivery —
+        # spoken rendition of the SAME adapted components (fail-open, absent
+        # for every other profile; contracts/spoken-rendition.md).
+        speech = None
+        try:
+            from orchestrator.watch_speech import speech_for_profile
+            speech = speech_for_profile(self.rote.get_profile(websocket), adapted)
+        except Exception:
+            logger.debug("watch_speech unavailable for ui_render", exc_info=True)
+        msg = UIRender(components=adapted, target=target, html=html, speech=speech)
         await self._safe_send(websocket, msg.to_json())
 
     async def _shell_token_for_request(self, request):

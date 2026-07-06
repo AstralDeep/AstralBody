@@ -144,6 +144,16 @@ class UIRender(Message):
     # astralprims primitives via webrender). Structured `components` remain on
     # the wire for programmatic/non-web consumers (FR-018).
     html: Optional[str] = None
+    # Feature 051: spoken rendition attached ONLY for watch-profile sockets
+    # ({"ssml": ..., "text": ...}); ABSENT — not null — everywhere else
+    # (contracts/spoken-rendition.md).
+    speech: Optional[Dict[str, str]] = None
+
+    def to_json(self) -> str:
+        data = asdict(self)
+        if data.get("speech") is None:
+            data.pop("speech", None)
+        return json.dumps(data)
 
 @dataclass
 class UIUpdate(Message):
@@ -171,6 +181,15 @@ class UIUpsert(Message):
     type: str = "ui_upsert"
     chat_id: str = ""
     ops: List[Dict[str, Any]] = field(default_factory=list)
+    # Feature 051: spoken rendition of this delivery's upserted content for
+    # watch-profile sockets; absent elsewhere (contracts/spoken-rendition.md).
+    speech: Optional[Dict[str, str]] = None
+
+    def to_json(self) -> str:
+        data = asdict(self)
+        if data.get("speech") is None:
+            data.pop("speech", None)
+        return json.dumps(data)
 
 
 @dataclass
