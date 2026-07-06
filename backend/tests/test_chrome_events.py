@@ -129,6 +129,42 @@ def test_handler_exception_renders_error_block(stub_surface):
     assert "astral-chrome-error" in html
 
 
+def _native(orch):
+    """Give a FakeOrch a native (windows) ROTE profile so error notices take
+    the chrome_surface path (feature 044 — surface_key assertions)."""
+    from rote.capabilities import DeviceProfile
+    profile = DeviceProfile.from_dict({"device_type": "windows"})
+    orch.rote = types.SimpleNamespace(get_profile=lambda ws: profile)
+    return orch
+
+
+def test_handler_exception_notice_carries_acting_surface_key(stub_surface):
+    orch = _native(FakeOrch())
+    handled = run(chrome_events.handle_chrome_event(orch, orch.ws, "chrome_stub_boom", {}, "u1"))
+    assert handled is True
+    frames = [f for f in orch.sent if f.get("type") == "chrome_surface"]
+    assert frames, "no chrome_surface error notice pushed"
+    assert frames[-1]["surface_key"] == "stub"
+
+
+def test_admin_denied_action_notice_carries_owner_surface_key():
+    chrome_events._HANDLERS = None
+    orch = _native(FakeOrch(roles=("user",)))
+    run(chrome_events.handle_chrome_event(
+        orch, orch.ws, "chrome_admin_step_archive", {"step_id": 1}, "u1"))
+    frames = [f for f in orch.sent if f.get("type") == "chrome_surface"]
+    assert frames, "no chrome_surface error notice pushed"
+    assert frames[-1]["surface_key"] == "admin_tools"
+
+
+def test_unknown_action_notice_defaults_to_error_surface_key(stub_surface):
+    orch = _native(FakeOrch())
+    run(chrome_events.handle_chrome_event(orch, orch.ws, "chrome_wat", {}, "u1"))
+    frames = [f for f in orch.sent if f.get("type") == "chrome_surface"]
+    assert frames, "no chrome_surface error notice pushed"
+    assert frames[-1]["surface_key"] == "error"
+
+
 def test_render_exception_renders_error_block(stub_surface, monkeypatch):
     async def bad_render(orch, user_id, roles, params):
         raise RuntimeError("render broke")

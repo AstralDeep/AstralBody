@@ -9,7 +9,13 @@ type therefore fails this suite until the desktop deliberately classifies it.
 import json
 from pathlib import Path
 
-from astral_client.protocol_manifest import CLASSIFICATION, HANDLED, IGNORED, is_handled
+from astral_client.protocol_manifest import (
+    CLASSIFICATION,
+    CLIENT_LOCAL_ACTIONS,
+    HANDLED,
+    IGNORED,
+    is_handled,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = REPO_ROOT / "backend" / "shared" / "ui_protocol.json"
@@ -27,6 +33,14 @@ def test_classification_covers_manifest_exactly():
     stale = sorted(classified - push)
     assert not missing, f"server frame types the desktop has not classified: {missing}"
     assert not stale, f"desktop classifies frame types the server no longer sends: {stale}"
+
+
+def test_client_local_actions_matches_manifest():
+    """The committed CLIENT_LOCAL_ACTIONS constant (a packaged build has no repo
+    tree to probe at import time) must mirror the manifest's
+    ``client_local_actions`` exactly."""
+    data = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    assert CLIENT_LOCAL_ACTIONS == frozenset(data["client_local_actions"])
 
 
 def test_classification_values_are_valid():

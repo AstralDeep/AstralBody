@@ -248,6 +248,45 @@ def test_live_success_restores_canvas_and_device_aware_close(device):
     assert not any(f.get("type") == "chrome_render" for f in orch.sent)
 
 
+def test_chrome_open_without_chat_id_defaults_to_active_chat():
+    """Feature 044 — chrome_open with no chat_id param falls back to the
+    socket's active chat server-side (native clients don't inject chat_id the
+    way web's client.js does), so the timeline lists snapshots instead of the
+    'Open a chat first' notice."""
+    from orchestrator import chrome_events
+
+    snaps = [{"id": 3, "cause": "turn", "created_at": 1_700_000_000_000}]
+    orch = TimelineOrch(workspace=FakeWorkspace(snaps=snaps))
+    ws = FakeWS("native")
+    orch.ui_sessions = {ws: {"realm_access": {"roles": ["user"]}}}
+    orch._ws_active_chat[id(ws)] = "c-active"
+    handled = run(chrome_events.handle_chrome_event(
+        orch, ws, "chrome_open", {"surface": "workspace_timeline"}, "u1"))
+    assert handled is True
+    surfaces = [f for f in orch.sent if f.get("type") == "chrome_surface"]
+    assert surfaces, "a chrome_surface frame was pushed"
+    comps = surfaces[-1]["components"]
+    assert not any(c.get("type") == "alert" and "Open a chat first" in c.get("message", "")
+                   for c in comps), "timeline fell back to the no-chat notice"
+    view_btns = _action(comps, "chrome_workspace_timeline_view")
+    assert view_btns and all(b["payload"]["chat_id"] == "c-active" for b in view_btns)
+
+
+def test_chrome_open_without_chat_id_or_active_chat_still_notices():
+    from orchestrator import chrome_events
+
+    orch = TimelineOrch(workspace=FakeWorkspace(snaps=[]))
+    ws = FakeWS("native")
+    orch.ui_sessions = {ws: {"realm_access": {"roles": ["user"]}}}
+    run(chrome_events.handle_chrome_event(
+        orch, ws, "chrome_open", {"surface": "workspace_timeline"}, "u1"))
+    surfaces = [f for f in orch.sent if f.get("type") == "chrome_surface"]
+    assert surfaces
+    comps = surfaces[-1]["components"]
+    assert any(c.get("type") == "alert" and "Open a chat first" in c.get("message", "")
+               for c in comps)
+
+
 def test_live_success_web_closes_with_empty_chrome_render():
     orch = TimelineOrch(device="browser", workspace=FakeWorkspace(live=[]))
     ws = FakeWS()

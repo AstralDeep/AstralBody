@@ -48,6 +48,45 @@ class ThemeTest {
     }
 
     @Test
+    fun explicit_colors_win_over_an_unknown_preset_name() {
+        // The backend sends the fully-resolved channel map alongside the preset
+        // name — a preset the client doesn't know must still apply via `colors`.
+        val p =
+            themePaletteForSpec(
+                null,
+                buildJsonObject {
+                    put("preset", "solarpunk")
+                    putJsonObject("colors") {
+                        put("bg", "#101010")
+                        put("surface", "#202020")
+                        put("primary", "#303030")
+                        put("secondary", "#404040")
+                        put("text", "#505050")
+                        put("muted", "#606060")
+                        put("accent", "#707070")
+                    }
+                },
+            )
+        assertEquals(
+            ThemePalette("#101010", "#202020", "#303030", "#404040", "#505050", "#606060", "#707070"),
+            p,
+        )
+    }
+
+    @Test
+    fun explicit_colors_win_over_a_known_preset_name() {
+        val p =
+            themePaletteForSpec(
+                THEME_PRESETS.getValue("midnight"),
+                buildJsonObject {
+                    put("preset", "ocean")
+                    putJsonObject("colors") { put("primary", "#123456") }
+                },
+            )
+        assertEquals("#123456", p?.primary)
+    }
+
+    @Test
     fun an_unknown_preset_or_empty_spec_leaves_current_unchanged() {
         val start = THEME_PRESETS.getValue("forest")
         assertEquals(start, themePaletteForSpec(start, buildJsonObject { put("preset", "chartreuse") }))

@@ -124,16 +124,20 @@ class MainActivity : ComponentActivity() {
         // Resume a cached session. Per the sign-in-once-a-year policy: if credentials
         // are found on the device, go straight to the home screen — show it right away
         // with the cached access token, then refresh silently and PERSIST the (rotated)
-        // refresh token so the session survives future cold starts. A failed refresh
-        // routes to the sign-in screen with an explanation, never a dead app (T016).
+        // refresh token so the session survives future cold starts. A DEFINITIVE
+        // refresh rejection routes to the sign-in screen with an explanation, never a
+        // dead app (T016); a transient failure (offline, IdP briefly down) keeps the
+        // cached token so a valid year-long session is never kicked out offline.
         lifecycleScope.launch(Dispatchers.IO) {
             val st = store.load() ?: return@launch
-            st.accessToken?.takeIf { it.isNotBlank() }?.let { authToken.value = it }
+            val cached = st.accessToken?.takeIf { it.isNotBlank() }
+            cached?.let { authToken.value = it }
             val route =
                 routeAfterRefresh(
                     runCatching { oidc.freshToken(st) }
                         .onSuccess { store.save(st) }
                         .onFailure { Log.w("MainActivity", "silent token refresh failed: ${it.message}") },
+                    cachedToken = cached,
                 )
             authToken.value = route.token
             signInError.value = route.error

@@ -252,6 +252,9 @@ async def handle_chrome_event(orch, websocket, action: str, payload: dict,
         return False
     payload = payload or {}
     roles = _roles(orch, websocket)
+    # Resolved before the handler runs so an exception's error notice carries
+    # the acting surface key (feature 044 — native key-matched reducers).
+    err_surface = ""
 
     try:
         if action == "chrome_close":
@@ -266,6 +269,14 @@ async def handle_chrome_event(orch, websocket, action: str, payload: dict,
                     params = json.loads(params)
                 except json.JSONDecodeError:
                     params = {}
+            if isinstance(params, dict) and not params.get("chat_id"):
+                # Feature 044: native clients don't inject chat_id client-side
+                # (web's client.js does) — default to the socket's active chat
+                # so per-chat surfaces (workspace_timeline) work everywhere.
+                # Same fallback the timeline's _live handler already uses.
+                chat_id = getattr(orch, "_ws_active_chat", {}).get(id(websocket), "")
+                if chat_id:
+                    params["chat_id"] = chat_id
             await _render_surface(orch, websocket, user_id, roles, surface, params)
             return True
 
@@ -277,6 +288,7 @@ async def handle_chrome_event(orch, websocket, action: str, payload: dict,
             return True
 
         surface_key, fn = entry
+        err_surface = surface_key
         # Admin re-check for actions owned by admin-only surfaces (FR-014).
         from webrender.chrome.surfaces import get_surface
         owner = get_surface(surface_key)
@@ -284,7 +296,8 @@ async def handle_chrome_event(orch, websocket, action: str, payload: dict,
             logger.warning("chrome: non-admin %s denied action %s", user_id, action)
             await _audit_admin_rejection(orch, websocket, user_id, action)
             await _push_error_notice(orch, websocket, "Not authorized",
-                                     "This action requires the admin role.")
+                                     "This action requires the admin role.",
+                                     surface_key)
             return True
 
         result = await fn(orch, websocket, user_id, roles, payload)
@@ -298,7 +311,8 @@ async def handle_chrome_event(orch, websocket, action: str, payload: dict,
         logger.exception("chrome: action %s failed", action)
         try:
             await _push_error_notice(orch, websocket, "Something went wrong",
-                                     "The action failed. Please retry.")
+                                     "The action failed. Please retry.",
+                                     err_surface)
         except Exception:
             logger.debug("chrome: error-notice push failed", exc_info=True)
         return True

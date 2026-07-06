@@ -16,16 +16,6 @@ from security_benchmark.envelope import EnvelopeConfig, default_ablation_matrix
 
 Mode = Literal["synthetic", "in_process", "external"]
 
-# Secret-bearing env names to scrub from any artifact if they ever appear
-# (defence in depth; these are product secrets, not harness inputs).
-SECRET_ENV_NAMES: tuple[str, ...] = (
-    "OPENAI_API_KEY",
-    "AUDIT_HMAC_SECRET",
-    "AGENT_API_KEY",
-    "KEYCLOAK_CLIENT_SECRET",
-    "SEARCH_API_KEY",
-)
-
 # Default gitignored artifacts root (per-run subdirs created underneath).
 # Resolved relative to this package so it is stable regardless of cwd.
 DEFAULT_ARTIFACTS_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_artifacts")
@@ -41,9 +31,7 @@ class RunConfig:
     ablation: List[EnvelopeConfig] = field(default_factory=default_ablation_matrix)
     artifacts_root: str = DEFAULT_ARTIFACTS_ROOT
     run_id: Optional[str] = None
-    base_url: Optional[str] = None             # external mode target
     asr_threshold: Optional[float] = None      # CI regression gate (FR-010)
-    strict: bool = False
 
     def normalized_run_id(self, stamp: str = "local") -> str:
         """Return the run id, namespaced under the harness prefix (FR-008).

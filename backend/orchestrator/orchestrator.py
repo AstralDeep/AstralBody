@@ -7462,9 +7462,11 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
     async def send_ui_render(self, websocket, components: List, target: str = "canvas"):
         """Send a UIRender message to a UI client, adapted via ROTE."""
-        # Auto-route error-only messages to the chat panel instead of the canvas
+        # Auto-route alert-only messages (any variant) to the chat panel
+        # instead of the canvas — a frame that is nothing but alerts would
+        # otherwise clobber the workspace with a partial single-alert render.
         if target == "canvas" and components and all(
-            isinstance(c, dict) and c.get("type") == "alert" and c.get("variant") == "error"
+            isinstance(c, dict) and c.get("type") == "alert"
             for c in components
         ):
             target = "chat"

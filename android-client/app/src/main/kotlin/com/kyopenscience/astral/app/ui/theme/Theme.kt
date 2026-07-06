@@ -135,21 +135,21 @@ fun hexToColor(hex: String?): Color? {
 }
 
 /**
- * Fold a `theme_apply` / `preferences.theme` spec onto [current] using the SAME
- * precedence as `client.js` `applyTheme` — a named `preset` wins, else a `colors`
- * map overlays present channels, else a single `color_key`+`color_value` overlays
- * one channel. Returns [current] unchanged when the spec carries nothing usable.
+ * Fold a `theme_apply` / `preferences.theme` spec onto [current] — an explicit
+ * `colors` map wins (the backend sends the fully-resolved channel map alongside
+ * the preset name, so an unrecognized preset still applies), else a named `preset`
+ * falls back to the local [THEME_PRESETS] table (old servers), else a single
+ * `color_key`+`color_value` overlays one channel. Returns [current] unchanged
+ * when the spec carries nothing usable.
  */
 fun themePaletteForSpec(
     current: ThemePalette?,
     spec: JsonObject?,
 ): ThemePalette? {
     if (spec == null) return current
-    val preset = (spec["preset"] as? JsonPrimitive)?.contentOrNull
-    if (preset != null && THEME_PRESETS.containsKey(preset)) return THEME_PRESETS[preset]
     val base = current ?: DEFAULT_PALETTE
     val colors = spec["colors"] as? JsonObject
-    if (colors != null) {
+    if (!colors.isNullOrEmpty()) {
         var next = base
         for ((k, v) in colors) {
             val hex = (v as? JsonPrimitive)?.contentOrNull ?: continue
@@ -157,6 +157,8 @@ fun themePaletteForSpec(
         }
         return next
     }
+    val preset = (spec["preset"] as? JsonPrimitive)?.contentOrNull
+    if (preset != null && THEME_PRESETS.containsKey(preset)) return THEME_PRESETS[preset]
     val key = (spec["color_key"] as? JsonPrimitive)?.contentOrNull
     val value =
         (spec["color_value"] as? JsonPrimitive)?.contentOrNull
