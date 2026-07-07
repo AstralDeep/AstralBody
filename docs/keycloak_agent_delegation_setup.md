@@ -3,8 +3,6 @@
 > **Keycloak 26.2+** · **RFC 8693 — OAuth 2.0 Token Exchange**
 > https://datatracker.ietf.org/doc/html/rfc8693
 
-> **See also:** [AstralBody Technical Document](./AstralBody_Technical_Document.md) — Section 6 (Delegated Authority Framework) and Section 14 (Appendix A) for the full security architecture context.
-
 Keycloak 26.2 introduced **Standard Token Exchange V2** as a fully supported feature (no longer preview). The old "Permissions" tab is removed — configuration is now a simple toggle in client settings.
 
 ---
@@ -245,10 +243,12 @@ AGENT_SERVICE_CLIENT_SECRET=<from-step-2>
 
 The existing variables remain unchanged:
 ```env
-VITE_KEYCLOAK_AUTHORITY=https://iam.ai.uky.edu/realms/Astral
-VITE_KEYCLOAK_CLIENT_ID=astral-frontend
+KEYCLOAK_AUTHORITY=https://iam.ai.uky.edu/realms/Astral
+KEYCLOAK_CLIENT_ID=astral-frontend
 KEYCLOAK_CLIENT_SECRET=<astral-frontend-client-secret>
 ```
+(The React-era `VITE_KEYCLOAK_*` names are deprecated aliases, backfilled
+automatically by `backend/shared/__init__.py` — use the un-prefixed names.)
 
 ---
 
@@ -260,5 +260,5 @@ KEYCLOAK_CLIENT_SECRET=<astral-frontend-client-secret>
 | `"error": "not_allowed"` | Exchange not enabled on client | Verify Steps 1 and 3 — toggle on both clients |
 | `"error": "invalid_client"` | Wrong client secret | Check `AGENT_SERVICE_CLIENT_SECRET` in `.env` |
 | `"error": "invalid_token"` | Expired user token | Refresh the user token before exchanging |
-| Missing `act` claim | Mapper not configured | Verify Step 5 — `actor-claim` mapper on `agent-delegation` scope |
-| `"error": "access_denied"` | Client policy blocking | Review Step 4 — client policies in realm settings |
+| Missing `act` claim | Mapper not configured | Verify Step 6 — `actor-claim` mapper on `agent-delegation` scope |
+| `"error": "access_denied"` | Exchange/audience misconfigured | Re-check Steps 1–4 (exchange toggles + audience mapper); V2 needs no client policies (Step 5) |

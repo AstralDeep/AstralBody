@@ -62,8 +62,8 @@ test: test-backend ## Run all tests
 
 ## ---------- Lint ----------
 
-lint-backend: ## Run ruff inside the astralbody container
-	docker exec astralbody bash -c "cd /app/backend && ruff check ."
+lint-backend: ## Run ruff from the repo root (ruff is NOT in the image; ruff.toml lives here — matches ci.yml)
+	ruff check .
 
 lint: lint-backend ## Run all linters
 
