@@ -166,6 +166,33 @@
     chat.scrollTop = chat.scrollHeight;
   }
 
+  // ---- query-start loading skeleton ----
+  // Client-local optimistic placeholder (the Android twin's SkeletonCanvas):
+  // appended to the canvas when a chat turn is sent, removed by the FIRST
+  // canvas content of the turn (render/upsert/stream) or when the turn ends
+  // without any (text-only answers, errors, cancellation). Reuses the
+  // .astral-skeleton-line shimmer the server-driven skeleton primitive ships.
+  function showSkeleton() {
+    if (timelineMode || document.getElementById("astral-canvas-skeleton")) return;
+    var d = document.createElement("div");
+    d.id = "astral-canvas-skeleton";
+    d.className = "astral-skeleton";
+    d.setAttribute("role", "status");
+    d.setAttribute("aria-busy", "true");
+    d.setAttribute("aria-live", "polite");
+    d.innerHTML = '<span class="sr-only">Loading…</span>'
+      + '<div class="astral-skeleton-line h-3 w-1/3 mb-3"></div>'
+      + '<div class="astral-skeleton-line h-20 w-full mb-3"></div>'
+      + '<div class="astral-skeleton-line h-20 w-full mb-3"></div>'
+      + '<div class="astral-skeleton-line h-3 w-1/2 mb-2"></div>';
+    canvas.appendChild(d);
+    canvas.scrollTop = canvas.scrollHeight;
+  }
+  function hideSkeleton() {
+    var d = document.getElementById("astral-canvas-skeleton");
+    if (d && d.parentNode) d.parentNode.removeChild(d);
+  }
+
   // ---- workspace upsert morph ----
   // Each op targets [data-component-id]: replace the node in place when it
   // exists (no flicker, neighbors untouched), append when new, remove on op
@@ -176,6 +203,7 @@
       setStatus("Live workspace updated — use “Back to live” to see it.");
       return;
     }
+    hideSkeleton(); // first canvas content of the turn
     var ops = msg.ops || [];
     var renderer = canvas.querySelector(".dynamic-renderer");
     if (!renderer) {
@@ -214,6 +242,7 @@
         escapeText(msg.error.message || "stream error") + "</div>";
     }
     if (!htmlStr && !msg.terminal) return;
+    hideSkeleton(); // streamed canvas content counts as the first component
     if (node) { node.innerHTML = htmlStr; processSideEffects(node); }
     else if (htmlStr) {
       node = document.createElement("div"); node.id = id; node.innerHTML = htmlStr;
@@ -228,13 +257,14 @@
       case "ui_render":
         if (data.target === "chat") appendChatBubble("assistant", data.html);
         else if (data.target === "history") { var hr = document.getElementById("astral-history"); if (hr) setHTML(hr, data.html); }
-        else setHTML(canvas, data.html);
+        else { hideSkeleton(); setHTML(canvas, data.html); }
         break;
       case "ui_upsert": applyUpsert(data); break; // in-place workspace updates
-      case "ui_update": setHTML(canvas, data.html); break;
-      case "ui_append": appendHTML(canvas, data.html); break;
+      case "ui_update": hideSkeleton(); setHTML(canvas, data.html); break;
+      case "ui_append": hideSkeleton(); appendHTML(canvas, data.html); break;
       case "workspace_timeline_mode": // read-only history view
         timelineMode = !!data.active;
+        if (timelineMode) hideSkeleton();
         setStatus(timelineMode ? "Viewing workspace history (read-only)" : "");
         break;
       case "chat_deleted": // chat removed (possibly from another tab)
@@ -271,6 +301,9 @@
         }
         break;
       case "chat_status":
+        // A turn that ends with no canvas output (text-only answer, error,
+        // cancellation) must still clear the query-start skeleton.
+        if (data.status === "done" || data.status === "idle") hideSkeleton();
         setStatus({ idle: "", thinking: "Thinking…", executing: "Working…", done: "" }[data.status] || "");
         break;
       case "chat_step": renderStep(data.step); break;
@@ -308,6 +341,7 @@
       case "error": { // feature 044 FR-002 — server error replies are never silent
         var em = errorMessage(data);
         showToast(em, "error");
+        hideSkeleton(); // the turn is over; no components are coming
         setStatus(""); // resolve any stuck "Thinking…" state (SC-006)
         break;
       }
@@ -395,6 +429,7 @@
       });
     }
     send({ type: "ui_event", action: "chat_message", session_id: activeChatId || undefined, payload: payload });
+    showSkeleton(); // optimistic loading state until the first canvas content
     if (typeof clearStagedAttachments === "function") clearStagedAttachments();
   }
 
@@ -881,6 +916,7 @@
     ws.onerror = function () { try { ws.close(); } catch (e) {} };
     ws.onclose = function () {
       setStatus("Disconnected"); attempts++;
+      hideSkeleton(); // the in-flight turn died with the socket
       // Refresh the session token BEFORE reconnecting so a register_ui after
       // the access-token TTL recovers silently instead of dead-ending. First
       // connect uses the shell-injected token directly.

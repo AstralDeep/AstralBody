@@ -291,9 +291,29 @@ class Canvas(QScrollArea):
         # Retained last-rendered component list so a live theme change can rebuild
         # inline-styled content with the new palette (feature 044 US5, restyle()).
         self._last_components: list = []
+        # Query-start loading placeholder (the Android twin's SkeletonCanvas):
+        # shown when a chat turn is sent, removed by the FIRST canvas content
+        # of the turn (set_components / apply_ops, which streaming also routes
+        # through) or explicitly when the turn ends without any.
+        self._skeleton: Optional[QWidget] = None
 
     def _insert(self, widget: QWidget) -> None:
         self._lay.insertWidget(self._lay.count() - 1, widget)
+
+    def show_skeleton(self) -> None:
+        """Append the loading placeholder below any existing components."""
+        if self._skeleton is not None:
+            return
+        w = render({"type": "skeleton", "variant": "card", "count": 3}, self.ctx)
+        self._skeleton = w
+        self._insert(w)
+
+    def hide_skeleton(self) -> None:
+        w = self._skeleton
+        self._skeleton = None
+        if w is not None:
+            w.setParent(None)
+            w.deleteLater()
 
     def set_components(self, components: list) -> None:
         """Full canvas render (a `ui_render` to the canvas region), reconciled BY
@@ -306,6 +326,7 @@ class Canvas(QScrollArea):
         clobber bug where a full render threw away components the new set still
         contains (e.g. one just added via a `ui_upsert`)."""
         components = list(components or [])
+        self.hide_skeleton()  # canvas content arrived (or is being rebuilt)
         self._last_components = components  # retained for restyle() (US5)
         # A widget is reusable only when its id survives into the new set AND
         # the incoming component payload equals what it was rendered from — a
@@ -373,6 +394,8 @@ class Canvas(QScrollArea):
 
     def apply_ops(self, ops: list) -> None:
         """In-place workspace patch (a `ui_upsert`)."""
+        if ops:
+            self.hide_skeleton()  # first canvas content of the turn
         for op in ops or []:
             kind = op.get("op", "upsert")
             cid = op.get("component_id")
@@ -1747,6 +1770,10 @@ class MainWindow(QMainWindow):
             if msg:
                 self.rail.add("user", msg)
             self.client.send_chat(msg, self.active_chat)
+            # Optimistic loading state until the turn's first canvas content
+            # (parity with the Android twin's send-time skeleton).
+            if not self._timeline_mode:
+                self.canvas.show_skeleton()
         else:
             self.client.send_event(action, payload, session_id=self.active_chat)
 
@@ -1985,6 +2012,9 @@ class MainWindow(QMainWindow):
                 )
             elif st == "done":
                 self._turn_active = False
+                # The turn ended without canvas output (text-only answer,
+                # cancellation) — clear the query-start skeleton.
+                self.canvas.hide_skeleton()
                 # A per-turn status reset ONLY — not the full reconnect re-sync
                 # (which would hide banners + re-fire discover/history every turn).
                 self._reset_status_line()
@@ -1992,6 +2022,7 @@ class MainWindow(QMainWindow):
             # FR-002/SC-006 — never silent; resolve any stuck turn.
             self._show_banner(normalize_error(msg), "error")
             self._turn_active = False
+            self.canvas.hide_skeleton()
             self.topbar.set_status("Connected", T.VARIANT_COLORS["success"][0])
         elif t == "notification":
             title = msg.get("title") or ""
@@ -2017,6 +2048,8 @@ class MainWindow(QMainWindow):
             self._show_banner("Background task finished.")
         elif t == "workspace_timeline_mode":
             self._timeline_mode = bool(msg.get("active") or msg.get("on"))
+            if self._timeline_mode:
+                self.canvas.hide_skeleton()
             # FR-007: a historical workspace view is strictly read-only — disable
             # the mutating affordances (message input + Send) while active and
             # restore them when the user returns to live. Component-action
