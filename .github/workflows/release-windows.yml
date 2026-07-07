@@ -35,11 +35,35 @@ jobs:
         with:
           python-version: "3.11"
 
+      # Guard: the pushed tag must equal v<astral_client.__version__>. Without
+      # this, a tag pushed against a stale version constant builds and signs
+      # cleanly but ships an exe whose launch integrity check permanently
+      # reports "A verified update is available" (it compares the baked
+      # __version__ to the latest release tag). Tag-push runs only —
+      # workflow_dispatch runs from a branch ref and is exempt.
+      - name: Tag matches astral_client.__version__
+        if: startsWith(github.ref, 'refs/tags/')
+        working-directory: windows-client
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'EOF'
+          import os, sys
+          import astral_client
+          tag = os.environ["TAG"]
+          want = f"v{astral_client.__version__}"
+          if tag != want:
+              sys.exit(f"Tag {tag!r} != v<__version__> ({want!r}) — bump "
+                       "windows-client/astral_client/__init__.py before tagging.")
+          print(f"tag {tag} matches __version__")
+          EOF
+
       - name: Install build + runtime deps
         run: |
           python -m pip install --upgrade pip
           pip install -r windows-client/requirements.txt
-          pip install pyinstaller sigstore
+          pip install "pyinstaller==6.21.0" "sigstore>=3.0,<4"
 
       - name: Build the exe (PyInstaller)
         working-directory: windows-client

@@ -29,16 +29,23 @@ Orchestrator (:8001)  ──WebSocket /ws──►  OrchestratorClient (asyncio 
 
 ## Run (dev)
 
-Requires a running orchestrator. For local dev set the orchestrator to mock auth
+Requires **Python 3.10+** (CI and release builds use 3.11) and a running
+orchestrator. For local dev set the orchestrator to mock auth
 (`USE_MOCK_AUTH=true`, `ASTRAL_ENV=development`) so the `dev-token` is accepted.
 
 ```bash
 python -m venv .venv
 .venv/Scripts/python -m pip install -r requirements.txt
-.venv/Scripts/python main.py                 # connects to ws://127.0.0.1:8001/ws as dev-token
+.venv/Scripts/python main.py                 # ws://127.0.0.1:8001/ws; see first-run note below
 # or:
 .venv/Scripts/python main.py --url ws://HOST:8001/ws --token <JWT>
 ```
+
+On a bare run with no authority/token configured (no env, no saved settings),
+a **first-run configuration dialog** appears (C-6): enter the server URL +
+Keycloak authority, or **Skip** to fall back to `dev-token` against a
+mock-auth orchestrator (Skip persists nothing, so the dialog returns on the
+next bare run).
 
 Env overrides: `ASTRAL_WS_URL`, `ASTRAL_TOKEN`.
 
@@ -60,8 +67,9 @@ QT_QPA_PLATFORM=offscreen .venv/Scripts/python tests/e2e_live.py --prompt "roll 
 
 ## Auth
 
-- **Dev**: `dev-token` against a mock-auth orchestrator (`--token dev-token`, the
-  default when no authority is configured).
+- **Dev**: `dev-token` against a mock-auth orchestrator (`--token dev-token`, or
+  the fallback when no authority is configured and the first-run dialog is
+  skipped).
 - **Real Keycloak (OIDC)**: set `--authority <realm-url>` (or `KEYCLOAK_AUTHORITY`)
   and the app runs **Authorization-Code + PKCE with a loopback redirect** (RFC
   8252) — it opens the system browser, you log in, and the token is used for

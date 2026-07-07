@@ -30,23 +30,23 @@ Windows client (`windows-client/astral_client/streaming.py`, `rest.py`).
 
 ## Prerequisites
 
-- JDK 17, Android SDK (Android Studio Ladybug+), an emulator or device (Android 8.0+ / API 26).
-- **First-time setup**: open `android-client/` in Android Studio (or run
-  `gradle wrapper`) to generate the Gradle wrapper (`gradlew` + the wrapper jar),
-  which isn't committed. CI builds via `gradle/actions/setup-gradle` and doesn't
-  need the wrapper.
+- JDK 17+ (21 recommended), Android SDK (Android Studio Ladybug+), an emulator or device (Android 8.0+ / API 26).
+- The **Gradle wrapper is committed** (`gradlew`, `gradlew.bat`, the wrapper
+  jar + properties) — use it directly; no first-time generation step. CI
+  resolves its Gradle version from the committed
+  `gradle/wrapper/gradle-wrapper.properties`.
 
 ## Build & test (no device — the bulk of logic)
 
 ```bash
-gradle :core:test                 # JVM unit tests: protocol, sdui, streaming, rest
-gradle :app:testDebugUnitTest     # app-level JVM unit tests
-gradle :core:koverVerify          # changed-code/module coverage ≥ 90%
-gradle ktlintCheck :app:lintDebug # Kotlin + Android lint
-gradle :app:assembleDebug         # → app/build/outputs/apk/debug/app-debug.apk
+./gradlew :core:test                 # JVM unit tests: protocol, sdui, streaming, rest
+./gradlew :app:testDebugUnitTest     # app-level JVM unit tests
+./gradlew :core:koverVerify          # changed-code/module coverage ≥ 90%
+./gradlew ktlintCheck :app:lintDebug # Kotlin + Android lint
+./gradlew :app:assembleDebug         # → app/build/outputs/apk/debug/app-debug.apk
 ```
 
-(Once the wrapper is generated, prefer `./gradlew …`.)
+(On Windows use `.\gradlew.bat …`.)
 
 ## Run
 
@@ -65,7 +65,7 @@ dev-token or mock-auth shortcut (the unused `DevAuth` path was removed in featur
 ## Instrumented / UI tests (emulator)
 
 ```bash
-gradle :app:connectedDebugAndroidTest   # Compose UI tests on a running emulator/device
+./gradlew :app:connectedDebugAndroidTest   # Compose UI tests on a running emulator/device
 ```
 
 ## CI

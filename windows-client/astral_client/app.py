@@ -2415,7 +2415,7 @@ def configure(app: QApplication) -> None:
     """Apply the theme + a guaranteed-present UI font (Inter if installed, else
     Segoe UI) so glyphs always render — the stylesheet family alone can fall back
     to a glyph-less font under some platforms."""
-    from PySide6.QtGui import QFont, QFontDatabase
+    from PySide6.QtGui import QFont, QFontDatabase, QIcon
 
     families = set(QFontDatabase.families())
     family = next(
@@ -2424,6 +2424,14 @@ def configure(app: QApplication) -> None:
     )
     app.setFont(QFont(family, 10))
     app.setStyleSheet(T.APP_STYLESHEET + T.ROOT_BG_STYLE)
+
+    # Window/taskbar icon: assets/ sits next to the source tree in dev and is
+    # extracted to sys._MEIPASS in a frozen build. Best-effort — a missing
+    # asset must never block startup.
+    base = getattr(sys, "_MEIPASS", os.path.join(os.path.dirname(__file__), ".."))
+    ico = os.path.join(base, "assets", "astralbody.ico")
+    if os.path.exists(ico):
+        app.setWindowIcon(QIcon(ico))
 
 
 def _http_base(ws_url: str) -> str:

@@ -34,8 +34,8 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # Provides Gradle on PATH so we can build without committing the wrapper
-      # jar (the wrapper is generated locally by Android Studio for `./gradlew`).
+      # Provides Gradle on PATH (the committed wrapper works locally, but
+      # setup-gradle gives CI caching + provenance).
       # The version is READ FROM the committed wrapper properties — the single
       # source of truth — so CI can never drift from the repo toolchain again
       # (a hard-pinned 8.11.1 broke the AGP 9.2.1 bump: AGP 9 needs Gradle ≥9.4.1).
