@@ -65,7 +65,9 @@ a = Analysis(
     ["main.py"],
     pathex=[],
     binaries=[],
-    datas=[],
+    # The brand icon ships inside the bundle too, so the running app can set
+    # its window/taskbar icon (assets resolve via sys._MEIPASS when frozen).
+    datas=[("assets/astralbody.ico", "assets")],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -94,4 +96,5 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     version=version_res,  # VERSIONINFO stamped from astral_client.__version__
+    icon="assets/astralbody.ico",
 )
