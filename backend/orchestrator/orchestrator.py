@@ -3582,7 +3582,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     logger.info(f"Processing cancelled by user for chat_id {chat_id}")
                     await self.send_ui_render(websocket, [
                         Alert(message="Processing was cancelled.", variant="info").to_dict()
-                    ])
+                    ], target="chat")
                     self.history.add_message(chat_id, "assistant", [
                         Alert(message="Processing was cancelled.", variant="info").to_dict()
                     ], user_id=user_id)
@@ -3678,7 +3678,12 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                             Text(content=reasoning, variant="markdown")
                         ]).to_dict()
                     ]
-                    await self.send_ui_render(websocket, reasoning_components)
+                    # Chat rail, NOT canvas: a canvas-target ui_render replaces
+                    # the whole canvas, wiping this turn's already-delivered
+                    # components. Reasoning is conversation commentary and
+                    # already re-hydrates to the chat rail on reload
+                    # (collapsible is a _TEXT_ONLY_TYPES member).
+                    await self.send_ui_render(websocket, reasoning_components, target="chat")
                     self.history.add_message(chat_id, "assistant", reasoning_components, user_id=user_id)
 
                 # Check if LLM wants to call tools
@@ -3864,7 +3869,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                             logger.warning("All tools denied — breaking Re-Act loop")
                             await self.send_ui_render(websocket, [
                                 Alert(message="All available tools are restricted by your permission settings. Please update your agent permissions.", variant="warning").to_dict()
-                            ])
+                            ], target="chat")
                             break
 
                     # Update task state and track tool calls
@@ -4155,7 +4160,10 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     websocket, messages, chat_id, user_id=user_id
                 )
                 if summary_components:
-                    await self.send_ui_render(websocket, summary_components)
+                    # Chat rail, NOT canvas — the summary is words about the
+                    # tool results; a canvas render would replace (wipe) the
+                    # components those tools just delivered.
+                    await self.send_ui_render(websocket, summary_components, target="chat")
                     if chat_id:
                         self.history.add_message(chat_id, "assistant", summary_components, user_id=user_id)
                 else:
@@ -4164,7 +4172,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                         Card(title="Round results", content=[
                             Text(content="Multiple tool operations were completed. Review the results above for details.", variant="body")
                         ]).to_dict()
-                    ])
+                    ], target="chat")
 
                 await self._safe_send(websocket, json.dumps({
                     "type": "chat_status",
