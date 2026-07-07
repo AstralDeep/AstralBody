@@ -14,7 +14,7 @@ plugins {
 // Absent on CI and fresh clones — release builds are simply unsigned there.
 val keystoreProperties =
     Properties().apply {
-        val f = rootProject.file("key.properties")
+        val f = rootProject.file("keystore.properties")
         if (f.exists()) f.inputStream().use { load(it) }
     }
 

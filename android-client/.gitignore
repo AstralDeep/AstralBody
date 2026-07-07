@@ -12,3 +12,4 @@ bin/
 key.properties
 *.jks
 *.keystore
+keystore.properties
