@@ -5420,7 +5420,11 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     ui_components=[alert.to_dict()],
                 )
 
-        if not agent_id or (agent_id not in self.agents and agent_id not in self.a2a_clients):
+        if not agent_id or (
+            agent_id not in self.agents
+            and agent_id not in self.a2a_clients
+            and agent_id not in self.local_agents
+        ):
             err_msg = f"No agent available for tool '{tool_name}'"
             await self.send_ui_render(websocket, [
                 Alert(message=err_msg, variant="error").to_dict()
