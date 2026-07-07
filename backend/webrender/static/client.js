@@ -442,6 +442,23 @@
     sendChat(v);
   });
 
+  // ---- new chat (topbar button) — the web twin of the native clients' ＋ New:
+  // clear the local conversation state, then ask the server for a fresh chat
+  // (it replies chat_created, which sets activeChatId).
+  var newChatBtn = document.getElementById("astral-newchat-btn");
+  if (newChatBtn) newChatBtn.addEventListener("click", function () {
+    activeChatId = null;
+    timelineMode = false;
+    streamSeq = {};
+    stepEls = {};
+    hideSkeleton();
+    chat.innerHTML = "";
+    canvas.innerHTML = "";
+    setStatus("");
+    action("new_chat", {});
+    if (input) { try { input.focus(); } catch (e) {} }
+  });
+
   // Delegated handlers for server-rendered interactive primitives
   document.addEventListener("click", function (e) {
     var btn = e.target.closest && e.target.closest(".astral-action");

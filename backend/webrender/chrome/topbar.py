@@ -46,6 +46,15 @@ _HISTORY_SVG = (
     '<path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg>'
 )
 
+# "plus" glyph for the New-chat button — the same core affordance the native
+# clients hardcode in their top bars (Windows "＋ New", Android's New-chat
+# action). Client-local behavior lives in client.js (#astral-newchat-btn).
+_PLUS_SVG = (
+    '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<path d="M12 5v14M5 12h14"/></svg>'
+)
+
 # "sparkle" glyph for the Pulse digest button — a recognizable "here's what I
 # noticed" affordance. Only rendered when FF_PULSE_DIGEST is enabled.
 _PULSE_SVG = (
@@ -152,8 +161,18 @@ def render_topbar(roles=None) -> str:
     """
     model = build_menu_model(roles)
 
-    # Left cluster: brand. Right cluster: status + interactive controls + gear,
-    # in model order (status, [pulse], timeline, settings).
+    # Left cluster: brand. Right cluster: status + New chat + interactive
+    # controls + gear, in model order (status, [pulse], timeline, settings).
+    # New chat is core client chrome, not a settings surface — every native
+    # client hardcodes it in its top bar (Windows TopBar.new_btn, Android
+    # RootScaffold onNewChat); this is the web twin of that button.
+    new_chat_btn = (
+        '<button type="button" id="astral-newchat-btn" data-tour-target="topbar.new-chat" '
+        'class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm '
+        'bg-astral-primary/20 border border-astral-primary/30 text-astral-text '
+        'hover:bg-astral-primary/30" aria-label="New chat" title="Start a new chat">'
+        f'{_PLUS_SVG}<span class="hidden sm:inline">New chat</span></button>'
+    )
     right_parts = []
     for control in model.topbar:
         if control.kind == "brand":
@@ -162,6 +181,7 @@ def render_topbar(roles=None) -> str:
             right_parts.append(
                 '<span id="astral-status" class="text-xs text-astral-muted" role="status"></span>'
             )
+            right_parts.append(new_chat_btn)
         elif control.kind == "action":
             right_parts.append(_icon_button(control))
         elif control.kind == "menu":  # the Settings gear + dropdown
