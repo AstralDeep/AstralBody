@@ -9,7 +9,7 @@ description: "Task list for 041-android-sdui-client"
 
 **Tests**: INCLUDED — the spec mandates automated tests (FR-016) and Constitution III requires ≥90% changed-code coverage. JVM unit tests cover all `:core` pure logic; Compose UI tests cover representative renderers/screens.
 
-**Organization**: Grouped by user story (US1 P1 → US2 P2 → US3 P2 → US4 P3) for independent implementation and testing. Paths follow plan.md: `android-client/{core,app}/…` with package `com.kyopenscience.astral.{core,app}`.
+**Organization**: Grouped by user story (US1 P1 → US2 P2 → US3 P2 → US4 P3) for independent implementation and testing. Paths follow plan.md: `android-client/{core,app}/…` with package `com.personalailabs.astraldeep.{core,app}`.
 
 ## Format: `[ID] [P?] [Story] Description`
 
@@ -23,11 +23,11 @@ description: "Task list for 041-android-sdui-client"
 **Purpose**: Stand up the Gradle project, modules, dependency catalog, and tooling.
 
 - [X] T001 Create the `android-client/` Gradle project skeleton (Gradle wrapper, `android-client/settings.gradle.kts` including `:core` and `:app`, root `android-client/build.gradle.kts`) per plan.md.
-- [X] T002 [P] Configure the `:app` Android module (applicationId/namespace `com.kyopenscience.astral`, minSdk 26, targetSdk current, Compose BOM + Material 3 + Material 3 Adaptive) in `android-client/app/build.gradle.kts`.
+- [X] T002 [P] Configure the `:app` Android module (applicationId/namespace `com.personalailabs.astraldeep`, minSdk 26, targetSdk current, Compose BOM + Material 3 + Material 3 Adaptive) in `android-client/app/build.gradle.kts`.
 - [X] T003 [P] Configure the `:core` pure-Kotlin module (JVM 17, kotlinx.serialization, coroutines; JUnit + kotlinx-coroutines-test) in `android-client/core/build.gradle.kts`.
 - [X] T004 [P] Declare the approved dependency set (OkHttp/Okio, kotlinx.serialization-json, AppAuth-Android + AndroidX Browser, Coil, AndroidX Security-Crypto/DataStore/Lifecycle/Navigation-Compose) in `android-client/gradle/libs.versions.toml` (Principle V — to be approved in the PR).
 - [X] T005 [P] Configure ktlint/detekt + Android Lint + Kover (≥90% changed-code gate) in `android-client/build.gradle.kts`.
-- [X] T006 [P] Add the dark theme / design tokens mirroring the web + Windows palette in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/ui/theme/Theme.kt`.
+- [X] T006 [P] Add the dark theme / design tokens mirroring the web + Windows palette in `android-client/app/src/main/kotlin/com/personalailabs/astraldeep/app/ui/theme/Theme.kt`.
 - [X] T007 Add the Android CI workflow skeleton (lint + `:core:test` + `:app:assembleDebug`) in `.github/workflows/android-ci.yml` (finalized in Polish).
 
 ---
@@ -38,15 +38,15 @@ description: "Task list for 041-android-sdui-client"
 
 **⚠️ CRITICAL**: No user story can begin until this phase is complete.
 
-- [X] T008 [P] Define the WS message models — inbound sealed union on `type` (`ui_render`/`ui_upsert`/`ui_stream_data`/`stream_*`/`chat_*`/`agent_list`/`history_list`/`chat_status`/`chrome_render`/`auth_required`) + outbound (`register_ui`/`ui_event`) per contracts/ws-protocol.md in `android-client/core/src/main/kotlin/com/kyopenscience/astral/core/protocol/Messages.kt`.
-- [X] T009 [P] Implement tolerant JSON decode/encode (`ignoreUnknownKeys`, lenient; dynamic `attributes` as `JsonObject`) in `android-client/core/src/main/kotlin/com/kyopenscience/astral/core/protocol/Wire.kt`.
-- [X] T010 [P] Unit tests for protocol decode (every inbound type) + outbound encode (`register_ui` device caps, `ui_event`) in `android-client/core/src/test/kotlin/com/kyopenscience/astral/core/protocol/WireTest.kt`.
-- [X] T011 [P] Define the SDUI `Component(type, id, attributes, children)` model + decode + identity (`component_id` ?: `id`) per data-model.md in `android-client/core/src/main/kotlin/com/kyopenscience/astral/core/sdui/Component.kt`.
-- [X] T012 [P] Implement the pure canvas reducer (`CanvasOp` upsert/remove keyed by `component_id`) in `android-client/core/src/main/kotlin/com/kyopenscience/astral/core/sdui/Canvas.kt`.
-- [X] T013 [P] Unit tests for `Component` decode + canvas reducer (upsert/remove/identity) in `android-client/core/src/test/kotlin/com/kyopenscience/astral/core/sdui/ComponentTest.kt`.
-- [X] T014 Implement the OkHttp WebSocket transport (connect, send `register_ui` with android `DeviceCapabilities`, inbound `Flow<InboundMessage>`, outbound `ui_event`/`chat_message`, reconnect/backoff, connection-state) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/transport/OrchestratorClient.kt`.
-- [X] T015 Implement the renderer registry scaffold + labeled-placeholder fallback (FR-005) + the Compose canvas host (children keyed by `component_id`, applies `CanvasOp` in place) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/render/Registry.kt` and `.../render/CanvasHost.kt`.
-- [X] T016 Implement the app shell + ViewModel (connect on launch, observe inbound `Flow` → chat/canvas state, dispatch `ui_event`) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/MainActivity.kt` and `.../ui/AppViewModel.kt`.
+- [X] T008 [P] Define the WS message models — inbound sealed union on `type` (`ui_render`/`ui_upsert`/`ui_stream_data`/`stream_*`/`chat_*`/`agent_list`/`history_list`/`chat_status`/`chrome_render`/`auth_required`) + outbound (`register_ui`/`ui_event`) per contracts/ws-protocol.md in `android-client/core/src/main/kotlin/com/personalailabs/astraldeep/core/protocol/Messages.kt`.
+- [X] T009 [P] Implement tolerant JSON decode/encode (`ignoreUnknownKeys`, lenient; dynamic `attributes` as `JsonObject`) in `android-client/core/src/main/kotlin/com/personalailabs/astraldeep/core/protocol/Wire.kt`.
+- [X] T010 [P] Unit tests for protocol decode (every inbound type) + outbound encode (`register_ui` device caps, `ui_event`) in `android-client/core/src/test/kotlin/com/personalailabs/astraldeep/core/protocol/WireTest.kt`.
+- [X] T011 [P] Define the SDUI `Component(type, id, attributes, children)` model + decode + identity (`component_id` ?: `id`) per data-model.md in `android-client/core/src/main/kotlin/com/personalailabs/astraldeep/core/sdui/Component.kt`.
+- [X] T012 [P] Implement the pure canvas reducer (`CanvasOp` upsert/remove keyed by `component_id`) in `android-client/core/src/main/kotlin/com/personalailabs/astraldeep/core/sdui/Canvas.kt`.
+- [X] T013 [P] Unit tests for `Component` decode + canvas reducer (upsert/remove/identity) in `android-client/core/src/test/kotlin/com/personalailabs/astraldeep/core/sdui/ComponentTest.kt`.
+- [X] T014 Implement the OkHttp WebSocket transport (connect, send `register_ui` with android `DeviceCapabilities`, inbound `Flow<InboundMessage>`, outbound `ui_event`/`chat_message`, reconnect/backoff, connection-state) in `android-client/app/src/main/kotlin/com/personalailabs/astraldeep/app/transport/OrchestratorClient.kt`.
+- [X] T015 Implement the renderer registry scaffold + labeled-placeholder fallback (FR-005) + the Compose canvas host (children keyed by `component_id`, applies `CanvasOp` in place) in `android-client/app/src/main/kotlin/com/personalailabs/astraldeep/app/render/Registry.kt` and `.../render/CanvasHost.kt`.
+- [X] T016 Implement the app shell + ViewModel (connect on launch, observe inbound `Flow` → chat/canvas state, dispatch `ui_event`) in `android-client/app/src/main/kotlin/com/personalailabs/astraldeep/app/MainActivity.kt` and `.../ui/AppViewModel.kt`.
 - [X] T017 [P] Server: add an `android` value to `DeviceType` + a full-capability `_BASE_HOST_CONFIG["android"]` entry (mirroring `windows`) in `backend/rote/capabilities.py`.
 - [X] T018 [P] Server: Python unit tests for the `android` ROTE profile (device_type → full-capability profile; `supported_types` honored) in `backend/rote/tests/test_android_profile.py`.
 
@@ -60,15 +60,15 @@ description: "Task list for 041-android-sdui-client"
 
 **Independent Test**: On a phone, complete OIDC sign-in, send a message, see a native-rendered response (no web view).
 
-- [X] T019 [P] [US1] Implement OIDC Authorization-Code + PKCE via AppAuth (discovery from the authority, login in a Custom Tab against `astral-mobile`, redirect `com.kyopenscience.astral:/oauth2redirect`, code→token exchange) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/auth/OidcAuth.kt`.
-- [X] T020 [P] [US1] Implement the encrypted refresh-token store + silent refresh + sign-out (AndroidX Security/DataStore) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/auth/TokenStore.kt`.
+- [X] T019 [P] [US1] Implement OIDC Authorization-Code + PKCE via AppAuth (discovery from the authority, login in a Custom Tab against `astral-mobile`, redirect `com.personalailabs.astraldeep:/oauth2redirect`, code→token exchange) in `android-client/app/src/main/kotlin/com/personalailabs/astraldeep/app/auth/OidcAuth.kt`.
+- [X] T020 [P] [US1] Implement the encrypted refresh-token store + silent refresh + sign-out (AndroidX Security/DataStore) in `android-client/app/src/main/kotlin/com/personalailabs/astraldeep/app/auth/TokenStore.kt`.
 - [X] T021 [US1] Wire auth into the transport: real bearer in `register_ui`; `auth_required` → silent re-auth then reconnect; "no access" role → clear message (FR-001) in `.../app/transport/OrchestratorClient.kt` + `.../app/auth/`.
-- [X] T022 [P] [US1] Debug-only dev-token path (`BuildConfig.DEBUG`-gated, absent from release per FR-002) in `android-client/app/src/debug/kotlin/com/kyopenscience/astral/app/auth/DevAuth.kt`.
-- [X] T023 [P] [US1] Basic Composable renderers (`text`, `card`, `container`, `alert`, `button`) registered in the registry in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/render/renderers/Basic.kt`.
-- [X] T024 [US1] Chat screen: input + send (`ui_event chat_message`), user/assistant text turns, `chat_status` indicator, `chat_created` active-chat in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/ui/ChatScreen.kt`.
-- [X] T025 [US1] Render `ui_render` (target canvas/chat) + `ui_upsert` into the canvas with the basic vocabulary in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/ui/CanvasView.kt`.
-- [X] T026 [P] [US1] JVM unit tests: token store + auth config; the `register_ui` device-caps builder (`device_type=android`, screen, `supported_types`) in `android-client/app/src/test/kotlin/com/kyopenscience/astral/app/auth/TokenStoreTest.kt` and `.../transport/DeviceCapsTest.kt`.
-- [X] T027 [US1] Compose UI test: a signed-in chat round-trip renders a basic response natively in `android-client/app/src/androidTest/kotlin/com/kyopenscience/astral/app/ChatRenderTest.kt`.
+- [X] T022 [P] [US1] Debug-only dev-token path (`BuildConfig.DEBUG`-gated, absent from release per FR-002) in `android-client/app/src/debug/kotlin/com/personalailabs/astraldeep/app/auth/DevAuth.kt`.
+- [X] T023 [P] [US1] Basic Composable renderers (`text`, `card`, `container`, `alert`, `button`) registered in the registry in `android-client/app/src/main/kotlin/com/personalailabs/astraldeep/app/render/renderers/Basic.kt`.
+- [X] T024 [US1] Chat screen: input + send (`ui_event chat_message`), user/assistant text turns, `chat_status` indicator, `chat_created` active-chat in `android-client/app/src/main/kotlin/com/personalailabs/astraldeep/app/ui/ChatScreen.kt`.
+- [X] T025 [US1] Render `ui_render` (target canvas/chat) + `ui_upsert` into the canvas with the basic vocabulary in `android-client/app/src/main/kotlin/com/personalailabs/astraldeep/app/ui/CanvasView.kt`.
+- [X] T026 [P] [US1] JVM unit tests: token store + auth config; the `register_ui` device-caps builder (`device_type=android`, screen, `supported_types`) in `android-client/app/src/test/kotlin/com/personalailabs/astraldeep/app/auth/TokenStoreTest.kt` and `.../transport/DeviceCapsTest.kt`.
+- [X] T027 [US1] Compose UI test: a signed-in chat round-trip renders a basic response natively in `android-client/app/src/androidTest/kotlin/com/personalailabs/astraldeep/app/ChatRenderTest.kt`.
 
 **Checkpoint**: MVP — sign in, chat, basic native rendering all work independently.
 
@@ -80,16 +80,16 @@ description: "Task list for 041-android-sdui-client"
 
 **Independent Test**: Trigger rich + streaming responses; each renders natively, streams update in place, an unknown type shows a placeholder.
 
-- [X] T028 [P] [US2] Port the streaming consumer (`streamFrameToOps`/`subscribeAckOps`/`streamErrorOps`: session filter, monotonic seq dedupe, terminal final/forget, error→alert; render `components`, ignore `html`) per research D4 in `android-client/core/src/main/kotlin/com/kyopenscience/astral/core/streaming/Streaming.kt`.
-- [X] T029 [P] [US2] Unit tests for the streaming consumer (mirror the Windows `test_streaming.py` cases) in `android-client/core/src/test/kotlin/com/kyopenscience/astral/core/streaming/StreamingTest.kt`.
-- [X] T030 [US2] Dispatch `ui_stream_data`/`stream_subscribed`/`stream_error`/`stream_unsubscribed` in the transport and bind ops to the canvas; subscribe via `ui_event stream_subscribe` in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/stream/StreamController.kt`.
+- [X] T028 [P] [US2] Port the streaming consumer (`streamFrameToOps`/`subscribeAckOps`/`streamErrorOps`: session filter, monotonic seq dedupe, terminal final/forget, error→alert; render `components`, ignore `html`) per research D4 in `android-client/core/src/main/kotlin/com/personalailabs/astraldeep/core/streaming/Streaming.kt`.
+- [X] T029 [P] [US2] Unit tests for the streaming consumer (mirror the Windows `test_streaming.py` cases) in `android-client/core/src/test/kotlin/com/personalailabs/astraldeep/core/streaming/StreamingTest.kt`.
+- [X] T030 [US2] Dispatch `ui_stream_data`/`stream_subscribed`/`stream_error`/`stream_unsubscribed` in the transport and bind ops to the canvas; subscribe via `ui_event stream_subscribe` in `android-client/app/src/main/kotlin/com/personalailabs/astraldeep/app/stream/StreamController.kt`.
 - [X] T031 [P] [US2] Layout/content renderers (`grid`, `hero`, `badge`, `metric`, `keyvalue`, `timeline`, `rating`, `divider`, `progress`, `collapsible`) in `.../app/render/renderers/Layout.kt`.
 - [X] T032 [P] [US2] Data renderers (`list`, `table`, `tabs`, `chat_history`, `skeleton`) virtualized via `LazyColumn` in `.../app/render/renderers/Data.kt`.
 - [X] T033 [P] [US2] Input/code/file renderers (`input`, `param_picker`, `code`, `file_upload`, `file_download`/`download_card`) in `.../app/render/renderers/Input.kt`.
 - [X] T034 [P] [US2] Chart renderers (`bar_chart`/`line_chart`/`pie_chart` via Compose Canvas) + `image` (Coil) in `.../app/render/renderers/Charts.kt` and `.../render/renderers/Media.kt`.
 - [X] T035 [US2] Advertise the native `supported_types` in `register_ui` device caps (exclude `plotly_chart`/`audio`/`color_picker`/`theme_apply`/`generative` → placeholder) in `.../app/transport/DeviceCaps.kt`.
-- [X] T036 [P] [US2] Vocabulary-parity test: advertised `supported_types` ⊆ `webrender.allowed_primitive_types()` and every advertised type has a renderer (mirror the Windows drift guard) in `android-client/app/src/test/kotlin/com/kyopenscience/astral/app/render/VocabularyParityTest.kt`.
-- [X] T037 [US2] Compose UI tests: each renderer group, unknown-type placeholder (FR-005), and streaming in-place update in `android-client/app/src/androidTest/kotlin/com/kyopenscience/astral/app/RenderersTest.kt` and `.../StreamingUiTest.kt`.
+- [X] T036 [P] [US2] Vocabulary-parity test: advertised `supported_types` ⊆ `webrender.allowed_primitive_types()` and every advertised type has a renderer (mirror the Windows drift guard) in `android-client/app/src/test/kotlin/com/personalailabs/astraldeep/app/render/VocabularyParityTest.kt`.
+- [X] T037 [US2] Compose UI tests: each renderer group, unknown-type placeholder (FR-005), and streaming in-place update in `android-client/app/src/androidTest/kotlin/com/personalailabs/astraldeep/app/RenderersTest.kt` and `.../StreamingUiTest.kt`.
 
 **Checkpoint**: Rich responses + live streaming render natively; US1 still works.
 
@@ -101,9 +101,9 @@ description: "Task list for 041-android-sdui-client"
 
 **Independent Test**: Run the same build on phone + tablet/foldable (or resize); layout adapts with no clipping/horizontal scroll, state preserved.
 
-- [X] T038 [US3] Adaptive scaffold via `WindowSizeClass`: Compact → stacked/navigable (chat ↔ canvas); Medium/Expanded → two-pane (chat rail + canvas) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/ui/AdaptiveScaffold.kt`.
+- [X] T038 [US3] Adaptive scaffold via `WindowSizeClass`: Compact → stacked/navigable (chat ↔ canvas); Medium/Expanded → two-pane (chat rail + canvas) in `android-client/app/src/main/kotlin/com/personalailabs/astraldeep/app/ui/AdaptiveScaffold.kt`.
 - [X] T039 [US3] Preserve conversation + scroll position across rotation/fold/split (`rememberSaveable` + ViewModel) in `.../app/ui/AdaptiveScaffold.kt` and `.../ui/AppViewModel.kt`.
-- [X] T040 [P] [US3] Compose UI tests: Compact vs Expanded layout selection + state preserved across a configuration change in `android-client/app/src/androidTest/kotlin/com/kyopenscience/astral/app/AdaptiveLayoutTest.kt`.
+- [X] T040 [P] [US3] Compose UI tests: Compact vs Expanded layout selection + state preserved across a configuration change in `android-client/app/src/androidTest/kotlin/com/personalailabs/astraldeep/app/AdaptiveLayoutTest.kt`.
 
 **Checkpoint**: The same build adapts across screen sizes; US1/US2 still work.
 
@@ -115,14 +115,14 @@ description: "Task list for 041-android-sdui-client"
 
 **Independent Test**: Toggle an agent + a permission, reopen a past chat, page/filter the personal audit log.
 
-- [X] T041 [P] [US4] Port REST shaping (`auditUrl`, `parseAuditResponse`, `RestError`) per contracts/rest-endpoints.md in `android-client/core/src/main/kotlin/com/kyopenscience/astral/core/rest/Audit.kt`.
-- [X] T042 [P] [US4] Unit tests for REST shaping (mirror the Windows `test_rest.py` cases) in `android-client/core/src/test/kotlin/com/kyopenscience/astral/core/rest/AuditTest.kt`.
-- [X] T043 [P] [US4] Authenticated REST client (OkHttp + `Bearer`) with background fetch → UI state in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/rest/RestClient.kt`.
-- [X] T044 [US4] Agents screen (`discover_agents`→`agent_list`; `enable_recommended_agents`; `set_agent_permissions`; per-tool toggles) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/ui/AgentsScreen.kt`.
-- [X] T045 [US4] History screen (`get_history`→`history_list`; `load_chat`→`chat_loaded` replay) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/ui/HistoryScreen.kt`.
-- [X] T046 [US4] Audit screen (GET `/api/audit`; `event_class`/`outcome`/`q` filters; cursor "load more"; outcome colour; user-scoped) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/ui/AuditScreen.kt`.
-- [X] T047 [P] [US4] `chrome_render` acknowledge (no web embed; native notice — FR-013) in `android-client/app/src/main/kotlin/com/kyopenscience/astral/app/stream/ChromeRender.kt`.
-- [X] T048 [US4] Compose UI tests: agent toggle, history reopen, audit list + filter + paging in `android-client/app/src/androidTest/kotlin/com/kyopenscience/astral/app/SurfacesTest.kt`.
+- [X] T041 [P] [US4] Port REST shaping (`auditUrl`, `parseAuditResponse`, `RestError`) per contracts/rest-endpoints.md in `android-client/core/src/main/kotlin/com/personalailabs/astraldeep/core/rest/Audit.kt`.
+- [X] T042 [P] [US4] Unit tests for REST shaping (mirror the Windows `test_rest.py` cases) in `android-client/core/src/test/kotlin/com/personalailabs/astraldeep/core/rest/AuditTest.kt`.
+- [X] T043 [P] [US4] Authenticated REST client (OkHttp + `Bearer`) with background fetch → UI state in `android-client/app/src/main/kotlin/com/personalailabs/astraldeep/app/rest/RestClient.kt`.
+- [X] T044 [US4] Agents screen (`discover_agents`→`agent_list`; `enable_recommended_agents`; `set_agent_permissions`; per-tool toggles) in `android-client/app/src/main/kotlin/com/personalailabs/astraldeep/app/ui/AgentsScreen.kt`.
+- [X] T045 [US4] History screen (`get_history`→`history_list`; `load_chat`→`chat_loaded` replay) in `android-client/app/src/main/kotlin/com/personalailabs/astraldeep/app/ui/HistoryScreen.kt`.
+- [X] T046 [US4] Audit screen (GET `/api/audit`; `event_class`/`outcome`/`q` filters; cursor "load more"; outcome colour; user-scoped) in `android-client/app/src/main/kotlin/com/personalailabs/astraldeep/app/ui/AuditScreen.kt`.
+- [X] T047 [P] [US4] `chrome_render` acknowledge (no web embed; native notice — FR-013) in `android-client/app/src/main/kotlin/com/personalailabs/astraldeep/app/stream/ChromeRender.kt`.
+- [X] T048 [US4] Compose UI tests: agent toggle, history reopen, audit list + filter + paging in `android-client/app/src/androidTest/kotlin/com/personalailabs/astraldeep/app/SurfacesTest.kt`.
 
 **Checkpoint**: All four stories independently functional.
 
@@ -133,7 +133,7 @@ description: "Task list for 041-android-sdui-client"
 - [X] T049 Reconnect + re-auth resilience (FR-012): disconnected state, auto-reconnect, no duplicate sends, no lost input — harden `.../app/transport/OrchestratorClient.kt` + add tests.
 - [X] T050 [P] Structured logging/observability for connect/auth/render failures (Principle X) across `.../app/`.
 - [X] T051 [P] KDoc on public `:core` + `:app` APIs (Constitution VI).
-- [X] T052 [P] Document the `astral-mobile` azp in `.env.example` and write `docs/keycloak-android-client-setup.md` (public client, PKCE S256, redirect `com.kyopenscience.astral:/oauth2redirect`, post-logout = redirect/`+`, web-origins blank).
+- [X] T052 [P] Document the `astral-mobile` azp in `.env.example` and write `docs/keycloak-android-client-setup.md` (public client, PKCE S256, redirect `com.personalailabs.astraldeep:/oauth2redirect`, post-logout = redirect/`+`, web-origins blank).
 - [X] T053 Finalize `.github/workflows/android-ci.yml` (`:core:test` + `:app:testDebugUnitTest` + `koverVerify` ≥90% + ktlint + `lintDebug` + `:app:assembleDebug` + APK artifact; optional nightly emulator job for instrumented tests).
 - [X] T054 [P] Write `android-client/README.md` (architecture, real-Keycloak run, debug-token, tests, CI) per Constitution VI.
 - [X] T055 On-device/emulator verification of the quickstart acceptance smoke (SC-001…SC-006) — Constitution X release gate; run where the Android SDK/emulator or a device is available.
