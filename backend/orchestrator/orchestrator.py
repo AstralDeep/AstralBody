@@ -5170,8 +5170,20 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             tool_name = llm_tool_name
         try:
             args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
-        except json.JSONDecodeError:
-            args = {}
+        except json.JSONDecodeError as _json_err:
+            # Hard-gate malformed tool-call arguments instead of silently
+            # dispatching with empty args (silent repair / parser loss).
+            # Surface the parse failure back to the model so it can retry
+            # with valid JSON — mirrors the permission-denial error return.
+            msg = (f"The arguments for '{tool_name}' were not valid JSON "
+                   f"({str(_json_err).splitlines()[0]}). Re-emit the tool "
+                   f"call with well-formed JSON arguments.")
+            logger.warning("tool_arg_parse_fail tool=%s user=%s err=%s",
+                           tool_name, user_id, _json_err.msg)
+            alert = Alert(message=msg, variant="error")
+            await self.send_ui_render(websocket, [alert.to_dict()])
+            return MCPResponse(error={"message": msg, "retryable": True},
+                               ui_components=[alert.to_dict()])
 
         # Feature 027 — orchestrator meta-tools dispatch before the agent
         # gates (the pseudo-agent has no scopes/credentials; ownership and
@@ -5668,10 +5680,25 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 tool_name = tool_to_unqualified[llm_tool_name]
             else:
                 tool_name = llm_tool_name
+            agent_id = tool_to_agent.get(llm_tool_name)
             try:
                 args = json.loads(tc.function.arguments) if tc.function.arguments else {}
-            except json.JSONDecodeError:
-                args = {}
+            except json.JSONDecodeError as _json_err:
+                # Hard-gate malformed tool-call arguments instead of silently
+                # dispatching with empty args (silent repair / parser loss).
+                # Surface the parse failure back to the model so it can retry
+                # with valid JSON — mirrors the security/permission error coro.
+                _pj_msg = (f"The arguments for '{tool_name}' were not valid "
+                           f"JSON ({str(_json_err).splitlines()[0]}). Re-emit "
+                           f"the tool call with well-formed JSON arguments.")
+                logger.warning("tool_arg_parse_fail(parallel) tool=%s user=%s err=%s",
+                               tool_name, user_id, _json_err.msg)
+
+                async def _arg_err(msg=_pj_msg):
+                    return MCPResponse(error={"message": msg, "retryable": True},
+                                       ui_components=[Alert(message=msg, variant="error").to_dict()])
+                prepared.append((idx, tc, tool_name, agent_id, None, _arg_err()))
+                continue
 
             if chat_id:
                 args = self._map_file_paths(chat_id, args, user_id=user_id)
@@ -5679,7 +5706,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 if user_id:
                     args["user_id"] = user_id
 
-            agent_id = tool_to_agent.get(llm_tool_name)
+            # agent_id resolved above (before the JSON parse) so the parse-fail
+            # error path can include it in the prepared tuple.
 
             # Feature 027 — meta-tools dispatch directly (see execute_single_tool).
             if agent_id == "__orchestrator__":
