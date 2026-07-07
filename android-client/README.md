@@ -52,7 +52,7 @@ gradle :app:assembleDebug         # → app/build/outputs/apk/debug/app-debug.ap
 
 **Real Keycloak (the product auth).** The `astral-mobile` public client is
 provisioned and allow-listed (`KEYCLOAK_ALLOWED_AZP`). Its Valid Redirect URIs
-include the Android scheme `com.kyopenscience.astral:/oauth2redirect` (matching
+include the Android scheme `com.personalailabs.astraldeep:/oauth2redirect` (matching
 the app's `appAuthRedirectScheme` manifest placeholder). Point the app at the
 orchestrator (`wss://<host>/ws`) and sign in via the system browser (OIDC
 Authorization-Code + PKCE), registering as `device_type=android`. See

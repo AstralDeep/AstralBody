@@ -1,4 +1,6 @@
 // :app — the Android/Compose client. Depends on :core for all pure logic.
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -8,12 +10,24 @@ plugins {
     alias(libs.plugins.ktlint)
 }
 
+// Release signing is read from a gitignored key.properties (see docs/play-store-release.md).
+// Absent on CI and fresh clones — release builds are simply unsigned there.
+val keystoreProperties =
+    Properties().apply {
+        val f = rootProject.file("key.properties")
+        if (f.exists()) f.inputStream().use { load(it) }
+    }
+
 android {
-    namespace = "com.kyopenscience.astral.app"
+    namespace = "com.personalailabs.astraldeep.app"
     compileSdk = libs.versions.compileSdk.get().toInt()
 
     defaultConfig {
-        applicationId = "com.kyopenscience.astral"
+        // Play Store identity (registered; permanent once uploaded). The Kotlin
+        // namespace, source packages, and the AppAuth redirect scheme all share
+        // this id — the scheme must match the astral-mobile client's Valid
+        // Redirect URI in Keycloak.
+        applicationId = "com.personalailabs.astraldeep"
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
         versionCode = 1
@@ -22,13 +36,24 @@ android {
 
         // AppAuth captures the OIDC redirect via this scheme (RedirectUriReceiverActivity).
         // Must match the astral-mobile client's Valid Redirect URI:
-        //   com.kyopenscience.astral:/oauth2redirect
-        manifestPlaceholders["appAuthRedirectScheme"] = "com.kyopenscience.astral"
+        //   com.personalailabs.astraldeep:/oauth2redirect
+        manifestPlaceholders["appAuthRedirectScheme"] = "com.personalailabs.astraldeep"
     }
 
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+
+    signingConfigs {
+        if (keystoreProperties.isNotEmpty()) {
+            create("release") {
+                storeFile = file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+            }
+        }
     }
 
     buildTypes {
@@ -38,6 +63,7 @@ android {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = signingConfigs.findByName("release")
         }
     }
 

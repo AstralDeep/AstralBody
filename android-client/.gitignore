@@ -9,3 +9,6 @@ captures/
 *.apk
 *.aab
 bin/
+key.properties
+*.jks
+*.keystore

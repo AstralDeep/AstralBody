@@ -28,7 +28,7 @@
 
         <!--
           AppAuth redirect receiver. The data scheme MUST match the astral-mobile
-          client's Valid Redirect URI: com.kyopenscience.astral:/oauth2redirect
+          client's Valid Redirect URI: com.personalailabs.astraldeep:/oauth2redirect
           (scheme is injected from the appAuthRedirectScheme manifest placeholder).
         -->
         <activity
