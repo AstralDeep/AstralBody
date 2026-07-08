@@ -272,14 +272,19 @@ def _r_grid(c, ctx):
 
 def _r_hero(c, ctx):
     frame = QFrame()
-    gradient = c.get("variant") == "gradient"
-    bg = (
-        T.GRAD
-        if gradient
-        else "qlineargradient(x1:0,y1:0,x2:1,y2:1,"
-        "stop:0 rgba(99,102,241,0.14), stop:1 rgba(139,92,246,0.06))"
-    )
-    _scoped(frame, f"background:{bg}; border:1px solid {T.BORDER}; border-radius:14px;")
+    if c.get("variant") == "gradient":
+        # Subtle primary→secondary wash derived from the LIVE palette (parity
+        # with the web's .astral-hero--gradient — never hardcoded midnight hex).
+        bg = (
+            "qlineargradient(x1:0,y1:0,x2:1,y2:1,"
+            f"stop:0 {T._rgba(T.PRIMARY, 0.16)}, stop:1 {T._rgba(T.SECONDARY, 0.07)})"
+        )
+        border = T._rgba(T.PRIMARY, 0.25)
+    else:
+        # Default hero = plain raised surface with a soft border (web parity).
+        bg = T.SURFACE
+        border = T.BORDER
+    _scoped(frame, f"background:{bg}; border:1px solid {border}; border-radius:14px;")
     frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
     lay = _vbox(4, (20, 18, 20, 18))
     frame.setLayout(lay)
@@ -445,8 +450,11 @@ def _btn_label(label) -> str:
 
 def _r_button(c, ctx):
     btn = QPushButton(_btn_label(c.get("label", "Button")))
-    if c.get("variant", "primary") == "primary":
+    variant = c.get("variant", "primary")
+    if variant == "primary":
         btn.setObjectName("primary")
+    elif variant == "danger":
+        btn.setObjectName("danger")  # solid error-token treatment (theme QSS)
     action = c.get("action")
     payload = c.get("payload") or {}
     if action:

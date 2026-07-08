@@ -259,7 +259,9 @@ class ChatRail(QWidget):
     def show_empty_hint(self) -> None:
         """A gentle empty-state so a fresh chat rail isn't a blank void."""
         self.clear()
-        hint = QLabel("Ask anything below, or pick an example on the canvas →")
+        hint = QLabel(
+            "Ask something below and AstralDeep will build a live interface for it."
+        )
         hint.setWordWrap(True)
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         hint.setStyleSheet(
@@ -291,11 +293,48 @@ class Canvas(QScrollArea):
         # Retained last-rendered component list so a live theme change can rebuild
         # inline-styled content with the new palette (feature 044 US5, restyle()).
         self._last_components: list = []
+        # Shared cross-client empty-canvas hint (parity with web/Android/Apple).
+        self._empty: Optional[QWidget] = None
         # Query-start loading placeholder (the Android twin's SkeletonCanvas):
         # shown when a chat turn is sent, removed by the FIRST canvas content
         # of the turn (set_components / apply_ops, which streaming also routes
         # through) or explicitly when the turn ends without any.
         self._skeleton: Optional[QWidget] = None
+        self.show_empty_state()
+
+    def _drop_empty(self) -> None:
+        if self._empty is not None:
+            self._empty.setParent(None)
+            self._empty.deleteLater()
+            self._empty = None
+
+    def show_empty_state(self) -> None:
+        """The shared empty-canvas copy (sparkle + headline + subtitle), muted,
+        shown while no components are rendered."""
+        if self._empty is not None:
+            return
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(24, 60, 24, 60)
+        lay.setSpacing(6)
+        glyph = QLabel("✦")
+        glyph.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        glyph.setStyleSheet(f"color:{T.PRIMARY}; font-size:28px; background:transparent;")
+        title = QLabel("Your generated interface appears here")
+        title.setWordWrap(True)
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet(
+            f"color:{T.TEXT}; font-size:15px; font-weight:600; background:transparent;"
+        )
+        sub = QLabel("Ask something below and AstralDeep will build a live interface for it.")
+        sub.setWordWrap(True)
+        sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sub.setStyleSheet(f"color:{T.MUTED}; font-size:12px; background:transparent;")
+        lay.addWidget(glyph)
+        lay.addWidget(title)
+        lay.addWidget(sub)
+        self._lay.insertWidget(0, box)
+        self._empty = box
 
     def _insert(self, widget: QWidget) -> None:
         self._lay.insertWidget(self._lay.count() - 1, widget)
@@ -328,6 +367,10 @@ class Canvas(QScrollArea):
         components = list(components or [])
         self.hide_skeleton()  # canvas content arrived (or is being rebuilt)
         self._last_components = components  # retained for restyle() (US5)
+        # The empty-state hint is dropped before the rebuild (the detach loop
+        # below would otherwise delete it out from under self._empty) and
+        # re-shown afterwards when the new set is empty.
+        self._drop_empty()
         # A widget is reusable only when its id survives into the new set AND
         # the incoming component payload equals what it was rendered from — a
         # re-delivered id with CHANGED content (timeline snapshots, combine/
@@ -378,6 +421,8 @@ class Canvas(QScrollArea):
                     rendered[cid] = comp
                 placed.add(cid)
         self._rendered = rendered
+        if not components:
+            self.show_empty_state()
 
     def restyle(self) -> None:
         """Re-render the retained components so inline-styled SDUI content (cards,
@@ -396,6 +441,8 @@ class Canvas(QScrollArea):
         """In-place workspace patch (a `ui_upsert`)."""
         if ops:
             self.hide_skeleton()  # first canvas content of the turn
+        if any((op or {}).get("op", "upsert") != "remove" for op in ops or []):
+            self._drop_empty()  # content is arriving — hide the empty-state hint
         for op in ops or []:
             kind = op.get("op", "upsert")
             cid = op.get("component_id")

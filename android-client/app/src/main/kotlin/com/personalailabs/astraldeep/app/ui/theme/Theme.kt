@@ -4,6 +4,7 @@ import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import kotlinx.serialization.json.JsonObject
@@ -24,14 +25,17 @@ object AstralColors {
     val Cyan = Color(0xFF06B6D4)
     val Bg = Color(0xFF0F1221)
     val BgElevated = Color(0xFF12162A)
-    val Surface = Color(0xFF161A2E)
+    val Surface = Color(0xFF1A1E2E)
     val SurfaceVariant = Color(0xFF1E2338)
     val Border = Color(0xFF2A2F49)
-    val Text = Color(0xFFE5E7EB)
-    val Muted = Color(0xFF9AA1B9)
+    val Text = Color(0xFFF3F4F6)
+    val Muted = Color(0xFF9CA3AF)
 
-    /** Signature indigo→purple sweep used on the brand button and accents. */
-    val AccentBrush = Brush.horizontalGradient(listOf(Indigo, Purple))
+    /** Signature indigo→purple 135° diagonal sweep (top-left → bottom-right)
+     *  used on the brand button and accents — matches the web `--astral-accent`
+     *  linear-gradient(135deg, …). */
+    val AccentBrush =
+        Brush.linearGradient(listOf(Indigo, Purple), start = Offset.Zero, end = Offset.Infinite)
 
     /** A deep vertical wash for full-screen backdrops (sign-in). */
     val BackdropBrush =

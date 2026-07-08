@@ -1,0 +1,57 @@
+# Feature 051 — Apple clients CI (additive; Constitution XI).
+# Mirrors how android-ci.yml was introduced in 041: its own workflow, no
+# change to the existing gates. Runs the AstralCore test suite (including
+# the ui_protocol.json drift guard) plus unsigned xcodebuild of all three
+# app targets (T052; the project is objectVersion 77, so Xcode 16+).
+name: apple-ci
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apple-clients/**"
+      - "backend/shared/ui_protocol.json"
+      - ".github/workflows/apple-ci.yml"
+  pull_request:
+    paths:
+      - "apple-clients/**"
+      - "backend/shared/ui_protocol.json"
+      - ".github/workflows/apple-ci.yml"
+
+jobs:
+  core-tests:
+    name: AstralCore swift test (drift guard)
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift version
+        run: swift --version
+      - name: Run AstralCore tests
+        run: swift test --package-path apple-clients/AstralCore
+
+  app-builds:
+    name: xcodebuild ${{ matrix.target.name }}
+    runs-on: macos-15
+    timeout-minutes: 40
+    needs: core-tests
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { name: iOS, scheme: AstralApp, destination: "generic/platform=iOS Simulator" }
+          - { name: macOS, scheme: AstralApp, destination: "platform=macOS" }
+          - { name: watchOS, scheme: AstralWatch, destination: "generic/platform=watchOS Simulator" }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select latest stable Xcode
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+      - name: Build (unsigned)
+        run: |
+          xcodebuild \
+            -project apple-clients/AstralApp/AstralApp.xcodeproj \
+            -scheme "${{ matrix.target.scheme }}" \
+            -destination "${{ matrix.target.destination }}" \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" \
+            build

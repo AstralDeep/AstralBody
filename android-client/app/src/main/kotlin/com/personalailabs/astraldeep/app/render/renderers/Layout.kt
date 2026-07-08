@@ -1,11 +1,15 @@
 package com.personalailabs.astraldeep.app.render.renderers
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
@@ -20,8 +24,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.personalailabs.astraldeep.app.render.Renderer
+import com.personalailabs.astraldeep.app.ui.theme.AstralColors
 import com.personalailabs.astraldeep.core.sdui.Component
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -57,14 +66,78 @@ private fun GridPrimitive(
     }
 }
 
+/**
+ * The hero banner. Mirrors the web renderer (`render_hero`): optional uppercase
+ * `eyebrow` caption above the title, optional string `badges` capsule row below
+ * the subtitle, and a `gradient` variant that adds a diagonal primary→secondary
+ * wash plus an AccentBrush top bar; the default variant stays a plain card.
+ */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun HeroPrimitive(c: Component) {
+    val gradient = c.str("variant") == "gradient"
+    val primary = MaterialTheme.colorScheme.primary
     Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            c.str("title")?.let { Text(it, style = MaterialTheme.typography.headlineSmall) }
-            c.str(
-                "subtitle",
-            )?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        Column {
+            if (gradient) {
+                Box(Modifier.fillMaxWidth().height(3.dp).background(AstralColors.AccentBrush))
+            }
+            Column(
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .then(
+                            if (gradient) {
+                                Modifier.background(
+                                    Brush.linearGradient(
+                                        listOf(
+                                            primary.copy(alpha = 0.18f),
+                                            MaterialTheme.colorScheme.secondary.copy(alpha = 0.08f),
+                                        ),
+                                        start = Offset.Zero,
+                                        end = Offset.Infinite,
+                                    ),
+                                )
+                            } else {
+                                Modifier
+                            },
+                        )
+                        .padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                c.str("eyebrow")?.let {
+                    Text(
+                        it.uppercase(),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = primary,
+                    )
+                }
+                c.str("title")?.let { Text(it, style = MaterialTheme.typography.headlineSmall) }
+                c.str(
+                    "subtitle",
+                )?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                val badges = c.arr("badges")?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank) }.orEmpty()
+                if (badges.isNotEmpty()) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        badges.forEach { badge ->
+                            Text(
+                                badge,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                modifier =
+                                    Modifier
+                                        .clip(RoundedCornerShape(50))
+                                        .background(primary.copy(alpha = 0.18f))
+                                        .padding(horizontal = 8.dp, vertical = 3.dp),
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }

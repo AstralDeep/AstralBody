@@ -25,6 +25,7 @@ import androidx.compose.ui.unit.dp
 import com.personalailabs.astraldeep.app.render.Emit
 import com.personalailabs.astraldeep.app.render.MarkdownText
 import com.personalailabs.astraldeep.app.render.Renderer
+import com.personalailabs.astraldeep.app.ui.theme.AstralColors
 import com.personalailabs.astraldeep.app.ui.theme.hexToColor
 import com.personalailabs.astraldeep.core.sdui.Component
 
@@ -121,6 +122,7 @@ private fun AlertPrimitive(c: Component) {
             "error" -> Color(0xFFEF4444)
             "warning" -> Color(0xFFEAB308)
             "success" -> Color(0xFF22C55E)
+            "info" -> Color(0xFF3B82F6)
             else -> MaterialTheme.colorScheme.primary
         }
     Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) {
@@ -133,7 +135,7 @@ private fun AlertPrimitive(c: Component) {
 
 /**
  * A server button. Honors `variant` like the web/Windows renderers: `primary`
- * filled, `secondary` tonal, `danger` error-tinted. Rendering every variant as
+ * gradient-filled, `secondary` tonal, `danger` solid red. Rendering every variant as
  * an identical filled button hid all selected-state feedback — the active
  * guide section / personalization tab / applied theme preset were visually
  * indistinguishable, which read as "the buttons do nothing".
@@ -155,10 +157,26 @@ private fun ButtonPrimitive(
                 enabled = action != null,
                 colors =
                     ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.errorContainer,
-                        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                        containerColor = Color(0xFFEF4444),
+                        contentColor = Color.White,
                     ),
             ) { Text(label) }
-        else -> Button(onClick = onClick, enabled = action != null) { Text(label) }
+        else -> {
+            // Brand treatment: the primary button carries the signature
+            // indigo→purple gradient (web `.astral-btn-primary`) — a transparent
+            // M3 Button (keeps the ripple) over a gradient-filled shape.
+            val shape = ButtonDefaults.shape
+            Button(
+                onClick = onClick,
+                enabled = action != null,
+                shape = shape,
+                colors =
+                    ButtonDefaults.buttonColors(
+                        containerColor = Color.Transparent,
+                        contentColor = Color.White,
+                    ),
+                modifier = Modifier.background(AstralColors.AccentBrush, shape),
+            ) { Text(label) }
+        }
     }
 }
