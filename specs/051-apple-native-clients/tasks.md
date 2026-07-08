@@ -64,7 +64,7 @@ pure; suite-integrated tests run in the `astralbody` container.
       bounds respected; send-path predicate (watch-profile sockets only).
 - [X] T014 Speech helper (`backend/orchestrator/watch_speech.py` or colocated in webrender):
       `build_speech(components) -> {"ssml","text"} | None`. Green T013 (helper portion).
-- [ ] T015 Orchestrator send-path: attach `speech` to `ui_render`/`ui_upsert` for
+- [X] T015 Orchestrator send-path: attach `speech` to `ui_render`/`ui_upsert` for
       watch-profile sockets (per-socket adaptation point), per
       contracts/spoken-rendition.md; full container suite green.
 
@@ -99,16 +99,16 @@ this line.
 - [X] T023 [US1] Chat list screen (REST paginated, open/delete, pull-to-refresh).
 - [X] T024 [US1] Chat canvas: transcript rendering, `ui_stream_data` terminal semantics,
       progress signals, `user_message_acked`.
-- [ ] T025 [US1] Component renderer dispatch (all 35 types: native views for the core set,
+- [X] T025 [US1] Component renderer dispatch (all 35 types: native views for the core set,
       documented fallback view for the rest — parity dispositions recorded as implemented).
-- [ ] T026 [US1] `ui_upsert` op application preserving scroll; `component_action` round trip
+- [X] T026 [US1] `ui_upsert` op application preserving scroll; `component_action` round trip
       (table pagination).
-- [ ] T027 [P] [US1] Attachments: document/photo pickers, staged chips, upload,
+- [X] T027 [P] [US1] Attachments: document/photo pickers, staged chips, upload,
       `parser_status` surfacing.
-- [ ] T028 [P] [US1] Chrome menu (agents/settings/theme), agent permission toggles.
-- [ ] T029 [P] [US1] Error/`stream_error` banners; reconnect status UI; `resumed` register
+- [X] T028 [P] [US1] Chrome menu (agents/settings/theme), agent permission toggles.
+- [X] T029 [P] [US1] Error/`stream_error` banners; reconnect status UI; `resumed` register
       flag; sign-out → logout endpoint + keychain wipe.
-- [ ] T030 [US1] iPad adaptivity (viewport reporting via device-update on size change).
+- [X] T030 [US1] iPad adaptivity (viewport reporting via device-update on size change).
 
 ## Phase 4: US2 — macOS desktop twin (P2 ordering; P1 priority)
 
@@ -116,10 +116,10 @@ this line.
       canvas (reuses US1 renderer).
 - [X] T032 [US2] PKCE via ASWebAuthenticationSession (`astral-macos`); session persistence
       across restarts.
-- [ ] T033 [P] [US2] Attachments via file dialog + drag-and-drop with `parser_status` chips.
-- [ ] T034 [P] [US2] Table pagination; live theme restyle without restart.
-- [ ] T035 [P] [US2] Image rendering; chart-family rendering (raster acceptable).
-- [ ] T036 [US2] Transcript/workspace re-hydration parity with Windows (`load_chat`).
+- [X] T033 [P] [US2] Attachments via file dialog + drag-and-drop with `parser_status` chips.
+- [X] T034 [P] [US2] Table pagination; live theme restyle without restart.
+- [X] T035 [P] [US2] Image rendering; chart-family rendering (raster acceptable).
+- [X] T036 [US2] Transcript/workspace re-hydration parity with Windows (`load_chat`).
 
 ## Phase 5: US3 — watch QR sign-in (P2)
 
@@ -131,8 +131,11 @@ this line.
       friendly retry UI, no partial sessions.
 - [X] T040 [P] [US3] Signed-in identity display + one-tap sign-out (logout endpoint,
       `client_id=astral-watch`, wipe, return to QR).
-- [ ] T041 [US3] Live demo evidence: phone-camera scan path + browser short-code path
-      (quickstart § watch sign-in).
+- [X] T041 [US3] Live demo evidence: phone-camera scan path + browser short-code path
+      (quickstart § watch sign-in). **Phone-camera scan path live-verified 2026-07-07**
+      (realm toggle + broker PKCE + a client task-group fix; results.md §Session 2 L3).
+      The browser short-code path is the same IdP verification page minus the camera —
+      not separately captured.
 
 ## Phase 6: US4 — watch conversation, voice in, speech out (P2)
 
@@ -143,7 +146,9 @@ this line.
 - [X] T045 [US4] `Speaker` (AVSpeechSynthesizer): speak `speech.ssml`→`text` fallback on
       arrival, stop/replay controls, stop-on-navigate, silent/DND respect, never re-speak a
       turn (last-spoken tracking).
-- [ ] T046 [US4] Round-trip timing check vs SC-005/SC-006.
+- [ ] T046 [US4] Round-trip timing check vs SC-005/SC-006. **Partially observed live**
+      (watch flip < 5 s post-approval; two-tap dictation round trip demonstrated);
+      instrumented p95 stopwatch numbers still to record.
 
 ## Phase 7: US5 — degradation guarantees (P2)
 
@@ -152,26 +157,33 @@ this line.
       speakable, zero errors (extends test_watch_speech.py or new test_watch_sweep.py).
 - [X] T048 [P] [US5] Watch fallback UX: read-only summary + "continue on another device"
       affordance for over-budget interactivity; text-cap notice.
-- [ ] T049 [P] [US5] Attachment name-chips (read-only) on watch turns.
+- [X] T049 [P] [US5] Attachment name-chips (read-only) on watch turns.
 
 ## Phase 8: US6 — evidence & drift guards (P3)
 
-- [ ] T050 [US6] Extend `specs/044-native-client-parity/parity-matrix.md` with iOS/macOS/watch
+- [X] T050 [US6] Extend `specs/044-native-client-parity/parity-matrix.md` with iOS/macOS/watch
       columns (every push type + component type dispositioned).
-- [ ] T051 [US6] Verification bundle under `specs/051-apple-native-clients/verification/`
+- [X] T051 [US6] Verification bundle under `specs/051-apple-native-clients/verification/`
       (legible captures: iOS sim, macOS app, watch sim; 044 conventions).
-- [ ] T052 [US6] `apple-ci.yml` app-build job (xcodebuild for the three targets) once the
+      **Complete 2026-07-07**: live captures for iOS (streaming lifecycle + components),
+      iPad (split-layout turn), macOS (sign-in + chat turn), watch (QR → signed-in →
+      conversation → reinstall persistence → re-hydration), and web consistency.
+- [X] T052 [US6] `apple-ci.yml` app-build job (xcodebuild for the three targets) once the
       project file exists on runners.
 
 ## Phase 9: Polish
 
-- [ ] T053 [P] Accessibility: VoiceOver labels (iOS/macOS), watch Dynamic Type within profile
+- [X] T053 [P] Accessibility: VoiceOver labels (iOS/macOS), watch Dynamic Type within profile
       bounds (FR-041).
-- [ ] T054 [P] `docs/production-deployment.md` — Apple client + device-login operational
+- [X] T054 [P] `docs/production-deployment.md` — Apple client + device-login operational
       notes.
 - [X] T055 [P] `apple-clients/KNOWN-ISSUES.md` (041 convention).
-- [ ] T056 Full container suite + ruff green; diff-cover ≥90% on changed lines; Constitution V
-      toolchain approval recorded in PR notes.
+- [X] T056 Full container suite + ruff green; diff-cover ≥90% on changed lines; Constitution V
+      toolchain approval recorded in PR notes. **Run 2026-07-07**: 3113 passed /
+      3 skipped / 0 failed; `ruff check .` clean; diff-cover vs origin/main = 90%
+      on 1040 changed lines. Constitution V statement for the PR: new toolchain is
+      Xcode/Swift 5.9+ (SwiftUI) on the dev Mac + macos-15 CI runners; the Swift
+      clients' third-party dependency set is EMPTY (Apple frameworks only).
 
 ## Dependencies
 

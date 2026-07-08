@@ -90,6 +90,33 @@ Both are ungated (no user data) and excluded from access logs.
   `auth_revocation_queue` and retried when the IdP is unreachable) plus all
   feature-025 offline grants.
 
+## Native clients (Windows, Android, Apple) & device sign-in
+
+- The native clients (feature 044/041/051: `windows-client/`, `android-client/`,
+  `apple-clients/` iOS + macOS + watchOS) consume the same public origin as the
+  browser — no extra ports or services. They authenticate as **public PKCE
+  clients**: `astral-desktop` (Windows + macOS), `astral-mobile`
+  (Android + iOS), `astral-watch` (watch). All must appear in
+  `KEYCLOAK_ALLOWED_AZP` and exist in the realm per
+  [keycloak-realm-settings.md](keycloak-realm-settings.md).
+- **Watch QR sign-in (feature 051)** is the backend-brokered OAuth 2.0 Device
+  Authorization Grant (RFC 8628): the watch calls
+  `POST /api/auth/device/{start,poll,refresh}` and never contacts the IdP.
+  Requirements: `FF_DEVICE_LOGIN=true` (default) and the **device grant
+  enabled on the `astral-watch` client** in the realm (a per-client toggle;
+  see keycloak-realm-settings.md §051). Fail-closed: flag off, IdP
+  unreachable, or grant not enabled all yield a clean 503 with an actionable
+  message on the watch — never a hung or partial session.
+- Device-login start/poll are rate-limited per client address and codes are
+  single-use + TTL-bound; the lifecycle is audited (`auth` class,
+  `auth.device_login_*`). Token material is never logged.
+- Apple/Android/Windows sign-out calls `POST /api/auth/logout` with its
+  client id; revocation is queued offline-tolerantly
+  (`auth_revocation_queue.client_id`) exactly like the web client.
+- iOS/macOS refresh directly against the IdP token endpoint (Windows
+  precedent); the watch refreshes via the backend broker (single TLS peer).
+  Silent refresh never extends the 365-day interactive anchor.
+
 ## Database
 
 - Postgres 17 (compose service `postgres`, named volume `pgdata`).
@@ -211,4 +238,7 @@ the pulled image refuses to serve and prints one consolidated checklist in
 [ ] https://host/auth/callback registered on the Keycloak client
 [ ] docker compose up -d; container healthcheck goes healthy (/readyz)
 [ ] Boot log shows no posture warnings; GET / redirects to Keycloak
+[ ] Native clients: astral-desktop/astral-mobile/astral-watch in
+    KEYCLOAK_ALLOWED_AZP; device grant enabled on astral-watch
+    (watch QR sign-in); FF_DEVICE_LOGIN=true
 ```
