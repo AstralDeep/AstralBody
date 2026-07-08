@@ -54,8 +54,9 @@ enum AstralRadius {
 /// Holds the live palette so the server can restyle without a relaunch
 /// (feature 044 US5 parity). Observed by the renderer and chrome.
 @MainActor
-final class ThemeStore: ObservableObject {
-    @Published var palette = AstralPalette.midnight
+@Observable
+final class ThemeStore {
+    var palette = AstralPalette.midnight
 
     /// A `user_preferences` frame payload (`{preferences:{theme:…}}` or a bare
     /// theme spec). Fail-open: unknown shapes are ignored.

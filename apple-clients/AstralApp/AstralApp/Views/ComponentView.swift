@@ -11,8 +11,8 @@ import AppKit
 
 struct ComponentView: View {
     let component: AstralComponent
-    @EnvironmentObject var theme: ThemeStore
-    @EnvironmentObject var model: AppModel
+    @Environment(ThemeStore.self) var theme
+    @Environment(AppModel.self) var model
 
     private var p: AstralPalette { theme.palette }
 
@@ -507,8 +507,8 @@ struct AstralButtonStyle: ButtonStyle {
 /// release assets) are fetched without credentials.
 struct DownloadComponent: View {
     let component: AstralComponent
-    @EnvironmentObject var theme: ThemeStore
-    @EnvironmentObject var model: AppModel
+    @Environment(ThemeStore.self) var theme
+    @Environment(AppModel.self) var model
     @State private var phase = Phase.idle
     private var p: AstralPalette { theme.palette }
 
@@ -620,8 +620,8 @@ struct DownloadComponent: View {
 /// Table with server-driven pagination (emits `table_paginate`).
 struct TableComponent: View {
     let component: AstralComponent
-    @EnvironmentObject var theme: ThemeStore
-    @EnvironmentObject var model: AppModel
+    @Environment(ThemeStore.self) var theme
+    @Environment(AppModel.self) var model
     private var p: AstralPalette { theme.palette }
 
     var body: some View {
@@ -689,8 +689,8 @@ struct TableComponent: View {
 /// Single-line input that submits its value through the standard event path.
 struct InputComponent: View {
     let component: AstralComponent
-    @EnvironmentObject var theme: ThemeStore
-    @EnvironmentObject var model: AppModel
+    @Environment(ThemeStore.self) var theme
+    @Environment(AppModel.self) var model
     @State private var value = ""
     private var p: AstralPalette { theme.palette }
 
@@ -724,8 +724,8 @@ struct InputComponent: View {
 /// templated chat message or a `submit_action` with `{fields:{…}}`.
 struct ParamPickerComponent: View {
     let component: AstralComponent
-    @EnvironmentObject var theme: ThemeStore
-    @EnvironmentObject var model: AppModel
+    @Environment(ThemeStore.self) var theme
+    @Environment(AppModel.self) var model
     @State private var values: [String: String] = [:]
     @State private var flags: [String: Bool] = [:]
     private var p: AstralPalette { theme.palette }
@@ -821,7 +821,7 @@ struct ParamPickerComponent: View {
 /// Tabs with local selection; renders the selected tab's children.
 struct TabsComponent: View {
     let component: AstralComponent
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(ThemeStore.self) var theme
     @State private var selection = 0
     private var p: AstralPalette { theme.palette }
 
@@ -851,7 +851,7 @@ struct TabsComponent: View {
 /// Collapsible disclosure (parity with web `<details>`).
 struct CollapsibleComponent: View {
     let component: AstralComponent
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(ThemeStore.self) var theme
     @State private var expanded: Bool
     private var p: AstralPalette { theme.palette }
 
@@ -887,8 +887,8 @@ struct CollapsibleComponent: View {
 /// Color picker → live restyle + `save_theme` (feature 044 US5 parity).
 struct ColorPickerComponent: View {
     let component: AstralComponent
-    @EnvironmentObject var theme: ThemeStore
-    @EnvironmentObject var model: AppModel
+    @Environment(ThemeStore.self) var theme
+    @Environment(AppModel.self) var model
     private var p: AstralPalette { theme.palette }
 
     private let presets = ["#6366F1", "#8B5CF6", "#06B6D4", "#22C55E", "#F59E0B", "#EF4444"]
@@ -922,7 +922,7 @@ struct ColorPickerComponent: View {
 /// Native bar/line/pie chart (parity with the other clients' canvas draws).
 struct ChartComponent: View {
     let component: AstralComponent
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(ThemeStore.self) var theme
     private var p: AstralPalette { theme.palette }
 
     var body: some View {

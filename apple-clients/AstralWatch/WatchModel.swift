@@ -9,7 +9,8 @@ import WatchKit
 #endif
 
 @MainActor
-final class WatchModel: ObservableObject {
+@Observable
+final class WatchModel {
 
     enum Phase: Equatable {
         case signedOut
@@ -31,22 +32,22 @@ final class WatchModel: ObservableObject {
         }
     }
 
-    // MARK: published state
+    // MARK: observable state
 
-    @Published var phase: Phase = .signedOut
-    @Published var login: DeviceLoginStart?
-    @Published var loginExpiresAt: Date = .distantFuture
-    @Published var recents: [ChatSummary] = []
-    @Published var entries: [Entry] = []
+    var phase: Phase = .signedOut
+    var login: DeviceLoginStart?
+    var loginExpiresAt: Date = .distantFuture
+    var recents: [ChatSummary] = []
+    var entries: [Entry] = []
     /// The live canvas — identity-keyed workspace components. `ui_upsert` ops
     /// apply in place (replace/remove by component_id) instead of stacking
     /// duplicate transcript entries (FR-013 as it reaches the watch).
-    @Published var canvas: [AstralComponent] = []
-    @Published var statusText: String?
-    @Published var errorBanner: String?
-    @Published var connected = false
-    @Published var accountName = ""
-    @Published var pendingDictation = ""
+    var canvas: [AstralComponent] = []
+    var statusText: String?
+    var errorBanner: String?
+    var connected = false
+    var accountName = ""
+    var pendingDictation = ""
 
     let speaker = Speaker()
 
@@ -59,7 +60,7 @@ final class WatchModel: ObservableObject {
     /// routes by `session_id` FIRST — a made-up id would send every message
     /// to a phantom chat, so this is adopted from chat_created/chat_loaded
     /// and nil until the server assigns one.
-    private var activeChatId: String?
+    @ObservationIgnored private var activeChatId: String?
     private let store: TokenStorage = {
         #if canImport(Security)
         KeychainTokenStore(service: "com.personalailabs.astraldeep.watch")
@@ -68,10 +69,16 @@ final class WatchModel: ObservableObject {
         #endif
     }()
 
-    private var tokens: TokenSet?
-    private var loginTask: Task<Void, Never>?
-    private var wsTask: Task<Void, Never>?
-    private var ws: WSClient?
+    @ObservationIgnored private var tokens: TokenSet?
+    @ObservationIgnored private var loginTask: Task<Void, Never>?
+    @ObservationIgnored private var wsTask: Task<Void, Never>?
+    @ObservationIgnored private var ws: WSClient?
+    /// Single-flight refresh (see `refreshOutcome`) + a session generation so
+    /// a refresh resolving after sign-out can never resurrect wiped
+    /// credentials or be joined by the next account's session.
+    @ObservationIgnored private var refreshTask: Task<RefreshResult, Never>?
+    @ObservationIgnored private var refreshTaskGeneration = -1
+    @ObservationIgnored private var sessionGeneration = 0
 
     var deviceLogin: DeviceLoginClient {
         DeviceLoginClient(serverBase: serverBase)
@@ -88,18 +95,19 @@ final class WatchModel: ObservableObject {
     func bootstrap() async {
         if let stored = store.load() {
             tokens = stored.tokenSet
-            switch await refreshOutcome() {
-            case .ok, .transient:
-                // Offline launch keeps the stored session (sign in once per
-                // device) — the home screen shows "Reconnecting…" and the WS
-                // backoff loop registers when the network returns. Only a
-                // definitive IdP rejection returns the watch to the QR screen.
-                await enterSignedIn()
-                return
-            case .rejected:
-                store.wipe()
-                tokens = nil
+            // Enter the signed-in home IMMEDIATELY: the WS dial starts now
+            // and the register frame waits on the (single-flight) broker
+            // refresh inside onConnect, so the two round trips overlap
+            // instead of running back-to-back behind the QR spinner. An
+            // offline launch keeps the stored session (sign in once per
+            // device) — the home screen shows "Reconnecting…" and the WS
+            // backoff loop registers when the network returns. Only a
+            // definitive IdP rejection returns the watch to the QR screen.
+            enterSignedIn()
+            if case .rejected = await refreshOutcome() {
+                await signOut(revokeRemote: false)   // ends at the QR screen
             }
+            return
         }
         beginDeviceLogin()
     }
@@ -145,7 +153,7 @@ final class WatchModel: ObservableObject {
                 case .approved(let set):
                     tokens = set
                     store.save(StoredTokens(from: set))
-                    await enterSignedIn()
+                    enterSignedIn()
                     return
                 case .denied(let reason):
                     phase = .loginFailed(reason == "denied_no_access"
@@ -173,12 +181,33 @@ final class WatchModel: ObservableObject {
 
     /// Ensure a live access token via the backend broker, with failures
     /// classified (rejected → QR screen; transient/offline → keep session).
+    /// SINGLE-FLIGHT: concurrent callers (the WS onConnect and the recents /
+    /// audit REST tokenProvider) join one in-flight broker round trip — two
+    /// parallel grants with the same rotating refresh token can revoke the
+    /// whole session at the IdP.
     private func refreshOutcome() async -> RefreshResult {
+        if let inFlight = refreshTask, refreshTaskGeneration == sessionGeneration {
+            return await inFlight.value
+        }
         guard let current = tokens else { return .rejected("no session") }
         if !current.needsRefresh() { return .ok(current) }
-        guard let refresh = current.refreshToken else { return .rejected("no refresh token") }
-        let result = await RefreshStrategy.broker(deviceLogin).attempt(refreshToken: refresh)
-        if case .ok(let set) = result {
+        return await runRefresh()
+    }
+
+    /// Start (and register) a refresh attempt unconditionally —
+    /// `refreshOutcome` gates it behind expiry, `handleAuthRequired` forces it.
+    private func runRefresh() async -> RefreshResult {
+        guard let refresh = tokens?.refreshToken else { return .rejected("no refresh token") }
+        let generation = sessionGeneration
+        let broker = deviceLogin
+        let attempt = Task { await RefreshStrategy.broker(broker).attempt(refreshToken: refresh) }
+        refreshTask = attempt
+        refreshTaskGeneration = generation
+        let result = await attempt.value
+        if refreshTaskGeneration == generation { refreshTask = nil }
+        // A sign-out while the request was in flight ended this session —
+        // never resurrect wiped credentials.
+        if case .ok(let set) = result, generation == sessionGeneration {
             tokens = set
             store.save(StoredTokens(from: set))
         }
@@ -190,17 +219,23 @@ final class WatchModel: ObservableObject {
         return nil
     }
 
-    private func enterSignedIn() async {
+    private func enterSignedIn() {
         accountName = tokens?.displayName ?? ""
         phase = .signedIn
         connectWS()
-        await refreshRecents()
+        // Recents load via WatchHomeView's `.task` the moment home appears
+        // (it appears on every path into `.signedIn`) — no eager fetch here.
     }
 
-    func signOut() async {
-        if let refresh = tokens?.refreshToken {
+    /// `revokeRemote: false` skips the server-side revocation round trip —
+    /// used when the IdP has ALREADY refused the credential (nothing to
+    /// revoke, and the call would only delay returning to the QR screen).
+    func signOut(revokeRemote: Bool = true) async {
+        if revokeRemote, let refresh = tokens?.refreshToken {
             _ = try? await rest.logout(clientId: AstralConfig.watchClientId, refreshToken: refresh)
         }
+        sessionGeneration += 1
+        refreshTask = nil
         wsTask?.cancel()
         await ws?.stop()
         ws = nil
@@ -305,23 +340,26 @@ final class WatchModel: ObservableObject {
     }
 
     /// The server refused our token. A near-expiry token refreshes anyway on
-    /// the normal path, so FORCE a broker refresh here: an unchanged/refused
-    /// credential means the session is dead server-side (revoked / hard cap)
-    /// — wipe and return to the QR screen instead of looping reconnects.
+    /// the normal path, so join the in-flight refresh if one is running,
+    /// otherwise FORCE a broker refresh: an unchanged/refused credential
+    /// means the session is dead server-side (revoked / hard cap) — wipe and
+    /// return to the QR screen instead of looping reconnects.
     private func handleAuthRequired() async {
-        guard let current = tokens, let refresh = current.refreshToken else {
+        guard let refused = tokens?.accessToken else {
             await signOut()
             return
         }
-        switch await RefreshStrategy.broker(deviceLogin).attempt(refreshToken: refresh) {
-        case .ok(let set) where set.accessToken != current.accessToken:
-            tokens = set
-            store.save(StoredTokens(from: set))
-            // The reconnect loop re-registers with the fresh token.
-        case .ok:
-            await signOut()   // same token came back — the server will refuse it again
-        case .rejected:
-            await signOut()
+        let result: RefreshResult
+        if let inFlight = refreshTask, refreshTaskGeneration == sessionGeneration {
+            result = await inFlight.value
+        } else {
+            result = await runRefresh()
+        }
+        switch result {
+        case .ok(let set) where set.accessToken != refused:
+            break             // the reconnect loop re-registers with the fresh token
+        case .ok, .rejected:
+            await signOut()   // same/refused token — the session is dead server-side
         case .transient:
             break             // offline blip; keep the session and retry
         }

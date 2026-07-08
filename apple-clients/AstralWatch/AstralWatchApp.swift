@@ -6,7 +6,7 @@ import AstralCore
 
 @main
 struct AstralWatchApp: App {
-    @StateObject private var model = WatchModel()
+    @State private var model = WatchModel()
 
     var body: some Scene {
         WindowGroup {
@@ -20,7 +20,7 @@ struct AstralWatchApp: App {
                     }
                 }
             }
-            .environmentObject(model)
+            .environment(model)
             .tint(Color(red: 99 / 255, green: 102 / 255, blue: 241 / 255)) // AstralDeep indigo
             .task { await model.bootstrap() }
         }

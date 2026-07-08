@@ -17,7 +17,8 @@ import AppKit
 #endif
 
 @MainActor
-final class AppModel: NSObject, ObservableObject {
+@Observable
+final class AppModel: NSObject {
 
     enum Screen: Equatable { case chat, agents, history, audit, surface }
 
@@ -51,8 +52,14 @@ final class AppModel: NSObject, ObservableObject {
 
     // MARK: configuration
 
-    @AppStorage("serverBase") var serverBaseText = AstralConfig.serverBaseURL
-    @AppStorage("authority") var authorityText = AstralConfig.keycloakAuthority
+    // UserDefaults-backed (the former @AppStorage pair — property wrappers
+    // aren't allowed on @Observable stored properties). Seeded in init.
+    var serverBaseText: String {
+        didSet { UserDefaults.standard.set(serverBaseText, forKey: "serverBase") }
+    }
+    var authorityText: String {
+        didSet { UserDefaults.standard.set(authorityText, forKey: "authority") }
+    }
 
     #if os(macOS)
     let clientId = AstralConfig.macosClientId
@@ -61,46 +68,46 @@ final class AppModel: NSObject, ObservableObject {
     #endif
     let redirectURI = AstralConfig.redirectURI
 
-    // MARK: published state (mirrors Android UiState)
+    // MARK: observable state (mirrors Android UiState)
 
-    @Published var signedIn = false
-    @Published var accountName = ""
-    @Published var connected = false
-    @Published var everConnected = false
-    @Published var screen: Screen = .chat
-    @Published var activeChatId: String?
+    var signedIn = false
+    var accountName = ""
+    var connected = false
+    var everConnected = false
+    var screen: Screen = .chat
+    var activeChatId: String?
 
-    @Published var turns: [ChatTurn] = []
-    @Published var canvas: [AstralComponent] = []
-    @Published var pendingCanvas: [AstralComponent] = []
-    @Published var turnActive = false
-    @Published var pendingReplace = false
-    @Published var canvasLabel = ""
-    @Published var pendingLabel = ""
-    @Published var canvasHistory: [CanvasSnapshot] = []
-    @Published var viewingIndex: Int?
+    var turns: [ChatTurn] = []
+    var canvas: [AstralComponent] = []
+    var pendingCanvas: [AstralComponent] = []
+    var turnActive = false
+    var pendingReplace = false
+    var canvasLabel = ""
+    var pendingLabel = ""
+    var canvasHistory: [CanvasSnapshot] = []
+    var viewingIndex: Int?
 
-    @Published var staged: [StagedAttachment] = []
-    @Published var statusText: String?
-    @Published var errorBanner: String?
-    @Published var bannerIsError = true
-    @Published var stepTrail: [String] = []
-    @Published var asyncDetached = false
+    var staged: [StagedAttachment] = []
+    var statusText: String?
+    var errorBanner: String?
+    var bannerIsError = true
+    var stepTrail: [String] = []
+    var asyncDetached = false
 
-    @Published var agents: [Agent] = []
-    @Published var history: [ChatSummary] = []
-    @Published var audit: [AuditEvent] = []
-    @Published var agentsLoading = false
-    @Published var historyLoading = false
-    @Published var auditLoading = false
+    var agents: [Agent] = []
+    var history: [ChatSummary] = []
+    var audit: [AuditEvent] = []
+    var agentsLoading = false
+    var historyLoading = false
+    var auditLoading = false
 
-    @Published var chromeMenu: ChromeMenuModel?
-    @Published var pendingSurfaceKey = ""
-    @Published var pendingSurfaceParams: JSONValue = .object([:])
-    @Published var pendingSurface: SurfaceContent?
-    @Published var timelineReadOnly = false
+    var chromeMenu: ChromeMenuModel?
+    var pendingSurfaceKey = ""
+    var pendingSurfaceParams: JSONValue = .object([:])
+    var pendingSurface: SurfaceContent?
+    var timelineReadOnly = false
 
-    @Published var signInError: String?
+    var signInError: String?
 
     let themeStore = ThemeStore()
 
@@ -115,7 +122,7 @@ final class AppModel: NSObject, ObservableObject {
     var showSkeleton: Bool { pendingReplace && viewingIndex == nil }
     var mutationsLocked: Bool { timelineReadOnly }
 
-    // MARK: session plumbing
+    // MARK: session plumbing (never read by views — not observation-tracked)
 
     private let store: TokenStorage = {
         #if canImport(Security)
@@ -124,12 +131,18 @@ final class AppModel: NSObject, ObservableObject {
         InMemoryTokenStore()
         #endif
     }()
-    private var tokens: TokenSet?
-    private var ws: WSClient?
-    private var wsTask: Task<Void, Never>?
-    private var authSession: ASWebAuthenticationSession?
-    private var seqState: [String: Int] = [:]
-    private var attachSeq = 0
+    @ObservationIgnored private var tokens: TokenSet?
+    @ObservationIgnored private var ws: WSClient?
+    @ObservationIgnored private var wsTask: Task<Void, Never>?
+    @ObservationIgnored private var authSession: ASWebAuthenticationSession?
+    @ObservationIgnored private var seqState: [String: Int] = [:]
+    @ObservationIgnored private var attachSeq = 0
+    /// Single-flight refresh (see `refreshOutcome`) + a session generation so
+    /// a refresh resolving after sign-out can never resurrect wiped
+    /// credentials or be joined by the next account's session.
+    @ObservationIgnored private var refreshTask: Task<RefreshResult, Never>?
+    @ObservationIgnored private var refreshTaskGeneration = -1
+    @ObservationIgnored private var sessionGeneration = 0
 
     private let docMarker = "full write-up is on the canvas"
     private let maxTrail = 20
@@ -153,30 +166,30 @@ final class AppModel: NSObject, ObservableObject {
     // MARK: lifecycle
 
     override init() {
-        super.init()
         let defaults = UserDefaults.standard
-        if (defaults.string(forKey: "serverBase") ?? "").isEmpty {
-            defaults.set(AstralConfig.serverBaseURL, forKey: "serverBase")
-        }
-        if (defaults.string(forKey: "authority") ?? "").isEmpty {
-            defaults.set(AstralConfig.keycloakAuthority, forKey: "authority")
-        }
+        let storedBase = defaults.string(forKey: "serverBase") ?? ""
+        let storedAuthority = defaults.string(forKey: "authority") ?? ""
+        serverBaseText = storedBase.isEmpty ? AstralConfig.serverBaseURL : storedBase
+        authorityText = storedAuthority.isEmpty ? AstralConfig.keycloakAuthority : storedAuthority
+        super.init()
+        if storedBase.isEmpty { defaults.set(AstralConfig.serverBaseURL, forKey: "serverBase") }
+        if storedAuthority.isEmpty { defaults.set(AstralConfig.keycloakAuthority, forKey: "authority") }
     }
 
     func bootstrap() async {
         guard let stored = store.load() else { return }
         tokens = stored.tokenSet
-        switch await refreshOutcome() {
-        case .ok, .transient:
-            // Transient (offline) keeps the stored credentials: land on the
-            // signed-in shell with the reconnect strip; the WS backoff loop
-            // retries and registers once the network returns. Credentials are
-            // wiped ONLY on a definitive IdP rejection — never for being
-            // offline at launch.
-            await enterSignedIn(resumedSession: true)
-        case .rejected:
-            store.wipe()
-            tokens = nil
+        // Enter the signed-in shell IMMEDIATELY: the WS dial starts now, and
+        // the register frame waits on the (single-flight) token refresh
+        // inside onConnect — so the IdP round trip and the socket handshake
+        // run concurrently instead of back-to-back behind a blank sign-in
+        // screen. Transient (offline) keeps the stored credentials: the
+        // reconnect strip shows and the WS backoff loop registers once the
+        // network returns. Credentials are wiped ONLY on a definitive IdP
+        // rejection — never for being offline at launch.
+        enterSignedIn(resumedSession: true)
+        if case .rejected = await refreshOutcome() {
+            await signOut(revokeRemote: false)   // the IdP already refused the credential
         }
     }
 
@@ -231,7 +244,7 @@ final class AppModel: NSObject, ObservableObject {
             }
             tokens = set
             store.save(StoredTokens(from: set))
-            await enterSignedIn(resumedSession: false)
+            enterSignedIn(resumedSession: false)
         } catch {
             signInError = error.localizedDescription
         }
@@ -239,15 +252,34 @@ final class AppModel: NSObject, ObservableObject {
 
     /// Ensure a live access token, classifying failures so callers can tell
     /// "the IdP revoked us" (wipe + interactive sign-in) from "we're offline"
-    /// (keep credentials, retry later).
+    /// (keep credentials, retry later). SINGLE-FLIGHT: concurrent callers
+    /// (the WS onConnect, REST tokenProvider, bootstrap validation) join one
+    /// in-flight IdP round trip — two parallel grants with the same rotating
+    /// refresh token can revoke the whole session at the IdP.
     private func refreshOutcome() async -> RefreshResult {
+        if let inFlight = refreshTask, refreshTaskGeneration == sessionGeneration {
+            return await inFlight.value
+        }
         guard let current = tokens else { return .rejected("no session") }
         if !current.needsRefresh() { return .ok(current) }
-        guard let refresh = current.refreshToken, let oidc else {
+        return await runRefresh()
+    }
+
+    /// Start (and register) a refresh attempt unconditionally —
+    /// `refreshOutcome` gates it behind expiry, `handleAuthRequired` forces it.
+    private func runRefresh() async -> RefreshResult {
+        guard let refresh = tokens?.refreshToken, let oidc else {
             return .rejected("no refresh token")
         }
-        let result = await RefreshStrategy.direct(oidc).attempt(refreshToken: refresh)
-        if case .ok(let set) = result {
+        let generation = sessionGeneration
+        let attempt = Task { await RefreshStrategy.direct(oidc).attempt(refreshToken: refresh) }
+        refreshTask = attempt
+        refreshTaskGeneration = generation
+        let result = await attempt.value
+        if refreshTaskGeneration == generation { refreshTask = nil }
+        // A sign-out while the request was in flight ended this session —
+        // never resurrect wiped credentials.
+        if case .ok(let set) = result, generation == sessionGeneration {
             tokens = set
             store.save(StoredTokens(from: set))
         }
@@ -261,38 +293,46 @@ final class AppModel: NSObject, ObservableObject {
 
     /// The server refused our token. `refreshOutcome` short-circuits when the
     /// token isn't near expiry, which would reconnect with the SAME rejected
-    /// credential forever — so FORCE a real IdP refresh and only reconnect if
-    /// it produced a different token; otherwise the session is dead
-    /// server-side (revoked / hard cap) and we go to interactive sign-in.
+    /// credential forever — so join the in-flight refresh if one is running,
+    /// otherwise FORCE a real IdP refresh; reconnect only if it produced a
+    /// different token, else the session is dead server-side (revoked / hard
+    /// cap) and we go to interactive sign-in.
     private func handleAuthRequired() async {
-        guard let current = tokens, let refresh = current.refreshToken, let oidc else {
+        guard let refused = tokens?.accessToken else {
             await signOut()
             return
         }
-        switch await RefreshStrategy.direct(oidc).attempt(refreshToken: refresh) {
-        case .ok(let set) where set.accessToken != current.accessToken:
-            tokens = set
-            store.save(StoredTokens(from: set))
+        let result: RefreshResult
+        if let inFlight = refreshTask, refreshTaskGeneration == sessionGeneration {
+            result = await inFlight.value
+        } else {
+            result = await runRefresh()
+        }
+        switch result {
+        case .ok(let set) where set.accessToken != refused:
             connectWS(resumed: true)
-        case .ok:
+        case .ok, .rejected:
             await signOut()   // same token — the server will just refuse it again
-        case .rejected:
-            await signOut()
         case .transient:
             break             // offline blip; the WS backoff loop keeps retrying
         }
     }
 
-    private func enterSignedIn(resumedSession: Bool) async {
+    private func enterSignedIn(resumedSession: Bool) {
         accountName = tokens?.displayName ?? ""
         signedIn = true
         connectWS(resumed: resumedSession)
     }
 
-    func signOut() async {
-        if let refresh = tokens?.refreshToken {
+    /// `revokeRemote: false` skips the server-side revocation round trip —
+    /// used when the IdP has ALREADY refused the credential (nothing to
+    /// revoke, and the call would only delay landing on the sign-in screen).
+    func signOut(revokeRemote: Bool = true) async {
+        if revokeRemote, let refresh = tokens?.refreshToken {
             _ = try? await rest.logout(clientId: clientId, refreshToken: refresh)
         }
+        sessionGeneration += 1
+        refreshTask = nil
         wsTask?.cancel()
         await ws?.stop()
         ws = nil
@@ -306,7 +346,7 @@ final class AppModel: NSObject, ObservableObject {
 
     // MARK: WS
 
-    private var lastReportedViewport: (width: Int, height: Int)?
+    @ObservationIgnored private var lastReportedViewport: (width: Int, height: Int)?
 
     private var device: DeviceDescriptor {
         #if os(macOS)

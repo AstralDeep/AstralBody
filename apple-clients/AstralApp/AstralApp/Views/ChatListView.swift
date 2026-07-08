@@ -5,8 +5,8 @@ import SwiftUI
 import AstralCore
 
 struct HistoryView: View {
-    @EnvironmentObject var model: AppModel
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(AppModel.self) var model
+    @Environment(ThemeStore.self) var theme
     private var p: AstralPalette { theme.palette }
 
     var body: some View {

@@ -117,20 +117,28 @@ public actor WSClient {
 
     private func runLoop() async {
         while running {
-            // Credentials first: with no register frame there is no point
-            // dialing (the server would close us into auth_required) — wait
-            // out the backoff and ask again. Offline launches sit here.
-            guard let register = await onConnect?() else {
-                continuation?.yield(.disconnected(reason: "waiting for credentials"))
+            // Dial FIRST, then fetch credentials while the TCP/TLS/WS
+            // handshake is in flight — URLSession buffers sends until the
+            // socket is open, so register_ui is still the first frame on the
+            // wire. On a cold launch with a stale access token the IdP
+            // refresh and the dial overlap instead of running back-to-back.
+            // The shared session (vs. one per attempt) keeps the TLS session
+            // cache warm across reconnects and never leaks session objects.
+            // Nothing but register_ui is ever sent pre-registration: if the
+            // credentials don't materialize, the socket is closed unused and
+            // we wait out the backoff. Offline launches sit here.
+            let task = URLSession.shared.webSocketTask(with: url)
+            self.task = task
+            task.resume()
+
+            guard let register = await onConnect?(), running else {
+                task.cancel(with: .normalClosure, reason: nil)
+                self.task = nil
                 guard running else { break }
+                continuation?.yield(.disconnected(reason: "waiting for credentials"))
                 try? await Task.sleep(nanoseconds: UInt64(backoffNext() * 1_000_000_000))
                 continue
             }
-
-            let session = URLSession(configuration: .default)
-            let task = session.webSocketTask(with: url)
-            self.task = task
-            task.resume()
             task.send(.string(register)) { _ in }
 
             // `.connected` (and the backoff reset, per the shared contract:

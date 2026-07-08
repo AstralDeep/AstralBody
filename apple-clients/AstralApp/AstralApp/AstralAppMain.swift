@@ -5,13 +5,13 @@ import AstralCore
 
 @main
 struct AstralApp: App {
-    @StateObject private var model = AppModel()
+    @State private var model = AppModel()
 
     var body: some Scene {
         WindowGroup {
             RootView()
-                .environmentObject(model)
-                .environmentObject(model.themeStore)
+                .environment(model)
+                .environment(model.themeStore)
                 .tint(model.themeStore.palette.primary)
                 .preferredColorScheme(.dark)
                 .task { await model.bootstrap() }
