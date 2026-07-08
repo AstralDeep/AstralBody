@@ -7,8 +7,8 @@ import SwiftUI
 import AstralCore
 
 struct RootView: View {
-    @EnvironmentObject var model: AppModel
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(AppModel.self) var model
+    @Environment(ThemeStore.self) var theme
 
     private var p: AstralPalette { theme.palette }
 
@@ -80,8 +80,8 @@ struct RootView: View {
 // MARK: - Top bar
 
 struct AstralTopBar: View {
-    @EnvironmentObject var model: AppModel
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(AppModel.self) var model
+    @Environment(ThemeStore.self) var theme
     private var p: AstralPalette { theme.palette }
 
     var body: some View {
@@ -175,7 +175,7 @@ struct AstralTopBar: View {
 // MARK: - Strips
 
 struct ConnectionStrip: View {
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(ThemeStore.self) var theme
     let label: String
     var body: some View {
         Text(label)
@@ -188,7 +188,7 @@ struct ConnectionStrip: View {
 }
 
 struct BannerBar: View {
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(ThemeStore.self) var theme
     let text: String
     let isError: Bool
     let onDismiss: () -> Void
@@ -211,7 +211,7 @@ struct BannerBar: View {
 // MARK: - Sign in (logo + SSO only; server/realm come from AstralConfig)
 
 struct SignInView: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) var model
 
     var body: some View {
         VStack(spacing: 28) {
@@ -301,7 +301,7 @@ private func previewCanvas() -> [AstralComponent] {
     model.canvas = previewCanvas()
     model.chromeMenu = previewChrome()
     return RootView()
-        .environmentObject(model)
-        .environmentObject(model.themeStore)
+        .environment(model)
+        .environment(model.themeStore)
         .preferredColorScheme(.dark)
 }

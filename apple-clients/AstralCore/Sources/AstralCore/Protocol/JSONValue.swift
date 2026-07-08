@@ -89,11 +89,38 @@ public enum JSONValue: Codable, Equatable, Sendable {
 }
 
 public extension JSONValue {
+    /// One-pass JSONSerialization parse. This is the hot path for every WS
+    /// frame and REST body; the Codable route (`init(from:)`'s try-cascade)
+    /// pays an internal error throw/catch per scalar, which dominates decode
+    /// time on canvas-sized payloads. Same lenient any-JSON model.
     static func parse(_ data: Data) throws -> JSONValue {
-        try JSONDecoder().decode(JSONValue.self, from: data)
+        JSONValue(bridging: try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]))
     }
 
     func encoded() throws -> Data {
         try JSONEncoder().encode(self)
+    }
+}
+
+private extension JSONValue {
+    init(bridging value: Any) {
+        switch value {
+        case let dictionary as [String: Any]:
+            var object = [String: JSONValue](minimumCapacity: dictionary.count)
+            for (key, element) in dictionary { object[key] = JSONValue(bridging: element) }
+            self = .object(object)
+        case let array as [Any]:
+            self = .array(array.map(JSONValue.init(bridging:)))
+        case let string as String:
+            self = .string(string)
+        case let number as NSNumber:
+            // JSON true/false arrive as CFBoolean, an NSNumber subclass —
+            // type-check it or booleans would decode as numbers 1/0.
+            self = CFGetTypeID(number) == CFBooleanGetTypeID()
+                ? .bool(number.boolValue)
+                : .number(number.doubleValue)
+        default:
+            self = .null   // NSNull (lenient model: never fail on a valid tree)
+        }
     }
 }
