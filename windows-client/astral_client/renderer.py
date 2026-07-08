@@ -1158,10 +1158,17 @@ def _r_skeleton(c, ctx):
     w = QWidget()
     lay = _vbox(8)
     w.setLayout(lay)
-    for _ in range(min(6, int(c.get("count", 3) or 3))):
+    try:
+        count = int(c.get("count", 3) or 3)
+    except (TypeError, ValueError):
+        count = 3
+    # "card" placeholders are chunky blocks (the canvas loading state, matching
+    # the web/Android SkeletonCanvas); the default stays thin text-like lines.
+    height, radius = (72, 12) if c.get("variant") == "card" else (14, 7)
+    for _ in range(max(1, min(6, count))):
         bar = QLabel()
-        bar.setFixedHeight(14)
-        bar.setStyleSheet(f"background:{T.SURFACE_2}; border-radius:7px;")
+        bar.setFixedHeight(height)
+        bar.setStyleSheet(f"background:{T.SURFACE_2}; border-radius:{radius}px;")
         lay.addWidget(bar)
     return w
 

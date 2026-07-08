@@ -17,7 +17,7 @@ cd android-client
 ```
 
 ## Run (real Keycloak — the required path)
-- The `astral-mobile` **public** client is provisioned + allow-listed. Ensure its Valid Redirect URIs include the Android **custom-scheme** redirect `com.kyopenscience.astral:/oauth2redirect` (Android can't use the desktop's loopback redirect). The app does OIDC Authorization-Code + PKCE via a Custom Tab against `astral-mobile` and registers as `device_type=android`. See `docs/keycloak-android-client-setup.md`.
+- The `astral-mobile` **public** client is provisioned + allow-listed. Ensure its Valid Redirect URIs include the Android **custom-scheme** redirect `com.personalailabs.astraldeep:/oauth2redirect` (Android can't use the desktop's loopback redirect). The app does OIDC Authorization-Code + PKCE via a Custom Tab against `astral-mobile` and registers as `device_type=android`. See `docs/keycloak-android-client-setup.md`.
 - Install + launch: `./gradlew :app:installDebug` (emulator → host via `ASTRAL_WS_URL=wss://<host>/ws`).
 
 ## Debug-only shortcut (NOT in release builds)

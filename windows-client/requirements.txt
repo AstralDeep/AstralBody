@@ -1,11 +1,16 @@
-PySide6>=6.6
-websockets>=12.0
+# Exact pins so a tagged release rebuild resolves the same dependency set the
+# client was verified against (the release workflow installs this file, then
+# sigstore-signs the artifact — upstream majors must be opted into, not drift
+# in silently). Bump deliberately, then re-run the suite + screenshot harness.
+PySide6==6.11.1
+websockets==16.0
 # Windows tools agent (client-hosted A2A):
-aiohttp>=3.9
-psutil>=5.9
-pyperclip>=1.8
+aiohttp==3.14.1
+psutil==7.2.2
+pyperclip==1.11.0
 # Integrity verification (CLIENT-ONLY — frozen into the PyInstaller bundle;
-# never a backend/orchestrator runtime dependency, Constitution V preserved):
-sigstore>=3.0
+# never a backend/orchestrator runtime dependency, Constitution V preserved).
+# Not installed in the dev venv (lazily imported); major-bounded for release.
+sigstore>=3.0,<4
 # build only:
-# pyinstaller>=6.0
+# pyinstaller==6.21.0

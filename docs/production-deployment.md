@@ -182,6 +182,14 @@ KEYCLOAK_AUTHORITY=https://iam.ai.uky.edu/realms/<realm>
 KEYCLOAK_CLIENT_ID=astral-frontend
 KEYCLOAK_CLIENT_SECRET=<client credentials tab>
 
+# Native clients — tokens from the Windows (astral-desktop) and Android
+# (astral-mobile) public clients are ACCEPTED ONLY when their azp is listed
+# here (empty/unset ⇒ web-only: every native sign-in is rejected while the
+# web keeps working, and the Android release build is hardcoded to this very
+# host). Client provisioning: docs/keycloak-windows-client-setup.md and
+# docs/keycloak-android-client-setup.md.
+KEYCLOAK_ALLOWED_AZP=astral-desktop,astral-mobile
+
 # Production posture — the exit-78 boot gate checks all of these
 # (leave ASTRAL_ENV unset: unset == production, fail closed)
 USE_MOCK_AUTH=false
@@ -232,6 +240,11 @@ the pulled image refuses to serve and prints one consolidated checklist in
 [ ] AGENT_API_KEY set (agents refuse to register without it)
 [ ] KEYCLOAK_* configured; realm per docs/keycloak-realm-settings.md
     (incl. Remember Me OFF, Offline Session ≥ 365 d, roles user/admin)
+[ ] KEYCLOAK_ALLOWED_AZP lists the native clients (astral-desktop,
+    astral-mobile) — unset means Windows/Android sign-ins are rejected
+[ ] Native client redirect URIs registered: 127.0.0.1 loopback on
+    astral-desktop, com.personalailabs.astraldeep:/oauth2redirect on
+    astral-mobile (see the per-client setup docs)
 [ ] PUBLIC_BASE_URL/BACKEND_PUBLIC_URL = public https origin
 [ ] Reverse proxy terminates TLS, forwards X-Forwarded-*, upgrades /ws
 [ ] FORWARDED_ALLOW_IPS = proxy address

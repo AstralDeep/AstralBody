@@ -23,6 +23,7 @@ UI_SEND_MODULES = [
     "orchestrator/stream_manager.py",
     "orchestrator/api.py",
     "orchestrator/agentic_creation.py",
+    "orchestrator/agent_lifecycle.py",
     "scheduler/runner.py",
     "audit/ws_publisher.py",
     "llm_config/ws_handlers.py",

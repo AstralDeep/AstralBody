@@ -65,6 +65,21 @@ def test_sign_out_is_plain_link_outside_js():
     assert 'href="/auth/logout"' in html and 'role="menuitem"' in html
 
 
+def test_new_chat_button_in_topbar_for_every_role():
+    """The New-chat button is core chrome on every client (Windows ＋ New,
+    Android RootScaffold onNewChat) — the web top bar carries its twin,
+    labelled, tour-targetable, and OUTSIDE (before) the Settings dropdown.
+    Client-local behavior (reset + `new_chat` event) lives in client.js."""
+    for roles in (["user"], ["admin", "user"], None):
+        html = render_topbar(roles=roles)
+        assert 'id="astral-newchat-btn"' in html
+        assert 'aria-label="New chat"' in html
+        assert 'data-tour-target="topbar.new-chat"' in html
+        assert html.index('id="astral-newchat-btn"') < html.index('id="astral-settings"')
+        # NOT a chrome_open surface — no settings-menu entry for it.
+        assert 'data-menu-key="new-chat"' not in html
+
+
 # ── Feature 033 (C-U8) — Pulse digest top-bar icon (flag-gated) ──────────────
 
 def test_pulse_icon_absent_when_flag_off(monkeypatch):

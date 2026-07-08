@@ -41,7 +41,7 @@ The settings items that currently open a *"This settings screen is coming to the
 
 - [X] T001 Create `backend/webrender/chrome/menu_model.py` scaffold (module docstring, dataclasses `ChromeModel/TopBarControl/MenuGroup/MenuItem/SignOutItem`, `to_dict()`), no logic yet.
 - [X] T002 [P] Create test files: `backend/webrender/tests/test_menu_model.py`, `backend/orchestrator/tests/test_chrome_menu.py` (empty skeletons that import the targets).
-- [X] T003 [P] Create Android `:core` package `com/kyopenscience/astral/core/chrome/` with `ChromeMenu.kt` scaffold + `android-client/core/src/test/kotlin/.../chrome/ChromeMenuTest.kt`.
+- [X] T003 [P] Create Android `:core` package `com/personalailabs/astraldeep/core/chrome/` with `ChromeMenu.kt` scaffold + `android-client/core/src/test/kotlin/.../chrome/ChromeMenuTest.kt`.
 
 ---
 

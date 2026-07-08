@@ -15,7 +15,7 @@ Build a native **Kotlin + Jetpack Compose** Android client as a new ROTE/webrend
 **Testing**: JUnit + kotlinx-coroutines-test for **JVM unit tests** of all pure logic (protocol decode, SDUI→model mapping, streaming consumer, REST shaping) in a pure-Kotlin `:core` module; Compose UI tests (`androidx.compose.ui.test`) for key renderers/screens; **Kover** for changed-code coverage.
 **Target Platform**: Android 8.0+ phones, tablets (≥7"), and foldables; all screen sizes in the handheld/large-screen family. (Car/automotive out of scope — see spec Assumptions.)
 **Project Type**: Mobile app — a new native client target in `android-client/`, a sibling of `backend/` and `windows-client/`. Two Gradle modules: `:core` (pure Kotlin, JVM-tested) and `:app` (Android/Compose).
-**App identity**: applicationId / namespace `com.kyopenscience.astral`; OIDC redirect `com.kyopenscience.astral:/oauth2redirect` (custom scheme via an intent filter; to be added to the `astral-mobile` client's Valid Redirect URIs by the operator).
+**App identity**: applicationId / namespace `com.personalailabs.astraldeep`; OIDC redirect `com.personalailabs.astraldeep:/oauth2redirect` (custom scheme via an intent filter; to be added to the `astral-mobile` client's Valid Redirect URIs by the operator).
 **Performance Goals**: 60 fps scrolling on a mid-range phone; streaming updates visible within ~1 s of server emission (SC-003); large tables/transcripts virtualized (LazyColumn) so the UI never blocks.
 **Constraints**: NO embedded web view (Constitution II — native render only); reuse the existing message/streaming protocol + REST endpoints unchanged; server changes additive only; offline + push notifications out of scope.
 **Scale/Scope**: ~35 SDUI primitive renderers (parity with the 35-type webrender registry); 5 surfaces (chat + canvas, agents & permissions, history, audit); phone/tablet/foldable adaptivity.
@@ -67,14 +67,14 @@ android-client/                      # NEW — native Android client (sibling of
 ├── build.gradle.kts                # root build config
 ├── gradle/libs.versions.toml       # version catalog (the approved dependency set)
 ├── core/                           # PURE KOTLIN module — no Android deps -> JVM unit tests
-│   ├── src/main/kotlin/com/kyopenscience/astral/core/
+│   ├── src/main/kotlin/com/personalailabs/astraldeep/core/
 │   │   ├── protocol/               # WS message models + JSON decode/encode (kotlinx.serialization)
 │   │   ├── sdui/                   # structured Component model + type->renderer KEY map (no Compose)
 │   │   ├── streaming/              # push-stream consumer (seq dedupe, session filter, terminal) — twin of windows streaming.py
 │   │   └── rest/                   # REST request/response shaping (audit, agents) — twin of windows rest.py
 │   └── src/test/kotlin/...         # JVM unit tests for ALL of the above (the FR-016 surface)
 ├── app/                            # ANDROID module — Compose UI + platform integration
-│   ├── src/main/kotlin/com/kyopenscience/astral/app/
+│   ├── src/main/kotlin/com/personalailabs/astraldeep/app/
 │   │   ├── transport/              # OkHttp WebSocket client (Flow of inbound msgs; outbound ui_event/chat)
 │   │   ├── auth/                   # AppAuth OIDC PKCE + encrypted token store + dev-token path
 │   │   ├── render/                 # Compose renderers: type -> @Composable (the Android renderer registry)

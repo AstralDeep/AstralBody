@@ -53,6 +53,12 @@
       <aside class="astral-chat-panel w-[380px] max-w-[40%] flex flex-col min-h-0">
         <!-- Server-driven chat-history surface (skeleton → list), ROTE-adapted -->
         <div id="astral-history" class="astral-history-region shrink-0 overflow-y-auto max-h-44 border-b border-white/10 px-3 py-2 space-y-1"></div>
+        <!-- Stacked layout only: collapsible transcript bar (the web twin of
+             the Android StackedShell "Messages (N)" panel). Hidden on split
+             layouts by astral.css; client.js keeps the count in sync and
+             toggles body.astral-msgs-open. -->
+        <button type="button" id="astral-msgs-toggle" class="astral-msgs-toggle" hidden
+                aria-expanded="false" aria-controls="astral-chat"><span id="astral-msgs-label">Messages</span></button>
         <div id="astral-chat" class="flex-1 overflow-y-auto p-3 space-y-2"></div>
         <form id="astral-form" class="astral-chat-form p-3 flex flex-col gap-2">
           <!-- Attachment chips for files staged on the next turn -->

@@ -23,6 +23,7 @@ from typing import Any, Dict
 
 from aiohttp import web
 
+from astral_client import __version__
 from astral_client.audit_log import AuditLogger
 from .tools import TOOL_REGISTRY, set_context
 
@@ -58,7 +59,7 @@ def build_card() -> Dict[str, Any]:
         "name": AGENT_NAME,
         "description": AGENT_DESC,
         "agent_id": AGENT_ID,
-        "version": "0.2.2",
+        "version": __version__,
         "skills": [{
             "id": name, "name": name, "description": info["description"],
             "input_schema": info.get("input_schema", {"type": "object", "properties": {}}),

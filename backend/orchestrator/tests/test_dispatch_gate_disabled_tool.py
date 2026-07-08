@@ -35,6 +35,7 @@ def _build_orch(*, disabled_agents=None, saved_selection=None,
     }
     orch.agents = {}  # no live agents — forces the 5th gate path
     orch.a2a_clients = {}
+    orch.local_agents = {}  # feature 040: guard also consults in-process agents
     orch.agent_urls = {}
     orch.security_flags = {}
     orch.ui_sessions = {}

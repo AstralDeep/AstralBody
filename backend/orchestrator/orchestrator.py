@@ -3593,7 +3593,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     logger.info(f"Processing cancelled by user for chat_id {chat_id}")
                     await self.send_ui_render(websocket, [
                         Alert(message="Processing was cancelled.", variant="info").to_dict()
-                    ])
+                    ], target="chat")
                     self.history.add_message(chat_id, "assistant", [
                         Alert(message="Processing was cancelled.", variant="info").to_dict()
                     ], user_id=user_id)
@@ -3689,7 +3689,12 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                             Text(content=reasoning, variant="markdown")
                         ]).to_dict()
                     ]
-                    await self.send_ui_render(websocket, reasoning_components)
+                    # Chat rail, NOT canvas: a canvas-target ui_render replaces
+                    # the whole canvas, wiping this turn's already-delivered
+                    # components. Reasoning is conversation commentary and
+                    # already re-hydrates to the chat rail on reload
+                    # (collapsible is a _TEXT_ONLY_TYPES member).
+                    await self.send_ui_render(websocket, reasoning_components, target="chat")
                     self.history.add_message(chat_id, "assistant", reasoning_components, user_id=user_id)
 
                 # Check if LLM wants to call tools
@@ -3875,7 +3880,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                             logger.warning("All tools denied — breaking Re-Act loop")
                             await self.send_ui_render(websocket, [
                                 Alert(message="All available tools are restricted by your permission settings. Please update your agent permissions.", variant="warning").to_dict()
-                            ])
+                            ], target="chat")
                             break
 
                     # Update task state and track tool calls
@@ -4166,7 +4171,10 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     websocket, messages, chat_id, user_id=user_id
                 )
                 if summary_components:
-                    await self.send_ui_render(websocket, summary_components)
+                    # Chat rail, NOT canvas — the summary is words about the
+                    # tool results; a canvas render would replace (wipe) the
+                    # components those tools just delivered.
+                    await self.send_ui_render(websocket, summary_components, target="chat")
                     if chat_id:
                         self.history.add_message(chat_id, "assistant", summary_components, user_id=user_id)
                 else:
@@ -4175,7 +4183,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                         Card(title="Round results", content=[
                             Text(content="Multiple tool operations were completed. Review the results above for details.", variant="body")
                         ]).to_dict()
-                    ])
+                    ], target="chat")
 
                 await self._safe_send(websocket, json.dumps({
                     "type": "chat_status",
@@ -5173,8 +5181,20 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             tool_name = llm_tool_name
         try:
             args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
-        except json.JSONDecodeError:
-            args = {}
+        except json.JSONDecodeError as _json_err:
+            # Hard-gate malformed tool-call arguments instead of silently
+            # dispatching with empty args (silent repair / parser loss).
+            # Surface the parse failure back to the model so it can retry
+            # with valid JSON — mirrors the permission-denial error return.
+            msg = (f"The arguments for '{tool_name}' were not valid JSON "
+                   f"({str(_json_err).splitlines()[0]}). Re-emit the tool "
+                   f"call with well-formed JSON arguments.")
+            logger.warning("tool_arg_parse_fail tool=%s user=%s err=%s",
+                           tool_name, user_id, _json_err.msg)
+            alert = Alert(message=msg, variant="error")
+            await self.send_ui_render(websocket, [alert.to_dict()])
+            return MCPResponse(error={"message": msg, "retryable": True},
+                               ui_components=[alert.to_dict()])
 
         # Feature 027 — orchestrator meta-tools dispatch before the agent
         # gates (the pseudo-agent has no scopes/credentials; ownership and
@@ -5411,7 +5431,11 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     ui_components=[alert.to_dict()],
                 )
 
-        if not agent_id or (agent_id not in self.agents and agent_id not in self.a2a_clients):
+        if not agent_id or (
+            agent_id not in self.agents
+            and agent_id not in self.a2a_clients
+            and agent_id not in self.local_agents
+        ):
             err_msg = f"No agent available for tool '{tool_name}'"
             await self.send_ui_render(websocket, [
                 Alert(message=err_msg, variant="error").to_dict()
@@ -5671,10 +5695,25 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 tool_name = tool_to_unqualified[llm_tool_name]
             else:
                 tool_name = llm_tool_name
+            agent_id = tool_to_agent.get(llm_tool_name)
             try:
                 args = json.loads(tc.function.arguments) if tc.function.arguments else {}
-            except json.JSONDecodeError:
-                args = {}
+            except json.JSONDecodeError as _json_err:
+                # Hard-gate malformed tool-call arguments instead of silently
+                # dispatching with empty args (silent repair / parser loss).
+                # Surface the parse failure back to the model so it can retry
+                # with valid JSON — mirrors the security/permission error coro.
+                _pj_msg = (f"The arguments for '{tool_name}' were not valid "
+                           f"JSON ({str(_json_err).splitlines()[0]}). Re-emit "
+                           f"the tool call with well-formed JSON arguments.")
+                logger.warning("tool_arg_parse_fail(parallel) tool=%s user=%s err=%s",
+                               tool_name, user_id, _json_err.msg)
+
+                async def _arg_err(msg=_pj_msg):
+                    return MCPResponse(error={"message": msg, "retryable": True},
+                                       ui_components=[Alert(message=msg, variant="error").to_dict()])
+                prepared.append((idx, tc, tool_name, agent_id, None, _arg_err()))
+                continue
 
             if chat_id:
                 args = self._map_file_paths(chat_id, args, user_id=user_id)
@@ -5682,7 +5721,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 if user_id:
                     args["user_id"] = user_id
 
-            agent_id = tool_to_agent.get(llm_tool_name)
+            # agent_id resolved above (before the JSON parse) so the parse-fail
+            # error path can include it in the prepared tuple.
 
             # Feature 027 — meta-tools dispatch directly (see execute_single_tool).
             if agent_id == "__orchestrator__":

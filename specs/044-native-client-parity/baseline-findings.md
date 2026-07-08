@@ -222,7 +222,7 @@ placeholder (Renderer.kt:60-69).
 
 ### 3.4 Auth / connection
 
-AppAuth PKCE, client `astral-mobile`, redirect `com.kyopenscience.astral:/oauth2redirect`,
+AppAuth PKCE, client `astral-mobile`, redirect `com.personalailabs.astraldeep:/oauth2redirect`,
 offline_access scope; AuthState in EncryptedSharedPreferences (TokenStore.kt:13-37); cold
 start uses cached token then silently refreshes (MainActivity.kt:122-131).
 **Reconnect: forever, exponential 1 s→30 s cap** (OrchestratorClient.kt:28-37,61-74);

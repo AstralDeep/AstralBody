@@ -40,7 +40,7 @@ python -m pytest tests -q               # headless-safe suite (QT_QPA_PLATFORM=o
 cd android-client
 .\gradlew :app:assembleDebug :core:test :app:testDebugUnitTest
 .\gradlew :app:installDebug             # emulator must be running; debug flavor targets ws://10.0.2.2:8001/ws
-adb shell am start -n com.kyopenscience.astral/.app.MainActivity
+adb shell am start -n com.personalailabs.astraldeep/.app.MainActivity
 adb exec-out screencap -p > specs/044-native-client-parity/verification/android/<scenario>-android.png
 ```
 

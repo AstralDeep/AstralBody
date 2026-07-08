@@ -295,6 +295,11 @@ class Canvas(QScrollArea):
         self._last_components: list = []
         # Shared cross-client empty-canvas hint (parity with web/Android/Apple).
         self._empty: Optional[QWidget] = None
+        # Query-start loading placeholder (the Android twin's SkeletonCanvas):
+        # shown when a chat turn is sent, removed by the FIRST canvas content
+        # of the turn (set_components / apply_ops, which streaming also routes
+        # through) or explicitly when the turn ends without any.
+        self._skeleton: Optional[QWidget] = None
         self.show_empty_state()
 
     def _drop_empty(self) -> None:
@@ -334,6 +339,21 @@ class Canvas(QScrollArea):
     def _insert(self, widget: QWidget) -> None:
         self._lay.insertWidget(self._lay.count() - 1, widget)
 
+    def show_skeleton(self) -> None:
+        """Append the loading placeholder below any existing components."""
+        if self._skeleton is not None:
+            return
+        w = render({"type": "skeleton", "variant": "card", "count": 3}, self.ctx)
+        self._skeleton = w
+        self._insert(w)
+
+    def hide_skeleton(self) -> None:
+        w = self._skeleton
+        self._skeleton = None
+        if w is not None:
+            w.setParent(None)
+            w.deleteLater()
+
     def set_components(self, components: list) -> None:
         """Full canvas render (a `ui_render` to the canvas region), reconciled BY
         component identity instead of a blind drop-and-rebuild (feature 044 T024).
@@ -345,6 +365,7 @@ class Canvas(QScrollArea):
         clobber bug where a full render threw away components the new set still
         contains (e.g. one just added via a `ui_upsert`)."""
         components = list(components or [])
+        self.hide_skeleton()  # canvas content arrived (or is being rebuilt)
         self._last_components = components  # retained for restyle() (US5)
         # The empty-state hint is dropped before the rebuild (the detach loop
         # below would otherwise delete it out from under self._empty) and
@@ -418,6 +439,8 @@ class Canvas(QScrollArea):
 
     def apply_ops(self, ops: list) -> None:
         """In-place workspace patch (a `ui_upsert`)."""
+        if ops:
+            self.hide_skeleton()  # first canvas content of the turn
         if any((op or {}).get("op", "upsert") != "remove" for op in ops or []):
             self._drop_empty()  # content is arriving — hide the empty-state hint
         for op in ops or []:
@@ -1794,6 +1817,10 @@ class MainWindow(QMainWindow):
             if msg:
                 self.rail.add("user", msg)
             self.client.send_chat(msg, self.active_chat)
+            # Optimistic loading state until the turn's first canvas content
+            # (parity with the Android twin's send-time skeleton).
+            if not self._timeline_mode:
+                self.canvas.show_skeleton()
         else:
             self.client.send_event(action, payload, session_id=self.active_chat)
 
@@ -2032,6 +2059,9 @@ class MainWindow(QMainWindow):
                 )
             elif st == "done":
                 self._turn_active = False
+                # The turn ended without canvas output (text-only answer,
+                # cancellation) — clear the query-start skeleton.
+                self.canvas.hide_skeleton()
                 # A per-turn status reset ONLY — not the full reconnect re-sync
                 # (which would hide banners + re-fire discover/history every turn).
                 self._reset_status_line()
@@ -2039,6 +2069,7 @@ class MainWindow(QMainWindow):
             # FR-002/SC-006 — never silent; resolve any stuck turn.
             self._show_banner(normalize_error(msg), "error")
             self._turn_active = False
+            self.canvas.hide_skeleton()
             self.topbar.set_status("Connected", T.VARIANT_COLORS["success"][0])
         elif t == "notification":
             title = msg.get("title") or ""
@@ -2064,6 +2095,8 @@ class MainWindow(QMainWindow):
             self._show_banner("Background task finished.")
         elif t == "workspace_timeline_mode":
             self._timeline_mode = bool(msg.get("active") or msg.get("on"))
+            if self._timeline_mode:
+                self.canvas.hide_skeleton()
             # FR-007: a historical workspace view is strictly read-only — disable
             # the mutating affordances (message input + Send) while active and
             # restore them when the user returns to live. Component-action
@@ -2429,7 +2462,7 @@ def configure(app: QApplication) -> None:
     """Apply the theme + a guaranteed-present UI font (Inter if installed, else
     Segoe UI) so glyphs always render — the stylesheet family alone can fall back
     to a glyph-less font under some platforms."""
-    from PySide6.QtGui import QFont, QFontDatabase
+    from PySide6.QtGui import QFont, QFontDatabase, QIcon
 
     families = set(QFontDatabase.families())
     family = next(
@@ -2438,6 +2471,14 @@ def configure(app: QApplication) -> None:
     )
     app.setFont(QFont(family, 10))
     app.setStyleSheet(T.APP_STYLESHEET + T.ROOT_BG_STYLE)
+
+    # Window/taskbar icon: assets/ sits next to the source tree in dev and is
+    # extracted to sys._MEIPASS in a frozen build. Best-effort — a missing
+    # asset must never block startup.
+    base = getattr(sys, "_MEIPASS", os.path.join(os.path.dirname(__file__), ".."))
+    ico = os.path.join(base, "assets", "astralbody.ico")
+    if os.path.exists(ico):
+        app.setWindowIcon(QIcon(ico))
 
 
 def _http_base(ws_url: str) -> str:

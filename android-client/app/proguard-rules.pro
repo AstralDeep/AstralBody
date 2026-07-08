@@ -7,8 +7,8 @@
 
 # kotlinx.serialization: keep @Serializable classes' generated serializers.
 -keepclassmembers,allowshrinking,allowobfuscation class kotlinx.serialization.** { *; }
--keep,includedescriptorclasses class com.kyopenscience.astral.**$$serializer { *; }
--keepclassmembers class com.kyopenscience.astral.** {
+-keep,includedescriptorclasses class com.personalailabs.astraldeep.**$$serializer { *; }
+-keepclassmembers class com.personalailabs.astraldeep.** {
     *** Companion;
 }
 

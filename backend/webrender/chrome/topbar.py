@@ -46,6 +46,25 @@ _HISTORY_SVG = (
     '<path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg>'
 )
 
+# "plus" glyph for the New-chat button — the same core affordance the native
+# clients hardcode in their top bars (Windows "＋ New", Android's New-chat
+# action). Client-local behavior lives in client.js (#astral-newchat-btn).
+_PLUS_SVG = (
+    '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<path d="M12 5v14M5 12h14"/></svg>'
+)
+
+# "speech bubble" glyph for the Recent-chats button — the same affordance
+# Android hardcodes in its top bar (RootScaffold ic_chat). Only shown by the
+# stylesheet on stacked (compact-width) layouts, where the persistent history
+# rail is hidden and recent chats open full-screen instead.
+_CHATS_SVG = (
+    '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>'
+)
+
 # "sparkle" glyph for the Pulse digest button — a recognizable "here's what I
 # noticed" affordance. Only rendered when FF_PULSE_DIGEST is enabled.
 _PULSE_SVG = (
@@ -152,8 +171,29 @@ def render_topbar(roles=None) -> str:
     """
     model = build_menu_model(roles)
 
-    # Left cluster: brand. Right cluster: status + interactive controls + gear,
-    # in model order (status, [pulse], timeline, settings).
+    # Left cluster: brand. Right cluster: status + New chat + interactive
+    # controls + gear, in model order (status, [pulse], timeline, settings).
+    # New chat is core client chrome, not a settings surface — every native
+    # client hardcodes it in its top bar (Windows TopBar.new_btn, Android
+    # RootScaffold onNewChat); this is the web twin of that button.
+    new_chat_btn = (
+        '<button type="button" id="astral-newchat-btn" data-tour-target="topbar.new-chat" '
+        'class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm '
+        'bg-astral-primary/20 border border-astral-primary/30 text-astral-text '
+        'hover:bg-astral-primary/30" aria-label="New chat" title="Start a new chat">'
+        f'{_PLUS_SVG}<span class="hidden sm:inline">New chat</span></button>'
+    )
+    # Recent chats — like New chat this is core client chrome the native
+    # clients hardcode (Android RootScaffold's speech-bubble button). The
+    # stylesheet keeps it hidden except on stacked (compact-width) layouts,
+    # where it replaces the always-visible history rail (#astral-chats-btn).
+    recent_chats_btn = (
+        '<button type="button" id="astral-chats-btn" data-tour-target="topbar.chats" '
+        'class="astral-chats-btn items-center justify-center p-1.5 rounded-lg '
+        'text-astral-muted hover:text-astral-text hover:bg-white/5" '
+        'aria-label="Recent chats" title="Recent chats" aria-expanded="false">'
+        f"{_CHATS_SVG}</button>"
+    )
     right_parts = []
     for control in model.topbar:
         if control.kind == "brand":
@@ -162,6 +202,8 @@ def render_topbar(roles=None) -> str:
             right_parts.append(
                 '<span id="astral-status" class="text-xs text-astral-muted" role="status"></span>'
             )
+            right_parts.append(new_chat_btn)
+            right_parts.append(recent_chats_btn)
         elif control.kind == "action":
             right_parts.append(_icon_button(control))
         elif control.kind == "menu":  # the Settings gear + dropdown

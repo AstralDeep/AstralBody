@@ -778,6 +778,94 @@ details > summary::-webkit-details-marker { display: none; }
   text-overflow: ellipsis;
 }
 .astral-history-time { flex: 0 0 auto; font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+
+/* ==========================================================================
+   Adaptive shell arrangement — the same division of labor as the Android
+   client: ROTE owns per-device COMPONENT adaptation (its DeviceProfile is
+   stamped on body[data-rote-device] by client.js), while the SHELL owns
+   the arrangement via body[data-astral-layout], computed from the window
+   width class exactly like Compose's windowSizeClass — "stacked" below
+   600 CSS px (Android COMPACT → StackedShell), "split" otherwise,
+   recomputed live on resize. The stacked rules are the web twin of
+   AdaptiveShell.kt StackedShell: canvas-first column, collapsible
+   "Messages (N)" transcript above a docked input, recent chats full-screen
+   behind the topbar speech-bubble button, icon-only brand.
+   ========================================================================== */
+.astral-chats-btn, .astral-msgs-toggle { display: none; }
+
+body[data-astral-layout="stacked"] main { flex-direction: column; }
+body[data-astral-layout="stacked"] #astral-canvas { flex: 1 1 auto; min-height: 0; }
+body[data-astral-layout="stacked"] .astral-chat-panel {
+  width: 100%;
+  max-width: 100%;
+  flex: 0 0 auto;
+  border-left: 0;
+  border-top: 1px solid rgb(255 255 255 / 0.08);
+  box-shadow: 0 -8px 24px -12px rgb(0 0 0 / 0.4);
+}
+body[data-astral-layout="stacked"] .astral-chats-btn { display: flex; }
+
+/* Recent chats: hidden from the dock; the speech-bubble button opens the
+   same server-rendered region full-screen (Android HistoryScreen). While
+   open, the dock's backdrop-filter must go — it turns the panel into the
+   containing block for fixed descendants, pinning the overlay inside the
+   dock instead of the viewport. */
+body[data-astral-layout="stacked"] .astral-history-region { display: none; }
+body[data-astral-layout="stacked"].astral-history-open .astral-chat-panel {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+body[data-astral-layout="stacked"].astral-history-open .astral-history-region {
+  display: block;
+  position: fixed;
+  z-index: 40;
+  top: var(--astral-topbar-h, 58px);
+  left: 0; right: 0; bottom: 0;
+  max-height: none;
+  border-bottom: 0;
+  background: var(--surface-0);
+  padding: 12px 16px;
+  overflow-y: auto;
+}
+
+/* Transcript: collapsed behind the "Messages (N)" bar docked above the
+   input (Android MessagesPanel); expands to at most 320px over the stack. */
+body[data-astral-layout="stacked"] #astral-chat { display: none; }
+body[data-astral-layout="stacked"].astral-msgs-open #astral-chat {
+  display: block;
+  flex: 0 0 auto;
+  max-height: 320px;
+  overflow-y: auto;
+}
+body[data-astral-layout="stacked"] .astral-msgs-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 8px 16px;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  background: rgb(255 255 255 / 0.03);
+  border: 0;
+  border-bottom: 1px solid rgb(255 255 255 / 0.06);
+  cursor: pointer;
+}
+body[data-astral-layout="stacked"] .astral-msgs-toggle[hidden] { display: none; }
+body[data-astral-layout="stacked"] .astral-msgs-toggle::after {
+  content: "▾";
+  transition: transform 0.15s ease;
+}
+body[data-astral-layout="stacked"].astral-msgs-open .astral-msgs-toggle::after { transform: rotate(180deg); }
+
+/* Brand: icon only, like Android's 30dp rounded app icon. */
+body[data-astral-layout="stacked"] #astral-topbar img {
+  content: url("/static/img/astra-fav.png");
+  height: 30px;
+  width: 30px;
+  border-radius: 8px;
+  object-fit: cover;
+}
 .astral-history-preview {
   font-size: 12px;
   color: var(--text-muted);
