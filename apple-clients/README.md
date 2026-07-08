@@ -13,6 +13,41 @@ AstralWatch/   # watchOS: QR sign-in (RFC 8628 via backend broker), voice in,
 Spec: `specs/051-apple-native-clients/` (contracts: `device-login.md`,
 `spoken-rendition.md`). **No third-party Swift dependencies** (Constitution V).
 
+## AstralPrims — the Swift `astralprims` mirror
+
+`AstralCore/Sources/AstralCore/Primitives/` mirrors the first-party
+[`astralprims`](https://github.com/AstralDeep/Astral-Primitives) Python
+package (currently v0.3.0): the same 32 primitives (`AstralPrims.Text`,
+`.Card`, `.Table`, `.Hero`, …) with the same serialization semantics —
+`toDict()` ≙ `to_dict()`, `createUIResponse` ≙ `create_ui_response`,
+`attributes` merged last (and able to override), `class_name` → `"class"`,
+empty `css` omitted, non-Optional defaults emitted. Types are namespaced
+under `AstralPrims` so nothing collides with SwiftUI. This is the AUTHORING
+layer only — the consuming/render model stays `AstralComponent`
+(Constitution II: astralprims defines → orchestrator renders → ROTE adapts).
+
+```swift
+let canvas = AstralPrims.createUIResponse([
+    AstralPrims.Hero(title: "Q3 Sales", variant: "gradient"),
+    AstralPrims.Grid(columns: 2).add(
+        AstralPrims.MetricCard(title: "Revenue", value: "$1.2M", subtitle: "+12%"),
+        AstralPrims.MetricCard(title: "New users", value: "3,401", variant: "success")),
+])
+```
+
+Fidelity is pinned by known-answer fixtures generated FROM the live Python
+package: every Swift construction in `PrimitivesTests` must byte-match its
+Python `to_dict()`. When the pip package version bumps, regenerate:
+
+```bash
+docker cp apple-clients/AstralCore/Tests/AstralCoreTests/Fixtures/generate_fixtures.py \
+  astralbody:/tmp/gen_fixtures.py
+docker exec astralbody python3 /tmp/gen_fixtures.py
+docker cp astralbody:/tmp/fixtures_out.json \
+  apple-clients/AstralCore/Tests/AstralCoreTests/Fixtures/astralprims-fixtures.json
+swift test --package-path apple-clients/AstralCore   # fails on any drift
+```
+
 ## Test the core (any Mac, no Xcode project needed)
 
 ```bash

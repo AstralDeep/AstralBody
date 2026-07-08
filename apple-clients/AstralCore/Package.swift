@@ -20,7 +20,10 @@ let package = Package(
         .testTarget(
             name: "AstralCoreTests",
             dependencies: ["AstralCore"],
-            path: "Tests/AstralCoreTests"
+            path: "Tests/AstralCoreTests",
+            // Known-answer fixtures are read via #filePath (source tree), not
+            // the resource bundle — excluded so SPM doesn't warn.
+            exclude: ["Fixtures"]
         ),
     ]
 )
