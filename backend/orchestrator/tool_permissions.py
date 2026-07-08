@@ -21,7 +21,7 @@ import json
 import time
 import logging
 from contextlib import contextmanager
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 logger = logging.getLogger("ToolPermissions")
 
@@ -409,7 +409,7 @@ class ToolPermissionManager:
     # ── Per-Tool Permissions (Feature 013) ──────────────────────────────
 
     def get_effective_tool_permissions(
-        self, user_id: str, agent_id: str
+        self, user_id: str, agent_id: str, safe_default: Optional[bool] = None
     ) -> Dict[str, Dict[str, bool]]:
         """Return the resolved per-tool, per-permission-kind permission map.
 
@@ -420,16 +420,32 @@ class ToolPermissionManager:
         scope from the agent's tool→scope map) are included — satisfies
         FR-014 (no greyed-out toggles for inapplicable kinds).
 
-        Resolution per tool:
-          - If a per-kind row exists, use that boolean.
-          - Else fall back to the agent-wide scope value.
+        Resolution per tool mirrors :meth:`is_tool_allowed` so the picker
+        matches the runtime gate:
           - A legacy tool-wide override (permission_kind IS NULL, enabled=False)
             forces the kind to False.
+          - Else, if a per-kind row exists, use that boolean.
+          - Else, if an explicit agent-wide scope row exists, use it.
+          - Else fall back to ``safe_default`` — feature 040's deny→allow flip
+            for a safe + public agent — so a fresh user sees a safe agent's
+            tools ON by default instead of contradicting the runtime gate.
+
+        ``safe_default`` is computed from the cached safe/ownership lookups when
+        not supplied; hot callers (the agents surface) pass it from data they
+        already read so this stays within their DB round-trip budget.
         """
         scope_map = self._tool_scope_map.get(agent_id, {})
         if not scope_map:
             return {}
-        scope_state = self.get_agent_scopes(user_id, agent_id)
+        if safe_default is None:
+            safe_default = self._is_safe_agent(agent_id) and self._safe_flip_allowed(agent_id)
+        # Raw scope rows so an explicit opt-out (enabled=False) is distinguished
+        # from an absent scope, which alone falls through to safe_default.
+        scope_rows = self.db.fetch_all(
+            "SELECT scope, enabled FROM agent_scopes WHERE user_id = ? AND agent_id = ?",
+            (user_id, agent_id),
+        )
+        explicit_scope = {row["scope"]: bool(row["enabled"]) for row in scope_rows}
         # Pull per-kind AND legacy override rows in one query, split in Python.
         override_rows = self.db.fetch_all(
             """SELECT tool_name, permission_kind, enabled FROM tool_overrides
@@ -452,8 +468,10 @@ class ToolPermissionManager:
                 effective = False
             elif tool_name in kind_lookup and required_scope in kind_lookup[tool_name]:
                 effective = kind_lookup[tool_name][required_scope]
+            elif required_scope in explicit_scope:
+                effective = explicit_scope[required_scope]
             else:
-                effective = bool(scope_state.get(required_scope, False))
+                effective = bool(safe_default)
             result[tool_name] = {required_scope: effective}
         return result
 

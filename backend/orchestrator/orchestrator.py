@@ -871,17 +871,22 @@ class Orchestrator:
             if not ownership:
                 default_owner = os.environ.get("DEFAULT_AGENT_OWNER", "")
                 if default_owner:
-                    # Feature 030: ownerless registrations are operator-bundled
-                    # agents (user-created agents get explicit creator ownership
-                    # from agent_lifecycle before they register), so default them
-                    # PUBLIC — otherwise they are invisible in every Agents tab
-                    # and users cannot discover or enable them. Drafts stay
-                    # private.
+                    # Only the bundled first-party fleet is public (visible +
+                    # enabled) by default. Every other ownerless registration —
+                    # an external A2A agent or one discovered via
+                    # A2A_EXTERNAL_AGENTS — defaults PRIVATE, i.e. off until an
+                    # admin turns it on. User-created agents already carry
+                    # explicit private ownership from agent_lifecycle before they
+                    # register, so they never reach this branch (drafts likewise).
+                    is_builtin = (
+                        card.agent_id in self.history.db._FIRST_PARTY_PUBLIC_AGENT_IDS
+                    )
                     self.history.db.set_agent_ownership(
-                        card.agent_id, default_owner,
-                        is_public=not self._is_draft_agent(card.agent_id))
+                        card.agent_id, default_owner, is_public=is_builtin)
                     ownership = self.history.db.get_agent_ownership(card.agent_id) or {}
-                    logger.info(f"Auto-assigned agent '{card.agent_id}' to {default_owner}")
+                    logger.info(
+                        "Auto-assigned agent '%s' to %s (public=%s)",
+                        card.agent_id, default_owner, is_builtin)
                 else:
                     ownership = {}
             return ownership

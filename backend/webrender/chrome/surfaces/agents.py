@@ -596,9 +596,17 @@ async def _render_detail(orch, user_id, roles, agent_id: str, tab: str) -> str:
         )
     tp = orch.tool_permissions
     tool_scope_map = tp.get_tool_scope_map(agent_id)
-    per_tool = await asyncio.to_thread(tp.get_effective_tool_permissions, user_id, agent_id)
     ctx = await _detail_context(orch, user_id, agent_id)
     scope_state = ctx["scope_state"]
+    # Feature 040: a safe + public agent's tools default ALLOW at runtime, so the
+    # picker must show them ON rather than contradict the gate. is_safe/is_public
+    # come from _detail_context (no extra query); pass the flip in to stay within
+    # the detail render's DB round-trip budget.
+    from shared.feature_flags import flags
+    safe_default = bool(
+        flags.is_enabled("safe_agents") and ctx["is_safe"] and ctx["is_public"])
+    per_tool = await asyncio.to_thread(
+        tp.get_effective_tool_permissions, user_id, agent_id, safe_default)
     tool_descriptions = {s.id: s.description for s in card.skills}
 
     user_email = ctx["user_email"]
