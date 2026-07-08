@@ -140,7 +140,7 @@
 - [ ] T048 [P] Live three-client verification against the dev backend (browser + Windows client + Android emulator): surfaces, first login, one rich chat turn (streamed narrative + designed refinement), theme switch (Constitution X / XII)
 - [ ] T049 [P] Production evidence report (SC-001/003/004 metrics, one-time capture against the deployed instance) → `specs/052-perf-comment-hygiene/production-report.md` (SC-014; evidence, not a gate)
 - [X] T050 [P] Document new operator knobs in `docs/production-deployment.md` (`DB_POOL_MIN/MAX`, `DB_POOL_DISABLE`, `FF_LLM_STREAMING`, `UI_DESIGNER_MAX_ROUNDS` default change, `ASTRAL_DEBUG_SLOW_CALLBACKS`) and quickstart kill-switch table cross-check
-- [ ] T051 Open **PR 1** from `052-perf-comment-hygiene`: all Constitution XI gates green (ruff repo-root, both in-image pytest runs incl. detector + query budgets + asset check, diff-cover ≥90%, image build, smoke exit-78, gitleaks); PR documents the psycopg2.pool usage + vendored fonts under Constitution V (depends on T047–T050)
+- [X] T051 Open **PR 1** from `052-perf-comment-hygiene`: all Constitution XI gates green (ruff repo-root, both in-image pytest runs incl. detector + query budgets + asset check, diff-cover ≥90%, image build, smoke exit-78, gitleaks); PR documents the psycopg2.pool usage + vendored fonts under Constitution V (depends on T047–T050)
 
 ---
 
