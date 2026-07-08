@@ -32,13 +32,16 @@ class MessageAttachmentRepository:
         """Insert one turn→attachment link and return its row id."""
         row_id = str(uuid.uuid4())
         now_ms = int(time.time() * 1000)
+        # message_id is the integer messages.id PK but the column is TEXT;
+        # store it as text so reads (which must compare as text) match.
+        stored_message_id = None if message_id is None else str(message_id)
         self.db.execute(
             """
             INSERT INTO message_attachment (
                 id, chat_id, message_id, attachment_id, user_id, created_at
             ) VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (row_id, chat_id, message_id, attachment_id, user_id, now_ms),
+            (row_id, chat_id, stored_message_id, attachment_id, user_id, now_ms),
         )
         return row_id
 
@@ -56,13 +59,15 @@ class MessageAttachmentRepository:
 
     def list_for_message(self, message_id: str, user_id: str) -> List[dict]:
         """All attachment links for a specific persisted user message."""
+        # Callers pass the integer messages.id PK; the column is TEXT, so
+        # coerce or Postgres raises "operator does not exist: text = integer".
         rows = self.db.fetch_all(
             """
             SELECT * FROM message_attachment
             WHERE message_id = ? AND user_id = ?
             ORDER BY created_at ASC
             """,
-            (message_id, user_id),
+            (str(message_id), user_id),
         )
         return [dict(r) for r in (rows or [])]
 
