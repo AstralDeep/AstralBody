@@ -1,15 +1,98 @@
 import psycopg2
+import psycopg2.pool
 from psycopg2.extras import RealDictCursor
+import asyncio
+import atexit
 import logging
 import os
 import json
+import threading
 from typing import List, Dict, Optional, Tuple
 
 logger = logging.getLogger('Database')
 
+SCHEMA_REVISION = '052.001'
+
+_POOLS: Dict[str, dict] = {}
+_POOLS_LOCK = threading.Lock()
+_POOL_ACQUIRE_TIMEOUT_S = 30.0
+
+
+def _close_all_pools() -> None:
+    """Close every shared connection pool (atexit hook / test teardown)."""
+    with _POOLS_LOCK:
+        for entry in _POOLS.values():
+            try:
+                entry['pool'].closeall()
+            except Exception:
+                pass
+        _POOLS.clear()
+
+
+atexit.register(_close_all_pools)
+
+
+class _PooledConnectionProxy:
+    """Wraps a pooled connection handed to ``_get_connection()`` callers.
+
+    Repository callers ``close()`` what they borrow; closing this proxy
+    returns the underlying connection to the shared pool instead of
+    destroying it. All other attribute access passes through.
+    """
+
+    def __init__(self, conn, release):
+        self._conn = conn
+        self._release_cb = release
+        self._released = False
+
+    def close(self):
+        """Return the underlying connection to its pool (idempotent)."""
+        if not self._released:
+            self._released = True
+            self._release_cb(self._conn)
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+class _KeepIdleToMaxPool(psycopg2.pool.ThreadedConnectionPool):
+    """ThreadedConnectionPool that keeps idle connections up to ``maxconn``.
+
+    The stock pool closes a returned connection once ``minconn`` are idle, so
+    every concurrency burst re-creates connections one at a time INSIDE the
+    pool's global lock — serializing all borrowers behind TCP+auth handshakes
+    (FR-018 reuse / SC-011 burst latency). Idle retention up to ``maxconn``
+    makes growth a one-time cost. ``putconn`` already holds the pool lock
+    when ``_putconn`` runs, so the temporary ``minconn`` swap is race-free.
+    """
+
+    def _putconn(self, conn, key=None, close=False):
+        real_min = self.minconn
+        self.minconn = self.maxconn
+        try:
+            return super()._putconn(conn, key=key, close=close)
+        finally:
+            self.minconn = real_min
+
+
 def _build_database_url() -> str:
-    """Build a PostgreSQL connection URL from individual DB_* env vars."""
+    """Build a PostgreSQL connection URL from individual DB_* env vars.
+
+    ``localhost`` is normalized to ``127.0.0.1``: libpq's IPv6-first attempt
+    against a Docker-published port stalls ~2s per NEW connection on Windows
+    hosts, and psycopg2's pool grows lazily while holding its global lock —
+    so one slow connect serializes every borrower during a burst (SC-011).
+    An operator who really wants IPv6 can set ``DB_HOST=::1`` explicitly.
+    """
     host = os.getenv("DB_HOST", "localhost")
+    if host.strip().lower() == "localhost":
+        host = "127.0.0.1"
     port = os.getenv("DB_PORT", "5432")
     name = os.getenv("DB_NAME", "astralbody")
     user = os.getenv("DB_USER", "astral")
@@ -22,10 +105,112 @@ class Database:
         self.database_url = database_url or os.getenv("DATABASE_URL") or _build_database_url()
         self._init_db()
 
+    @classmethod
+    def close(cls) -> None:
+        """Close all shared connection pools; the next call reopens lazily."""
+        _close_all_pools()
+
+    def _pool_entry(self) -> dict:
+        """Return the ``{'pool', 'sem'}`` entry for this database_url.
+
+        Pools live in a module-level dict keyed by URL because many
+        ``Database`` instances are constructed across the codebase for the
+        same database; they all share one bounded pool.
+        """
+        with _POOLS_LOCK:
+            entry = _POOLS.get(self.database_url)
+            if entry is None:
+                max_conn = int(os.getenv('DB_POOL_MAX', '10'))
+                entry = {
+                    'pool': _KeepIdleToMaxPool(
+                        int(os.getenv('DB_POOL_MIN', '2')),
+                        max_conn,
+                        dsn=self.database_url,
+                        cursor_factory=RealDictCursor,
+                    ),
+                    'sem': threading.BoundedSemaphore(max_conn),
+                }
+                _POOLS[self.database_url] = entry
+            return entry
+
+    def _borrow(self):
+        """Borrow a connection; returns ``(conn, pooled)``.
+
+        ``DB_POOL_DISABLE=1`` restores the legacy connect-per-call path.
+        When the pool is fully checked out, borrowers queue on a bounded
+        semaphore instead of failing immediately.
+        """
+        if os.getenv('DB_POOL_DISABLE') == '1':
+            return psycopg2.connect(self.database_url, cursor_factory=RealDictCursor), False
+        entry = self._pool_entry()
+        if not entry['sem'].acquire(timeout=_POOL_ACQUIRE_TIMEOUT_S):
+            raise psycopg2.OperationalError('connection pool exhausted (DB_POOL_MAX)')
+        try:
+            return entry['pool'].getconn(), True
+        except Exception:
+            entry['sem'].release()
+            raise
+
+    def _release(self, conn, pooled: bool, discard: bool = False) -> None:
+        """Return a borrowed connection; ``discard=True`` drops a stale one."""
+        if not pooled:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            return
+        entry = _POOLS.get(self.database_url)
+        try:
+            if entry is None:
+                conn.close()
+            else:
+                entry['pool'].putconn(conn, close=discard)
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        finally:
+            if entry is not None:
+                try:
+                    entry['sem'].release()
+                except ValueError:
+                    pass
+
+    def _run_with_retry(self, op):
+        """Run ``op(conn)`` on a borrowed connection, always returning it.
+
+        A stale pooled connection (``OperationalError``/``InterfaceError``)
+        is discarded via ``putconn(close=True)`` and the operation retried
+        once on a freshly borrowed connection; a second failure propagates.
+        The non-pooled kill-switch path never retries (legacy behavior).
+        """
+        conn, pooled = self._borrow()
+        try:
+            try:
+                return op(conn)
+            except (psycopg2.OperationalError, psycopg2.InterfaceError):
+                if not pooled:
+                    raise
+                self._release(conn, pooled, discard=True)
+                conn = None
+                conn, pooled = self._borrow()
+                return op(conn)
+        finally:
+            if conn is not None:
+                self._release(conn, pooled)
+
     def _get_connection(self):
-        """Get a database connection with dict-like row factory."""
-        conn = psycopg2.connect(self.database_url, cursor_factory=RealDictCursor)
-        return conn
+        """Get a database connection with dict-like row factory.
+
+        In pooled mode this returns a proxy whose ``close()`` returns the
+        connection to the shared pool — existing repository callers close
+        what they borrow, and that must not destroy pooled connections.
+        """
+        conn, pooled = self._borrow()
+        if not pooled:
+            return conn
+        return _PooledConnectionProxy(conn, lambda c: self._release(c, True))
 
     def _translate_query(self, query: str) -> str:
         """Convert SQLite ? placeholders to PostgreSQL %s placeholders.
@@ -47,10 +232,40 @@ class Database:
         return cursor.fetchone() is not None
 
     def _init_db(self):
-        """Initialize the database schema."""
-        conn = self._get_connection()
-        cursor = conn.cursor()
+        """Ensure the database schema is current.
 
+        Fast path: when the stored ``schema_meta`` revision marker equals
+        ``SCHEMA_REVISION`` the full idempotent DDL/migration run is
+        skipped. A missing or mismatched marker triggers the full run,
+        then upserts the marker. Rollback: ``DELETE FROM schema_meta WHERE
+        key='revision'`` forces a full run on the next boot.
+        """
+        from shared.perf import perf_span
+        with perf_span('boot.init_db'):
+            conn, pooled = self._borrow()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    'CREATE TABLE IF NOT EXISTS schema_meta ('
+                    'key TEXT PRIMARY KEY, value TEXT NOT NULL)'
+                )
+                conn.commit()
+                cursor.execute("SELECT value FROM schema_meta WHERE key = 'revision'")
+                row = cursor.fetchone()
+                if row is not None and row['value'] == SCHEMA_REVISION:
+                    return
+                self._apply_full_schema(conn, cursor)
+                cursor.execute(
+                    "INSERT INTO schema_meta (key, value) VALUES ('revision', %s) "
+                    'ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
+                    (SCHEMA_REVISION,),
+                )
+                conn.commit()
+            finally:
+                self._release(conn, pooled)
+
+    def _apply_full_schema(self, conn, cursor):
+        """Run the full idempotent schema DDL + guarded migration set."""
         # Chats table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS chats (
@@ -998,8 +1213,7 @@ class Database:
         # ── Feature 045: workspace-timeline tour step moved to the top bar ───
         self._migrate_tutorial_timeline_target_045(cursor)
 
-        conn.commit()
-        conn.close()
+        self._migrate_backfill_tool_kinds_052(cursor)
 
     # Feature 029 identity sets (specs/029-agents-adaptive-ui-ci/baseline.md).
     # Both the declared hyphenated agent ids and the legacy underscore
@@ -1260,40 +1474,84 @@ class Database:
             "WHERE slug = 'workspace-timeline' AND target_key = 'sidebar.timeline'"
         )
 
+    _PERMISSION_KINDS_052 = ('tools:read', 'tools:write', 'tools:search', 'tools:system')
+
+    def _migrate_backfill_tool_kinds_052(self, cursor):
+        """Feature 052: boot-time promotion of the per-render tool backfill.
+
+        Copies each legacy tool-wide disable row (``permission_kind IS
+        NULL``, ``enabled = FALSE``) to per-kind rows carrying the same
+        ``enabled`` value for every permission kind, so per-tool resolution
+        does not depend on a per-surface-open backfill
+        (``ToolPermissionManager.backfill_per_tool_rows`` remains for the
+        registration-aware agent_scopes carry-forward, which needs the
+        in-memory tool->scope map unavailable at boot). Copying the disable
+        across all kinds is outcome-preserving: ``is_tool_allowed`` consults
+        only the tool's required kind, and the legacy row previously blocked
+        regardless of kind. Only ``enabled = FALSE`` rows are copied — a
+        hypothetical legacy enable row defers to scope state today, and
+        copying it would widen access (fail-closed posture). Existing
+        per-kind rows always win (``ON CONFLICT DO NOTHING``); legacy rows
+        are left in place for the runtime layers that still read them.
+        Idempotent: re-runs insert nothing. Rollback: none needed — the
+        rows are the same ones the runtime path would have produced.
+        """
+        kinds_values = ', '.join(['(%s)'] * len(self._PERMISSION_KINDS_052))
+        cursor.execute(
+            f"""INSERT INTO tool_overrides
+                    (user_id, agent_id, tool_name, permission_kind, enabled, updated_at)
+                SELECT t.user_id, t.agent_id, t.tool_name, k.kind, t.enabled, t.updated_at
+                FROM tool_overrides t
+                CROSS JOIN (VALUES {kinds_values}) AS k(kind)
+                WHERE t.permission_kind IS NULL AND t.enabled = FALSE
+                ON CONFLICT (user_id, agent_id, tool_name, COALESCE(permission_kind, ''))
+                DO NOTHING""",
+            self._PERMISSION_KINDS_052,
+        )
+
     def execute(self, query: str, params: Tuple = ()):
         """Execute a write operation (INSERT, UPDATE, DELETE)."""
-        conn = self._get_connection()
-        try:
+        def op(conn):
             cursor = conn.cursor()
-            cursor.execute(self._translate_query(query), params)
-            conn.commit()
-            return cursor
-        except Exception as e:
-            conn.rollback()
-            logger.error(f"Database error executing {query}: {e}")
-            raise
-        finally:
-            conn.close()
+            try:
+                cursor.execute(self._translate_query(query), params)
+                conn.commit()
+                return cursor
+            except (psycopg2.OperationalError, psycopg2.InterfaceError):
+                raise
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Database error executing {query}: {e}")
+                raise
+        return self._run_with_retry(op)
 
     def fetch_one(self, query: str, params: Tuple = ()) -> Optional[Dict]:
         """Fetch a single row."""
-        conn = self._get_connection()
-        try:
+        def op(conn):
             cursor = conn.cursor()
             cursor.execute(self._translate_query(query), params)
             return cursor.fetchone()
-        finally:
-            conn.close()
+        return self._run_with_retry(op)
 
     def fetch_all(self, query: str, params: Tuple = ()) -> List[Dict]:
         """Fetch all rows."""
-        conn = self._get_connection()
-        try:
+        def op(conn):
             cursor = conn.cursor()
             cursor.execute(self._translate_query(query), params)
             return cursor.fetchall()
-        finally:
-            conn.close()
+        return self._run_with_retry(op)
+
+    async def afetch_one(self, query: str, params: Tuple = ()) -> Optional[Dict]:
+        """Async twin of :meth:`fetch_one`, run off the event loop."""
+        return await asyncio.to_thread(self.fetch_one, query, params)
+
+    async def afetch_all(self, query: str, params: Tuple = ()) -> List[Dict]:
+        """Async twin of :meth:`fetch_all`, run off the event loop."""
+        return await asyncio.to_thread(self.fetch_all, query, params)
+
+    async def aexecute(self, query: str, params: Tuple = ()):
+        """Async twin of :meth:`execute`, run off the event loop."""
+        return await asyncio.to_thread(self.execute, query, params)
 
     # ── Agent Ownership ──────────────────────────────────────────────────
 
@@ -1717,7 +1975,3 @@ class Database:
                    GROUP BY agent_id, tool_name"""
             )
         return [dict(r) for r in rows]
-
-    def close(self):
-        """No-op for compatibility — connections are opened/closed per request."""
-        pass

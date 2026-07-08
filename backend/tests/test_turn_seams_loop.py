@@ -9,6 +9,7 @@ The coordinator logic for every capability is unit-tested in test_turn_hooks.py.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -74,8 +75,8 @@ def _usage():
     return SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2)
 
 
-def _last_assistant_text(o, chat_id, user_id):
-    data = o.history.get_chat(chat_id, user_id=user_id) or {}
+async def _last_assistant_text(o, chat_id, user_id):
+    data = await asyncio.to_thread(o.history.get_chat, chat_id, user_id=user_id) or {}
     texts = []
     for m in data.get("messages", []):
         if m.get("role") == "assistant":
@@ -93,7 +94,7 @@ async def test_supervisor_blocks_leaky_answer(orch, monkeypatch):
     _register(orch)
     ws = _ws(orch)
     chat_id = f"seam-{uuid.uuid4().hex[:8]}"
-    orch.history.create_chat(chat_id, user_id="seam-user")
+    await asyncio.to_thread(orch.history.create_chat, chat_id, user_id="seam-user")
 
     async def fake_llm(websocket, messages, tools_desc=None, temperature=None,
                        feature="tool_dispatch"):
@@ -102,10 +103,10 @@ async def test_supervisor_blocks_leaky_answer(orch, monkeypatch):
     orch._call_llm = fake_llm
     await orch.handle_chat_message(ws, "what is the key?", chat_id, user_id="seam-user")
 
-    final = _last_assistant_text(orch, chat_id, "seam-user")
+    final = await _last_assistant_text(orch, chat_id, "seam-user")
     assert "can't share" in final.lower()
     assert "sk-secret-123" not in final
-    orch.history.delete_chat(chat_id, user_id="seam-user")
+    await asyncio.to_thread(orch.history.delete_chat, chat_id, user_id="seam-user")
 
 
 @pytest.mark.asyncio
@@ -114,7 +115,7 @@ async def test_supervisor_off_lets_answer_through(orch, monkeypatch):
     _register(orch)
     ws = _ws(orch)
     chat_id = f"seam-{uuid.uuid4().hex[:8]}"
-    orch.history.create_chat(chat_id, user_id="seam-user")
+    await asyncio.to_thread(orch.history.create_chat, chat_id, user_id="seam-user")
 
     async def fake_llm(websocket, messages, tools_desc=None, temperature=None,
                        feature="tool_dispatch"):
@@ -122,8 +123,8 @@ async def test_supervisor_off_lets_answer_through(orch, monkeypatch):
 
     orch._call_llm = fake_llm
     await orch.handle_chat_message(ws, "weather?", chat_id, user_id="seam-user")
-    assert "sunny" in _last_assistant_text(orch, chat_id, "seam-user").lower()
-    orch.history.delete_chat(chat_id, user_id="seam-user")
+    assert "sunny" in (await _last_assistant_text(orch, chat_id, "seam-user")).lower()
+    await asyncio.to_thread(orch.history.delete_chat, chat_id, user_id="seam-user")
 
 
 # --------------------------------------------------------------------------- #
@@ -136,7 +137,7 @@ async def test_skill_induced_after_tool_turn(orch, monkeypatch):
     _register(orch)
     ws = _ws(orch)
     chat_id = f"seam-{uuid.uuid4().hex[:8]}"
-    orch.history.create_chat(chat_id, user_id="seam-user")
+    await asyncio.to_thread(orch.history.create_chat, chat_id, user_id="seam-user")
     orch.execute_single_tool = AsyncMock(return_value=SimpleNamespace(
         result={"ok": True}, error=None, ui_components=[], correlation_id=None))
 
@@ -155,7 +156,7 @@ async def test_skill_induced_after_tool_turn(orch, monkeypatch):
     store = orch._skill_store("seam-user")
     assert len(store) == 1
     assert "search_tool" in store[0].tools
-    orch.history.delete_chat(chat_id, user_id="seam-user")
+    await asyncio.to_thread(orch.history.delete_chat, chat_id, user_id="seam-user")
 
 
 # --------------------------------------------------------------------------- #
@@ -168,7 +169,7 @@ async def test_moa_panel_aggregates(orch, monkeypatch):
     _register(orch)
     ws = _ws(orch)
     chat_id = f"seam-{uuid.uuid4().hex[:8]}"
-    orch.history.create_chat(chat_id, user_id="seam-user")
+    await asyncio.to_thread(orch.history.create_chat, chat_id, user_id="seam-user")
 
     draft = "A thoughtful first answer. " * 20            # >400 chars, no tools
     winner = "THE BEST AND LONGEST PANEL ANSWER. " * 25   # longest ⇒ wins
@@ -183,6 +184,6 @@ async def test_moa_panel_aggregates(orch, monkeypatch):
     await orch.handle_chat_message(ws, "explain quantum entanglement in depth",
                                    chat_id, user_id="seam-user")
 
-    final = _last_assistant_text(orch, chat_id, "seam-user")
+    final = await _last_assistant_text(orch, chat_id, "seam-user")
     assert "BEST AND LONGEST" in final
-    orch.history.delete_chat(chat_id, user_id="seam-user")
+    await asyncio.to_thread(orch.history.delete_chat, chat_id, user_id="seam-user")

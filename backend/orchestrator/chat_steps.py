@@ -119,7 +119,7 @@ class ChatStepRecorder:
         args_text, args_trunc = redact(args, kind="args")
         started = _now_ms()
         try:
-            self.db.execute(
+            await self.db.aexecute(
                 """
                 INSERT INTO chat_steps (
                     id, chat_id, user_id, turn_message_id,
@@ -141,7 +141,7 @@ class ChatStepRecorder:
                     started,
                 ),
             )
-            self._bump_step_count()
+            await self._bump_step_count()
         except Exception as exc:  # pragma: no cover — defensive
             # "step_name", not "name": `name` is a reserved LogRecord attribute
             # and putting it in `extra` makes the logging call itself raise.
@@ -230,7 +230,7 @@ class ChatStepRecorder:
             # respect that and clear the in-memory entry without emitting
             # a contradictory cancelled event.
             try:
-                row = self.db.fetch_one(
+                row = await self.db.afetch_one(
                     "SELECT status FROM chat_steps WHERE id = ?", (step_id,)
                 )
                 if row is not None and row.get("status") in _TERMINAL_STATUSES:
@@ -273,7 +273,7 @@ class ChatStepRecorder:
     ) -> None:
         ended = _now_ms()
         try:
-            self.db.execute(
+            await self.db.aexecute(
                 """
                 UPDATE chat_steps
                    SET status = ?, ended_at = ?,
@@ -302,7 +302,7 @@ class ChatStepRecorder:
         # Re-fetch the row so the emit carries the canonical persisted state
         # (and matches what the REST endpoint would return on rehydrate).
         try:
-            row = self.db.fetch_one(
+            row = await self.db.afetch_one(
                 "SELECT * FROM chat_steps WHERE id = ?",
                 (step_id,),
             )
@@ -344,11 +344,11 @@ class ChatStepRecorder:
             extra={"step_id": step_id, "status": status, "chat_id": self.chat_id},
         )
 
-    def _bump_step_count(self) -> None:
+    async def _bump_step_count(self) -> None:
         if self.turn_message_id is None:
             return
         try:
-            self.db.execute(
+            await self.db.aexecute(
                 "UPDATE messages SET step_count = step_count + 1 WHERE id = ?",
                 (self.turn_message_id,),
             )

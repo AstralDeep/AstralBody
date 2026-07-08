@@ -16,6 +16,8 @@ import json
 import logging
 import re
 
+from shared.perf import perf_span
+
 logger = logging.getLogger("Orchestrator.Chrome")
 
 # Lazily aggregated {action: (surface_key, handler)} — surfaces register via
@@ -144,12 +146,13 @@ async def _render_surface(orch, websocket, user_id, roles, surface_key: str,
     ChromeSurface (ROTE-adapted astralprims components). Admin-gated and
     gracefully-degrading on either path (Constitution X/XII, FR-014).
     """
-    if _device_type(orch, websocket) in _NATIVE_SDUI_DEVICE_TYPES:
-        await _render_surface_sdui(orch, websocket, user_id, roles,
-                                   surface_key, params, notice_html)
-    else:
-        await _render_surface_html(orch, websocket, user_id, roles,
-                                   surface_key, params, notice_html)
+    with perf_span("surface.render." + surface_key, surface=surface_key):
+        if _device_type(orch, websocket) in _NATIVE_SDUI_DEVICE_TYPES:
+            await _render_surface_sdui(orch, websocket, user_id, roles,
+                                       surface_key, params, notice_html)
+        else:
+            await _render_surface_html(orch, websocket, user_id, roles,
+                                       surface_key, params, notice_html)
 
 
 async def _render_surface_html(orch, websocket, user_id, roles, surface_key: str,

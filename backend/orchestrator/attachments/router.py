@@ -166,7 +166,7 @@ async def upload_file(
     rel_storage = str(path.relative_to(store.get_upload_root()))
     repo = _get_repository(request)
     try:
-        attachment = repo.insert(
+        attachment = await repo.ainsert(
             attachment_id=attachment_id,
             user_id=user_id,
             filename=safe_filename,
@@ -197,7 +197,10 @@ async def upload_file(
         from orchestrator import attachment_autoparse
         orch = _get_orchestrator(request)
         if orch is not None:
-            cov = attachment_autoparse.coverage_status(orch, extension=extension, category=category)
+            cov = await asyncio.to_thread(
+                attachment_autoparse.coverage_status, orch,
+                extension=extension, category=category,
+            )
             response_body["parser_status"] = cov["status"]
             if cov["status"] == "preparing":
                 asyncio.create_task(
@@ -228,7 +231,7 @@ async def list_attachments(
     user_id: str = Depends(require_user_id),
 ):
     repo = _get_repository(request)
-    items, next_cursor = repo.list_for_user(
+    items, next_cursor = await repo.alist_for_user(
         user_id, category=category, limit=limit, cursor=cursor,
     )
     return {
@@ -247,7 +250,7 @@ async def get_attachment(
     user_id: str = Depends(require_user_id),
 ):
     repo = _get_repository(request)
-    att = repo.get_by_id(attachment_id, user_id)
+    att = await repo.aget_by_id(attachment_id, user_id)
     if att is None:
         # Deliberately 404, not 403, so we don't confirm existence to non-owners.
         raise HTTPException(status_code=404, detail="Attachment not found")
@@ -265,7 +268,7 @@ async def delete_attachment(
     user_id: str = Depends(require_user_id),
 ):
     repo = _get_repository(request)
-    deleted = repo.soft_delete(attachment_id, user_id)
+    deleted = await repo.asoft_delete(attachment_id, user_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Attachment not found")
     # Best-effort blob removal.

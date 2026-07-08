@@ -26,6 +26,7 @@ lifecycle on top of the 026 flow:
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -244,6 +245,17 @@ def get_session(request: Request) -> Optional[Dict[str, Any]]:
     return sess
 
 
+async def aget_session(request: Request) -> Optional[Dict[str, Any]]:
+    """Async twin of :func:`get_session` — the durable-store read (cache miss)
+    is a blocking DB call, so async handlers run it off the event loop."""
+    return await asyncio.to_thread(get_session, request)
+
+
+async def _asession_by_sid(sid: str) -> Optional[Dict[str, Any]]:
+    """Async twin of :func:`_session_by_sid`, run off the event loop."""
+    return await asyncio.to_thread(_session_by_sid, sid)
+
+
 async def _refresh_session(sid: str, sess: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Silent refresh at Keycloak (D2). Returns the refreshed session or None.
 
@@ -280,7 +292,7 @@ async def _refresh_session(sid: str, sess: Dict[str, Any]) -> Optional[Dict[str,
     store = _get_store()
     if store is not None:
         try:
-            store.update_tokens(sid, access_token=sess["access_token"], refresh_token=sess["refresh_token"])
+            await store.aupdate_tokens(sid, access_token=sess["access_token"], refresh_token=sess["refresh_token"])
         except Exception:
             logger.warning("web_auth: failed persisting refreshed tokens", exc_info=True)
     return sess
@@ -292,7 +304,7 @@ async def _kill_session(sid: str, sess: Dict[str, Any], *, audit_action: Optiona
     store = _get_store()
     if store is not None:
         try:
-            store.delete(sid)
+            await store.adelete(sid)
         except Exception:
             logger.debug("web_auth: store delete failed", exc_info=True)
     if audit_action:
@@ -308,7 +320,7 @@ async def ensure_session(request: Request) -> Optional[Dict[str, Any]]:
     if _is_mock():
         return {"access_token": "dev-token", "refresh_token": "", "sub": "test_user",
                 "created_at": time.time(), "resumed": True, "sid": "mock"}
-    sess = get_session(request)
+    sess = await aget_session(request)
     if sess is None:
         return None
     sid = sess.get("sid") or _unsign(request.cookies.get(COOKIE_NAME, "")) or ""
@@ -510,7 +522,7 @@ async def auth_callback(request: Request):
 
     # D6 — user-switch revocation: a live session for someone else on this
     # browser is revoked (session + refresh token) before the new one starts.
-    prior = get_session(request)
+    prior = await aget_session(request)
     if prior and prior.get("sub") and prior["sub"] != sub:
         prior_sid = prior.get("sid", "")
         logger.info("web_auth: user switch %s -> %s — revoking prior session", prior["sub"], sub)
@@ -531,7 +543,8 @@ async def auth_callback(request: Request):
         return _no_access_page()
 
     await _audit("login_interactive", sub, "Interactive login completed; new session established")
-    return _establish_session(
+    return await asyncio.to_thread(
+        _establish_session,
         request,
         {"access_token": tok.get("access_token", ""), "refresh_token": tok.get("refresh_token", ""), "sub": sub},
         nxt,
@@ -560,7 +573,7 @@ async def auth_session(request: Request):
         store = _get_store()
         if store is not None and sess.get("sid"):
             try:
-                store.mark_resumed(sess["sid"])
+                await store.amark_resumed(sess["sid"])
             except Exception:
                 logger.debug("web_auth: mark_resumed failed", exc_info=True)
     return JSONResponse({
@@ -585,7 +598,7 @@ async def auth_logout(request: Request):
     if raw:
         sid = _unsign(raw)
         if sid:
-            sess = _session_by_sid(sid)
+            sess = await _asession_by_sid(sid)
             if sess is None:
                 _SESSIONS.pop(sid, None)
             else:
@@ -595,7 +608,8 @@ async def auth_logout(request: Request):
         await _revoke_or_queue(user_id, sess.get("refresh_token", ""))
         try:
             from orchestrator.offline_grant import OfflineGrantStore
-            revoked = OfflineGrantStore().revoke_for_user(user_id)
+            revoked = await asyncio.to_thread(
+                lambda: OfflineGrantStore().revoke_for_user(user_id))
             if revoked:
                 logger.info("web_auth: revoked %d offline grant(s) for %s at sign-out", revoked, user_id)
         except Exception:
@@ -696,7 +710,7 @@ async def _revoke_or_queue(user_id: str, refresh_token: str,
     store = _get_store()
     if store is not None:
         try:
-            store.enqueue_revocation(user_id, refresh_token, client_id=client_id)
+            await store.aenqueue_revocation(user_id, refresh_token, client_id=client_id)
             logger.info("web_auth: IdP unreachable — refresh-token revocation queued for %s", user_id)
             return "queued"
         except Exception:
@@ -716,21 +730,21 @@ async def process_revocation_queue_once() -> int:
         return 0
     resolved = 0
     try:
-        pending = store.pending_revocations()
+        pending = await store.apending_revocations()
     except Exception:
         logger.debug("web_auth: revocation queue read failed", exc_info=True)
         return 0
     for item in pending:
         if await _revoke_refresh_token(item["refresh_token"],
                                        client_id=item.get("client_id")):
-            store.resolve_revocation(item["id"])
+            await store.aresolve_revocation(item["id"])
             resolved += 1
         elif item["attempts"] >= _MAX_REVOCATION_ATTEMPTS:
             logger.warning("web_auth: dropping revocation for %s after %d attempts "
                            "(token will die at its natural expiry)", item["user_id"], item["attempts"])
-            store.resolve_revocation(item["id"])
+            await store.aresolve_revocation(item["id"])
         else:
-            store.bump_revocation_attempt(item["id"])
+            await store.abump_revocation_attempt(item["id"])
     return resolved
 
 

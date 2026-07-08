@@ -16,6 +16,7 @@ NEVER logged. If the key is unset, capture fails closed (no plaintext storage).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -109,7 +110,7 @@ class OfflineGrantStore:
         Raises OfflineGrantError on revoked/expired grants or refresh failure
         (e.g. Keycloak-side revocation) — the caller fails the run safe.
         """
-        row = self._row(grant_id)
+        row = await asyncio.to_thread(self._row, grant_id)
         if not row:
             raise OfflineGrantError("offline grant not found")
         if row.get("revoked_at"):

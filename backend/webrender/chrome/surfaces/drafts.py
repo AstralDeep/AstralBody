@@ -9,6 +9,7 @@ SAME auto-create + self-test pipeline as chat (``create_capability``).
 
 Renders for the web target only (chrome layer).
 """
+import asyncio
 import json
 import logging
 
@@ -146,12 +147,12 @@ async def render(orch, user_id, roles, params) -> str:
     """Drafts list / detail / create — unified across entry points (SC-007)."""
     draft_id = (params or {}).get("draft_id")
     if draft_id:
-        draft = orch.history.db.get_draft_agent(str(draft_id))
+        draft = await asyncio.to_thread(orch.history.db.get_draft_agent, str(draft_id))
         if draft and draft.get("user_id") == user_id:
             return _detail(orch, user_id, draft, show_refine=bool((params or {}).get("refine")))
         return notice_block("error", "Draft not found (it may have been discarded).")
 
-    drafts = _user_drafts(orch, user_id)
+    drafts = await asyncio.to_thread(_user_drafts, orch, user_id)
     rows = []
     for d in drafts:
         open_payload = esc(json.dumps({"surface": "drafts", "params": {"draft_id": d["id"]}}))

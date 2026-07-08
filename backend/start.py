@@ -5,12 +5,43 @@ import subprocess
 import time
 import sys
 import os
+import urllib.request
 
 try:
     from dotenv import load_dotenv
     load_dotenv(override=False)
 except ImportError:
     pass
+
+
+def _wait_for_orchestrator(port: int, process, timeout_s: float = 60.0,
+                           interval_s: float = 0.5) -> bool:
+    """Poll the orchestrator's /healthz until it answers, dies, or times out.
+
+    Proceeds on the first successful response (fast path); stops early if
+    the orchestrator process exits so the supervisor loop can propagate its
+    exit code. Returns True when healthy, False otherwise — callers always
+    continue either way (feature 052, FR-029).
+    """
+    url = f"http://localhost:{port}/healthz"
+    started = time.monotonic()
+    deadline = started + timeout_s
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            print(" Orchestrator exited before reporting healthy.")
+            return False
+        try:
+            with urllib.request.urlopen(url, timeout=2) as resp:
+                if resp.status == 200:
+                    elapsed = time.monotonic() - started
+                    print(f" Orchestrator healthy after {elapsed:.1f}s.")
+                    return True
+        except Exception:
+            pass
+        time.sleep(interval_s)
+    print(f" Orchestrator /healthz not ready after {timeout_s:.0f}s; continuing anyway.")
+    return False
+
 
 def main():
     # Force UTF-8 encoding for stdout/stderr to avoid Windows cp1252 errors
@@ -82,7 +113,7 @@ def main():
         print(f"Starting Orchestrator on port {orch_port} (expecting {max_agents} agents)...")
         p_orch = subprocess.Popen([python_exe, orchestrator_script], env=env)
         processes.append(p_orch)
-        time.sleep(2)
+        _wait_for_orchestrator(orch_port, p_orch)
 
         # Feature 040 (US1): when in-process agents are enabled (default), the
         # orchestrator runs the bundled first-party agents itself — don't spawn
@@ -116,7 +147,6 @@ def main():
                     )
                     processes.append(p_custom_agent)
                     next_port += 1
-                    time.sleep(1)
 
         print()
         print("-" * 60)

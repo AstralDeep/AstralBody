@@ -121,13 +121,39 @@ Both are ungated (no user data) and excluded from access logs.
 
 - Postgres 17 (compose service `postgres`, named volume `pgdata`).
 - Schema migrations are idempotent and run automatically at boot
-  (`shared/database.py::_init_db`) — no migration step to operate.
+  (`shared/database.py::_init_db`) — no migration step to operate. Since
+  feature 052 a `schema_meta` revision marker lets boots with a current
+  schema skip the full migration pass; to force a full re-run once, execute
+  `DELETE FROM schema_meta WHERE key='revision';` and restart.
+- Connections are pooled (feature 052): `DB_POOL_MIN` (default 2) and
+  `DB_POOL_MAX` (default 10) size the shared pool; `DB_POOL_DISABLE=1`
+  reverts to the legacy connection-per-query behavior as a kill switch.
 - Back up `pgdata` and the `backend/data` bind mount (uploads, agent keys).
+
+## Performance knobs (feature 052)
+
+- `FF_LLM_STREAMING` (default on) — streams the narrative answer token-wise
+  to all clients when the configured model supports it; any provider error
+  falls back to the non-streamed call automatically. Set `false` to disable.
+- `FF_PHI_WARM` (default on) — pre-loads the PHI analyzer in a background
+  thread at boot so the first personalization write does not stall.
+- `JWKS_REFRESH_SECONDS` (default 500) — background refresh interval for the
+  identity-provider signing keys warmed at boot; token validation stays
+  fail-closed regardless.
+- `UI_DESIGNER_MAX_ROUNDS` — the adaptive UI designer now defaults to **1**
+  design pass per turn (was 3); raise it to restore multi-round refinement.
+  Components are always delivered to clients before the designer runs.
+- Static assets are served with immutable per-file versioned URLs; a deploy
+  changes the URLs, so no cache purge is ever needed.
 
 ## Logging & observability
 
 - `LOG_LEVEL` (default `info`) controls uvicorn/app verbosity; health-probe
   and agent-card polls are filtered out of access logs.
+- Timing spans (feature 052) are logged as `perf <name> duration_ms=<int>`
+  lines (surface renders, sign-in phases, chat-turn phases, boot phases);
+  summarize with `python scripts/perf_report.py` (run from `backend/`,
+  feeding it the app log).
 - The tamper-evident audit trail (per-user HMAC hash chain) is queryable via
   `GET /api/audit` (per-user) and verifiable server-side:
   `python -m audit.cli verify-chain --user-id <id>`.

@@ -5,7 +5,10 @@ runtime via ``set_workspace_override``. These tests prove confinement tracks the
 override: a write goes to the chosen folder, a path outside it is refused, and
 changing the override mid-session changes where writes land.
 
-Pure-Python — does NOT require PySide6 (the override + confinement are Qt-free).
+The override/confinement tests are pure-Python (no PySide6). The lazy-workspace
+section at the bottom drives MainWindow (window-first launch: startup applies
+persisted/env silently; the folder picker is deferred to first file-tool use)
+and skips gracefully when PySide6 is unavailable.
 """
 
 from __future__ import annotations
@@ -102,3 +105,140 @@ def test_audit_path_redaction_uses_override(workspace_a, tmp_path, auto_allow):
     write_row = next(r for r in reversed(rows) if r["tool"] == "write_file")
     # The path is workspace-relative, not an absolute path under ws_a.
     assert write_row["args"]["path"] == "tracked.py"
+
+
+# --- lazy workspace resolution in the GUI (window-first launch) ------------- #
+
+
+class _FakeSettings:
+    """QSettings stand-in so tests never read/write the real registry."""
+
+    def __init__(self, d=None):
+        self.d = dict(d or {})
+
+    def value(self, key, default="", type=str):
+        return self.d.get(key, default)
+
+    def setValue(self, key, val):
+        self.d[key] = val
+
+
+@pytest.fixture
+def make_win(tmp_path, monkeypatch):
+    """Factory building a MainWindow with transport/integrity stubbed, settings
+    isolated, HOME redirected to tmp, and the folder picker instrumented."""
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    from astral_client import app as appmod
+
+    class _FakeSig:
+        def connect(self, *_a):
+            pass
+
+        def disconnect(self, *_a):
+            pass
+
+    class _FakeClient:
+        message = _FakeSig()
+        status = _FakeSig()
+
+        def __init__(self, *_a, **_k):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def send_event(self, *_a, **_k):
+            pass
+
+    monkeypatch.setenv("ASTRAL_WIN_AGENT", "0")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.delenv("ASTRAL_WORKSPACE_DIR", raising=False)
+    monkeypatch.setattr(appmod, "OrchestratorClient", _FakeClient)
+    monkeypatch.setattr(
+        appmod.MainWindow, "_start_integrity_check", lambda self: None
+    )
+    tools.set_workspace_override(None)
+    made = []
+
+    def _make(persisted="", picker=None):
+        settings = _FakeSettings(
+            {"workspace_dir": persisted} if persisted else {}
+        )
+        monkeypatch.setattr(
+            appmod.MainWindow, "_settings", lambda self: settings
+        )
+        if picker is None:
+            def picker(self, *_a, **_k):
+                raise AssertionError("folder picker must not open here")
+        monkeypatch.setattr(appmod.MainWindow, "_gui_pick_directory", picker)
+        win = appmod.MainWindow("ws://127.0.0.1:9/ws", "dev-token")
+        made.append(win)
+        return win, settings
+
+    yield _make
+    for w in made:
+        w.close()
+    tools.set_workspace_override(None)
+
+
+def test_startup_applies_persisted_without_prompt(make_win, tmp_path):
+    pers = tmp_path / "persisted_ws"
+    pers.mkdir()
+    win, _ = make_win(persisted=str(pers))
+    assert win._workspace_ready is True
+    assert tools.workspace_root() == os.path.realpath(str(pers))
+
+
+def test_startup_without_config_defers_picker(make_win, tmp_path):
+    win, _ = make_win()
+    assert win._workspace_ready is False
+    # Tools fall back to the launch default until first use resolves it.
+    default_root = os.path.realpath(str(tmp_path / "AstralWorkspace"))
+    assert tools.workspace_root() == default_root
+
+
+def test_first_tool_use_prompts_and_denies_on_redirect(make_win, tmp_path, monkeypatch):
+    """First confirm with no stored workspace opens the picker; a pick that
+    lands OUTSIDE the default root denies the in-flight call (it was confined
+    to the old default) while the pick still applies for the retry."""
+    chosen = tmp_path / "elsewhere"
+    chosen.mkdir()
+    win, settings = make_win(picker=lambda self, *_a, **_k: str(chosen))
+    actions = []
+    monkeypatch.setattr(
+        type(win), "_action_dialog",
+        lambda self, req: actions.append(req) or {"accepted": True, "choice": None},
+    )
+    first = win._show_confirm_dialog({"kind": "action", "tool": "write_file"})
+    assert first == {"accepted": False, "choice": None}
+    assert actions == []  # the in-flight call never reached the Allow dialog
+    assert win._workspace_ready is True
+    assert tools.workspace_root() == os.path.realpath(str(chosen))
+    assert settings.d["workspace_dir"] == os.path.realpath(str(chosen))
+    # The retry proceeds under the newly chosen root.
+    second = win._show_confirm_dialog({"kind": "action", "tool": "write_file"})
+    assert second["accepted"] is True
+    assert len(actions) == 1
+
+
+def test_first_tool_use_default_pick_proceeds(make_win, tmp_path, monkeypatch):
+    """Cancelling the first-use picker adopts the default root the call was
+    already confined to, so the in-flight call proceeds to the Allow dialog."""
+    win, _ = make_win(picker=lambda self, *_a, **_k: None)
+    actions = []
+    monkeypatch.setattr(
+        type(win), "_action_dialog",
+        lambda self, req: actions.append(req) or {"accepted": True, "choice": None},
+    )
+    result = win._show_confirm_dialog({"kind": "action", "tool": "write_file"})
+    assert result["accepted"] is True
+    assert len(actions) == 1
+    assert win._workspace_ready is True
+    assert tools.workspace_root() == os.path.realpath(str(tmp_path / "AstralWorkspace"))

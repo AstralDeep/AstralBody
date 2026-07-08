@@ -15,6 +15,7 @@ References:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -219,7 +220,8 @@ class TestHandleChatMessageTextOnly:
 
         ws = _fake_websocket(orchestrator)
         chat_id = f"text-only-{uuid.uuid4().hex[:8]}"
-        orchestrator.history.create_chat(chat_id, user_id="text-only-test-user")
+        await asyncio.to_thread(
+            orchestrator.history.create_chat, chat_id, user_id="text-only-test-user")
         captured_call = {}
 
         async def fake_call_llm(websocket, messages, tools_desc=None, temperature=None,
@@ -255,13 +257,15 @@ class TestHandleChatMessageTextOnly:
         )
 
         # Assistant reply was persisted to history.
-        chat = orchestrator.history.get_chat(chat_id, user_id="text-only-test-user")
+        chat = await asyncio.to_thread(
+            orchestrator.history.get_chat, chat_id, user_id="text-only-test-user")
         assert chat is not None
         roles = [m["role"] for m in chat["messages"]]
         assert "assistant" in roles, "assistant reply must be saved to history"
 
         # Cleanup.
-        orchestrator.history.delete_chat(chat_id, user_id="text-only-test-user")
+        await asyncio.to_thread(
+            orchestrator.history.delete_chat, chat_id, user_id="text-only-test-user")
 
     @pytest.mark.asyncio
     async def test_text_only_dispatch_emits_correct_audit_feature_tag(self, orchestrator):
@@ -270,7 +274,8 @@ class TestHandleChatMessageTextOnly:
         the audit recorder emits a distinguishable event."""
         ws = _fake_websocket(orchestrator)
         chat_id = f"text-only-audit-{uuid.uuid4().hex[:8]}"
-        orchestrator.history.create_chat(chat_id, user_id="text-only-test-user")
+        await asyncio.to_thread(
+            orchestrator.history.create_chat, chat_id, user_id="text-only-test-user")
         captured_features = []
 
         async def fake_call_llm(websocket, messages, tools_desc=None, temperature=None,
@@ -289,7 +294,8 @@ class TestHandleChatMessageTextOnly:
             f"got {captured_features!r}"
         )
 
-        orchestrator.history.delete_chat(chat_id, user_id="text-only-test-user")
+        await asyncio.to_thread(
+            orchestrator.history.delete_chat, chat_id, user_id="text-only-test-user")
 
     @pytest.mark.asyncio
     async def test_draft_chat_with_no_tools_does_not_fall_through(self, orchestrator):
@@ -298,7 +304,8 @@ class TestHandleChatMessageTextOnly:
         through to text-only mode."""
         ws = _fake_websocket(orchestrator)
         chat_id = f"text-only-draft-{uuid.uuid4().hex[:8]}"
-        orchestrator.history.create_chat(chat_id, user_id="text-only-test-user")
+        await asyncio.to_thread(
+            orchestrator.history.create_chat, chat_id, user_id="text-only-test-user")
         called = {"count": 0}
 
         async def fake_call_llm(websocket, messages, tools_desc=None, temperature=None,
@@ -325,7 +332,8 @@ class TestHandleChatMessageTextOnly:
             f"got: {rendered_text!r}"
         )
 
-        orchestrator.history.delete_chat(chat_id, user_id="text-only-test-user")
+        await asyncio.to_thread(
+            orchestrator.history.delete_chat, chat_id, user_id="text-only-test-user")
 
     @pytest.mark.asyncio
     async def test_tool_augmented_dispatch_does_not_inject_addendum(self, orchestrator):
@@ -350,7 +358,8 @@ class TestHandleChatMessageTextOnly:
 
         ws = _fake_websocket(orchestrator)
         chat_id = f"tool-aug-{uuid.uuid4().hex[:8]}"
-        orchestrator.history.create_chat(chat_id, user_id="text-only-test-user")
+        await asyncio.to_thread(
+            orchestrator.history.create_chat, chat_id, user_id="text-only-test-user")
         captured = {}
 
         async def fake_call_llm(websocket, messages, tools_desc=None, temperature=None,
@@ -375,7 +384,8 @@ class TestHandleChatMessageTextOnly:
             "tool-augmented turn must NOT include the text-only addendum"
         )
 
-        orchestrator.history.delete_chat(chat_id, user_id="text-only-test-user")
+        await asyncio.to_thread(
+            orchestrator.history.delete_chat, chat_id, user_id="text-only-test-user")
 
 
 # ---------------------------------------------------------------------------

@@ -271,7 +271,9 @@ def test_list_unknown_tab_falls_back_to_mine():
 def test_detail_sections_tool_switches_named_tool_kind_with_state():
     orch = make_orch()
     html = run(surface.render(orch, "u1", ["user"], {"agent_id": "alpha"}))
-    assert orch.tool_permissions.backfilled == [("u1", "alpha")]
+    # Feature 052 (T015/T016): the per-render backfill is gone — it runs once
+    # as the _migrate_backfill_tool_kinds_052 boot migration instead.
+    assert orch.tool_permissions.backfilled == []
     # Tool switches keep the <tool>::<kind> names; enabled state from internals.
     assert 'name="get_data::tools:read" checked' in html
     assert 'name="write_data::tools:write"' in html
@@ -614,3 +616,18 @@ def test_normalize_credential_entries_shapes():
     assert keys == ["A", "B", "C"]
     assert labels == {"A": "Label A"}
     assert surface._normalize_credential_entries(None) == ([], {})
+# ---------------------------------------------------------------------------
+# 052 — pure helpers: email fallback + preferences-blob disabled set
+# ---------------------------------------------------------------------------
+
+def test_email_fallback_uses_email_shaped_user_id():
+    assert surface._email_fallback("", "dev@example.com") == "dev@example.com"
+    assert surface._email_fallback("real@example.com", "dev@example.com") == "real@example.com"
+    assert surface._email_fallback(None, "not-an-email") == ""
+
+
+def test_disabled_from_preferences_tolerates_malformed_blobs():
+    assert surface._disabled_from_preferences('{"disabled_agents": ["a", "b"]}') == {"a", "b"}
+    assert surface._disabled_from_preferences("not-json{") == set()
+    assert surface._disabled_from_preferences('{"disabled_agents": "not-a-list"}') == set()
+    assert surface._disabled_from_preferences(None) == set()

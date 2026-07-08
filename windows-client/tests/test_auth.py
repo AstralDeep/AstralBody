@@ -1,10 +1,13 @@
-"""Desktop OIDC helpers — PKCE encoding, silent refresh, and the auth-resolution
-policy (explicit token wins; no authority ⇒ dev-token)."""
+"""Desktop OIDC helpers — PKCE encoding, silent refresh, the auth-resolution
+policy (explicit token wins; no authority ⇒ dev-token), and the cancellable
+loopback wait used by the window-first launch."""
 from __future__ import annotations
 
 import hashlib
 import io
 import json
+import threading
+import time
 import types
 
 import pytest
@@ -110,3 +113,59 @@ def test_oidc_login_bff_mode_uses_proxy(monkeypatch):
     assert session.token_url == "http://127.0.0.1:8001/auth/token"
     assert captured["url"] == "http://127.0.0.1:8001/auth/token"
     assert session.client_id == "astral-frontend"
+
+
+# --- cancellable loopback wait (window-first launch) ------------------------ #
+
+
+def test_oidc_login_completes_with_unset_cancel_event(monkeypatch):
+    session, _ = _run_oidc_login(
+        monkeypatch, client_id="astral-desktop", cancel_event=threading.Event())
+    assert session.access_token == "AT"
+
+
+def test_oidc_login_cancel_unblocks_loopback_wait(monkeypatch):
+    """Setting the cancel event while parked in the loopback wait must abort
+    promptly with LoginCancelled instead of blocking out the full timeout."""
+    monkeypatch.setattr(auth, "urlopen",
+                        lambda *a, **k: io.BytesIO(json.dumps(_DISCO).encode()))
+    monkeypatch.setattr(auth.webbrowser, "open", lambda url: None)
+    cancel = threading.Event()
+    outcome: dict = {}
+
+    def run():
+        try:
+            auth.oidc_login("https://kc.example/realms/R",
+                            cancel_event=cancel, timeout=30)
+            outcome["result"] = "completed"
+        except auth.LoginCancelled:
+            outcome["result"] = "cancelled"
+        except Exception as exc:  # noqa: BLE001 — asserted below
+            outcome["result"] = f"error: {exc}"
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    time.sleep(0.3)
+    assert t.is_alive()  # parked in the loopback wait, no callback fired
+    t0 = time.monotonic()
+    cancel.set()
+    t.join(5)
+    assert not t.is_alive()
+    assert time.monotonic() - t0 < 5
+    assert outcome["result"] == "cancelled"
+
+
+def test_resolve_auth_propagates_cancel(monkeypatch):
+    """resolve_auth must NOT swallow a user cancel into the dev-token fallback."""
+    pytest.importorskip("PySide6")
+    from astral_client.app import resolve_auth
+
+    def fake_login(*_a, **_k):
+        raise auth.LoginCancelled("user cancelled")
+
+    monkeypatch.setattr(auth, "oidc_login", fake_login)
+    args = types.SimpleNamespace(
+        token="", authority="https://kc.example/realms/R",
+        client_id="astral-desktop", url="ws://127.0.0.1:8001/ws", bff=False)
+    with pytest.raises(auth.LoginCancelled):
+        resolve_auth(args, cancel_event=threading.Event())

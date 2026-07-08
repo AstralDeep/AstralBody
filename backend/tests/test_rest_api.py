@@ -22,7 +22,14 @@ from fastapi.testclient import TestClient
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from orchestrator.api import chat_router, component_router, agent_router, dashboard_router
+from orchestrator.api import (
+    chat_router,
+    component_router,
+    agent_router,
+    dashboard_router,
+    draft_router,
+    user_router,
+)
 from orchestrator.auth import auth_router
 
 
@@ -34,6 +41,36 @@ MOCK_JWT_TOKEN = (
 )
 
 AUTH_HEADER = {"Authorization": f"Bearer {MOCK_JWT_TOKEN}"}
+
+
+def _make_mock_token(payload: dict) -> str:
+    """Build an unsigned JWT the mock-auth decoder accepts (payload only)."""
+    import base64
+    import json as _json
+    body = base64.b64encode(_json.dumps(payload).encode()).decode().rstrip("=")
+    return f"header.{body}.signature"
+
+
+class _FakeSkill:
+    """Minimal stand-in for shared.protocol.AgentSkill in API tests."""
+
+    def __init__(self, skill_id, description="", input_schema=None,
+                 scope="tools:read"):
+        self.id = skill_id
+        self.description = description
+        self.input_schema = input_schema or {}
+        self.scope = scope
+
+
+class _FakeCard:
+    """Minimal stand-in for shared.protocol.AgentCard in API tests."""
+
+    def __init__(self, agent_id, name="Fake Agent", skills=None):
+        self.agent_id = agent_id
+        self.name = name
+        self.description = "a fake agent"
+        self.skills = skills or [_FakeSkill("tool_a", "does A")]
+        self.metadata = {}
 
 
 def _create_test_app():
@@ -68,14 +105,38 @@ def _create_test_app():
     # behavior is covered by tests/test_rest_legacy_workspace.py.
     mock_orch.workspace = MagicMock()
     mock_orch.workspace.upsert.return_value = []
+    mock_orch.workspace.aupsert = AsyncMock(return_value=[])
+    mock_orch.workspace.aget_by_component_id = AsyncMock(return_value=None)
+    mock_orch.workspace.asnapshot = AsyncMock(return_value=None)
     mock_orch.send_ui_upsert = AsyncMock()
     mock_orch._reconcile_legacy_replacement = AsyncMock()
+    # Draft listings hide draft agents via a to_thread call — a bare
+    # MagicMock is truthy and would hide every card.
+    mock_orch._is_draft_agent = MagicMock(return_value=False)
+    mock_orch.security_flags = {}
+    # Typed returns so the permission endpoints' response models validate.
+    tp = MagicMock()
+    tp.get_agent_scopes.return_value = {"tools:read": True}
+    tp.get_tool_scope_map.return_value = {"tool_a": "tools:read"}
+    tp.get_effective_permissions.return_value = {"tool_a": True}
+    tp.get_effective_tool_permissions.return_value = {"tool_a": {"tools:read": True}}
+    tp.get_tool_overrides.return_value = {}
+    tp.is_scope_enabled.return_value = True
+    tp.is_tool_allowed.return_value = True
+    mock_orch.tool_permissions = tp
+    mock_orch.credential_manager = MagicMock()
+    mock_orch.credential_manager.list_credential_keys.return_value = ["API_KEY"]
+    lifecycle = MagicMock()
+    lifecycle.stop_draft_agent = AsyncMock()
+    mock_orch.lifecycle_manager = lifecycle
 
     app.state.orchestrator = mock_orch
 
     app.include_router(chat_router)
     app.include_router(component_router)
     app.include_router(agent_router)
+    app.include_router(user_router)
+    app.include_router(draft_router)
     app.include_router(dashboard_router)
     app.include_router(auth_router)
 
@@ -263,6 +324,287 @@ class TestAgentEndpoints:
         data = resp.json()
         assert "agents" in data
         assert "total_tools" in data
+
+
+class TestSendMessageCreatesChat:
+    def test_send_message_to_unknown_chat_creates_it(self, client, orch):
+        """A message to a nonexistent chat transparently creates the chat."""
+        import uuid
+        chat_id = f"rest-auto-{uuid.uuid4()}"
+        resp = client.post(
+            f"/api/chats/{chat_id}/messages",
+            headers=AUTH_HEADER,
+            json={"message": "hello there"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "accepted"
+        assert orch.history.get_chat(chat_id, user_id="dev-user-id") is not None
+        orch.history.delete_chat(chat_id, user_id="dev-user-id")
+
+
+class TestAgentPermissionEndpoints:
+    def test_list_agents_includes_connected_card(self, client, orch):
+        orch.agent_cards = {"agent-x": _FakeCard("agent-x")}
+        resp = client.get("/api/agents", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        agents = resp.json()["agents"]
+        assert [a["id"] for a in agents] == ["agent-x"]
+        assert agents[0]["tools"][0]["name"] == "tool_a"
+
+    def test_get_permissions_reads_all_views(self, client, orch):
+        orch.agent_cards = {"agent-x": _FakeCard("agent-x")}
+        resp = client.get("/api/agents/agent-x/permissions", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["agent_id"] == "agent-x"
+        assert body["scopes"] == {"tools:read": True}
+        assert body["per_tool_permissions"] == {"tool_a": {"tools:read": True}}
+        assert orch.tool_permissions.backfill_per_tool_rows.called
+
+    def test_get_permissions_unknown_agent_404(self, client, orch):
+        orch.agent_cards = {}
+        resp = client.get("/api/agents/ghost/permissions", headers=AUTH_HEADER)
+        assert resp.status_code == 404
+
+    def test_put_permissions_per_tool_shape(self, client, orch):
+        orch.agent_cards = {"agent-x": _FakeCard("agent-x")}
+        resp = client.put(
+            "/api/agents/agent-x/permissions",
+            headers=AUTH_HEADER,
+            json={"per_tool_permissions": {"tool_a": {"tools:read": True}}},
+        )
+        assert resp.status_code == 200
+        orch.tool_permissions.set_tool_permission.assert_any_call(
+            "dev-user-id", "agent-x", "tool_a", "tools:read", True)
+        assert orch.tool_permissions.set_agent_scopes.called
+
+    def test_put_permissions_rejects_unknown_tool(self, client, orch):
+        orch.agent_cards = {"agent-x": _FakeCard("agent-x")}
+        resp = client.put(
+            "/api/agents/agent-x/permissions",
+            headers=AUTH_HEADER,
+            json={"per_tool_permissions": {"ghost_tool": {"tools:read": True}}},
+        )
+        assert resp.status_code == 400
+
+    def test_put_permissions_rejects_wrong_kind(self, client, orch):
+        orch.agent_cards = {"agent-x": _FakeCard("agent-x")}
+        resp = client.put(
+            "/api/agents/agent-x/permissions",
+            headers=AUTH_HEADER,
+            json={"per_tool_permissions": {"tool_a": {"tools:write": True}}},
+        )
+        assert resp.status_code == 400
+
+    def test_put_permissions_legacy_shape(self, client, orch):
+        orch.agent_cards = {"agent-x": _FakeCard("agent-x")}
+        resp = client.put(
+            "/api/agents/agent-x/permissions",
+            headers=AUTH_HEADER,
+            json={"scopes": {"tools:read": True},
+                  "tool_overrides": {"tool_a": True}},
+        )
+        assert resp.status_code == 200
+        assert orch.tool_permissions.set_agent_scopes.called
+        assert orch.tool_permissions.set_tool_overrides.called
+
+    def test_put_permissions_empty_body_400(self, client, orch):
+        orch.agent_cards = {"agent-x": _FakeCard("agent-x")}
+        resp = client.put(
+            "/api/agents/agent-x/permissions", headers=AUTH_HEADER, json={})
+        assert resp.status_code == 400
+
+    def test_dashboard_counts_allowed_tools(self, client, orch):
+        orch.agent_cards = {"agent-x": _FakeCard("agent-x")}
+        resp = client.get("/api/dashboard", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert [a["id"] for a in data["agents"]] == ["agent-x"]
+        assert data["total_tools"] == 1
+
+
+class TestToolSelectionEndpoints:
+    def test_get_selection_defaults_to_none(self, client, orch):
+        orch.agent_cards = {"agent-x": _FakeCard("agent-x")}
+        resp = client.get(
+            "/api/users/me/tool-selection", headers=AUTH_HEADER,
+            params={"agent_id": "agent-x"})
+        assert resp.status_code == 200
+        assert resp.json()["agent_id"] == "agent-x"
+
+    def test_put_then_clear_selection(self, client, orch):
+        orch.agent_cards = {"agent-x": _FakeCard("agent-x")}
+        resp = client.put(
+            "/api/users/me/tool-selection", headers=AUTH_HEADER,
+            json={"agent_id": "agent-x", "selected_tools": ["tool_a"]})
+        assert resp.status_code == 200
+        assert resp.json()["selected_tools"] == ["tool_a"]
+
+        resp = client.get(
+            "/api/users/me/tool-selection", headers=AUTH_HEADER,
+            params={"agent_id": "agent-x"})
+        assert resp.json()["selected_tools"] == ["tool_a"]
+
+        resp = client.delete(
+            "/api/users/me/tool-selection", headers=AUTH_HEADER,
+            params={"agent_id": "agent-x"})
+        assert resp.status_code == 204
+
+    def test_put_selection_rejects_empty_and_foreign_and_blocked(self, client, orch):
+        orch.agent_cards = {"agent-x": _FakeCard("agent-x")}
+        resp = client.put(
+            "/api/users/me/tool-selection", headers=AUTH_HEADER,
+            json={"agent_id": "agent-x", "selected_tools": []})
+        assert resp.status_code == 400
+
+        resp = client.put(
+            "/api/users/me/tool-selection", headers=AUTH_HEADER,
+            json={"agent_id": "agent-x", "selected_tools": ["ghost"]})
+        assert resp.status_code == 400
+
+        orch.tool_permissions.is_tool_allowed.return_value = False
+        try:
+            resp = client.put(
+                "/api/users/me/tool-selection", headers=AUTH_HEADER,
+                json={"agent_id": "agent-x", "selected_tools": ["tool_a"]})
+            assert resp.status_code == 400
+        finally:
+            orch.tool_permissions.is_tool_allowed.return_value = True
+
+    def test_agent_enabled_toggle(self, client, orch):
+        orch.agent_cards = {"agent-x": _FakeCard("agent-x")}
+        resp = client.put(
+            "/api/users/me/agent-enabled", headers=AUTH_HEADER,
+            json={"agent_id": "agent-x", "enabled": False})
+        assert resp.status_code == 200
+        assert resp.json() == {"agent_id": "agent-x", "enabled": False}
+        resp = client.put(
+            "/api/users/me/agent-enabled", headers=AUTH_HEADER,
+            json={"agent_id": "ghost", "enabled": True})
+        assert resp.status_code == 404
+        orch.history.db.set_user_agent_disabled("dev-user-id", "agent-x", False)
+
+
+class TestAgentVisibilityAndCredentials:
+    def test_visibility_owner_only(self, client, orch):
+        import uuid
+        agent_id = f"vis-test-{uuid.uuid4().hex[:8]}"
+        orch.history.db.set_agent_ownership(agent_id, "owner@example.com")
+        owner_token = _make_mock_token(
+            {"sub": "dev-user-id", "email": "owner@example.com"})
+        try:
+            resp = client.put(
+                f"/api/agents/{agent_id}/visibility",
+                headers={"Authorization": f"Bearer {owner_token}"},
+                json={"is_public": True})
+            assert resp.status_code == 200
+            assert resp.json()["is_public"] is True
+
+            resp = client.put(
+                f"/api/agents/{agent_id}/visibility",
+                headers=AUTH_HEADER, json={"is_public": False})
+            assert resp.status_code == 403
+
+            resp = client.put(
+                "/api/agents/never-owned/visibility",
+                headers=AUTH_HEADER, json={"is_public": True})
+            assert resp.status_code == 404
+        finally:
+            orch.history.db.execute(
+                "DELETE FROM agent_ownership WHERE agent_id = ?", (agent_id,))
+
+    def test_list_and_delete_agent_credentials(self, client, orch):
+        orch.agent_cards = {"agent-x": _FakeCard("agent-x")}
+        resp = client.get("/api/agents/agent-x/credentials", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        assert resp.json()["credential_keys"] == ["API_KEY"]
+
+        resp = client.delete(
+            "/api/agents/agent-x/credentials/API_KEY", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        orch.credential_manager.delete_credential.assert_called_with(
+            "dev-user-id", "agent-x", "API_KEY")
+
+
+class TestDraftEndpoints:
+    def _make_draft(self, orch):
+        import uuid
+        draft_id = f"draft-{uuid.uuid4().hex[:12]}"
+        orch.history.db.create_draft_agent(
+            draft_id, "dev-user-id", "Coverage Draft",
+            f"cov_{uuid.uuid4().hex[:8]}", "coverage test draft")
+        return draft_id
+
+    def _delete_draft(self, orch, draft_id):
+        orch.history.db.execute(
+            "DELETE FROM draft_agents WHERE id = ?", (draft_id,))
+
+    def test_list_drafts(self, client):
+        resp = client.get("/api/agents/drafts", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        assert "drafts" in resp.json()
+
+    def test_pending_review_requires_admin(self, client):
+        resp = client.get(
+            "/api/agents/drafts/pending-review", headers=AUTH_HEADER)
+        assert resp.status_code == 403
+        admin_token = _make_mock_token(
+            {"sub": "dev-user-id", "roles": ["admin"]})
+        resp = client.get(
+            "/api/agents/drafts/pending-review",
+            headers={"Authorization": f"Bearer {admin_token}"})
+        assert resp.status_code == 200
+
+    def test_unknown_draft_yields_404_everywhere(self, client):
+        missing = "no-such-draft-052"
+        assert client.get(
+            f"/api/agents/drafts/{missing}", headers=AUTH_HEADER
+        ).status_code == 404
+        assert client.delete(
+            f"/api/agents/drafts/{missing}", headers=AUTH_HEADER
+        ).status_code == 404
+        for verb in ("generate", "refine", "test", "stop", "approve"):
+            body = {"message": "hi"} if verb == "refine" else None
+            resp = client.post(
+                f"/api/agents/drafts/{missing}/{verb}",
+                headers=AUTH_HEADER, json=body)
+            assert resp.status_code == 404, verb
+        assert client.get(
+            f"/api/agents/drafts/{missing}/credentials", headers=AUTH_HEADER
+        ).status_code == 404
+        assert client.put(
+            f"/api/agents/drafts/{missing}/credentials",
+            headers=AUTH_HEADER, json={"credentials": {"K": "v"}}
+        ).status_code == 404
+
+    def test_stop_draft_resets_status(self, client, orch):
+        draft_id = self._make_draft(orch)
+        try:
+            resp = client.post(
+                f"/api/agents/drafts/{draft_id}/stop", headers=AUTH_HEADER)
+            assert resp.status_code == 200
+            assert resp.json()["status"] == "generated"
+            orch.lifecycle_manager.stop_draft_agent.assert_awaited_with(draft_id)
+        finally:
+            self._delete_draft(orch, draft_id)
+
+    def test_draft_credentials_roundtrip(self, client, orch):
+        draft_id = self._make_draft(orch)
+        try:
+            resp = client.get(
+                f"/api/agents/drafts/{draft_id}/credentials",
+                headers=AUTH_HEADER)
+            assert resp.status_code == 200
+            assert resp.json()["stored_credential_keys"] == ["API_KEY"]
+
+            resp = client.put(
+                f"/api/agents/drafts/{draft_id}/credentials",
+                headers=AUTH_HEADER,
+                json={"credentials": {"API_KEY": "secret"}})
+            assert resp.status_code == 200
+            assert orch.credential_manager.set_bulk_credentials.called
+        finally:
+            self._delete_draft(orch, draft_id)
 
 
 class TestA2AAuth:

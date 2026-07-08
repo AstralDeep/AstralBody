@@ -143,6 +143,53 @@ def test_duplicate_id_in_one_payload_not_inserted_twice(qapp):
     assert len(set(id(w) for w in widgets)) == 3   # no widget added twice
 
 
+def test_unchanged_full_render_early_exits(qapp):
+    """A full render whose payload is the same object as (or == equal to) the
+    last one skips reconciliation entirely — even UNKEYED widgets survive,
+    which reconciliation would have rebuilt."""
+    c = Canvas(_ctx())
+    comps = [{"type": "text", "content": "one"}, _card("A")]
+    c.set_components(comps)
+    unkeyed_before = c._lay.itemAt(0).widget()
+    wa = c._by_id["A"]
+    c.set_components(comps)  # same object
+    assert c._lay.itemAt(0).widget() is unkeyed_before
+    c.set_components([{"type": "text", "content": "one"}, _card("A")])  # == equal
+    assert c._lay.itemAt(0).widget() is unkeyed_before
+    assert c._by_id["A"] is wa
+
+
+def test_equal_render_after_upsert_still_reconciles(qapp):
+    """apply_ops diverges the canvas from the last full-render payload, so an
+    equal-looking full render must NOT early-exit — the upserted component has
+    to be removed by reconciliation."""
+    c = Canvas(_ctx())
+    c.set_components([_card("A")])
+    c.apply_ops([{"op": "upsert", "component_id": "B", "component": _card("B")}])
+    assert "B" in c._by_id
+    c.set_components([_card("A")])
+    assert "B" not in c._by_id
+    assert c._lay.count() - 1 == 1
+
+
+def test_early_exit_still_clears_skeleton(qapp):
+    c = Canvas(_ctx())
+    c.set_components([_card("A")])
+    c.show_skeleton()
+    c.set_components([_card("A")])  # unchanged payload — early exit path
+    assert c._skeleton is None
+
+
+def test_restyle_bypasses_early_exit(qapp):
+    """restyle() re-renders the SAME retained list — the early exit must not
+    swallow it (the full rebuild is intentional: inline CSS is palette-stale)."""
+    c = Canvas(_ctx())
+    c.set_components([_card("A")])
+    wa = c._by_id["A"]
+    c.restyle()
+    assert c._by_id["A"] is not wa
+
+
 def test_stream_seq_dedupe_drops_dup_and_stale(qapp):
     """The _on_stream_data path uses stream_frame_to_ops with a shared seq_state
     so out-of-order / duplicate frames are dropped (canvas not double-updated)."""

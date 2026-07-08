@@ -50,6 +50,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QAction, QBrush, QColor
 
 from . import theme as T
+from .auth import LoginCancelled
 from . import confirm as _confirm
 from . import integrity as _integrity
 from . import __version__ as _APP_VERSION
@@ -293,6 +294,10 @@ class Canvas(QScrollArea):
         # Retained last-rendered component list so a live theme change can rebuild
         # inline-styled content with the new palette (feature 044 US5, restyle()).
         self._last_components: list = []
+        # True whenever the canvas diverged from _last_components (apply_ops
+        # patches, restyle's forced rebuild) — gates the set_components
+        # unchanged-payload early exit.
+        self._mutated_since_render = False
         # Shared cross-client empty-canvas hint (parity with web/Android/Apple).
         self._empty: Optional[QWidget] = None
         # Query-start loading placeholder (the Android twin's SkeletonCanvas):
@@ -363,8 +368,21 @@ class Canvas(QScrollArea):
         scroll position). Ids absent from the new set are removed; brand-new ids
         (and unkeyed components) are rendered fresh. This is the fix for the
         clobber bug where a full render threw away components the new set still
-        contains (e.g. one just added via a `ui_upsert`)."""
-        components = list(components or [])
+        contains (e.g. one just added via a `ui_upsert`).
+
+        Cheap early-exit: when nothing has mutated the canvas since the last
+        full render and the incoming list is the same object as (or compares
+        equal to) the previous one, the canvas already IS this state — skip
+        reconciliation entirely. apply_ops/restyle flip ``_mutated_since_render``
+        so patched or palette-stale canvases always reconcile."""
+        incoming = components or []
+        if not self._mutated_since_render and (
+            incoming is self._last_components
+            or incoming == self._last_components
+        ):
+            self.hide_skeleton()
+            return
+        components = list(incoming)
         self.hide_skeleton()  # canvas content arrived (or is being rebuilt)
         self._last_components = components  # retained for restyle() (US5)
         # The empty-state hint is dropped before the rebuild (the detach loop
@@ -421,6 +439,7 @@ class Canvas(QScrollArea):
                     rendered[cid] = comp
                 placed.add(cid)
         self._rendered = rendered
+        self._mutated_since_render = False
         if not components:
             self.show_empty_state()
 
@@ -429,18 +448,28 @@ class Canvas(QScrollArea):
         hero, alerts, badges — styled from the theme palette AT render time, not
         via global QSS) picks up a live theme change (feature 044 US5). Identity
         reconciliation would reuse the existing widgets, which keep their stale
-        inline CSS, so the id map is cleared to force a fresh rebuild."""
+        inline CSS, so the id map is cleared to force a fresh rebuild.
+
+        The full rebuild here is INTENTIONAL: every renderer reads the palette
+        globals at render time, so after a theme change effectively all retained
+        widgets are palette-stale — there is no "unaffected component" subset to
+        preserve. The per-frame path (set_components) keeps identity reuse plus
+        the unchanged-payload early exit; only theme changes pay for a rebuild."""
         comps = self._last_components
         # Force a fresh render (reused widgets keep stale inline CSS); the
         # payload map is cleared with the id map so reuse can't kick in.
         self._by_id = {}
         self._rendered = {}
+        self._mutated_since_render = True
         self.set_components(comps)
 
     def apply_ops(self, ops: list) -> None:
         """In-place workspace patch (a `ui_upsert`)."""
         if ops:
             self.hide_skeleton()  # first canvas content of the turn
+            # The canvas now diverges from _last_components, so the next full
+            # render must reconcile even if its payload looks unchanged.
+            self._mutated_since_render = True
         if any((op or {}).get("op", "upsert") != "remove" for op in ops or []):
             self._drop_empty()  # content is arriving — hide the empty-state hint
         for op in ops or []:
@@ -1186,8 +1215,11 @@ class MainWindow(QMainWindow):
     _reauth_done = Signal(object)
     # Silent token refresh resolved off-thread -> GUI thread (new token or None).
     _silent_refresh_done = Signal(object)
+    # Window-first startup login resolved off-thread -> GUI thread (dict outcome).
+    _login_resolved = Signal(object)
 
-    def __init__(self, url: str, token: str, session=None, login_params=None):
+    def __init__(self, url: str, token: str, session=None, login_params=None,
+                 connect: bool = True):
         super().__init__()
         self.setWindowTitle("AstralBody — Windows")
         self.resize(1280, 860)
@@ -1200,6 +1232,13 @@ class MainWindow(QMainWindow):
         self._reauth_tries = 0
         # Guard so two auth_required frames don't fire two concurrent refreshes.
         self._silent_refresh_active = False
+        # Window-first startup login state (begin_login/cancel_login).
+        self._login_active = False
+        self._login_cancel: Optional[threading.Event] = None
+        self._login_resolver = None
+        # False until a workspace is applied — the first-run folder picker is
+        # deferred to the first file-tool use so no dialog blocks first paint.
+        self._workspace_ready = False
         self._agents: List[dict] = []
         self._agents_dialog: Optional[AgentsDialog] = None
         self._history_dialog: Optional[HistoryDialog] = None
@@ -1303,8 +1342,9 @@ class MainWindow(QMainWindow):
             f"background:{T.SURFACE_2}; color:{T.TEXT}; border-bottom:1px solid {T.BORDER};"
             "padding:6px 14px; font-size:12px;"
         )
-        # Click to dismiss (errors/notices); the reconnect banner re-asserts itself.
-        self._banner.mousePressEvent = lambda _ev: self._hide_banner()
+        # Click to dismiss (errors/notices); the reconnect banner re-asserts
+        # itself; during a startup sign-in the click cancels the login instead.
+        self._banner.mousePressEvent = lambda _ev: self._on_banner_clicked()
 
         root = QWidget()
         root.setObjectName("root")
@@ -1324,11 +1364,12 @@ class MainWindow(QMainWindow):
         # picker) modal. Must happen on the GUI thread, before any tool call.
         _confirm.BRIDGE.attach(self._show_confirm_dialog)
 
-        # Resolve the coding-agent workspace: a persisted QSettings choice wins,
-        # else an ASTRAL_WORKSPACE_DIR env, else prompt the user to pick one.
+        # Apply a persisted/env workspace silently; the first-run folder picker
+        # is deferred to the first file-tool use so it never blocks first paint.
         self._init_workspace()
 
-        self.client.start()
+        if connect:
+            self.client.start()
 
         # Launch-time integrity / update check (feature 039 B.5). Verifies the
         # running build's SHA-256 + sigstore signature against the GitHub release
@@ -1342,6 +1383,7 @@ class MainWindow(QMainWindow):
         self._signed_out.connect(self._finish_sign_out)
         self._reauth_done.connect(self._on_reauth_done)
         self._silent_refresh_done.connect(self._on_silent_refresh_done)
+        self._login_resolved.connect(self._on_login_resolved)
         self._signing_out_done = False
         self._connected_once = False
         self._start_integrity_check()
@@ -1411,6 +1453,12 @@ class MainWindow(QMainWindow):
     def _hide_banner(self) -> None:
         self._banner.setVisible(False)
         self._banner.setText("")
+
+    def _on_banner_clicked(self) -> None:
+        """Banner click: cancel an in-flight startup sign-in, else dismiss."""
+        if self._login_active:
+            self.cancel_login()
+        self._hide_banner()
 
     def _set_composer_enabled(self, enabled: bool) -> None:
         """Enable/disable the message input + Send button (feature 044 FR-007 —
@@ -1997,6 +2045,80 @@ class MainWindow(QMainWindow):
         self._reconnect(session.access_token)
         self._hide_banner()
 
+    # --- window-first startup sign-in ------------------------------------ #
+    def begin_login(self, resolver) -> None:
+        """Resolve auth on a worker thread while the window stays interactive.
+
+        ``resolver(cancel_event)`` returns ``(token, session)`` (or raises
+        ``LoginCancelled``); the outcome is marshalled back to the GUI thread
+        via ``_login_resolved``. The top-bar shows sign-in progress and the
+        banner offers a click-to-cancel path for the loopback wait.
+        """
+        if self._login_active:
+            return
+        self._login_active = True
+        self._login_resolver = resolver
+        self._login_cancel = threading.Event()
+        cancel = self._login_cancel
+        self.topbar.set_status("Signing in…", T.MUTED)
+        self._show_banner(
+            "Signing in — complete the sign-in in your browser. "
+            "Click here to cancel."
+        )
+
+        def _work() -> None:
+            try:
+                token, session = resolver(cancel)
+                self._login_resolved.emit({"token": token, "session": session})
+            except LoginCancelled:
+                self._login_resolved.emit({"cancelled": True})
+            except Exception as exc:  # noqa: BLE001 — surfaced via the retry prompt
+                logger.warning("startup sign-in failed", exc_info=True)
+                self._login_resolved.emit({"error": str(exc)})
+
+        threading.Thread(target=_work, name="astral-login", daemon=True).start()
+
+    def cancel_login(self) -> None:
+        """Abort an in-flight startup sign-in (unblocks the loopback wait)."""
+        if self._login_cancel is not None:
+            self._login_cancel.set()
+            self.topbar.set_status("Cancelling sign-in…", T.MUTED)
+
+    def _on_login_resolved(self, result: object) -> None:
+        """GUI-thread handler for the startup sign-in outcome: adopt the token,
+        or offer a retry/quit choice on cancel/failure."""
+        self._login_active = False
+        result = result if isinstance(result, dict) else {}
+        token = result.get("token")
+        if isinstance(token, str) and token:
+            self._hide_banner()
+            self._apply_login(token, result.get("session"))
+            return
+        self.topbar.set_status("Not signed in", T.VARIANT_COLORS["error"][0])
+        self._login_retry_prompt("cancelled" if result.get("cancelled") else "failed")
+
+    def _login_retry_prompt(self, verb: str) -> None:
+        """Modal retry/quit choice after a cancelled/failed startup sign-in."""
+        box = QMessageBox(self)
+        box.setWindowTitle("Sign in")
+        box.setText(f"Sign-in {verb}. Retry, or quit?")
+        retry = box.addButton("Retry", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Quit", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is retry and self._login_resolver is not None:
+            self.begin_login(self._login_resolver)
+        else:
+            self.close()
+
+    def _apply_login(self, token: str, session=None) -> None:
+        """Adopt a startup-resolved login: keep the refresh session, update the
+        top-bar identity, and connect via the existing rebuild-with-new-token
+        flow (no separate token-injection mechanism)."""
+        self._auth_session = session
+        self._reauth_tries = 0
+        self.topbar.set_user(_user_from_token(token))
+        self._reconnect(token)
+
     def _on_message(self, msg: dict) -> None:
         t = msg.get("type")
         if t == "ui_render":
@@ -2226,7 +2348,10 @@ class MainWindow(QMainWindow):
             if not chosen:
                 return {"accepted": False, "choice": None}
             return {"accepted": True, "choice": os.path.realpath(chosen)}
-        # default: action confirm
+        # Lazy first-use workspace pick: a redirected pick denies the in-flight
+        # call (it was confined to the old default root) — retry runs under it.
+        if not self._ensure_workspace_selected():
+            return {"accepted": False, "choice": None}
         return self._action_dialog(req)
 
     def _action_dialog(self, req: dict) -> dict:
@@ -2334,24 +2459,22 @@ class MainWindow(QMainWindow):
         return os.path.realpath(chosen) if chosen else None
 
     def _init_workspace(self) -> None:
-        """Resolve the coding-agent workspace: persisted choice > env > prompt.
+        """Apply a persisted/env workspace at startup — never prompts.
 
-        Sets the in-process override on the tools + audit modules so every
-        file/command tool is confined to the chosen folder for this session.
+        Precedence: persisted QSettings choice > ASTRAL_WORKSPACE_DIR env.
+        With neither, nothing is applied here: the folder picker is deferred to
+        the first file-tool use (``_ensure_workspace_selected`` via the confirm
+        bridge) so no modal dialog can block first paint.
         """
         env_dir = os.getenv("ASTRAL_WORKSPACE_DIR", "").strip()
         persisted = self._settings().value("workspace_dir", "", type=str) or ""
         chosen = persisted or env_dir
-        if not chosen:
-            chosen = (
-                self._gui_pick_directory(
-                    "Choose the folder where Astral may read & write files",
-                    os.path.expanduser("~"),
-                )
-                or ""
-            )
-        if not chosen:
-            chosen = os.path.join(os.path.expanduser("~"), "AstralWorkspace")
+        if chosen:
+            self._activate_workspace(chosen)
+
+    def _activate_workspace(self, chosen: str) -> None:
+        """Create + persist + apply a workspace folder (falls back to the
+        default ~/AstralWorkspace when the folder can't be created)."""
         chosen = os.path.realpath(chosen)
         try:
             os.makedirs(chosen, exist_ok=True)
@@ -2360,6 +2483,34 @@ class MainWindow(QMainWindow):
             os.makedirs(chosen, exist_ok=True)
         self._settings().setValue("workspace_dir", chosen)
         self._apply_workspace(chosen)
+
+    def _default_workspace(self) -> str:
+        """The launch-default confinement root the tools fall back to before
+        any workspace is applied (mirrors win_agent.tools.workspace_root)."""
+        return os.path.realpath(
+            os.path.expanduser(os.path.join("~", "AstralWorkspace"))
+        )
+
+    def _ensure_workspace_selected(self) -> bool:
+        """Lazily resolve the workspace on the first file-tool use.
+
+        Returns True when the in-flight tool call may proceed. When the
+        first-time pick lands somewhere OTHER than the default root the call
+        was already confined to, the call is denied (False) so it can be
+        retried under the newly chosen root — the pick still applies.
+        """
+        if self._workspace_ready:
+            return True
+        default_root = self._default_workspace()
+        chosen = (
+            self._gui_pick_directory(
+                "Choose the folder where Astral may read & write files",
+                os.path.expanduser("~"),
+            )
+            or default_root
+        )
+        self._activate_workspace(chosen)
+        return os.path.realpath(chosen) == default_root
 
     def _apply_workspace(self, path: str) -> None:
         """Push the chosen workspace into the tools + audit modules + env."""
@@ -2371,6 +2522,7 @@ class MainWindow(QMainWindow):
             _tools.set_workspace_override(path)
         except Exception:  # noqa: BLE001
             pass
+        self._workspace_ready = True
         self.topbar.set_status(f"Workspace: {path}", T.MUTED)
 
     def _change_workspace(self) -> None:
@@ -2490,13 +2642,15 @@ def _http_base(ws_url: str) -> str:
     return f"{scheme}://{u.netloc}"
 
 
-def resolve_auth(args):
+def resolve_auth(args, cancel_event=None):
     """Return (token, session). An explicit --token/ASTRAL_TOKEN wins (use
     'dev-token' for a mock-auth orchestrator). Otherwise, if a Keycloak authority
     is configured, run the interactive OIDC desktop login — by default with the
     dedicated public client (astral-desktop), exchanging the code DIRECTLY
     against Keycloak; with --bff it reuses the web's astral-frontend via the
-    orchestrator's BFF proxy. Falls back to 'dev-token' on failure."""
+    orchestrator's BFF proxy. Falls back to 'dev-token' on failure; a
+    user-cancelled login (``cancel_event``) re-raises ``LoginCancelled`` —
+    cancel is a choice, not a failure to paper over with a dev token."""
     if args.token:
         return args.token, None
     if args.authority:
@@ -2505,9 +2659,12 @@ def resolve_auth(args):
 
             bff_base = _http_base(args.url) if getattr(args, "bff", False) else None
             session = oidc_login(
-                args.authority, client_id=args.client_id, bff_base=bff_base
+                args.authority, client_id=args.client_id, bff_base=bff_base,
+                cancel_event=cancel_event,
             )
             return session.access_token, session
+        except LoginCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001
             print(f"OIDC login failed ({exc}); falling back to dev-token.")
     return "dev-token", None
@@ -2582,7 +2739,9 @@ def _resolve_config(args, *, settings, prompt) -> None:
     Mutates ``args`` (authority/url) and ``os.environ['AGENT_API_KEY']`` so the
     rest of startup (OIDC login + the win_agent registration) works for a bare
     download. Prompts (once, persisting) only when there's no authority and no
-    explicit token. ``settings``/``prompt`` are injected for testability.
+    explicit token; ``prompt=None`` resolves non-interactively (the window-first
+    launch defers the first-run dialog until after first paint).
+    ``settings``/``prompt`` are injected for testability.
     """
     authority = (os.getenv("KEYCLOAK_AUTHORITY")
                  or settings.value("config/authority", "", type=str) or "")
@@ -2592,7 +2751,7 @@ def _resolve_config(args, *, settings, prompt) -> None:
     agent_key = (os.getenv("AGENT_API_KEY")
                  or settings.value("config/agent_key", "", type=str) or "")
 
-    if not authority and not args.token:
+    if not authority and not args.token and prompt is not None:
         vals = prompt(authority, ws_url, agent_key)
         if vals:
             authority, ws_url, agent_key = vals
@@ -2634,22 +2793,53 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     configure(app)
-    # C-6: resolve/capture deployment config (authority, ws url, agent key) so a
-    # bare-downloaded exe is usable without env vars instead of silently failing.
-    _resolve_config(
-        args, settings=QSettings("AstralBody", "WindowsClient"), prompt=_prompt_config
-    )
-    token, session = resolve_auth(args)
+    _win = _launch(args)  # keep the window referenced for the app's lifetime
+    return app.exec()
+
+
+def _launch(args, settings=None) -> "MainWindow":
+    """Window-first startup: show the shell immediately, then resolve the
+    first-run config prompt and the (potentially slow) OIDC sign-in AFTER first
+    paint — auth runs on a worker thread and the token is adopted through the
+    existing rebuild-with-new-token flow. An explicit --token/ASTRAL_TOKEN
+    keeps the original synchronous path (it resolves instantly)."""
+    settings = settings or QSettings("AstralBody", "WindowsClient")
+    _resolve_config(args, settings=settings, prompt=None)
     login_params = {
         "authority": args.authority,
         "client_id": args.client_id,
         "bff": bool(getattr(args, "bff", False)),
     }
-    win = MainWindow(args.url, token, session=session, login_params=login_params)
+    if args.token:
+        token, session = resolve_auth(args)
+        win = MainWindow(args.url, token, session=session, login_params=login_params)
+        win.show()
+        win.raise_()
+        win.activateWindow()
+        return win
+
+    win = MainWindow(
+        args.url, "", session=None, login_params=login_params, connect=False
+    )
     win.show()
     win.raise_()
     win.activateWindow()
-    return app.exec()
+    win.topbar.set_status("Signing in…", T.MUTED)
+
+    def _after_first_paint() -> None:
+        """Deferred startup tail: first-run config dialog (if still needed),
+        then the background sign-in."""
+        if not args.authority:
+            _resolve_config(args, settings=settings, prompt=_prompt_config)
+            win._login_params.update(
+                authority=args.authority,
+                client_id=getattr(args, "client_id", "astral-desktop"),
+                bff=bool(getattr(args, "bff", False)),
+            )
+        win.begin_login(lambda cancel: resolve_auth(args, cancel_event=cancel))
+
+    QTimer.singleShot(0, _after_first_paint)
+    return win
 
 
 if __name__ == "__main__":

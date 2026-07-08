@@ -9,6 +9,7 @@ All reads are user-scoped; a caller only ever sees its own links.
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from typing import List, Optional
@@ -64,6 +65,29 @@ class MessageAttachmentRepository:
             (message_id, user_id),
         )
         return [dict(r) for r in (rows or [])]
+
+    # ── async facade (event-loop-safe twins of the sync methods above) ────
+    async def ainsert(
+        self,
+        *,
+        chat_id: str,
+        attachment_id: str,
+        user_id: str,
+        message_id: Optional[str] = None,
+    ) -> str:
+        """Async twin of :meth:`insert`, run off the event loop."""
+        return await asyncio.to_thread(
+            self.insert, chat_id=chat_id, attachment_id=attachment_id,
+            user_id=user_id, message_id=message_id,
+        )
+
+    async def alist_for_chat(self, chat_id: str, user_id: str) -> List[dict]:
+        """Async twin of :meth:`list_for_chat`, run off the event loop."""
+        return await asyncio.to_thread(self.list_for_chat, chat_id, user_id)
+
+    async def alist_for_message(self, message_id: str, user_id: str) -> List[dict]:
+        """Async twin of :meth:`list_for_message`, run off the event loop."""
+        return await asyncio.to_thread(self.list_for_message, message_id, user_id)
 
 
 __all__ = ["MessageAttachmentRepository"]

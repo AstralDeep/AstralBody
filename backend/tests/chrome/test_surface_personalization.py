@@ -503,3 +503,25 @@ def test_module_contract_title_and_handlers():
     }
     assert set(surf.HANDLERS) == expected
     assert not getattr(surf, "ADMIN_ONLY", False)
+# ---------------------------------------------------------------------------
+# 052 -- PHI reject-field labels + SDUI components() schedule tab
+# ---------------------------------------------------------------------------
+
+def test_phi_reject_field_labels_each_field(monkeypatch):
+    class _Gate:
+        def contains_phi(self, value):
+            return "PHI" in str(value)
+
+    monkeypatch.setattr(surf, "get_phi_gate", lambda: _Gate())
+    body = SimpleNamespace(profession="engineer", goals=["fine", "PHI goal"])
+    assert surf._phi_reject_field(body, None) == "goals"
+    body = SimpleNamespace(profession=None, goals=[])
+    assert surf._phi_reject_field(body, "PHI notes") == "personality notes"
+    body = SimpleNamespace(profession="PHI job", goals=[])
+    assert surf._phi_reject_field(body, None) == "profession"
+    assert surf._phi_reject_field(SimpleNamespace(profession="x", goals=["y"]), "z") is None
+
+
+def test_components_schedule_tab_via_sdui_entry():
+    comps = asyncio.run(surf.components(make_orch(), "u1", ["user"], {"tab": "schedule"}))
+    assert comps and len(comps) >= 2

@@ -81,7 +81,7 @@ async def list_chats(
     user_id: str = Depends(require_user_id),
 ):
     orch = _get_orchestrator(request)
-    chats = orch.history.get_recent_chats(limit=limit, user_id=user_id)
+    chats = await asyncio.to_thread(orch.history.get_recent_chats, limit=limit, user_id=user_id)
     return ChatListResponse(chats=[ChatSummary(**c) for c in chats])
 
 
@@ -104,7 +104,7 @@ async def create_chat(
 ):
     orch = _get_orchestrator(request)
     agent_id = body.agent_id if body is not None else None
-    chat_id = orch.history.create_chat(user_id=user_id, agent_id=agent_id)
+    chat_id = await asyncio.to_thread(orch.history.create_chat, user_id=user_id, agent_id=agent_id)
     return ChatCreateResponse(chat_id=chat_id, agent_id=agent_id)
 
 
@@ -121,7 +121,7 @@ async def get_chat(
     user_id: str = Depends(require_user_id),
 ):
     orch = _get_orchestrator(request)
-    chat = orch.history.get_chat(chat_id, user_id=user_id)
+    chat = await asyncio.to_thread(orch.history.get_chat, chat_id, user_id=user_id)
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
     return ChatDetailResponse(chat=ChatDetail(**chat))
@@ -140,7 +140,7 @@ async def delete_chat(
     user_id: str = Depends(require_user_id),
 ):
     orch = _get_orchestrator(request)
-    orch.history.delete_chat(chat_id, user_id=user_id)
+    await asyncio.to_thread(orch.history.delete_chat, chat_id, user_id=user_id)
     # Feature 028 (spec edge case): another tab time-traveling through this
     # chat must have its historical view ended gracefully, not left staring
     # at a snapshot of a chat that no longer exists.
@@ -192,10 +192,10 @@ async def get_chat_steps(
     orch = _get_orchestrator(request)
 
     # Ownership + existence check (matches the get_chat pattern).
-    chat = orch.history.get_chat(chat_id, user_id=user_id)
+    chat = await asyncio.to_thread(orch.history.get_chat, chat_id, user_id=user_id)
     if not chat:
         # Try to differentiate "exists for another user" vs "does not exist".
-        cross_user = orch.history.db.fetch_one(
+        cross_user = await orch.history.db.afetch_one(
             "SELECT 1 FROM chats WHERE id = ? LIMIT 1", (chat_id,)
         )
         if cross_user is not None:
@@ -207,7 +207,7 @@ async def get_chat_steps(
     try:
         from shared.phi_redactor import redact
 
-        rows = orch.history.db.fetch_all(
+        rows = await orch.history.db.afetch_all(
             "SELECT * FROM chat_steps WHERE chat_id = ? AND user_id = ? "
             "ORDER BY started_at ASC, id ASC",
             (chat_id, user_id),
@@ -278,19 +278,18 @@ async def send_message(
     orch = _get_orchestrator(request)
 
     # Ensure chat exists
-    if not orch.history.get_chat(chat_id, user_id=user_id):
-        orch.history.create_chat(chat_id, user_id=user_id)
+    if not await asyncio.to_thread(orch.history.get_chat, chat_id, user_id=user_id):
+        await asyncio.to_thread(orch.history.create_chat, chat_id, user_id=user_id)
 
     # Save the user message to history
     msg_to_save = body.display_message if body.display_message else body.message
-    orch.history.add_message(chat_id, "user", msg_to_save, user_id=user_id)
+    await asyncio.to_thread(orch.history.add_message, chat_id, "user", msg_to_save, user_id=user_id)
 
     # Try to dispatch the message for processing via the orchestrator.
     # If a WebSocket client is connected for this user, results stream to them.
     # If not, results are still saved to history.
     dispatched = False
     try:
-        import asyncio
         for ws in orch.ui_clients:
             if ws in orch.ui_sessions:
                 ws_user_id = orch.ui_sessions[ws].get("sub", "legacy")
@@ -354,7 +353,9 @@ async def get_components(
     user_id: str = Depends(require_user_id),
 ):
     orch = _get_orchestrator(request)
-    components = orch.history.get_saved_components(chat_id, user_id=user_id)
+    components = await asyncio.to_thread(
+        orch.history.get_saved_components, chat_id, user_id=user_id
+    )
     return ComponentListResponse(components=[SavedComponent(**c) for c in components])
 
 
@@ -378,13 +379,16 @@ async def save_component(
     # WS save_component reconciliation.
     component_id = None
     if isinstance(body.component_data, dict):
-        ops = orch.workspace.upsert(chat_id, user_id, [body.component_data])
+        ops = await orch.workspace.aupsert(chat_id, user_id, [body.component_data])
         if ops:
             await orch.send_ui_upsert(None, chat_id, user_id, ops)
-            row = orch.workspace.get_by_component_id(chat_id, user_id, ops[0]["component_id"])
+            row = await orch.workspace.aget_by_component_id(
+                chat_id, user_id, ops[0]["component_id"]
+            )
             component_id = (row or {}).get("id")
     if component_id is None:
-        component_id = orch.history.save_component(
+        component_id = await asyncio.to_thread(
+            orch.history.save_component,
             chat_id,
             body.component_data,
             body.component_type,
@@ -418,13 +422,13 @@ async def delete_component(
     # Feature 028 (D18/FR-026): resolve the row first so the workspace
     # identity can be removed on every client and the removal snapshotted +
     # audited — a REST delete must not mutate the workspace invisibly.
-    row = orch.history.get_component_by_id(component_id, user_id=user_id)
+    row = await asyncio.to_thread(orch.history.get_component_by_id, component_id, user_id=user_id)
     ws_component_id = None
     chat_id_for_row = row.get("chat_id") if row else None
     if row and isinstance(row.get("component_data"), dict):
         ws_component_id = row["component_data"].get("component_id")
 
-    success = orch.history.delete_component(component_id, user_id=user_id)
+    success = await asyncio.to_thread(orch.history.delete_component, component_id, user_id=user_id)
     if not success:
         raise HTTPException(status_code=404, detail="Component not found")
     if ws_component_id and chat_id_for_row:
@@ -432,7 +436,7 @@ async def delete_component(
             {"op": "remove", "component_id": ws_component_id}
         ])
         try:
-            orch.workspace.snapshot(chat_id_for_row, user_id, cause="remove")
+            await orch.workspace.asnapshot(chat_id_for_row, user_id, cause="remove")
             from audit.hooks import record_workspace_event
             asyncio.create_task(record_workspace_event(
                 user_id=user_id, action="component_removed",
@@ -456,8 +460,8 @@ async def combine_components(
     user_id: str = Depends(require_user_id),
 ):
     orch = _get_orchestrator(request)
-    source = orch.history.get_component_by_id(body.source_id, user_id=user_id)
-    target = orch.history.get_component_by_id(body.target_id, user_id=user_id)
+    source = await asyncio.to_thread(orch.history.get_component_by_id, body.source_id, user_id=user_id)
+    target = await asyncio.to_thread(orch.history.get_component_by_id, body.target_id, user_id=user_id)
 
     if not source or not target:
         raise HTTPException(status_code=404, detail="One or both components not found")
@@ -468,7 +472,8 @@ async def combine_components(
         raise HTTPException(status_code=400, detail=result["error"])
 
     chat_id = source["chat_id"]
-    new_components = orch.history.replace_components(
+    new_components = await asyncio.to_thread(
+        orch.history.replace_components,
         [body.source_id, body.target_id],
         result["components"],
         chat_id,
@@ -498,7 +503,7 @@ async def condense_components(
     orch = _get_orchestrator(request)
     components = []
     for cid in body.component_ids:
-        comp = orch.history.get_component_by_id(cid, user_id=user_id)
+        comp = await asyncio.to_thread(orch.history.get_component_by_id, cid, user_id=user_id)
         if comp:
             components.append(comp)
 
@@ -511,7 +516,8 @@ async def condense_components(
         raise HTTPException(status_code=400, detail=result["error"])
 
     chat_id = components[0]["chat_id"]
-    new_components = orch.history.replace_components(
+    new_components = await asyncio.to_thread(
+        orch.history.replace_components,
         body.component_ids,
         result["components"],
         chat_id,
@@ -544,14 +550,17 @@ async def list_agents(
 ):
     orch = _get_orchestrator(request)
     db = orch.history.db
-    ownership_map = {o["agent_id"]: o for o in db.get_all_agent_ownership()}
+    ownership_map = {
+        o["agent_id"]: o
+        for o in await asyncio.to_thread(db.get_all_agent_ownership)
+    }
     # Feature 013 follow-up: resolve the requesting user's per-agent
     # disabled list once so every row in the response carries it.
-    disabled_set = set(db.get_user_disabled_agents(user_id))
+    disabled_set = set(await asyncio.to_thread(db.get_user_disabled_agents, user_id))
     agents = []
     for agent_id, card in orch.agent_cards.items():
         # Hide draft agents that aren't live yet
-        if orch._is_draft_agent(agent_id):
+        if await asyncio.to_thread(orch._is_draft_agent, agent_id):
             continue
         ownership = ownership_map.get(agent_id, {})
         agents.append(AgentInfo(
@@ -590,21 +599,25 @@ async def get_agent_permissions(
     # backfill per-tool rows from the legacy scope state so users don't
     # have to re-toggle previously consented permissions. Idempotent —
     # subsequent reads insert nothing.
-    try:
-        orch.tool_permissions.backfill_per_tool_rows(user_id, agent_id)
-    except Exception as e:  # pragma: no cover — defensive logging only
-        logger.warning(f"Per-tool backfill failed for user={user_id} agent={agent_id}: {e}")
     available_tools = [s.id for s in card.skills]
     tool_descriptions = {s.id: s.description for s in card.skills}
-    scopes = orch.tool_permissions.get_agent_scopes(user_id, agent_id)
-    tool_scope_map = orch.tool_permissions.get_tool_scope_map(agent_id)
-    permissions = orch.tool_permissions.get_effective_permissions(
-        user_id, agent_id, available_tools
-    )
-    per_tool_permissions = orch.tool_permissions.get_effective_tool_permissions(
-        user_id, agent_id
-    )
-    tool_overrides = orch.tool_permissions.get_tool_overrides(user_id, agent_id)
+
+    def _read_permission_state():
+        """Backfill + resolve all permission views off the event loop."""
+        try:
+            orch.tool_permissions.backfill_per_tool_rows(user_id, agent_id)
+        except Exception as e:  # pragma: no cover — defensive logging only
+            logger.warning(f"Per-tool backfill failed for user={user_id} agent={agent_id}: {e}")
+        return (
+            orch.tool_permissions.get_agent_scopes(user_id, agent_id),
+            orch.tool_permissions.get_tool_scope_map(agent_id),
+            orch.tool_permissions.get_effective_permissions(user_id, agent_id, available_tools),
+            orch.tool_permissions.get_effective_tool_permissions(user_id, agent_id),
+            orch.tool_permissions.get_tool_overrides(user_id, agent_id),
+        )
+
+    (scopes, tool_scope_map, permissions, per_tool_permissions,
+     tool_overrides) = await asyncio.to_thread(_read_permission_state)
     return AgentPermissionsResponse(
         agent_id=agent_id,
         agent_name=card.name,
@@ -661,40 +674,48 @@ async def set_agent_permissions(
                             f"'{tool_name}' (required: '{required}')."
                         ),
                     )
-        for tool_name, kind_map in body.per_tool_permissions.items():
-            for kind, enabled in kind_map.items():
-                orch.tool_permissions.set_tool_permission(
-                    user_id, agent_id, tool_name, kind, bool(enabled)
-                )
-        # Mirror up to the agent_scopes layer so the legacy filter path
-        # remains coherent: a scope is enabled at the legacy layer iff at
-        # least one tool of that kind is now enabled per-tool.
-        scope_state = orch.tool_permissions.get_agent_scopes(user_id, agent_id)
-        derived: Dict[str, bool] = {**scope_state}
-        per_tool = orch.tool_permissions.get_effective_tool_permissions(user_id, agent_id)
-        for tool_name, kind_map in per_tool.items():
-            for kind, enabled in kind_map.items():
-                if enabled:
-                    derived[kind] = True
-        orch.tool_permissions.set_agent_scopes(user_id, agent_id, derived)
+        def _apply_per_tool():
+            """Write per-tool rows and mirror them into agent_scopes off-loop."""
+            for tool_name, kind_map in body.per_tool_permissions.items():
+                for kind, enabled in kind_map.items():
+                    orch.tool_permissions.set_tool_permission(
+                        user_id, agent_id, tool_name, kind, bool(enabled)
+                    )
+            # Mirror up to the agent_scopes layer so the legacy filter path
+            # remains coherent: a scope is enabled at the legacy layer iff at
+            # least one tool of that kind is now enabled per-tool.
+            scope_state = orch.tool_permissions.get_agent_scopes(user_id, agent_id)
+            derived: Dict[str, bool] = {**scope_state}
+            per_tool = orch.tool_permissions.get_effective_tool_permissions(user_id, agent_id)
+            for tool_name, kind_map in per_tool.items():
+                for kind, enabled in kind_map.items():
+                    if enabled:
+                        derived[kind] = True
+            orch.tool_permissions.set_agent_scopes(user_id, agent_id, derived)
+
+        await asyncio.to_thread(_apply_per_tool)
 
     # Legacy shape for transitional clients — write scopes, then reflect
     # the change into per-tool rows so the new model stays in sync.
     elif legacy_payload:
-        if body.scopes is not None:
-            orch.tool_permissions.set_agent_scopes(user_id, agent_id, body.scopes)
-        if body.tool_overrides is not None:
-            orch.tool_permissions.set_tool_overrides(user_id, agent_id, body.tool_overrides)
-        # Re-derive per-tool rows from the new scope+override state.
-        for tool_name, required_scope in tool_scope_map.items():
-            scope_enabled = orch.tool_permissions.is_scope_enabled(
-                user_id, agent_id, required_scope
-            )
-            override_disabled = (body.tool_overrides or {}).get(tool_name, True) is False
-            orch.tool_permissions.set_tool_permission(
-                user_id, agent_id, tool_name, required_scope,
-                bool(scope_enabled and not override_disabled),
-            )
+        def _apply_legacy():
+            """Write legacy scope state and re-derive per-tool rows off-loop."""
+            if body.scopes is not None:
+                orch.tool_permissions.set_agent_scopes(user_id, agent_id, body.scopes)
+            if body.tool_overrides is not None:
+                orch.tool_permissions.set_tool_overrides(user_id, agent_id, body.tool_overrides)
+            # Re-derive per-tool rows from the new scope+override state.
+            for tool_name, required_scope in tool_scope_map.items():
+                scope_enabled = orch.tool_permissions.is_scope_enabled(
+                    user_id, agent_id, required_scope
+                )
+                override_disabled = (body.tool_overrides or {}).get(tool_name, True) is False
+                orch.tool_permissions.set_tool_permission(
+                    user_id, agent_id, tool_name, required_scope,
+                    bool(scope_enabled and not override_disabled),
+                )
+
+        await asyncio.to_thread(_apply_legacy)
         logger.warning(
             "Legacy scope-shaped permissions update accepted for user=%s agent=%s "
             "(legacy_scope_update=true)",
@@ -709,14 +730,18 @@ async def set_agent_permissions(
 
     available_tools = [s.id for s in card.skills]
     tool_descriptions = {s.id: s.description for s in card.skills}
-    scopes = orch.tool_permissions.get_agent_scopes(user_id, agent_id)
-    permissions = orch.tool_permissions.get_effective_permissions(
-        user_id, agent_id, available_tools
-    )
-    per_tool_permissions = orch.tool_permissions.get_effective_tool_permissions(
-        user_id, agent_id
-    )
-    tool_overrides = orch.tool_permissions.get_tool_overrides(user_id, agent_id)
+
+    def _read_back():
+        """Re-read the resolved permission views off the event loop."""
+        return (
+            orch.tool_permissions.get_agent_scopes(user_id, agent_id),
+            orch.tool_permissions.get_effective_permissions(user_id, agent_id, available_tools),
+            orch.tool_permissions.get_effective_tool_permissions(user_id, agent_id),
+            orch.tool_permissions.get_tool_overrides(user_id, agent_id),
+        )
+
+    (scopes, permissions, per_tool_permissions,
+     tool_overrides) = await asyncio.to_thread(_read_back)
     logger.info(
         "Agent permissions updated: user=%s agent=%s shape=%s tools_changed=%d",
         user_id,
@@ -764,7 +789,9 @@ async def get_user_tool_selection(
     orch = _get_orchestrator(request)
     if agent_id not in orch.agent_cards:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
-    selected = orch.history.db.get_user_tool_selection(user_id, agent_id)
+    selected = await asyncio.to_thread(
+        orch.history.db.get_user_tool_selection, user_id, agent_id
+    )
     return ToolSelectionResponse(agent_id=agent_id, selected_tools=selected)
 
 
@@ -800,16 +827,20 @@ async def set_user_tool_selection(
             status_code=400,
             detail=f"Tools not part of agent '{body.agent_id}': {invalid}",
         )
-    blocked = [
-        t for t in body.selected_tools
-        if not orch.tool_permissions.is_tool_allowed(user_id, body.agent_id, t)
-    ]
+    blocked = await asyncio.to_thread(
+        lambda: [
+            t for t in body.selected_tools
+            if not orch.tool_permissions.is_tool_allowed(user_id, body.agent_id, t)
+        ]
+    )
     if blocked:
         raise HTTPException(
             status_code=400,
             detail=f"Tools blocked by scope/per-tool permissions: {blocked}",
         )
-    orch.history.db.set_user_tool_selection(user_id, body.agent_id, body.selected_tools)
+    await asyncio.to_thread(
+        orch.history.db.set_user_tool_selection, user_id, body.agent_id, body.selected_tools
+    )
     logger.info(
         "Tool selection updated: user=%s agent=%s tools=%d action=set",
         user_id,
@@ -839,7 +870,9 @@ async def clear_user_tool_selection(
     orch = _get_orchestrator(request)
     if agent_id not in orch.agent_cards:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
-    cleared = orch.history.db.clear_user_tool_selection(user_id, agent_id)
+    cleared = await asyncio.to_thread(
+        orch.history.db.clear_user_tool_selection, user_id, agent_id
+    )
     logger.info(
         "Tool selection updated: user=%s agent=%s action=reset cleared=%s",
         user_id,
@@ -869,7 +902,9 @@ async def set_user_agent_enabled(
     orch = _get_orchestrator(request)
     if body.agent_id not in orch.agent_cards:
         raise HTTPException(status_code=404, detail=f"Agent '{body.agent_id}' not found")
-    orch.history.db.set_user_agent_disabled(user_id, body.agent_id, not body.enabled)
+    await asyncio.to_thread(
+        orch.history.db.set_user_agent_disabled, user_id, body.agent_id, not body.enabled
+    )
     logger.info(
         "Agent enabled state updated: user=%s agent=%s enabled=%s",
         user_id,
@@ -896,14 +931,14 @@ async def set_agent_visibility(
 ):
     orch = _get_orchestrator(request)
     db = orch.history.db
-    ownership = db.get_agent_ownership(agent_id)
+    ownership = await asyncio.to_thread(db.get_agent_ownership, agent_id)
     if not ownership:
         raise HTTPException(status_code=404, detail=f"No ownership record for agent '{agent_id}'")
     # Only the owner can change visibility
     user_email = payload.get("email", "")
     if ownership["owner_email"] != user_email:
         raise HTTPException(status_code=403, detail="Only the agent owner can change visibility")
-    db.set_agent_visibility(agent_id, body.is_public)
+    await asyncio.to_thread(db.set_agent_visibility, agent_id, body.is_public)
     return {"agent_id": agent_id, "is_public": body.is_public}
 
 
@@ -925,7 +960,7 @@ async def get_agent_credentials(
     card = orch.agent_cards.get(agent_id)
     if not card:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
-    keys = orch.credential_manager.list_credential_keys(user_id, agent_id)
+    keys = await asyncio.to_thread(orch.credential_manager.list_credential_keys, user_id, agent_id)
     required = getattr(card, 'metadata', {}).get("required_credentials", []) if hasattr(card, 'metadata') else []
     return CredentialListResponse(
         agent_id=agent_id,
@@ -951,8 +986,10 @@ async def set_agent_credentials(
     card = orch.agent_cards.get(agent_id)
     if not card:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
-    orch.credential_manager.set_bulk_credentials(user_id, agent_id, body.credentials)
-    keys = orch.credential_manager.list_credential_keys(user_id, agent_id)
+    await asyncio.to_thread(
+        orch.credential_manager.set_bulk_credentials, user_id, agent_id, body.credentials
+    )
+    keys = await asyncio.to_thread(orch.credential_manager.list_credential_keys, user_id, agent_id)
     required = getattr(card, 'metadata', {}).get("required_credentials", []) if hasattr(card, 'metadata') else []
     response = CredentialListResponse(
         agent_id=agent_id,
@@ -967,7 +1004,9 @@ async def set_agent_credentials(
     skill_names = {getattr(s, "name", None) for s in getattr(card, "skills", [])}
     if "_credentials_check" in skill_names:
         try:
-            creds = orch.credential_manager.get_agent_credentials_encrypted(user_id, agent_id)
+            creds = await asyncio.to_thread(
+                orch.credential_manager.get_agent_credentials_encrypted, user_id, agent_id
+            )
             args: Dict[str, Any] = {}
             if creds:
                 args["_credentials"] = creds
@@ -1014,7 +1053,9 @@ async def delete_agent_credential(
     card = orch.agent_cards.get(agent_id)
     if not card:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
-    orch.credential_manager.delete_credential(user_id, agent_id, credential_key)
+    await asyncio.to_thread(
+        orch.credential_manager.delete_credential, user_id, agent_id, credential_key
+    )
     return CredentialDeleteResponse(message=f"Credential '{credential_key}' deleted for agent '{agent_id}'")
 
 
@@ -1128,7 +1169,7 @@ async def list_drafts(
     user_id: str = Depends(require_user_id),
 ):
     orch = _get_orchestrator(request)
-    drafts = orch.history.db.get_user_draft_agents(user_id)
+    drafts = await asyncio.to_thread(orch.history.db.get_user_draft_agents, user_id)
     return DraftAgentListResponse(
         drafts=[_draft_to_response(d, orch) for d in drafts]
     )
@@ -1177,7 +1218,7 @@ async def list_pending_review(
         raise HTTPException(status_code=403, detail="Admin role required")
 
     orch = _get_orchestrator(request)
-    drafts = orch.history.db.get_pending_review_drafts()
+    drafts = await asyncio.to_thread(orch.history.db.get_pending_review_drafts)
     return DraftAgentListResponse(
         drafts=[_draft_to_response(d, orch) for d in drafts]
     )
@@ -1194,7 +1235,7 @@ async def get_draft(
     user_id: str = Depends(require_user_id),
 ):
     orch = _get_orchestrator(request)
-    draft = orch.history.db.get_draft_agent(draft_id)
+    draft = await asyncio.to_thread(orch.history.db.get_draft_agent, draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft agent not found")
     if draft["user_id"] != user_id:
@@ -1214,7 +1255,7 @@ async def delete_draft(
     user_id: str = Depends(require_user_id),
 ):
     orch = _get_orchestrator(request)
-    draft = orch.history.db.get_draft_agent(draft_id)
+    draft = await asyncio.to_thread(orch.history.db.get_draft_agent, draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft agent not found")
     if draft["user_id"] != user_id:
@@ -1239,7 +1280,7 @@ async def generate_draft(
     user_id: str = Depends(require_user_id),
 ):
     orch = _get_orchestrator(request)
-    draft = orch.history.db.get_draft_agent(draft_id)
+    draft = await asyncio.to_thread(orch.history.db.get_draft_agent, draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft agent not found")
     if draft["user_id"] != user_id:
@@ -1265,7 +1306,7 @@ async def refine_draft(
     user_id: str = Depends(require_user_id),
 ):
     orch = _get_orchestrator(request)
-    draft = orch.history.db.get_draft_agent(draft_id)
+    draft = await asyncio.to_thread(orch.history.db.get_draft_agent, draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft agent not found")
     if draft["user_id"] != user_id:
@@ -1289,7 +1330,7 @@ async def test_draft(
     user_id: str = Depends(require_user_id),
 ):
     orch = _get_orchestrator(request)
-    draft = orch.history.db.get_draft_agent(draft_id)
+    draft = await asyncio.to_thread(orch.history.db.get_draft_agent, draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft agent not found")
     if draft["user_id"] != user_id:
@@ -1315,7 +1356,7 @@ async def stop_draft(
     user_id: str = Depends(require_user_id),
 ):
     orch = _get_orchestrator(request)
-    draft = orch.history.db.get_draft_agent(draft_id)
+    draft = await asyncio.to_thread(orch.history.db.get_draft_agent, draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft agent not found")
     if draft["user_id"] != user_id:
@@ -1323,8 +1364,8 @@ async def stop_draft(
 
     lifecycle = _get_lifecycle(request)
     await lifecycle.stop_draft_agent(draft_id)
-    orch.history.db.update_draft_agent(draft_id, status="generated")
-    updated = orch.history.db.get_draft_agent(draft_id)
+    await asyncio.to_thread(orch.history.db.update_draft_agent, draft_id, status="generated")
+    updated = await asyncio.to_thread(orch.history.db.get_draft_agent, draft_id)
     return _draft_to_response(updated, orch)
 
 
@@ -1340,7 +1381,7 @@ async def approve_draft(
     user_id: str = Depends(require_user_id),
 ):
     orch = _get_orchestrator(request)
-    draft = orch.history.db.get_draft_agent(draft_id)
+    draft = await asyncio.to_thread(orch.history.db.get_draft_agent, draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft agent not found")
     if draft["user_id"] != user_id:
@@ -1395,14 +1436,16 @@ async def get_draft_credentials(
     user_id: str = Depends(require_user_id),
 ):
     orch = _get_orchestrator(request)
-    draft = orch.history.db.get_draft_agent(draft_id)
+    draft = await asyncio.to_thread(orch.history.db.get_draft_agent, draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft agent not found")
     if draft["user_id"] != user_id:
         raise HTTPException(status_code=403, detail="Not your draft agent")
 
     agent_id = f"{draft['agent_slug'].replace('_', '-')}-1"
-    stored_keys = orch.credential_manager.list_credential_keys(user_id, agent_id)
+    stored_keys = await asyncio.to_thread(
+        orch.credential_manager.list_credential_keys, user_id, agent_id
+    )
     required = json.loads(draft.get("required_credentials") or "[]")
 
     return {
@@ -1425,15 +1468,19 @@ async def set_draft_credentials(
     user_id: str = Depends(require_user_id),
 ):
     orch = _get_orchestrator(request)
-    draft = orch.history.db.get_draft_agent(draft_id)
+    draft = await asyncio.to_thread(orch.history.db.get_draft_agent, draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft agent not found")
     if draft["user_id"] != user_id:
         raise HTTPException(status_code=403, detail="Not your draft agent")
 
     agent_id = f"{draft['agent_slug'].replace('_', '-')}-1"
-    orch.credential_manager.set_bulk_credentials(user_id, agent_id, body.credentials)
-    stored_keys = orch.credential_manager.list_credential_keys(user_id, agent_id)
+    await asyncio.to_thread(
+        orch.credential_manager.set_bulk_credentials, user_id, agent_id, body.credentials
+    )
+    stored_keys = await asyncio.to_thread(
+        orch.credential_manager.list_credential_keys, user_id, agent_id
+    )
     required = json.loads(draft.get("required_credentials") or "[]")
 
     return {
@@ -1462,23 +1509,29 @@ async def get_dashboard(
     user_id: str = Depends(require_user_id),
 ):
     orch = _get_orchestrator(request)
-    agents = []
-    total_tools = 0
-    for agent_id, card in orch.agent_cards.items():
-        available_tools = [s.id for s in card.skills]
-        permissions = orch.tool_permissions.get_effective_permissions(
-            user_id, agent_id, available_tools
-        )
-        total_tools += sum(1 for v in permissions.values() if v)
-        agents.append(AgentInfo(
-            id=card.agent_id,
-            name=card.name,
-            tools=[
-                AgentTool(name=s.id, description=s.description)
-                for s in card.skills
-            ],
-            status="connected",
-        ))
+
+    def _build_dashboard():
+        """Resolve per-agent effective permissions off the event loop."""
+        agents = []
+        total_tools = 0
+        for agent_id, card in orch.agent_cards.items():
+            available_tools = [s.id for s in card.skills]
+            permissions = orch.tool_permissions.get_effective_permissions(
+                user_id, agent_id, available_tools
+            )
+            total_tools += sum(1 for v in permissions.values() if v)
+            agents.append(AgentInfo(
+                id=card.agent_id,
+                name=card.name,
+                tools=[
+                    AgentTool(name=s.id, description=s.description)
+                    for s in card.skills
+                ],
+                status="connected",
+            ))
+        return agents, total_tools
+
+    agents, total_tools = await asyncio.to_thread(_build_dashboard)
     return DashboardResponse(
         agents=agents,
         total_tools=total_tools,

@@ -252,7 +252,9 @@ def _round_components():
     return [_comp("wc_a"), _comp("wc_b")]
 
 
-def _drive(llm_call, timeout_s=None):
+def _drive(llm_call, timeout_s=None, max_rounds=None):
+    """Drive design_round; multi-round tests pin max_rounds=3 explicitly
+    because the product default is a single pass since feature 052."""
     return asyncio.run(design_round(
         user_request="compare things",
         round_components=_round_components(),
@@ -262,6 +264,7 @@ def _drive(llm_call, timeout_s=None):
         allowed_types=ALLOWED,
         llm_call=llm_call,
         timeout_s=timeout_s,
+        max_rounds=max_rounds,
     ))
 
 
@@ -382,7 +385,7 @@ def test_designer_max_rounds_env(monkeypatch):
 
 def test_refine_pass_improves_the_draft():
     llm, calls = _scripted_llm([_DRAFT, _IMPROVED, "DONE"])
-    layout = _drive(llm)
+    layout = _drive(llm, max_rounds=3)
     assert layout is not None
     assert len(calls) == 3, "draft + refine + DONE"
     assert layout[0]["type"] == "metric", "refined arrangement won"
@@ -396,7 +399,7 @@ def test_refine_pass_improves_the_draft():
 
 def test_done_reply_keeps_the_draft():
     llm, calls = _scripted_llm([_DRAFT, "DONE"])
-    layout = _drive(llm)
+    layout = _drive(llm, max_rounds=3)
     assert layout is not None
     assert len(calls) == 2
     assert [n["type"] for n in layout] == ["ref", "ref"]
@@ -404,7 +407,7 @@ def test_done_reply_keeps_the_draft():
 
 def test_stable_refinement_converges():
     llm, calls = _scripted_llm([_DRAFT, _DRAFT, _DRAFT])
-    layout = _drive(llm)
+    layout = _drive(llm, max_rounds=3)
     assert layout is not None
     assert len(calls) == 2, "identical refinement ends the loop"
 
@@ -412,7 +415,7 @@ def test_stable_refinement_converges():
 def test_failed_refinement_keeps_best_arrangement():
     for bad_second in ("not json", "ERROR: meh", "", RuntimeError("boom")):
         llm, calls = _scripted_llm([_IMPROVED, bad_second])
-        layout = _drive(llm)
+        layout = _drive(llm, max_rounds=3)
         assert layout is not None, f"second-pass {bad_second!r} must not lose the draft"
         assert layout[0]["type"] == "metric"
         assert set(ui_designer.iter_refs(layout)) == {"wc_a", "wc_b"}
@@ -428,7 +431,7 @@ def test_degenerate_refinement_keeps_best_arrangement():
         '{"layout": [{"type": "ref", "component_id": "wc_a"}]}',  # omits wc_b
     ):
         llm, calls = _scripted_llm([_IMPROVED, degen])
-        layout = _drive(llm)
+        layout = _drive(llm, max_rounds=3)
         assert layout is not None
         assert layout[0]["type"] == "metric", f"draft lost to degenerate refinement {degen!r}"
         assert set(ui_designer.iter_refs(layout)) == {"wc_a", "wc_b"}
@@ -447,6 +450,7 @@ def test_refinement_must_keep_canvas_refs():
         layout_key="ly_test",
         allowed_types=ALLOWED,
         llm_call=llm,
+        max_rounds=3,
     ))
     assert layout is not None
     assert set(ui_designer.iter_refs(layout)) == {"wc_a", "wc_b", "wc_old"}, \
@@ -459,7 +463,7 @@ def test_refinement_must_keep_canvas_refs():
 
 def test_fenced_done_reply_ends_loop():
     llm, calls = _scripted_llm([_DRAFT, "```json\nDONE\n```"])
-    layout = _drive(llm)
+    layout = _drive(llm, max_rounds=3)
     assert layout is not None
     assert len(calls) == 2
 
@@ -490,14 +494,14 @@ def test_refine_timeout_keeps_best_arrangement():
             await asyncio.sleep(0.5)  # refine pass blows the per-pass budget
         return _IMPROVED
 
-    layout = _drive(llm, timeout_s=0.2)
+    layout = _drive(llm, timeout_s=0.2, max_rounds=3)
     assert layout is not None
     assert set(ui_designer.iter_refs(layout)) == {"wc_a", "wc_b"}
 
 
 def test_format_retry_recovers_unusable_draft():
     llm, calls = _scripted_llm(["not json at all", _DRAFT, "DONE"])
-    layout = _drive(llm)
+    layout = _drive(llm, max_rounds=3)
     assert layout is not None
     assert set(ui_designer.iter_refs(layout)) == {"wc_a", "wc_b"}
     # The retry message carried the failure reason back to the model.
@@ -506,7 +510,10 @@ def test_format_retry_recovers_unusable_draft():
     assert "could not be used" in retry_messages[-1]["content"]
 
 
-def test_max_rounds_one_is_single_pass():
+def test_max_rounds_one_is_single_pass(monkeypatch):
+    # A host .env can re-leak the taskmodel flag after conftest's ambient
+    # strip (load_dotenv at import time); its pre-pass would add an LLM call.
+    monkeypatch.delenv("FF_UI_DESIGNER_TASKMODEL", raising=False)
     llm, calls = _scripted_llm([_DRAFT])
     layout = asyncio.run(design_round(
         user_request="compare things",

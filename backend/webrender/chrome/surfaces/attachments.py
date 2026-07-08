@@ -8,6 +8,7 @@ soft-delete via the ``chrome_attachment_delete`` handler.
 
 Renders for the web target only (chrome layer). All reads are user-scoped.
 """
+import asyncio
 import json
 import logging
 
@@ -43,6 +44,21 @@ def _repo(orch):
     return AttachmentRepository(orch.history.db)
 
 
+def _list_items(orch, user_id):
+    """The user's live attachments (sync repository read, run off-loop)."""
+    items, _ = _repo(orch).list_for_user(user_id, limit=100)
+    return items
+
+
+def _delete_item(orch, user_id, attachment_id):
+    """Soft-delete + best-effort blob removal (sync, run off-loop)."""
+    from orchestrator.attachments import store
+    deleted = _repo(orch).soft_delete(attachment_id, user_id)
+    if deleted:
+        store.delete(user_id, attachment_id)
+    return deleted
+
+
 def _row_html(att) -> str:
     cat = _CATEGORY_LABEL.get(att.category, att.category)
     data = (
@@ -69,7 +85,7 @@ def _row_html(att) -> str:
 async def render(orch, user_id, roles, params) -> str:
     """List the caller's live attachments with attach/delete controls."""
     try:
-        items, _ = _repo(orch).list_for_user(user_id, limit=100)
+        items = await asyncio.to_thread(_list_items, orch, user_id)
     except Exception:
         logger.exception("attachments surface: list failed")
         return notice_block("error", "Could not load your attachments.")
@@ -99,7 +115,7 @@ async def components(orch, user_id, roles, params):
     a single notice Alert. Web ``render()`` HTML is unchanged (contract §3.3).
     """
     try:
-        items, _ = _repo(orch).list_for_user(user_id, limit=100)
+        items = await asyncio.to_thread(_list_items, orch, user_id)
     except Exception:
         logger.exception("attachments surface: list failed (native)")
         return [_sdui.alert("Could not load your attachments.", "error")]
@@ -131,10 +147,7 @@ async def _h_attachment_delete(orch, websocket, user_id, roles, payload):
     if not attachment_id:
         return ("attachments", {}, notice_block("error", "No attachment specified."))
     try:
-        from orchestrator.attachments import store
-        deleted = _repo(orch).soft_delete(attachment_id, user_id)
-        if deleted:
-            store.delete(user_id, attachment_id)  # best-effort blob removal
+        deleted = await asyncio.to_thread(_delete_item, orch, user_id, attachment_id)
     except Exception:
         logger.exception("attachments surface: delete failed")
         return ("attachments", {}, notice_block("error", "Delete failed — please try again."))

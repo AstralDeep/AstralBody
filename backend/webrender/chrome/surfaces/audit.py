@@ -24,6 +24,7 @@ Never HTTP-to-self. Every dynamic interpolation goes through ``esc()``.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 
@@ -294,14 +295,16 @@ async def _render_list(orch, user_id, params) -> str:
         "availability_resolver": _availability_resolver(orch),
     }
     try:
-        items, next_cursor = orch.audit_repo.list_for_user(user_id, **kwargs)
+        items, next_cursor = await asyncio.to_thread(
+            orch.audit_repo.list_for_user, user_id, **kwargs)
     except ValueError as exc:
         # Expected failure: a stale/corrupt cursor. Fall back to page one.
         logger.warning("chrome audit: invalid cursor for user %s: %s", user_id, exc)
         notices.append(notice_block("error", "Invalid page cursor - showing the first page."))
         cursor = None
         kwargs["cursor"] = None
-        items, next_cursor = orch.audit_repo.list_for_user(user_id, **kwargs)
+        items, next_cursor = await asyncio.to_thread(
+            orch.audit_repo.list_for_user, user_id, **kwargs)
 
     await _record_list_view(user_id, event_class, outcome, q, cursor, len(items))
 
@@ -326,8 +329,9 @@ async def _render_list(orch, user_id, params) -> str:
 async def _render_detail(orch, user_id, event_id) -> str:
     """Render the detail body for one audit event (user-scoped fetch)."""
     event_id = str(event_id)
-    dto = orch.audit_repo.get_for_user(
-        user_id, event_id, availability_resolver=_availability_resolver(orch)
+    dto = await asyncio.to_thread(
+        orch.audit_repo.get_for_user,
+        user_id, event_id, availability_resolver=_availability_resolver(orch),
     )
     if dto is None:
         # Non-existence and cross-user access are indistinguishable

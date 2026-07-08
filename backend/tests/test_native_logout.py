@@ -48,7 +48,8 @@ def test_logout_queues_when_idp_unreachable(monkeypatch):
     enq = {}
 
     class FakeStore:
-        def enqueue_revocation(self, user_id, refresh_token, client_id=None):
+        async def aenqueue_revocation(self, user_id, refresh_token, client_id=None):
+            """Async twin mirroring WebSessionStore's event-loop-safe facade."""
             enq.update(user_id=user_id, refresh_token=refresh_token, client_id=client_id)
 
     monkeypatch.setattr(web_auth, "_revoke_refresh_token", fake_revoke)
@@ -139,7 +140,9 @@ def test_retrier_uses_stored_client_id(monkeypatch):
         return True
 
     class FakeStore:
-        def pending_revocations(self, limit=20):
+        """Mirrors WebSessionStore's async facade (the retrier's contract)."""
+
+        async def apending_revocations(self, limit=20):
             return [
                 {"id": 1, "user_id": "u", "refresh_token": "rt-native",
                  "attempts": 0, "enqueued_at": 0, "client_id": "astral-mobile"},
@@ -147,10 +150,10 @@ def test_retrier_uses_stored_client_id(monkeypatch):
                  "attempts": 0, "enqueued_at": 0, "client_id": None},
             ]
 
-        def resolve_revocation(self, qid):
+        async def aresolve_revocation(self, qid):
             pass
 
-        def bump_revocation_attempt(self, qid):
+        async def abump_revocation_attempt(self, qid):
             pass
 
     monkeypatch.setattr(web_auth, "_revoke_refresh_token", fake_revoke)

@@ -267,12 +267,24 @@ def _cleanup_rows(db, user_id):
         db.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
 
 
+def _force_full_init(db):
+    """Run ``_init_db`` with the schema_meta revision marker cleared.
+
+    Feature 052's fast path skips the full migration set (including
+    ``_migrate_agent_catalog_029``) when the marker is current; deleting the
+    marker forces the full run, and ``_init_db`` re-upserts it afterward so
+    other tests see a current marker again.
+    """
+    db.execute("DELETE FROM schema_meta WHERE key = 'revision'")
+    db._init_db()
+
+
 def test_catalog_migration_remaps_merges_and_cleans(history):
     db = history.db
     user_id = f"pytest-mig-{uuid.uuid4().hex[:12]}"
     _seed_rows(db, user_id)
     try:
-        db._init_db()  # runs _migrate_agent_catalog_029
+        _force_full_init(db)  # runs _migrate_agent_catalog_029
 
         scopes = db.fetch_all(
             "SELECT agent_id, scope, enabled FROM agent_scopes WHERE user_id = ?", (user_id,))
@@ -298,7 +310,7 @@ def test_catalog_migration_remaps_merges_and_cleans(history):
         before = sorted(map(dict, db.fetch_all(
             "SELECT agent_id, tool_name, enabled FROM tool_overrides WHERE user_id = ?", (user_id,))),
             key=lambda r: r["tool_name"])
-        db._init_db()
+        _force_full_init(db)
         after = sorted(map(dict, db.fetch_all(
             "SELECT agent_id, tool_name, enabled FROM tool_overrides WHERE user_id = ?", (user_id,))),
             key=lambda r: r["tool_name"])

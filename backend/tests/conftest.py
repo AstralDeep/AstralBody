@@ -32,3 +32,5 @@ def _strip_ambient_flags() -> None:
 # Run at collection import time (before any test module import can cache a
 # flag read); tests that need a flag set it explicitly via monkeypatch.
 _strip_ambient_flags()
+
+from tests.plugins.event_loop_guard import event_loop_guard  # noqa: E402,F401

@@ -8,6 +8,7 @@ contracts/upload-api.md).
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import time
@@ -173,6 +174,36 @@ class AttachmentRepository:
             (now_ms, user_id),
         )
         return getattr(cursor, "rowcount", 0)
+
+    # ── async facade (event-loop-safe twins of the sync methods above) ────
+    async def ainsert(self, **kwargs) -> Attachment:
+        """Async twin of :meth:`insert`, run off the event loop."""
+        return await asyncio.to_thread(self.insert, **kwargs)
+
+    async def aget_by_id(self, attachment_id: str, user_id: str) -> Optional[Attachment]:
+        """Async twin of :meth:`get_by_id`, run off the event loop."""
+        return await asyncio.to_thread(self.get_by_id, attachment_id, user_id)
+
+    async def alist_for_user(
+        self,
+        user_id: str,
+        *,
+        category: Optional[str] = None,
+        limit: int = 50,
+        cursor: Optional[str] = None,
+    ) -> Tuple[List[Attachment], Optional[str]]:
+        """Async twin of :meth:`list_for_user`, run off the event loop."""
+        return await asyncio.to_thread(
+            self.list_for_user, user_id, category=category, limit=limit, cursor=cursor,
+        )
+
+    async def asoft_delete(self, attachment_id: str, user_id: str) -> bool:
+        """Async twin of :meth:`soft_delete`, run off the event loop."""
+        return await asyncio.to_thread(self.soft_delete, attachment_id, user_id)
+
+    async def asoft_delete_all_for_user(self, user_id: str) -> int:
+        """Async twin of :meth:`soft_delete_all_for_user`, run off the event loop."""
+        return await asyncio.to_thread(self.soft_delete_all_for_user, user_id)
 
 
 __all__ = ["AttachmentRepository"]

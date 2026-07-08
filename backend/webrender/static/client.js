@@ -126,9 +126,42 @@
     send({ type: "ui_event", action: name, payload: payload || {}, session_id: activeChatId || undefined });
   }
 
+  // ---- Plotly lazy loader: the library left the shell <head> (feature 052);
+  // it is injected once on first chart need and idle-prefetched after boot ----
+  var plotlyLoading = false;
+  var plotlyCallbacks = [];
+  function ensurePlotly(cb) {
+    if (typeof Plotly !== "undefined") { if (cb) { try { cb(); } catch (e) {} } return; }
+    if (cb) plotlyCallbacks.push(cb);
+    if (plotlyLoading) return;
+    plotlyLoading = true;
+    var s = document.createElement("script");
+    s.src = window.__ASTRAL_PLOTLY_URL__ || "/static/vendor/plotly.min.js";
+    s.onload = function () {
+      var cbs = plotlyCallbacks;
+      plotlyCallbacks = [];
+      for (var i = 0; i < cbs.length; i++) { try { cbs[i](); } catch (e) {} }
+    };
+    // allow a later chart render to retry the injection after a load failure
+    s.onerror = function () { plotlyLoading = false; };
+    document.head.appendChild(s);
+  }
+  var pendingChartRoots = [];
+  function flushPendingCharts() {
+    var roots = pendingChartRoots;
+    pendingChartRoots = [];
+    for (var i = 0; i < roots.length; i++) initCharts(roots[i]);
+  }
+
   // ---- Plotly chart init from server-rendered data-chart placeholders ----
   function initCharts(root) {
-    if (typeof Plotly === "undefined") return;
+    if (typeof Plotly === "undefined") {
+      if (root.querySelectorAll(".astral-chart").length) {
+        pendingChartRoots.push(root);
+        ensurePlotly(flushPendingCharts);
+      }
+      return;
+    }
     var els = root.querySelectorAll(".astral-chart");
     for (var i = 0; i < els.length; i++) {
       var el = els[i];
@@ -558,6 +591,7 @@
       // a typed message — present it the same way: user bubble + the standard
       // chat payload shape.
       if (act === "chat_message" && payload.message) { sendChat(payload.message); return; }
+      if (act === "chrome_open") showModalSkeleton(act, payload);
       if (act) action(act, payload);
       if (act === "load_chat") closeHistoryOverlay(); // mobile: leave the full-screen list
       return;
@@ -726,7 +760,10 @@
     attachMenu = document.createElement("div");
     attachMenu.className = "astral-attach-menu";
     [["Upload a file", function () { attachInput.click(); }],
-     ["Choose from your files", function () { action("chrome_open", { surface: "attachments" }); }]
+     ["Choose from your files", function () {
+       showModalSkeleton("chrome_open", { surface: "attachments" });
+       action("chrome_open", { surface: "attachments" });
+     }]
     ].forEach(function (pair) {
       var b = document.createElement("button");
       b.type = "button"; b.className = "astral-attach-menu-item"; b.textContent = pair[0];
@@ -789,9 +826,59 @@
   var modalRoot = document.getElementById("astral-modal");
   var modalReturnFocus = null;
 
+  // ---- chrome_open perceived latency (feature 052): a local skeleton fills
+  // the modal instantly; chrome_render replaces it via setModal. If nothing
+  // arrives within the timeout, a retry card re-sends the same chrome_open
+  // instead of leaving an infinite shimmer. Focus is NOT moved here so
+  // setModal still captures the real return-focus element when it lands.
+  var MODAL_SKELETON_TIMEOUT_MS = 6000;
+  var modalSkeletonTimer = null;
+  var modalSkeletonRequest = null;
+  function clearModalSkeletonTimer() {
+    if (modalSkeletonTimer) { clearTimeout(modalSkeletonTimer); modalSkeletonTimer = null; }
+  }
+  function modalShellHtml(bodyHtml) {
+    return '<div class="astral-modal-backdrop fixed inset-0 z-50 bg-black/60 backdrop-blur-sm '
+      + 'flex items-start justify-center overflow-y-auto py-10">'
+      + '<div class="astral-modal-card relative bg-astral-surface border border-white/10 rounded-xl '
+      + 'shadow-2xl w-full max-w-3xl mx-4 my-auto" role="dialog" aria-modal="true" tabindex="-1">'
+      + '<div class="px-5 py-4 space-y-4">' + bodyHtml + "</div></div></div>";
+  }
+  function showModalSkeleton(act, payload) {
+    if (!modalRoot) return;
+    clearModalSkeletonTimer();
+    modalSkeletonRequest = { action: act, payload: payload || {} };
+    modalRoot.innerHTML = modalShellHtml(
+      '<div class="astral-skeleton" role="status" aria-busy="true" aria-live="polite">'
+      + '<span class="sr-only">Loading…</span>'
+      + '<div class="astral-skeleton-line h-3 w-1/3 mb-3"></div>'
+      + '<div class="astral-skeleton-line h-20 w-full mb-3"></div>'
+      + '<div class="astral-skeleton-line h-20 w-full mb-3"></div>'
+      + '<div class="astral-skeleton-line h-3 w-1/2 mb-2"></div></div>');
+    modalSkeletonTimer = setTimeout(showModalRetry, MODAL_SKELETON_TIMEOUT_MS);
+  }
+  function showModalRetry() {
+    modalSkeletonTimer = null;
+    if (!modalRoot || !modalSkeletonRequest) return;
+    modalRoot.innerHTML = modalShellHtml(
+      '<div class="text-sm text-astral-text" role="status">This is taking longer than expected.</div>'
+      + '<div class="flex gap-2">'
+      + '<button type="button" class="astral-modal-retry px-3 py-1.5 rounded-lg text-xs font-medium '
+      + 'bg-astral-primary text-white">Retry</button>'
+      + '<button type="button" class="astral-modal-close px-3 py-1.5 rounded-lg text-xs '
+      + 'bg-white/5 border border-white/10 text-astral-text">Close</button></div>');
+    var retry = modalRoot.querySelector(".astral-modal-retry");
+    if (retry) retry.addEventListener("click", function () {
+      var req = modalSkeletonRequest;
+      showModalSkeleton(req.action, req.payload);
+      action(req.action, req.payload);
+    });
+  }
+
   /** Replace the chrome modal content; empty html closes it (restores focus). */
   function setModal(htmlStr) {
     if (!modalRoot) return;
+    clearModalSkeletonTimer();
     if (htmlStr) {
       modalReturnFocus = document.activeElement;
       modalRoot.innerHTML = htmlStr;
@@ -895,7 +982,7 @@
       payload.params = payload.params || {};
       if (!payload.params.chat_id && activeChatId) payload.params.chat_id = activeChatId;
     }
-    if (act === "chrome_open") setMenu(false, false);
+    if (act === "chrome_open") { setMenu(false, false); showModalSkeleton(act, payload); }
     action(act, payload);
   });
 
@@ -1023,7 +1110,13 @@
       }, 3000);
     };
   }
-  setTimeout(connect, 200);
+  connect();
+
+  // Warm the lazy Plotly bundle once the boot work has settled so the first
+  // chart-bearing turn is usually already loaded.
+  function idlePrefetchPlotly() { ensurePlotly(null); }
+  if (window.requestIdleCallback) window.requestIdleCallback(idlePrefetchPlotly, { timeout: 5000 });
+  else setTimeout(idlePrefetchPlotly, 2500);
 })();
 
 /* Feature 040 (US5): slash-command typeahead. Discovery only — the server

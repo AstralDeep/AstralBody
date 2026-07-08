@@ -15,6 +15,7 @@ analog of 016's client revocation queue).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -317,3 +318,57 @@ class WebSessionStore:
         self.db.execute(
             "UPDATE auth_revocation_queue SET attempts = attempts + 1 WHERE id = ?", (queue_id,)
         )
+
+    # ── async facade (event-loop-safe twins of the sync methods above) ────
+    async def acreate(self, sid: str, *, user_id: str, access_token: str,
+                      refresh_token: str, hard_max_seconds: int,
+                      resumed: bool = False) -> Dict[str, Any]:
+        """Async twin of :meth:`create`, run off the event loop."""
+        return await asyncio.to_thread(
+            self.create, sid, user_id=user_id, access_token=access_token,
+            refresh_token=refresh_token, hard_max_seconds=hard_max_seconds,
+            resumed=resumed,
+        )
+
+    async def aget(self, sid: str) -> Optional[Dict[str, Any]]:
+        """Async twin of :meth:`get`, run off the event loop."""
+        return await asyncio.to_thread(self.get, sid)
+
+    async def aupdate_tokens(self, sid: str, *, access_token: str, refresh_token: str) -> None:
+        """Async twin of :meth:`update_tokens`, run off the event loop."""
+        return await asyncio.to_thread(
+            self.update_tokens, sid, access_token=access_token, refresh_token=refresh_token
+        )
+
+    async def amark_resumed(self, sid: str, resumed: bool = True) -> None:
+        """Async twin of :meth:`mark_resumed`, run off the event loop."""
+        return await asyncio.to_thread(self.mark_resumed, sid, resumed)
+
+    async def adelete(self, sid: str) -> Optional[Dict[str, Any]]:
+        """Async twin of :meth:`delete`, run off the event loop."""
+        return await asyncio.to_thread(self.delete, sid)
+
+    async def adelete_for_user(self, user_id: str) -> int:
+        """Async twin of :meth:`delete_for_user`, run off the event loop."""
+        return await asyncio.to_thread(self.delete_for_user, user_id)
+
+    async def apurge_expired(self) -> int:
+        """Async twin of :meth:`purge_expired`, run off the event loop."""
+        return await asyncio.to_thread(self.purge_expired)
+
+    async def aenqueue_revocation(self, user_id: str, refresh_token: str,
+                                  client_id: str | None = None) -> None:
+        """Async twin of :meth:`enqueue_revocation`, run off the event loop."""
+        return await asyncio.to_thread(self.enqueue_revocation, user_id, refresh_token, client_id)
+
+    async def apending_revocations(self, limit: int = 20) -> list:
+        """Async twin of :meth:`pending_revocations`, run off the event loop."""
+        return await asyncio.to_thread(self.pending_revocations, limit)
+
+    async def aresolve_revocation(self, queue_id: int) -> None:
+        """Async twin of :meth:`resolve_revocation`, run off the event loop."""
+        return await asyncio.to_thread(self.resolve_revocation, queue_id)
+
+    async def abump_revocation_attempt(self, queue_id: int) -> None:
+        """Async twin of :meth:`bump_revocation_attempt`, run off the event loop."""
+        return await asyncio.to_thread(self.bump_revocation_attempt, queue_id)

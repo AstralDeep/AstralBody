@@ -23,6 +23,7 @@ import json
 import logging
 import secrets
 import threading
+import time
 import webbrowser
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -31,6 +32,10 @@ from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 logger = logging.getLogger("astral.auth")
+
+
+class LoginCancelled(RuntimeError):
+    """The user aborted an in-flight interactive login (loopback wait)."""
 
 _DEFAULT_SCOPES = "openid profile email offline_access"
 _DONE_HTML = (b"<html><body style='font-family:sans-serif;background:#0F1221;color:#F3F4F6;"
@@ -78,12 +83,17 @@ class Session:
 
 def oidc_login(authority: str, *, client_id: str = "astral-desktop",
                bff_base: Optional[str] = None, scopes: str = _DEFAULT_SCOPES,
-               timeout: int = 300) -> Session:
+               timeout: int = 300,
+               cancel_event: Optional[threading.Event] = None) -> Session:
     """Interactive PKCE loopback login (RFC 8252).
 
     ``authority`` — the Keycloak realm URL (its discovery document supplies the
     authorize + token endpoints). ``client_id`` — the OIDC client; the default
     ``astral-desktop`` is the dedicated *public* client.
+
+    ``cancel_event`` — optional: setting it while the loopback wait is pending
+    aborts the login promptly with :class:`LoginCancelled` (a completed
+    callback wins over a late cancel).
 
     Token exchange mode:
 
@@ -138,9 +148,16 @@ def oidc_login(authority: str, *, client_id: str = "astral-desktop",
 
     t = threading.Thread(target=server.handle_request, daemon=True)
     t.start()
-    t.join(timeout)
+    deadline = time.monotonic() + timeout
+    while t.is_alive() and time.monotonic() < deadline:
+        if cancel_event is not None and cancel_event.is_set():
+            break
+        t.join(0.2)
     server.server_close()
 
+    if (not captured.get("code")
+            and cancel_event is not None and cancel_event.is_set()):
+        raise LoginCancelled("sign-in cancelled by the user")
     code = captured.get("code")
     if not code:
         raise RuntimeError("OIDC login did not complete (no authorization code).")

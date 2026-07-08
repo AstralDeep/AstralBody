@@ -7,6 +7,7 @@ exercised through the real ``agent_trust`` storage path.
 """
 from __future__ import annotations
 
+import asyncio
 import sys
 import uuid
 from pathlib import Path
@@ -102,11 +103,11 @@ async def test_mark_safe_requires_admin(db):
     _, agent_id = _fresh_ids()
     denied = await agent_trust.mark_safe(db, agent_id, True, "alice", roles=[])
     assert denied["ok"] is False and denied["error"] == "forbidden"
-    assert db.get_agent_is_safe(agent_id) is False
+    assert await asyncio.to_thread(db.get_agent_is_safe, agent_id) is False
 
     ok = await agent_trust.mark_safe(db, agent_id, True, "admin-user", roles=["admin"])
     assert ok["ok"] is True and ok["is_safe"] is True
-    assert db.get_agent_is_safe(agent_id) is True
+    assert await asyncio.to_thread(db.get_agent_is_safe, agent_id) is True
 
 
 @pytest.mark.asyncio
@@ -115,11 +116,11 @@ async def test_reset_on_revision_clears_marker(db):
 
     _, agent_id = _fresh_ids()
     await agent_trust.mark_safe(db, agent_id, True, "admin-user", roles=["admin"])
-    assert db.get_agent_is_safe(agent_id) is True
+    assert await asyncio.to_thread(db.get_agent_is_safe, agent_id) is True
 
     res = await agent_trust.reset_on_revision(db, agent_id, actor_user="reviser")
     assert res["reset"] is True
-    assert db.get_agent_is_safe(agent_id) is False
+    assert await asyncio.to_thread(db.get_agent_is_safe, agent_id) is False
 
 
 @pytest.mark.asyncio

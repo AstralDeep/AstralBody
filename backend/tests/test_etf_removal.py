@@ -70,14 +70,20 @@ def test_etf_orphan_rows_purged_idempotently():
     history = HistoryManager(data_dir=f"/tmp/etf-test-{uuid.uuid4().hex[:8]}")
     db = history.db
 
+    def _force_full_init():
+        """Clear the 052 schema_meta fast-path marker so ``_init_db`` runs the
+        full migration set (it re-upserts the marker afterward)."""
+        db.execute("DELETE FROM schema_meta WHERE key = 'revision'")
+        db._init_db()
+
     # Seed an orphaned ownership row for the retired agent.
     db.set_agent_ownership("etf-tracker-1-1", "pytest-etf@example.com", is_public=True)
     assert db.get_agent_ownership("etf-tracker-1-1"), "precondition: row seeded"
 
     # First boot runs _cleanup_retired_agents_040 → row purged.
-    db._init_db()
+    _force_full_init()
     assert not db.get_agent_ownership("etf-tracker-1-1"), "orphan row purged on boot"
 
     # Re-run is a no-op (Constitution IX idempotency).
-    db._init_db()
+    _force_full_init()
     assert not db.get_agent_ownership("etf-tracker-1-1"), "idempotent on re-run"
