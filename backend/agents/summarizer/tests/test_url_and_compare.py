@@ -35,7 +35,10 @@ def test_summarize_url_happy_path(rmock: HttpMock, fake_openai) -> None:
               headers={"Content-Type": "text/html"})
     fake_cls = fake_openai(GOOD_JSON)
     result = summarize_url(url="https://example.com/pythons")
-    tabs = result["_ui_components"][0]
+    source = result["_ui_components"][0]
+    assert source["type"] == "text" and source["variant"] == "markdown"
+    assert "https://example.com/pythons" in source["content"]
+    tabs = result["_ui_components"][1]
     assert tabs["type"] == "tabs"
     assert result["_data"]["url"] == "https://example.com/pythons"
     assert result["_data"]["title"] == "Python Facts"
@@ -89,7 +92,8 @@ def test_summarize_url_follows_redirect(rmock: HttpMock, fake_openai) -> None:
               headers={"Content-Type": "text/html"})
     fake_openai(GOOD_JSON)
     result = summarize_url(url="https://redirect.example.com/old")
-    assert result["_ui_components"][0]["type"] == "tabs"
+    assert result["_ui_components"][0]["type"] == "text"  # source link
+    assert result["_ui_components"][1]["type"] == "tabs"
     assert result["_data"]["title"] == "Python Facts"
 
 
