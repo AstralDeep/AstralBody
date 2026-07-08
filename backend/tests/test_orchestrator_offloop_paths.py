@@ -163,6 +163,59 @@ async def test_load_chat_rehydrates_attachment_chips(
     assert "attachments" not in assistant_msg
 
 
+async def test_load_chat_rehydrates_attachment_chips_real_row(
+        orch, registered_ws, chat_env):
+    """Regression for the int-vs-text message_id bug: a real
+    message_attachment row (written through the repo, keyed on the integer
+    messages.id) must re-hydrate on load_chat. A monkeypatched repo hides
+    this because the actual WHERE message_id = <int> never runs; here it does,
+    against real Postgres, so a `text = integer` mismatch would fail the test.
+    """
+    from orchestrator.attachments.message_attachment_repo import (
+        MessageAttachmentRepository,
+    )
+    from orchestrator.attachments.repository import AttachmentRepository
+
+    ws, chat_id = registered_ws, chat_env
+    att_id = f"att-real-{uuid.uuid4().hex[:8]}"
+    att_repo = AttachmentRepository(orch.history.db)
+    link_repo = MessageAttachmentRepository(orch.history.db)
+    try:
+        await asyncio.to_thread(
+            orch.history.add_message, chat_id, "user", "read this real file",
+            user_id=USER_ID)
+        msg_id = await asyncio.to_thread(
+            orch.history.get_latest_message_id, chat_id, USER_ID)
+        assert isinstance(msg_id, int), "messages.id is the integer PK"
+        await asyncio.to_thread(
+            att_repo.insert, attachment_id=att_id, user_id=USER_ID,
+            filename="real-notes.md", content_type="text/markdown",
+            category="text", extension="md", size_bytes=12,
+            sha256="0" * 64, storage_path="/tmp/real-notes.md")
+        await asyncio.to_thread(
+            link_repo.insert, chat_id=chat_id, attachment_id=att_id,
+            user_id=USER_ID, message_id=msg_id)
+
+        await orch.handle_ui_message(ws, json.dumps(
+            {"type": "ui_event", "action": "load_chat",
+             "payload": {"chat_id": chat_id}}))
+
+        loaded = _frames(ws, "chat_loaded")
+        assert loaded
+        user_msg = next(m for m in loaded[-1]["chat"]["messages"]
+                        if m["role"] == "user")
+        assert user_msg.get("attachments") == [
+            {"attachment_id": att_id, "filename": "real-notes.md",
+             "category": "text"}]
+    finally:
+        await asyncio.to_thread(
+            orch.history.db.execute,
+            "DELETE FROM message_attachment WHERE attachment_id = ?", (att_id,))
+        await asyncio.to_thread(
+            orch.history.db.execute,
+            "DELETE FROM user_attachments WHERE attachment_id = ?", (att_id,))
+
+
 async def test_load_chat_survives_transcript_render_failure(
         orch, registered_ws, chat_env, monkeypatch):
     ws, chat_id = registered_ws, chat_env
