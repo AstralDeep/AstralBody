@@ -81,6 +81,35 @@
     };
   }
 
+  // ROTE ↔ shell cooperation, split exactly like the Android client:
+  // ROTE owns per-device COMPONENT adaptation — its authoritative
+  // DeviceProfile (rote_config, after register_ui) is stamped on
+  // body[data-rote-device], provisionally seeded from local detection so
+  // phones never flash the desktop arrangement. The SHELL owns the
+  // ARRANGEMENT via body[data-astral-layout]: "stacked" below 600 CSS px
+  // (Android's COMPACT window-width class → StackedShell), "split"
+  // otherwise — recomputed live on resize, like Compose recomputes its
+  // windowSizeClass on every configuration change.
+  function applyDeviceProfile(dt) {
+    if (dt) document.body.setAttribute("data-rote-device", String(dt));
+  }
+  function applyLayoutClass() {
+    var mode = window.innerWidth < 600 ? "stacked" : "split";
+    if (document.body.getAttribute("data-astral-layout") !== mode) {
+      document.body.setAttribute("data-astral-layout", mode);
+      if (mode === "split") { // stacked-only chrome state must not linger
+        document.body.classList.remove("astral-history-open", "astral-msgs-open");
+      }
+    }
+  }
+  applyDeviceProfile(detectDeviceType());
+  applyLayoutClass();
+  var layoutResizeTimer = null;
+  window.addEventListener("resize", function () {
+    clearTimeout(layoutResizeTimer);
+    layoutResizeTimer = setTimeout(applyLayoutClass, 120);
+  });
+
   function setStatus(s) { if (statusEl) statusEl.textContent = s || ""; }
 
   function send(obj) { try { ws.send(JSON.stringify(obj)); } catch (e) {} }
@@ -348,7 +377,10 @@
       case "notification": // scheduler push (feature 044 parity matrix)
         showToast((data.title ? data.title + ": " : "") + (data.body || ""), data.level === "error" ? "error" : "info");
         break;
-      case "rote_config": case "system_config": case "agent_list": case "agent_registered":
+      case "rote_config": // ROTE's device verdict drives the shell layout
+        applyDeviceProfile(data.device_profile && data.device_profile.device_type);
+        break;
+      case "system_config": case "agent_list": case "agent_registered":
       case "history_list": case "heartbeat": case "llm_config_ack": case "saved_components_list":
         break; // not needed for the core flow
       default: break;
@@ -456,8 +488,43 @@
     canvas.innerHTML = "";
     setStatus("");
     action("new_chat", {});
+    closeHistoryOverlay();
     if (input) { try { input.focus(); } catch (e) {} }
   });
+
+  // ---- stacked-shell chrome: the web twin of Android's StackedShell.
+  // Recent chats live behind the topbar speech-bubble button (full-screen
+  // overlay of the same server-rendered #astral-history region), and the
+  // transcript collapses behind a "Messages (N)" bar above the input.
+  // Split layouts never see these controls — astral.css gates them on
+  // body[data-astral-layout="stacked"].
+  function closeHistoryOverlay() {
+    document.body.classList.remove("astral-history-open");
+    if (chatsBtn) chatsBtn.setAttribute("aria-expanded", "false");
+  }
+  var chatsBtn = document.getElementById("astral-chats-btn");
+  if (chatsBtn) chatsBtn.addEventListener("click", function () {
+    var topbar = document.getElementById("astral-topbar");
+    if (topbar) document.documentElement.style.setProperty("--astral-topbar-h", topbar.offsetHeight + "px");
+    var open = document.body.classList.toggle("astral-history-open");
+    chatsBtn.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+  var msgsToggle = document.getElementById("astral-msgs-toggle");
+  var msgsLabel = document.getElementById("astral-msgs-label");
+  if (msgsToggle) msgsToggle.addEventListener("click", function () {
+    var open = document.body.classList.toggle("astral-msgs-open");
+    msgsToggle.setAttribute("aria-expanded", open ? "true" : "false");
+    if (open && chat) chat.scrollTop = chat.scrollHeight;
+  });
+  function syncMsgsToggle() {
+    if (!msgsToggle || !chat) return;
+    var n = chat.children.length;
+    msgsToggle.hidden = n === 0;
+    if (n === 0) document.body.classList.remove("astral-msgs-open");
+    if (msgsLabel) msgsLabel.textContent = n ? "Messages (" + n + ")" : "Messages";
+  }
+  if (window.MutationObserver && chat) new MutationObserver(syncMsgsToggle).observe(chat, { childList: true });
+  syncMsgsToggle();
 
   // Delegated handlers for server-rendered interactive primitives
   document.addEventListener("click", function (e) {
@@ -479,6 +546,7 @@
       // chat payload shape.
       if (act === "chat_message" && payload.message) { sendChat(payload.message); return; }
       if (act) action(act, payload);
+      if (act === "load_chat") closeHistoryOverlay(); // mobile: leave the full-screen list
       return;
     }
     // param_picker toggle buttons (checklist)
