@@ -105,6 +105,11 @@ async def _push_surface(orch, websocket, surface_key, title, admin_only, compone
     ).to_json())
 
 
+# Feature 051: iOS/macOS join Windows/Android as chrome-model SDUI natives
+# (the watch is deliberately chrome-free — no surfaces on the wrist).
+_NATIVE_SDUI_DEVICE_TYPES = ("windows", "android", "ios", "macos")
+
+
 async def _push_error_notice(orch, websocket, title: str, message: str,
                              surface_key: str = ""):
     """Device-aware error notice (feature 044, FR-002/FR-017).
@@ -112,7 +117,7 @@ async def _push_error_notice(orch, websocket, title: str, message: str,
     Web keeps the feature-027 HTML modal; native SDUI clients get a
     ``chrome_surface`` carrying an error Alert — an HTML frame would be
     invisible to them (the pre-044 gap)."""
-    if _device_type(orch, websocket) in ("windows", "android"):
+    if _device_type(orch, websocket) in _NATIVE_SDUI_DEVICE_TYPES:
         from webrender.chrome.surfaces import _sdui
         await _push_surface(orch, websocket, surface_key or "error", title, False,
                             [_sdui.alert(message, "error")])
@@ -125,7 +130,7 @@ async def _push_error_notice(orch, websocket, title: str, message: str,
 async def _push_close(orch, websocket):
     """Device-aware modal close: web clears the HTML modal region; native SDUI
     clients receive the documented empty-components ``chrome_surface`` form."""
-    if _device_type(orch, websocket) in ("windows", "android"):
+    if _device_type(orch, websocket) in _NATIVE_SDUI_DEVICE_TYPES:
         await _push_surface(orch, websocket, "", "", False, [])
     else:
         await _push_modal(orch, websocket, "")
@@ -139,7 +144,7 @@ async def _render_surface(orch, websocket, user_id, roles, surface_key: str,
     ChromeSurface (ROTE-adapted astralprims components). Admin-gated and
     gracefully-degrading on either path (Constitution X/XII, FR-014).
     """
-    if _device_type(orch, websocket) in ("windows", "android"):
+    if _device_type(orch, websocket) in _NATIVE_SDUI_DEVICE_TYPES:
         await _render_surface_sdui(orch, websocket, user_id, roles,
                                    surface_key, params, notice_html)
     else:

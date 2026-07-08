@@ -20,13 +20,13 @@ final class WatchModel: ObservableObject {
     }
 
     enum Entry: Identifiable, Equatable {
-        case user(id: String, text: String)
+        case user(id: String, text: String, attachments: [String])
         case status(id: String, text: String)
         case turn(id: String, components: [AstralComponent])
 
         var id: String {
             switch self {
-            case .user(let id, _), .status(let id, _), .turn(let id, _): return id
+            case .user(let id, _, _), .status(let id, _), .turn(let id, _): return id
             }
         }
     }
@@ -38,6 +38,10 @@ final class WatchModel: ObservableObject {
     @Published var loginExpiresAt: Date = .distantFuture
     @Published var recents: [ChatSummary] = []
     @Published var entries: [Entry] = []
+    /// The live canvas — identity-keyed workspace components. `ui_upsert` ops
+    /// apply in place (replace/remove by component_id) instead of stacking
+    /// duplicate transcript entries (FR-013 as it reaches the watch).
+    @Published var canvas: [AstralComponent] = []
     @Published var statusText: String?
     @Published var errorBanner: String?
     @Published var connected = false
@@ -48,12 +52,17 @@ final class WatchModel: ObservableObject {
 
     // MARK: config + session
 
-    /// Dev default; long-press the QR screen to change in a later polish task.
-    var serverBase = URL(string: "http://127.0.0.1:8001")!
-    private let sessionId = UUID().uuidString
+    /// Dev default from the shared config (backend .env PUBLIC_BASE_URL);
+    /// long-press the QR screen to change in a later polish task.
+    var serverBase = URL(string: AstralConfig.serverBaseURL)!
+    /// The server-issued chat id this session is talking to. The backend
+    /// routes by `session_id` FIRST — a made-up id would send every message
+    /// to a phantom chat, so this is adopted from chat_created/chat_loaded
+    /// and nil until the server assigns one.
+    private var activeChatId: String?
     private let store: TokenStorage = {
         #if canImport(Security)
-        KeychainTokenStore(service: "com.kyopenscience.astral.watch")
+        KeychainTokenStore(service: "com.personalailabs.astraldeep.watch")
         #else
         InMemoryTokenStore()
         #endif
@@ -79,12 +88,18 @@ final class WatchModel: ObservableObject {
     func bootstrap() async {
         if let stored = store.load() {
             tokens = stored.tokenSet
-            if await freshAccessToken() != nil {
+            switch await refreshOutcome() {
+            case .ok, .transient:
+                // Offline launch keeps the stored session (sign in once per
+                // device) — the home screen shows "Reconnecting…" and the WS
+                // backoff loop registers when the network returns. Only a
+                // definitive IdP rejection returns the watch to the QR screen.
                 await enterSignedIn()
                 return
+            case .rejected:
+                store.wipe()
+                tokens = nil
             }
-            store.wipe()
-            tokens = nil
         }
         beginDeviceLogin()
     }
@@ -106,13 +121,18 @@ final class WatchModel: ObservableObject {
                 loginExpiresAt = Date().addingTimeInterval(start.expiresIn)
                 phase = .waitingApproval
 
-                // Rotate to a fresh code shortly before expiry (FR-023).
-                let rotation = Task { [expiresIn = start.expiresIn] in
-                    try? await Task.sleep(nanoseconds: UInt64(max(expiresIn - 10, 5) * 1_000_000_000))
-                }
+                // Rotate to a fresh code shortly before expiry (FR-023). The
+                // rotation timer must be a DIRECT child of the group: the
+                // group awaits every child before returning, and a child that
+                // awaits an outer Task's `.value` is uncancellable — it would
+                // pin an approved sign-in to the full ~10-minute timer.
                 let result: DeviceLoginPoll = try await withThrowingTaskGroup(of: DeviceLoginPoll?.self) { group in
                     group.addTask { try await self.deviceLogin.waitForApproval(start: start) }
-                    group.addTask { await rotation.value; return nil }
+                    group.addTask { [expiresIn = start.expiresIn] in
+                        // Task.sleep is cancellation-aware; cancelAll() ends it.
+                        try? await Task.sleep(nanoseconds: UInt64(max(expiresIn - 10, 5) * 1_000_000_000))
+                        return nil
+                    }
                     defer { group.cancelAll() }
                     while let next = try await group.next() {
                         if let terminal = next { return terminal }
@@ -151,19 +171,23 @@ final class WatchModel: ObservableObject {
 
     // MARK: session
 
-    private func freshAccessToken() async -> String? {
-        guard var current = tokens else { return nil }
-        if current.needsRefresh() {
-            guard let refresh = current.refreshToken else { return nil }
-            do {
-                current = try await deviceLogin.refresh(refreshToken: refresh)
-                tokens = current
-                store.save(StoredTokens(from: current))
-            } catch {
-                return nil
-            }
+    /// Ensure a live access token via the backend broker, with failures
+    /// classified (rejected → QR screen; transient/offline → keep session).
+    private func refreshOutcome() async -> RefreshResult {
+        guard let current = tokens else { return .rejected("no session") }
+        if !current.needsRefresh() { return .ok(current) }
+        guard let refresh = current.refreshToken else { return .rejected("no refresh token") }
+        let result = await RefreshStrategy.broker(deviceLogin).attempt(refreshToken: refresh)
+        if case .ok(let set) = result {
+            tokens = set
+            store.save(StoredTokens(from: set))
         }
-        return current.accessToken
+        return result
+    }
+
+    private func freshAccessToken() async -> String? {
+        if case .ok(let set) = await refreshOutcome() { return set.accessToken }
+        return nil
     }
 
     private func enterSignedIn() async {
@@ -175,7 +199,7 @@ final class WatchModel: ObservableObject {
 
     func signOut() async {
         if let refresh = tokens?.refreshToken {
-            _ = try? await rest.logout(clientId: "astral-watch", refreshToken: refresh)
+            _ = try? await rest.logout(clientId: AstralConfig.watchClientId, refreshToken: refresh)
         }
         wsTask?.cancel()
         await ws?.stop()
@@ -183,7 +207,9 @@ final class WatchModel: ObservableObject {
         store.wipe()
         tokens = nil
         entries = []
+        canvas = []
         recents = []
+        activeChatId = nil
         speaker.stop()
         beginDeviceLogin()
     }
@@ -211,7 +237,7 @@ final class WatchModel: ObservableObject {
                 guard let token = await self.freshAccessToken() else { return nil }
                 let (w, h) = await self.viewport
                 let register = Outbound.registerUI(
-                    token: token, sessionId: await self.sessionId,
+                    token: token, sessionId: await self.activeChatId,
                     device: .watch(viewportWidth: w, viewportHeight: h),
                     resumed: resumed)
                 resumed = true
@@ -243,16 +269,14 @@ final class WatchModel: ObservableObject {
         case "ui_render":
             let comps = frame.renderComponents
             guard !comps.isEmpty else { return }
-            let turnId = "render-\(entries.count)"
-            entries.append(.turn(id: turnId, components: comps))
+            canvas = comps
             statusText = nil
-            speaker.speak(frame.speech, turnId: turnId)
+            speaker.speak(frame.speech)
         case "ui_upsert":
-            let comps = frame.upsertOps.compactMap(\.component)
-            guard !comps.isEmpty else { return }
-            let turnId = "upsert-\(entries.count)"
-            entries.append(.turn(id: turnId, components: comps))
-            speaker.speak(frame.speech, turnId: turnId)
+            let ops = frame.upsertOps
+            guard !ops.isEmpty else { return }
+            canvas = Canvas.apply(canvas, ops)
+            speaker.speak(frame.speech)
         case "ui_stream_data":
             if let text = frame.streamComponents.first?.textContent {
                 statusText = text
@@ -260,17 +284,75 @@ final class WatchModel: ObservableObject {
         case "chat_status", "chat_step":
             statusText = frame.statusText
         case "user_message_acked":
+            activeChatId = frame.payload["payload"]?["chat_id"]?.stringValue
+                ?? frame.payload["chat_id"]?.stringValue ?? activeChatId
             statusText = "Thinking…"
         case "chat_created":
-            entries = []
+            // Adopt the server-issued chat id; the transcript the user is
+            // looking at (their just-sent bubble) must NOT be wiped.
+            activeChatId = frame.payload["payload"]?["chat_id"]?.stringValue
+                ?? frame.payload["chat_id"]?.stringValue ?? activeChatId
+        case "chat_loaded":
+            reduceChatLoaded(frame)
         case "error", "stream_error":
             errorBanner = frame.errorMessage
             statusText = nil
         case "auth_required":
-            Task { await self.signOut() }
+            Task { await self.handleAuthRequired() }
         default:
             break
         }
+    }
+
+    /// The server refused our token. A near-expiry token refreshes anyway on
+    /// the normal path, so FORCE a broker refresh here: an unchanged/refused
+    /// credential means the session is dead server-side (revoked / hard cap)
+    /// — wipe and return to the QR screen instead of looping reconnects.
+    private func handleAuthRequired() async {
+        guard let current = tokens, let refresh = current.refreshToken else {
+            await signOut()
+            return
+        }
+        switch await RefreshStrategy.broker(deviceLogin).attempt(refreshToken: refresh) {
+        case .ok(let set) where set.accessToken != current.accessToken:
+            tokens = set
+            store.save(StoredTokens(from: set))
+            // The reconnect loop re-registers with the fresh token.
+        case .ok:
+            await signOut()   // same token came back — the server will refuse it again
+        case .rejected:
+            await signOut()
+        case .transient:
+            break             // offline blip; keep the session and retry
+        }
+    }
+
+    /// Re-hydrate a loaded transcript: user text with read-only attachment
+    /// name-chips (FR-033/T049 — the watch has no upload affordance) and
+    /// assistant narrative. Rich canvas content arrives right after as a
+    /// speech-free `ui_render` (the server re-hydrates the workspace).
+    private func reduceChatLoaded(_ frame: InboundFrame) {
+        let chat = frame.payload["chat"]
+        activeChatId = chat?["id"]?.stringValue ?? activeChatId
+        canvas = []   // the server re-hydrates the workspace via ui_render next
+        let messages = chat?["messages"]?.arrayValue ?? chat?["history"]?.arrayValue ?? []
+        var loaded: [Entry] = []
+        for (index, message) in messages.enumerated() {
+            let role = message["role"]?.stringValue
+                ?? (message["is_user"]?.boolValue == true ? "user" : "assistant")
+            let text = message["content"]?.stringValue ?? message["text"]?.stringValue ?? ""
+            if role == "user" {
+                let names = (message["attachments"]?.arrayValue ?? [])
+                    .compactMap { $0["filename"]?.stringValue }
+                if !text.isEmpty || !names.isEmpty {
+                    loaded.append(.user(id: "hist-\(index)", text: text, attachments: names))
+                }
+            } else if !text.isEmpty {
+                loaded.append(.status(id: "hist-\(index)", text: text))
+            }
+        }
+        entries = loaded
+        statusText = nil
     }
 
     // MARK: US4 — conversation
@@ -281,13 +363,17 @@ final class WatchModel: ObservableObject {
 
     func newConversation() {
         entries = []
+        canvas = []
+        activeChatId = nil   // the server assigns the id via chat_created
         errorBanner = nil
-        Task { await ws?.send(Outbound.newChat(sessionId: sessionId)) }
+        Task { await ws?.send(Outbound.newChat(sessionId: nil)) }
     }
 
     func openChat(_ chat: ChatSummary) {
         entries = []
-        Task { await ws?.send(Outbound.loadChat(sessionId: sessionId, chatId: chat.id)) }
+        canvas = []
+        activeChatId = chat.id
+        Task { await ws?.send(Outbound.loadChat(sessionId: chat.id, chatId: chat.id)) }
     }
 
     /// Dictated text goes through the STANDARD chat path (FR-029) after the
@@ -296,8 +382,8 @@ final class WatchModel: ObservableObject {
         let text = pendingDictation.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         pendingDictation = ""
-        entries.append(.user(id: "user-\(entries.count)", text: text))
+        entries.append(.user(id: "user-\(entries.count)", text: text, attachments: []))
         statusText = "Sending…"
-        Task { await ws?.send(Outbound.chatMessage(text, sessionId: sessionId)) }
+        Task { await ws?.send(Outbound.chatMessage(text, sessionId: activeChatId)) }
     }
 }

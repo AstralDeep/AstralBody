@@ -71,6 +71,16 @@
     "update_device", "watch_task"
   ],
   "client_local_actions": ["attach_existing"],
+  "additive_fields": [
+    {
+      "field": "speech",
+      "shape": {"ssml": "string", "text": "string"},
+      "carried_on": ["ui_render", "ui_upsert"],
+      "scope": "watch-profile sockets only; absent when the rendition is unspeakable",
+      "introduced_by": "051-apple-native-clients (FR-036)",
+      "contract": "specs/051-apple-native-clients/contracts/spoken-rendition.md"
+    }
+  ],
   "component_types": [
     "alert", "audio", "badge", "bar_chart", "button", "card", "chat_history", "code",
     "collapsible", "color_picker", "container", "divider", "download_card", "file_download",

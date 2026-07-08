@@ -45,7 +45,7 @@ struct WatchHomeView: View {
                 }
             }
         }
-        .navigationTitle("AstralBody")
+        .navigationTitle("AstralDeep")
         .task { await model.refreshRecents() }
         .overlay(alignment: .bottom) {
             if !model.connected {

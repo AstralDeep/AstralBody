@@ -11,6 +11,9 @@ struct AstralApp: App {
         WindowGroup {
             RootView()
                 .environmentObject(model)
+                .environmentObject(model.themeStore)
+                .tint(model.themeStore.palette.primary)
+                .preferredColorScheme(.dark)
                 .task { await model.bootstrap() }
                 #if os(macOS)
                 .frame(minWidth: 900, minHeight: 600)

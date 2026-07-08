@@ -7,6 +7,7 @@ contract in specs/051-apple-native-clients/contracts/device-login.md.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import sys
 import time
@@ -90,7 +91,11 @@ def token_body(roles=("user",), sub="user-1"):
 def env(monkeypatch):
     monkeypatch.setenv("FF_DEVICE_LOGIN", "1")
     monkeypatch.setenv("WEB_SESSION_ENC_KEY", Fernet.generate_key().decode())
+    # BOTH spellings: shared/__init__ re-aliases KEYCLOAK_AUTHORITY over the
+    # VITE_ name at (possibly lazy) import time with "new name wins", so a
+    # container run with a real .env would otherwise clobber the fake realm.
     monkeypatch.setenv("VITE_KEYCLOAK_AUTHORITY", AUTHORITY)
+    monkeypatch.setenv("KEYCLOAK_AUTHORITY", AUTHORITY)
     monkeypatch.setenv("VITE_KEYCLOAK_CLIENT_ID", "astral-frontend")
     monkeypatch.setenv(
         "KEYCLOAK_ALLOWED_AZP", "astral-desktop,astral-mobile,astral-ios,astral-macos,astral-watch"
@@ -132,6 +137,10 @@ async def test_start_happy_path_shape(env):
     out = await do_start(post=post)
     assert post.calls[0][0] == DEVICE_EP
     assert post.calls[0][1]["client_id"] == "astral-watch"
+    # PKCE rides on the device-auth request (realms enforcing a client PKCE
+    # policy refuse without it; harmless elsewhere).
+    assert post.calls[0][1]["code_challenge_method"] == "S256"
+    assert len(post.calls[0][1]["code_challenge"]) == 43   # b64url(sha256), no pad
     assert out["user_code"] == "WDJB-MJHT"
     assert out["verification_uri_complete"].endswith("user_code=WDJB-MJHT")
     assert out["expires_in"] == 600 and out["interval"] == 5
@@ -212,12 +221,19 @@ async def test_poll_slow_down_from_idp_bumps_interval(env):
 
 
 async def test_poll_approved_releases_filtered_tokens_once(env):
-    out = await do_start()
+    start_post = FakePost((200, start_body()))
+    out = await do_start(post=start_post)
     handle = out["handle"]
     dl._POLL_STATE[dl._handle_digest(handle)]["next_ok"] = 0.0
     post = FakePost((200, token_body()))
     res = await dl.poll(handle, "1.2.3.4", http_post=post, http_get=fake_get())
     assert res["status"] == "approved"
+    # PKCE round trip: the token poll carries the verifier whose S256 equals
+    # the challenge sent at start — proving it survived the sealed handle.
+    verifier = post.calls[0][1]["code_verifier"]
+    digest = hashlib.sha256(verifier.encode()).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+    assert challenge == start_post.calls[0][1]["code_challenge"]
     tokens = res["tokens"]
     assert tokens["refresh_token"] == "refresh-secret-xyz"
     assert tokens["token_type"] == "Bearer"

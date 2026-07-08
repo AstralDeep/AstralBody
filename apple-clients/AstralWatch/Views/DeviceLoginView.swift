@@ -19,7 +19,7 @@ struct DeviceLoginView: View {
                 EmptyView()
             }
         }
-        .navigationTitle("AstralBody")
+        .navigationTitle("AstralDeep")
     }
 
     @ViewBuilder
@@ -56,7 +56,7 @@ struct DeviceLoginView: View {
         VStack(spacing: 8) {
             Image(systemName: "exclamationmark.circle")
                 .font(.title2)
-                .foregroundStyle(.orange)
+                .foregroundStyle(WatchBrand.warning)
             Text(title).font(.headline)
             Text(message)
                 .font(.footnote)

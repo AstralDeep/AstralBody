@@ -117,24 +117,37 @@ public actor WSClient {
 
     private func runLoop() async {
         while running {
+            // Credentials first: with no register frame there is no point
+            // dialing (the server would close us into auth_required) — wait
+            // out the backoff and ask again. Offline launches sit here.
+            guard let register = await onConnect?() else {
+                continuation?.yield(.disconnected(reason: "waiting for credentials"))
+                guard running else { break }
+                try? await Task.sleep(nanoseconds: UInt64(backoffNext() * 1_000_000_000))
+                continue
+            }
+
             let session = URLSession(configuration: .default)
             let task = session.webSocketTask(with: url)
             self.task = task
             task.resume()
+            task.send(.string(register)) { _ in }
 
-            if let register = await onConnect?() {
-                task.send(.string(register)) { _ in }
-            }
-            backoff.reset()
-            continuation?.yield(.connected)
-            for frame in queue.drainAll() {
-                task.send(.string(frame)) { _ in }
-            }
-
-            // Receive until failure/close.
+            // `.connected` (and the backoff reset, per the shared contract:
+            // reset ONLY on success) waits for the first successful receive —
+            // resume() alone proves nothing when the network is down.
+            var established = false
             receive: while running {
                 do {
                     let message = try await task.receive()
+                    if !established {
+                        established = true
+                        backoff.reset()
+                        continuation?.yield(.connected)
+                        for frame in queue.drainAll() {
+                            task.send(.string(frame)) { _ in }
+                        }
+                    }
                     switch message {
                     case .string(let text):
                         if let frame = InboundFrame.parse(text) {

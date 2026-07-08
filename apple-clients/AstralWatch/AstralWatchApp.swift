@@ -21,6 +21,7 @@ struct AstralWatchApp: App {
                 }
             }
             .environmentObject(model)
+            .tint(Color(red: 99 / 255, green: 102 / 255, blue: 241 / 255)) // AstralDeep indigo
             .task { await model.bootstrap() }
         }
     }

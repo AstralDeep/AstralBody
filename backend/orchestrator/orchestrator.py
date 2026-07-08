@@ -1165,7 +1165,9 @@ class Orchestrator:
                     # neither needs nor receives this frame — Constitution XII).
                     try:
                         _dt = getattr(rote_profile.device_type, "value", str(rote_profile.device_type))
-                        if _dt in ("windows", "android"):
+                        # Feature 051: iOS/macOS are chrome-model natives too
+                        # (the watch stays chrome-free by design).
+                        if _dt in ("windows", "android", "ios", "macos"):
                             from shared.protocol import ChromeMenu
                             from webrender.chrome.menu_model import menu_model_dict
                             _roles = list((user_data.get("realm_access") or {}).get("roles") or [])
@@ -1217,8 +1219,12 @@ class Orchestrator:
                                 _tools_avail = self.compute_tools_available_for_user(_welcome_user)
                             except Exception:
                                 _tools_avail = True
+                            # speak=False: chrome, not a conversation turn —
+                            # a watch must not narrate the welcome canvas on
+                            # every (re)connect.
                             await self.send_ui_render(
-                                websocket, welcome_components(tools_available=_tools_avail))
+                                websocket, welcome_components(tools_available=_tools_avail),
+                                speak=False)
                             self._ws_welcome[id(websocket)] = True
                     except Exception as _e:  # non-fatal — an empty canvas is fine
                         logger.debug(f"welcome canvas render failed (non-fatal): {_e}")
@@ -1651,7 +1657,9 @@ class Orchestrator:
                             # Feature 029: materialized arrangements re-hydrate too.
                             ws_components = self._canvas_components(chat_id, user_id)
                             if ws_components:
-                                await self.send_ui_render(websocket, ws_components)
+                                # speak=False: re-hydration re-presents old
+                                # turns — never re-spoken (FR-030).
+                                await self.send_ui_render(websocket, ws_components, speak=False)
                         except Exception:
                             logger.exception("workspace re-hydration failed for chat %s", chat_id)
 
@@ -2042,7 +2050,10 @@ class Orchestrator:
                                             websocket, active_chat, old_profile, new_profile, ws_components):
                                         handled_via_workspace = True
                                     else:
-                                        await self.send_ui_render(websocket, ws_components)
+                                        # speak=False: viewport re-adaptation of
+                                        # existing content — never re-spoken.
+                                        await self.send_ui_render(websocket, ws_components,
+                                                                  speak=False)
                                         handled_via_workspace = True
                             except Exception:
                                 logger.exception("workspace re-adapt failed after device change")
@@ -6861,7 +6872,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # the text doc). Deliver the flat components and let the client arrange them;
         # web/voice/etc. still get the adaptive designer.
         _prof = self.rote.get_profile(websocket) if websocket is not None else None
-        if _prof is not None and _prof.device_type in (DeviceType.WINDOWS, DeviceType.ANDROID):
+        if _prof is not None and _prof.device_type in (
+                DeviceType.WINDOWS, DeviceType.ANDROID,
+                DeviceType.IOS, DeviceType.MACOS, DeviceType.WATCH):
             return await self._send_or_replace_components(websocket, components, chat_id, user_id)
         if not chat_id or not ui_designer.should_design(components, timeline_mode=timeline):
             return await self._send_or_replace_components(websocket, components, chat_id, user_id)
@@ -7473,8 +7486,13 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         comp.update(source)
         return comp
 
-    async def send_ui_render(self, websocket, components: List, target: str = "canvas"):
-        """Send a UIRender message to a UI client, adapted via ROTE."""
+    async def send_ui_render(self, websocket, components: List, target: str = "canvas",
+                             speak: bool = True):
+        """Send a UIRender message to a UI client, adapted via ROTE.
+
+        ``speak=False`` suppresses the watch spoken rendition for renders that
+        re-present EXISTING content (chat re-hydration, viewport re-adaptation,
+        the welcome canvas) — a turn is never auto-spoken twice (FR-030)."""
         # Auto-route alert-only messages (any variant) to the chat panel
         # instead of the canvas — a frame that is nothing but alerts would
         # otherwise clobber the workspace with a partial single-alert render.
@@ -7504,11 +7522,12 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # spoken rendition of the SAME adapted components (fail-open, absent
         # for every other profile; contracts/spoken-rendition.md).
         speech = None
-        try:
-            from orchestrator.watch_speech import speech_for_profile
-            speech = speech_for_profile(self.rote.get_profile(websocket), adapted)
-        except Exception:
-            logger.debug("watch_speech unavailable for ui_render", exc_info=True)
+        if speak:
+            try:
+                from orchestrator.watch_speech import speech_for_profile
+                speech = speech_for_profile(self.rote.get_profile(websocket), adapted)
+            except Exception:
+                logger.debug("watch_speech unavailable for ui_render", exc_info=True)
         msg = UIRender(components=adapted, target=target, html=html, speech=speech)
         await self._safe_send(websocket, msg.to_json())
 

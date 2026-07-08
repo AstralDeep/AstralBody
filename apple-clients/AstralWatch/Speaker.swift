@@ -11,8 +11,8 @@ typealias AstralSpeech = AstralCore.Speech
 
 final class Speaker: NSObject, ObservableObject {
     private let synthesizer = AVSpeechSynthesizer()
-    private var lastSpokenTurnId: String?
-    private var lastSpeech: (speech: SpeechPayload, turnId: String)?
+    private var lastSpokenKey: Int?
+    private var lastSpeech: SpeechPayload?
 
     struct SpeechPayload {
         let ssml: String
@@ -24,23 +24,29 @@ final class Speaker: NSObject, ObservableObject {
     override init() {
         super.init()
         synthesizer.delegate = self
+        #if os(watchOS)
+        // Ambient: mixes politely and honors the system silent/DND state.
+        try? AVAudioSession.sharedInstance().setCategory(.ambient, options: [.duckOthers])
+        #endif
     }
 
-    /// Speak a delivery's rendition exactly once (`turnId` de-dupes; the
-    /// server never re-sends speech for re-adapted content, and we never
-    /// re-speak a turn we already voiced — FR-030).
-    func speak(_ speech: AstralSpeech?, turnId: String) {
-        guard let speech, turnId != lastSpokenTurnId else { return }
-        lastSpokenTurnId = turnId
+    /// Speak a delivery's rendition exactly once. Dedup is keyed on the
+    /// rendition CONTENT — frames carry no stable turn id, and a server
+    /// re-push of the same canvas must never re-speak it (FR-030).
+    func speak(_ speech: AstralSpeech?) {
+        guard let speech else { return }
+        let key = speech.text.hashValue
+        guard key != lastSpokenKey else { return }
+        lastSpokenKey = key
         let payload = SpeechPayload(ssml: speech.ssml, text: speech.text)
-        lastSpeech = (payload, turnId)
+        lastSpeech = payload
         utter(payload)
     }
 
     func replay() {
         guard let last = lastSpeech else { return }
         stop()
-        utter(last.speech)
+        utter(last)
     }
 
     func stop() {

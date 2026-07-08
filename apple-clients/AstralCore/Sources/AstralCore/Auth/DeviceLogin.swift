@@ -54,6 +54,7 @@ public enum DeviceLoginPoll: Sendable, Equatable {
 public enum DeviceLoginError: Error, Equatable {
     case unavailable(String)   // 503 — flag off / IdP down / grant not enabled
     case invalidHandle         // 400 — expired or replayed handle
+    case rejected(String)      // 401 invalid_grant — the IdP refused the credential
     case rateLimited
     case transport(String)
 }
@@ -67,7 +68,7 @@ public struct DeviceLoginClient: Sendable {
     public let clientId: String
     private let transport: Transport
 
-    public init(serverBase: URL, clientId: String = "astral-watch",
+    public init(serverBase: URL, clientId: String = AstralConfig.watchClientId,
                 transport: Transport? = nil) {
         self.serverBase = serverBase
         self.clientId = clientId
@@ -103,6 +104,7 @@ public struct DeviceLoginClient: Sendable {
         switch status {
         case 429: return .rateLimited
         case 400: return .invalidHandle
+        case 401: return .rejected(detail)
         default: return .unavailable(detail)
         }
     }

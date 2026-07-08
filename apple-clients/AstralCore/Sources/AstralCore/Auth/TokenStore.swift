@@ -58,7 +58,7 @@ public final class InMemoryTokenStore: TokenStorage, @unchecked Sendable {
 public final class KeychainTokenStore: TokenStorage, @unchecked Sendable {
     private let service: String
 
-    public init(service: String = "com.kyopenscience.astral.tokens") {
+    public init(service: String = "com.personalailabs.astraldeep.tokens") {
         self.service = service
     }
 
@@ -80,13 +80,16 @@ public final class KeychainTokenStore: TokenStorage, @unchecked Sendable {
 
     public func save(_ tokens: StoredTokens) {
         guard let data = try? JSONEncoder().encode(tokens) else { return }
+        // Delete-then-add so the accessibility class is always applied
+        // (SecItemUpdate cannot change it on an existing item).
+        SecItemDelete(query as CFDictionary)
         var add = query
         add[kSecValueData as String] = data
-        let status = SecItemAdd(add as CFDictionary, nil)
-        if status == errSecDuplicateItem {
-            SecItemUpdate(query as CFDictionary,
-                          [kSecValueData as String: data] as CFDictionary)
-        }
+        // Available after first unlock: cold launches (including before the
+        // UI is unlocked post-reboot) restore the session without sign-in.
+        // ThisDeviceOnly: refresh tokens never ride iCloud Keychain backups.
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        SecItemAdd(add as CFDictionary, nil)
     }
 
     public func wipe() {
@@ -94,6 +97,19 @@ public final class KeychainTokenStore: TokenStorage, @unchecked Sendable {
     }
 }
 #endif
+
+/// Outcome of a refresh attempt, classified so callers can tell a definitive
+/// credential rejection (wipe and re-authenticate) from a transient failure
+/// (KEEP the stored tokens — an offline launch must never destroy a session).
+public enum RefreshResult: Sendable {
+    case ok(TokenSet)
+    /// The IdP/broker definitively refused the refresh token
+    /// (revoked / expired / hard-cap). Wipe and go to interactive sign-in.
+    case rejected(String)
+    /// Network unreachable, timeout, rate limit, or server unavailable.
+    /// Credentials stay valid — retry later.
+    case transient(String)
+}
 
 /// How a session obtains a fresh access token when the current one nears
 /// expiry. Both paths keep the sign-in interactive anchor untouched — the
@@ -112,15 +128,51 @@ public enum RefreshStrategy: Sendable {
             request.setValue("application/x-www-form-urlencoded",
                              forHTTPHeaderField: "Content-Type")
             request.httpBody = Data(config.refreshRequestBody(refreshToken: refreshToken).utf8)
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response): (Data, URLResponse)
+            do {
+                (data, response) = try await URLSession.shared.data(for: request)
+            } catch {
+                throw DeviceLoginError.transport(error.localizedDescription)
+            }
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if status == 400 || status == 401 {
+                throw DeviceLoginError.rejected("refresh rejected (HTTP \(status))")
+            }
             guard status == 200, let json = try? JSONValue.parse(data),
                   let tokens = TokenSet(json: json) else {
-                throw DeviceLoginError.unavailable("refresh rejected (HTTP \(status))")
+                throw DeviceLoginError.unavailable("refresh failed (HTTP \(status))")
             }
             return tokens
         case .broker(let client):
             return try await client.refresh(refreshToken: refreshToken)
+        }
+    }
+
+    /// `refresh` with the failure mode classified (never throws). If the IdP
+    /// rotates without returning a new refresh token, the previous one is
+    /// preserved — dropping it would silently force a re-login at next expiry.
+    public func attempt(refreshToken: String) async -> RefreshResult {
+        do {
+            var set = try await refresh(refreshToken: refreshToken)
+            if set.refreshToken == nil {
+                set = TokenSet(accessToken: set.accessToken,
+                               refreshToken: refreshToken,
+                               expiresIn: set.expiresAt.timeIntervalSinceNow)
+            }
+            return .ok(set)
+        } catch let error as DeviceLoginError {
+            switch error {
+            case .rejected(let detail):
+                return .rejected(detail)
+            case .invalidHandle:
+                return .rejected("invalid_grant")
+            case .unavailable(let detail), .transport(let detail):
+                return .transient(detail)
+            case .rateLimited:
+                return .transient("rate limited")
+            }
+        } catch {
+            return .transient(error.localizedDescription)
         }
     }
 }

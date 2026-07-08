@@ -9,9 +9,11 @@ final class ManifestDriftTests: XCTestCase {
 
     struct Manifest: Decodable {
         struct Named: Decodable { let name: String }
+        // ui_protocol.json shape: push_types are {name, category} objects;
+        // component_types and accept_actions are plain strings.
         let push_types: [Named]
-        let component_types: [Named]
-        let accept_actions: [Named]
+        let component_types: [String]
+        let accept_actions: [String]
     }
 
     /// Walk up from this file until the committed manifest is found.
@@ -37,7 +39,7 @@ final class ManifestDriftTests: XCTestCase {
         XCTAssertEqual(Set(manifest.push_types.map(\.name)),
                        Set(ClientDispositions.allPushTypes),
                        "push_types drift — update Dispositions.swift + parity matrix")
-        XCTAssertEqual(Set(manifest.component_types.map(\.name)),
+        XCTAssertEqual(Set(manifest.component_types),
                        Set(ClientDispositions.allComponentTypes),
                        "component_types drift — update Dispositions.swift + parity matrix")
         XCTAssertEqual(manifest.push_types.count, 47)

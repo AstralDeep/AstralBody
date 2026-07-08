@@ -19,7 +19,7 @@ struct WatchComponentView: View {
             Label(component.message ?? component.fallbackText,
                   systemImage: iconForVariant)
                 .font(.footnote)
-                .foregroundStyle(component.variant == "error" ? .red : .primary)
+                .foregroundStyle(alertColor)
         case "metric":
             VStack(alignment: .leading, spacing: 0) {
                 Text(component.title ?? component.label ?? "")
@@ -114,9 +114,18 @@ struct WatchComponentView: View {
         }
     }
 
+    private var alertColor: Color {
+        switch component.variant {
+        case "error", "danger": return WatchBrand.error
+        case "warning": return WatchBrand.warning
+        default: return .primary
+        }
+    }
+
     private var progressFraction: Double {
+        // Wire value is a 0–1 fraction; tolerate 0–100 (mirrors the iOS
+        // renderer — treating everything as percent renders ~0% bars).
         let value = component.raw["value"]?.numberValue ?? 0
-        let max = component.raw["max"]?.numberValue ?? 100
-        return max > 0 ? min(value / max, 1) : 0
+        return value > 1 ? min(value / 100, 1) : min(max(value, 0), 1)
     }
 }

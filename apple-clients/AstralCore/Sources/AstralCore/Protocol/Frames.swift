@@ -77,6 +77,12 @@ public struct UpsertOp: Sendable, Equatable {
     public let componentId: String?
     public let component: AstralComponent?
 
+    public init(op: String, componentId: String?, component: AstralComponent?) {
+        self.op = op
+        self.componentId = componentId
+        self.component = component
+    }
+
     public init?(json: JSONValue) {
         guard let o = json.objectValue, let op = o["op"]?.stringValue else { return nil }
         self.op = op
@@ -119,7 +125,7 @@ public struct DeviceDescriptor: Sendable {
         DeviceDescriptor(deviceType: "ios", viewportWidth: viewportWidth,
                          viewportHeight: viewportHeight,
                          supportedTypes: ClientDispositions.ios.nativeComponentTypes,
-                         userAgent: "AstralBody-iOS/0.1")
+                         userAgent: "AstralDeep-iOS/0.1")
     }
 
     public static func macos(viewportWidth: Int, viewportHeight: Int) -> DeviceDescriptor {
@@ -127,14 +133,14 @@ public struct DeviceDescriptor: Sendable {
                          viewportHeight: viewportHeight, pixelRatio: 2.0,
                          hasTouch: false,
                          supportedTypes: ClientDispositions.macos.nativeComponentTypes,
-                         userAgent: "AstralBody-macOS/0.1")
+                         userAgent: "AstralDeep-macOS/0.1")
     }
 
     public static func watch(viewportWidth: Int, viewportHeight: Int) -> DeviceDescriptor {
         DeviceDescriptor(deviceType: "watch", viewportWidth: viewportWidth,
                          viewportHeight: viewportHeight,
                          supportedTypes: ClientDispositions.watch.nativeComponentTypes,
-                         userAgent: "AstralBody-watchOS/0.1")
+                         userAgent: "AstralDeep-watchOS/0.1")
     }
 
     var json: JSONValue {
@@ -181,19 +187,19 @@ public enum Outbound {
         return text
     }
 
-    public static func registerUI(token: String, sessionId: String,
+    public static func registerUI(token: String, sessionId: String?,
                                   device: DeviceDescriptor, resumed: Bool) -> String {
         encode(.object([
             "type": .string("register_ui"),
             "token": .string(token),
-            "session_id": .string(sessionId),
-            "capabilities": .array([]),
+            "session_id": sessionId.map(JSONValue.string) ?? .null,
+            "capabilities": .array([.string("render"), .string("stream")]),
             "device": device.json,
             "resumed": .bool(resumed),
         ]))
     }
 
-    public static func chatMessage(_ message: String, sessionId: String,
+    public static func chatMessage(_ message: String, sessionId: String?,
                                    displayMessage: String? = nil,
                                    attachments: [ChatAttachmentRef] = []) -> String {
         var payload: [String: JSONValue] = ["message": .string(message)]
@@ -204,26 +210,29 @@ public enum Outbound {
         return uiEvent(action: "chat_message", sessionId: sessionId, payload: .object(payload))
     }
 
-    public static func newChat(sessionId: String, agentId: String? = nil) -> String {
+    public static func newChat(sessionId: String?, agentId: String? = nil) -> String {
         var payload: [String: JSONValue] = [:]
         if let agent = agentId { payload["agent_id"] = .string(agent) }
         return uiEvent(action: "new_chat", sessionId: sessionId, payload: .object(payload))
     }
 
-    public static func loadChat(sessionId: String, chatId: String) -> String {
+    public static func loadChat(sessionId: String?, chatId: String) -> String {
         uiEvent(action: "load_chat", sessionId: sessionId,
                 payload: .object(["chat_id": .string(chatId)]))
     }
 
     public static func updateDevice(sessionId: String, device: DeviceDescriptor) -> String {
-        uiEvent(action: "update_device", sessionId: sessionId, payload: device.json)
+        // The orchestrator reads payload["device"] (orchestrator.py update_device
+        // handler) — the descriptor must be NESTED, not spread into the payload.
+        uiEvent(action: "update_device", sessionId: sessionId,
+                payload: .object(["device": device.json]))
     }
 
-    public static func uiEvent(action: String, sessionId: String, payload: JSONValue) -> String {
+    public static func uiEvent(action: String, sessionId: String?, payload: JSONValue) -> String {
         encode(.object([
             "type": .string("ui_event"),
             "action": .string(action),
-            "session_id": .string(sessionId),
+            "session_id": sessionId.map(JSONValue.string) ?? .null,
             "payload": payload,
         ]))
     }

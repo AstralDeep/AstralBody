@@ -33,6 +33,7 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import time
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
@@ -295,17 +296,39 @@ async def start(
     disco = await _discover(http_get)
 
     poster = http_post or _default_post_form
+    # PKCE (RFC 7636) on the device grant: realms that enforce a code-challenge
+    # policy on the client (Keycloak "PKCE Code Challenge Method" = S256)
+    # refuse the request without one; sending it is harmless everywhere else.
+    # The verifier never leaves the backend — it rides inside the encrypted
+    # handle and returns on the token poll.
+    code_verifier = secrets.token_urlsafe(64)
+    code_challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(code_verifier.encode("ascii")).digest()
+    ).rstrip(b"=").decode("ascii")
     try:
         status, body = await poster(
             disco["device_authorization_endpoint"],
-            {"client_id": client, "scope": _SCOPE},
+            {"client_id": client, "scope": _SCOPE,
+             "code_challenge": code_challenge,
+             "code_challenge_method": "S256"},
         )
     except DeviceLoginError:
         raise
     except Exception as exc:
         raise DeviceLoginUnavailable(f"IdP device authorization failed: {exc}") from None
     if status != 200 or not body.get("device_code") or not body.get("user_code"):
-        raise DeviceLoginUnavailable(f"IdP refused device authorization (HTTP {status})")
+        # Surface the IdP's own error so the watch message is actionable —
+        # ``unauthorized_client`` means the realm operator has not enabled the
+        # device grant on this client (keycloak-realm-settings.md §051).
+        idp_error = str(body.get("error", "")) if isinstance(body, dict) else ""
+        if idp_error == "unauthorized_client":
+            raise DeviceLoginUnavailable(
+                "the realm has not enabled the device grant for this client — "
+                "ask an admin to turn on 'OAuth 2.0 Device Authorization Grant' "
+                f"for '{client}' (docs/keycloak-realm-settings.md §051)")
+        detail = f" ({idp_error})" if idp_error else ""
+        raise DeviceLoginUnavailable(
+            f"IdP refused device authorization (HTTP {status}){detail}")
 
     user_code = str(body["user_code"])
     verification_uri = str(body.get("verification_uri", ""))
@@ -321,6 +344,7 @@ async def start(
     now = time.time()
     handle = fernet.encrypt(json.dumps({
         "dc": str(body["device_code"]),
+        "cv": code_verifier,
         "client": client,
         "iat": now,
         "exp": now + expires_in,
@@ -361,6 +385,7 @@ async def poll(
     try:
         blob = json.loads(fernet.decrypt((handle or "").encode()))
         device_code = blob["dc"]
+        code_verifier = blob.get("cv", "")
         client = blob["client"]
         exp = float(blob["exp"])
     except Exception:
@@ -386,11 +411,14 @@ async def poll(
     disco = await _discover(http_get)
     poster = http_post or _default_post_form
     try:
-        status, body = await poster(disco["token_endpoint"], {
+        token_request = {
             "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
             "device_code": device_code,
             "client_id": client,
-        })
+        }
+        if code_verifier:   # PKCE round trip (absent only on pre-PKCE handles)
+            token_request["code_verifier"] = code_verifier
+        status, body = await poster(disco["token_endpoint"], token_request)
     except DeviceLoginError:
         raise
     except Exception as exc:

@@ -34,25 +34,43 @@ public struct ClientDispositions: Sendable {
 
     // MARK: shared vocabulary baselines
 
-    /// Frames every Apple client handles the same way.
+    /// Frames every Apple client handles the same way (the watch's reduce is
+    /// the common core; iOS/macOS add the full-screen surfaces below). These
+    /// tables mirror the ACTUAL reduce switch cases — a disposition claiming
+    /// `handled` for a frame the code lets fall through `default:` is a lie
+    /// the parity matrix would inherit.
     private static let commonHandled: [String] = [
-        "auth_required", "chat_created", "chat_deleted", "chat_loaded",
-        "chat_status", "chat_step", "error", "heartbeat", "history_list",
-        "notification", "rote_config", "stream_error", "system_config",
-        "task_completed", "task_started", "tool_progress", "ui_append",
-        "ui_render", "ui_stream_data", "ui_update", "ui_upsert",
-        "user_message_acked", "user_preferences",
+        "auth_required", "chat_created", "chat_loaded", "chat_status",
+        "chat_step", "error", "stream_error", "ui_render", "ui_stream_data",
+        "ui_upsert", "user_message_acked",
     ]
 
-    /// Web-only or admin-only frames (044 channel decisions).
+    /// Deliberately ignored on every Apple client (044 channel decisions —
+    /// same dispositions as the Android ProtocolManifest).
     private static let commonIgnored: [String: String] = [
-        "audit_append": "admin audit surface is web-only (044)",
+        "agent_permissions": "acks for web workspace verbs; natives re-discover",
+        "agent_permissions_updated": "acks for web workspace verbs; natives re-discover",
+        "agent_registered": "agent lifecycle acks have no native surface (matches Android)",
+        "audit_append": "admin audit surface is web-only (044); natives fetch audit via REST",
+        "chat_deleted": "cross-tab concern; natives are single-window (044)",
         "chrome_render": "raw-HTML chrome region is web-only; natives use chrome_surface",
-        "stream_data": "legacy live-stream channel; natives consume ui_stream_data",
-        "stream_list": "legacy live-stream channel",
-        "stream_subscribed": "legacy live-stream channel",
-        "stream_unsubscribed": "legacy live-stream channel",
-        "workspace_timeline_mode": "timeline chrome surface is web-only (028)",
+        "combine_error": "web workspace verb acks (044)",
+        "combine_status": "web workspace verb acks (044)",
+        "component_deleted": "web workspace verb acks (044)",
+        "component_save_error": "web workspace verb acks (044)",
+        "component_saved": "web workspace verb acks (044)",
+        "components_combined": "web workspace verb acks (044)",
+        "components_condensed": "web workspace verb acks (044)",
+        "heartbeat": "keepalive; the transport layer answers (matches Windows/Android)",
+        "llm_config_ack": "natives use the LLM chrome-surface round trip (044)",
+        "llm_usage_report": "no native usage surface (044)",
+        "rote_config": "natives are full-capability; profile info unused (044)",
+        "saved_components_list": "web workspace browsing (044)",
+        "stream_list": "no native stream-browser surface (matches Windows/Android)",
+        "stream_unsubscribed": "terminal state arrives via ui_stream_data done flag",
+        "system_config": "dashboard data; natives use agent_list (044)",
+        "ui_append": "legacy channel; server no longer targets natives (044)",
+        "ui_update": "legacy channel; server no longer targets natives (044)",
     ]
 
     private static func frames(extraHandled: [String],
@@ -71,20 +89,17 @@ public struct ClientDispositions: Sendable {
         client: "ios",
         frames: frames(
             extraHandled: [
-                "agent_list", "agent_permissions", "agent_permissions_updated",
-                "agent_registered", "chrome_menu", "chrome_surface",
-                "combine_error", "combine_status", "component_deleted",
-                "component_save_error", "component_saved",
-                "components_combined", "components_condensed",
-                "llm_config_ack", "llm_usage_report", "saved_components_list",
+                "agent_list", "chrome_menu", "chrome_surface", "history_list",
+                "notification", "stream_data", "stream_subscribed",
+                "task_completed", "task_started", "tool_progress",
+                "user_preferences", "workspace_timeline_mode",
             ],
             extraIgnored: [
                 "agent_creation_progress": "agentic-creation drafting UX is web-only for now (matches Android)",
             ]),
         components: fullComponentSet(fallbacks: [
+            "audio": "web-only media, server degrade ladder (044 channel decision)",
             "generative": "web-only media (044 channel decision)",
-            "theme_apply": "themes apply via user_preferences on natives",
-            "param_picker": "renders as read-only summary until native picker lands",
         ]))
 
     // MARK: macOS (twin of Windows — 044 dispositions)
@@ -93,9 +108,8 @@ public struct ClientDispositions: Sendable {
         client: "macos",
         frames: ios.frames,   // identical frame surface to iOS by design
         components: fullComponentSet(fallbacks: [
+            "audio": "web-only media, server degrade ladder (044 channel decision)",
             "generative": "web-only media (044 channel decision)",
-            "theme_apply": "themes apply via user_preferences on natives",
-            "param_picker": "renders as read-only summary until native picker lands",
         ]))
 
     // MARK: watch (server pre-degrades via the `watch` ROTE profile)
@@ -107,21 +121,17 @@ public struct ClientDispositions: Sendable {
             extraIgnored: [
                 "agent_creation_progress": "no drafting UX on the wrist",
                 "agent_list": "agent management happens on phone/desktop/web",
-                "agent_permissions": "managed on larger clients",
-                "agent_permissions_updated": "managed on larger clients",
-                "agent_registered": "managed on larger clients",
                 "chrome_menu": "no chrome surfaces on the wrist",
                 "chrome_surface": "no chrome surfaces on the wrist",
-                "combine_error": "workspace curation is a larger-screen task",
-                "combine_status": "workspace curation is a larger-screen task",
-                "component_deleted": "workspace curation is a larger-screen task",
-                "component_save_error": "workspace curation is a larger-screen task",
-                "component_saved": "workspace curation is a larger-screen task",
-                "components_combined": "workspace curation is a larger-screen task",
-                "components_condensed": "workspace curation is a larger-screen task",
-                "llm_config_ack": "LLM config is managed on larger clients",
-                "llm_usage_report": "usage reporting is a larger-screen surface",
-                "saved_components_list": "workspace browsing is a larger-screen task",
+                "history_list": "recents come from REST (bounded list)",
+                "notification": "no toast surface on the wrist; speech covers deliveries",
+                "stream_data": "no live-stream nodes on the wrist",
+                "stream_subscribed": "no live-stream nodes on the wrist",
+                "task_completed": "async detachment is a larger-screen affordance",
+                "task_started": "async detachment is a larger-screen affordance",
+                "tool_progress": "chat_status text is the wrist progress channel",
+                "user_preferences": "the wrist is system-styled (no live theming)",
+                "workspace_timeline_mode": "timeline is a larger-screen surface",
             ]),
         components: watchComponentSet())
 

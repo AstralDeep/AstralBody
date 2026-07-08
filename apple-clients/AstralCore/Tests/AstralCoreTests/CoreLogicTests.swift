@@ -22,8 +22,8 @@ final class PKCETests: XCTestCase {
     func testAuthorizeURLCarriesPKCE() {
         let config = OIDCConfig(
             authority: URL(string: "https://idp.example/realms/astral")!,
-            clientId: "astral-ios",
-            redirectURI: "astral://oauth2redirect")
+            clientId: "astral-mobile",
+            redirectURI: "astraldeep://oauth2redirect")
         let url = config.authorizeURL(state: "st", challenge: "ch")
         let query = URLComponents(url: url, resolvingAgainstBaseURL: false)!.queryItems!
         func value(_ name: String) -> String? {
@@ -31,7 +31,7 @@ final class PKCETests: XCTestCase {
         }
         XCTAssertEqual(value("code_challenge_method"), "S256")
         XCTAssertEqual(value("code_challenge"), "ch")
-        XCTAssertEqual(value("client_id"), "astral-ios")
+        XCTAssertEqual(value("client_id"), "astral-mobile")
         XCTAssertEqual(value("response_type"), "code")
     }
 }

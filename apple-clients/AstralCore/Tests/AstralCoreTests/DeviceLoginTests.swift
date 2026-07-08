@@ -79,8 +79,10 @@ final class DeviceLoginTests: XCTestCase {
             (400, #"{"detail":{"error":"invalid_handle"}}"#),
         ])
         let c = client(broker)
-        XCTAssertEqual(try await c.poll(handle: "h"), .pending(interval: 5))
-        XCTAssertEqual(try await c.poll(handle: "h"), .slowDown(interval: 10))
+        let pending = try await c.poll(handle: "h")
+        XCTAssertEqual(pending, .pending(interval: 5))
+        let slow = try await c.poll(handle: "h")
+        XCTAssertEqual(slow, .slowDown(interval: 10))
         if case .approved(let tokens) = try await c.poll(handle: "h") {
             XCTAssertEqual(tokens.accessToken, "at")
             XCTAssertEqual(tokens.refreshToken, "rt")
@@ -123,8 +125,10 @@ final class DeviceLoginTests: XCTestCase {
             (200, #"{"status":"expired"}"#),
         ])
         let c = client(broker)
-        XCTAssertEqual(try await c.poll(handle: "h"), .denied(reason: "denied_no_access"))
-        XCTAssertEqual(try await c.poll(handle: "h"), .expired)
+        let denied = try await c.poll(handle: "h")
+        XCTAssertEqual(denied, .denied(reason: "denied_no_access"))
+        let expired = try await c.poll(handle: "h")
+        XCTAssertEqual(expired, .expired)
     }
 
     func testRefreshViaBroker() async throws {

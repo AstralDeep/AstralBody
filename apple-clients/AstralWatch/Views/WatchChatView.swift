@@ -14,6 +14,13 @@ struct WatchChatView: View {
                     ForEach(model.entries) { entry in
                         entryView(entry).id(entry.id)
                     }
+                    // The live canvas: identity-keyed in the MODEL (upserts
+                    // morph components in place); watch views are stateless,
+                    // so positional ForEach identity is safe here.
+                    ForEach(Array(model.canvas.enumerated()), id: \.offset) { _, comp in
+                        WatchComponentView(component: comp)
+                    }
+                    .id("canvas")
                     if let status = model.statusText {
                         HStack(spacing: 4) {
                             ProgressView().controlSize(.mini)
@@ -23,7 +30,7 @@ struct WatchChatView: View {
                     if let banner = model.errorBanner {
                         Label(banner, systemImage: "exclamationmark.triangle")
                             .font(.footnote)
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(WatchBrand.warning)
                     }
                     inputArea
                 }
@@ -33,14 +40,21 @@ struct WatchChatView: View {
                     withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
                 }
             }
+            .onChange(of: model.canvas.count) { _, count in
+                if count > 0 { withAnimation { proxy.scrollTo("canvas", anchor: .bottom) } }
+            }
         }
         .navigationTitle("Chat")
         .toolbar {
+            // Speech controls (FR-030). Explicit white glyphs: the app-wide
+            // indigo tint colors the bottom-bar button circles, and a tinted
+            // glyph on a tinted circle disappears into a plain dot.
             ToolbarItemGroup(placement: .bottomBar) {
                 Button {
                     model.speaker.replay()
                 } label: {
-                    Image(systemName: "arrow.counterclockwise.circle")
+                    Image(systemName: "arrow.counterclockwise")
+                        .foregroundStyle(.white)
                 }
                 .accessibilityLabel("Replay spoken response")
                 Spacer()
@@ -48,7 +62,8 @@ struct WatchChatView: View {
                     model.speaker.stop()
                 } label: {
                     Image(systemName: model.speaker.isSpeaking
-                          ? "speaker.slash.circle.fill" : "speaker.circle")
+                          ? "speaker.slash.fill" : "speaker.wave.2")
+                        .foregroundStyle(.white)
                 }
                 .accessibilityLabel("Stop speaking")
             }
@@ -59,12 +74,27 @@ struct WatchChatView: View {
     @ViewBuilder
     private func entryView(_ entry: WatchModel.Entry) -> some View {
         switch entry {
-        case .user(_, let text):
-            Text(text)
-                .font(.footnote)
-                .padding(6)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-                .background(.blue.opacity(0.25), in: RoundedRectangle(cornerRadius: 8))
+        case .user(_, let text, let attachments):
+            VStack(alignment: .trailing, spacing: 3) {
+                if !text.isEmpty {
+                    Text(text)
+                        .font(.footnote)
+                        .padding(6)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                        .background(WatchBrand.primary.opacity(0.25),
+                                    in: RoundedRectangle(cornerRadius: 8))
+                }
+                // Read-only name chips (FR-033): no upload affordance exists
+                // on the watch — these only mirror what the turn carried.
+                ForEach(attachments, id: \.self) { name in
+                    Label(name, systemImage: "paperclip")
+                        .font(.caption2)
+                        .lineLimit(1)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(.gray.opacity(0.25), in: Capsule())
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
         case .status(_, let text):
             Text(text).font(.footnote).foregroundStyle(.secondary)
         case .turn(_, let components):
