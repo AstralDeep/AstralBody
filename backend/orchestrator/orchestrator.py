@@ -1432,11 +1432,21 @@ class Orchestrator:
                     )
 
             elif isinstance(msg, UIEvent):
-                # Ensure authenticated
+                # The _registered_events gate guarantees register_ui has already
+                # resolved before any ui_event runs. So an unauthenticated socket
+                # here means register_ui FAILED — and that path already sent the
+                # recoverable `auth_required` frame that drives the client's
+                # silent re-auth (028 FR-009 D4). A concurrently-gated ui_event
+                # (e.g. the client's initial get_history) arriving in that
+                # cold-boot window must NOT paint a dead-end "Unauthorized" alert:
+                # it is stale the instant re-auth succeeds and the query works.
+                # Drop it silently; the client re-sends its ui_events after the
+                # auth_required-driven reconnect.
                 if websocket not in self.ui_sessions:
-                    await self.send_ui_render(websocket, [
-                        Alert(message="Unauthorized. Please refresh.", variant="error").to_dict()
-                    ])
+                    logger.debug(
+                        "Dropping pre-auth ui_event %r; register_ui already "
+                        "signaled auth_required for recovery",
+                        getattr(msg, "action", None))
                     return
 
                 user_id = self._get_user_id(websocket)
