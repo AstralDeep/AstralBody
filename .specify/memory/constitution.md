@@ -1,6 +1,45 @@
 <!--
   Sync Impact Report
   ==================
+  Version change: 2.5.0 → 2.6.0 (MINOR — Principle XII materially expanded:
+    device-client consistency now covers the visual design language — one
+    shared palette/theme across every client — and layout parity on
+    similarly sized devices, with the committed UI-protocol manifest and
+    per-client drift-guard suites named as the mechanical enforcement)
+
+  Amendment (2026-07-08, v2.6.0) — device client consistency:
+    XII. Cross-Client Consistency (EXPANDED) — every device/client that
+        connects to the orchestrator+ROTE backend (web, Windows desktop,
+        Android, Apple, and any future ROTE target) MUST be consistent
+        with every other client on three axes:
+        (a) COLORS/THEMING — one server-owned palette/theme definition
+            (including the user's selected theme) drives every client;
+            equivalent components use the same palette roles on every
+            client; no client hard-codes or locally forks a divergent
+            palette;
+        (b) LAYOUT — devices of a comparable form-factor class receive
+            equivalent layout for the same content; divergence between
+            similarly sized devices MUST trace to a declared ROTE
+            device-profile capability difference, never to which client
+            codebase is connecting;
+        (c) FUNCTIONALITY — capability/chrome parity as already required
+            by this principle.
+        Enforcement named: the committed UI-protocol manifest
+        (backend/shared/ui_protocol.json) plus the parity/drift-guard
+        suites in every client test stack; a change to shared UI behavior
+        (frames, component types, chrome, theming) lands on all in-scope
+        clients in the same feature or records an explicit, justified
+        divergence in the owning spec (web-only carve-out pattern).
+    Development Workflow — chrome-parity PR bullet extended to cover the
+        shared visual design language (palette/theme tokens) and to
+        require keeping the manifest + drift guards green.
+    Templates requiring updates:
+      ✅ .specify/templates/plan-template.md — generic Constitution Check, compatible
+      ✅ .specify/templates/spec-template.md — generic, compatible
+      ✅ .specify/templates/tasks-template.md — generic, compatible
+    Follow-up TODOs: None
+
+  -- Prior amendment (2026-07-06, v2.5.0) --------------------------------
   Version change: 2.4.0 → 2.5.0 (MINOR — Principle VII expanded: Cresco
     external-infrastructure integration sanctioned; Technology Stack gains
     a Cresco Integration entry; Defense-track Documentation entry corrected
@@ -569,8 +608,9 @@ green main commit deployable by pull.
 ### XII. Cross-Client Consistency
 
 Every client target MUST present the same user-facing
-capabilities and application chrome. Consistency across clients
-is a requirement, not an aspiration.
+capabilities, application chrome, and visual design language.
+Consistency across every device that connects to the
+orchestrator+ROTE backend is a requirement, not an aspiration.
 
 - All current and future clients — the web experience, the
   desktop client, native mobile clients, and any later target
@@ -598,6 +638,33 @@ is a requirement, not an aspiration.
   client genuinely cannot yet render something, it MUST degrade
   gracefully (labeled placeholder), never silently omit or
   diverge.
+- **Colors and theming**: every client MUST render the shared,
+  server-owned design language. One palette/theme definition —
+  including the user's selected theme preference — drives every
+  client; equivalent components MUST use the same palette roles
+  (surfaces, text, accents, state/severity colors) on every
+  client, within platform rendering idiom. No client may
+  hard-code or locally fork a divergent palette; a theme or
+  palette change propagates to every client from the shared
+  definition, never via per-client re-theming.
+- **Layout on similarly sized devices**: devices of a comparable
+  form-factor class (e.g., two phone-class devices, or desktop
+  web beside the desktop client) MUST receive equivalent layout
+  and arrangement for the same content. Per-device adaptation is
+  keyed on the declared ROTE device profile and its capabilities
+  (`backend/rote/capabilities.py`), never on which client
+  codebase is connecting; any layout divergence between two
+  similarly sized devices MUST trace to a declared capability
+  difference, not an ad-hoc client choice.
+- **Enforcement**: the committed UI-protocol manifest
+  (`backend/shared/ui_protocol.json`) and the parity/drift-guard
+  suites in every client test stack are the mechanical
+  enforcement of this principle. A change to shared UI behavior
+  — protocol frames, component types, chrome, or theming — MUST
+  land on every in-scope client within the same feature (or
+  record an explicit, justified divergence in the owning spec,
+  per the carve-out below) and MUST keep the manifest and every
+  client's drift guards green.
 - A capability MAY be deliberately scoped **web-only** — offered
   on the web but intentionally absent from other clients — when it
   is inherently tied to something another client genuinely lacks
@@ -618,7 +685,13 @@ desktop, and mobile clients). Anchoring every client to one
 server-owned definition and one shared renderer makes
 "the clients match" a structural guarantee rather than a
 recurring manual reconciliation, and keeps new client targets
-cheap and faithful.
+cheap and faithful. Visual drift is the same failure in
+different clothes: a client with its own palette, or its own
+layout for the same form factor, reads as a different product.
+Anchoring theme and per-form-factor layout to the same
+server-owned definitions — and gating them behind the committed
+protocol manifest and per-client drift guards — keeps "it looks
+and works the same everywhere" a machine-checked guarantee.
 
 ### XIII. Documentation & Research Integrity
 
@@ -714,11 +787,13 @@ an ungoverned back channel for unverified claims.
   the orchestrator's render layer, with a renderer for each
   supported client target and per-device adaptation via ROTE.
 - PRs that change the application chrome (top-bar controls or
-  the settings menu) or that add, remove, or relocate a
+  the settings menu), the shared visual design language
+  (palette/theme tokens), or that add, remove, or relocate a
   user-facing capability MUST update the single server-owned
-  chrome definition rather than any per-client copy, and MUST
-  verify parity on every affected client target before merge
-  (Principle XII).
+  definition rather than any per-client copy, MUST keep the
+  UI-protocol manifest and every client's drift-guard suites
+  green, and MUST verify parity on every affected client target
+  before merge (Principle XII).
 - PRs MUST be production-ready before merge — reviewers MUST
   reject changes that contain stubs, debug-only code, missing
   observability for new features, or untested error paths.
@@ -743,4 +818,4 @@ guidance when conflicts arise.
   adherence to these principles. Violations MUST be resolved
   before merge.
 
-**Version**: 2.5.0 | **Ratified**: 2026-03-11 | **Last Amended**: 2026-07-06
+**Version**: 2.6.0 | **Ratified**: 2026-03-11 | **Last Amended**: 2026-07-08
