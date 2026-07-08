@@ -611,11 +611,37 @@ def test_detail_renders_with_dict_shaped_required_credentials():
 
 
 def test_normalize_credential_entries_shapes():
-    keys, labels = surface._normalize_credential_entries(
-        [{"key": "A", "label": "Label A"}, "B", {"name": "C"}, {"x": 1}, None, 7])
-    assert keys == ["A", "B", "C"]
+    keys, labels, optional = surface._normalize_credential_entries(
+        [{"key": "A", "label": "Label A"}, "B", {"name": "C"},
+         {"key": "D", "required": False}, {"x": 1}, None, 7])
+    assert keys == ["A", "B", "C", "D"]
     assert labels == {"A": "Label A"}
-    assert surface._normalize_credential_entries(None) == ([], {})
+    assert optional == {"D"}  # only explicit required:False is optional
+    assert surface._normalize_credential_entries(None) == ([], {}, set())
+
+
+def test_credentials_optional_declaration_shows_optional_not_required():
+    """A credential declared required:False (e.g. web_research SEARCH_API_*, which
+    has a keyless fallback) must render an Optional badge, not Required."""
+    cards = {"alpha": FakeCard(
+        "alpha", "Alpha Agent", "Search with an optional provider.",
+        skills=[FakeSkill("get_data", "Fetch records", "tools:read")],
+        metadata={"required_credentials": [
+            {"key": "SEARCH_API_URL", "required": False},
+            {"key": "MANDATORY_KEY", "required": True},
+        ]},
+    )}
+    db = FakeDB(
+        ownership={"alpha": {"owner_email": "alice@example.com", "is_public": False}},
+        users={"u1": {"email": "alice@example.com"}},
+    )
+    perms = FakePerms(scope_map={"get_data": "tools:read"},
+                      per_tool={"get_data": {"tools:read": True}})
+    orch = FakeOrch(cards=cards, db=db, perms=perms, creds=FakeCreds(keys=[]))
+    html = run(surface.render(orch, "u1", ["user"], {"agent_id": "alpha"}))
+    assert "SEARCH_API_URL" in html and "MANDATORY_KEY" in html
+    assert ">Optional<" in html  # the optional cred is not mislabeled Required
+    assert ">Required<" in html  # the genuinely-required cred still shows Required
 # ---------------------------------------------------------------------------
 # 052 — pure helpers: email fallback + preferences-blob disabled set
 # ---------------------------------------------------------------------------

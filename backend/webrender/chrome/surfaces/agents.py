@@ -431,14 +431,17 @@ def _render_safe(agent_id: str, is_safe: bool, tab: str = "mine") -> str:
 
 
 def _normalize_credential_entries(raw) -> "tuple[list, dict]":
-    """Normalize ``required_credentials`` declarations to (keys, labels).
+    """Normalize ``required_credentials`` declarations to (keys, labels, optional).
 
     Agents declare them either as plain strings or as dicts like
     ``{"key": "MS_GRAPH_CLIENT_ID", "label": ..., "description": ...,
     "required": bool, "type": ...}`` (the generated-agent shape). Anything
-    unrecognizable is skipped rather than crashing the surface.
+    unrecognizable is skipped rather than crashing the surface. ``optional`` is
+    the set of keys a declaration explicitly marks ``"required": False`` (e.g.
+    web_research's SEARCH_API_* — there is a keyless fallback) so the UI can
+    label them Optional instead of Required.
     """
-    keys, labels = [], {}
+    keys, labels, optional = [], {}, set()
     for entry in raw or []:
         if isinstance(entry, dict):
             key = str(entry.get("key") or entry.get("name") or "").strip()
@@ -448,18 +451,20 @@ def _normalize_credential_entries(raw) -> "tuple[list, dict]":
             label = entry.get("label") or entry.get("description")
             if label:
                 labels[key] = str(label)
+            if entry.get("required") is False:
+                optional.add(key)
         elif isinstance(entry, str) and entry.strip():
             keys.append(entry.strip())
-    return keys, labels
+    return keys, labels, optional
 
 
 def _render_credentials(keys, agent_id: str, card, tab: str = "mine") -> str:
     """Render the credentials section from already-fetched stored ``keys``."""
     metadata = getattr(card, "metadata", None) or {}
-    required, req_labels = _normalize_credential_entries(
+    declared, req_labels, optional_creds = _normalize_credential_entries(
         metadata.get("required_credentials"))
     stored = set(keys)
-    all_keys = list(dict.fromkeys(list(required) + sorted(stored)))
+    all_keys = list(dict.fromkeys(list(declared) + sorted(stored)))
     parts = [
         '<div class="astral-credentials bg-white/5 border border-white/10 rounded-lg p-4 space-y-3">',
         '<h3 class="text-sm font-semibold text-astral-text">Credentials</h3>',
@@ -479,6 +484,12 @@ def _render_credentials(keys, agent_id: str, card, tab: str = "mine") -> str:
                     'bg-green-500/10 text-green-400 border border-green-500/20">Stored</span>'
                 )
                 placeholder = "Stored — enter a new value to replace"
+            elif key in optional_creds:
+                badge = (
+                    '<span class="px-1.5 py-0.5 rounded text-[10px] font-medium '
+                    'bg-white/10 text-astral-muted border border-white/10">Optional</span>'
+                )
+                placeholder = "Optional — leave blank to use the default"
             else:
                 badge = (
                     '<span class="px-1.5 py-0.5 rounded text-[10px] font-medium '
