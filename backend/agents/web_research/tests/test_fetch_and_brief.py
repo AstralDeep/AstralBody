@@ -36,7 +36,10 @@ def test_fetch_page_renders_card_with_markdown(rmock: HttpMock) -> None:
     card = result["_ui_components"][0]
     assert card["type"] == "card"
     assert card["title"] == "Page One"
-    text = card["content"][0]
+    source = card["content"][0]
+    assert source["type"] == "text" and source["variant"] == "markdown"
+    assert "https://example.com/python" in source["content"]
+    text = card["content"][1]
     assert text["type"] == "text"
     assert text["variant"] == "markdown"
     assert "# Alpha" in text["content"]
@@ -130,7 +133,8 @@ def test_fetch_page_non_html_returns_raw_text(rmock: HttpMock) -> None:
     result = fetch_page(url="https://example.com/data.txt")
     card = result["_ui_components"][0]
     assert card["title"] == "https://example.com/data.txt"
-    assert card["content"][0]["content"] == "plain text payload"
+    assert "https://example.com/data.txt" in card["content"][0]["content"]
+    assert card["content"][1]["content"] == "plain text payload"
 
 
 # ---------------------------------------------------------------------------

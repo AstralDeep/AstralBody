@@ -260,7 +260,18 @@ body {
   border-radius: var(--radius-md);
   padding: var(--space-4);
   box-shadow: var(--shadow-1);
+  /* min-width:0 lets a card shrink inside a grid/flex track instead of being
+     forced wide by an unbreakable token; overflow-wrap breaks that token. */
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
+/* Component wrappers are the grid/flex items on the designed canvas — they must
+   also be allowed to shrink so long content wraps instead of overlapping. */
+.astral-component { min-width: 0; }
+/* Rendered markdown: break long unbroken tokens (URLs, base64, hashes) rather
+   than let them overflow into a neighboring component. */
+.astral-md { overflow-wrap: anywhere; word-break: break-word; }
+.astral-md pre, .astral-md code { white-space: pre-wrap; overflow-wrap: anywhere; }
 .astral-card:hover {
   box-shadow: var(--shadow-2);
   border-color: rgb(255 255 255 / 0.12);

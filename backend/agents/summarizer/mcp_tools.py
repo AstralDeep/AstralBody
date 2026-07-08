@@ -37,6 +37,12 @@ from shared.external_http import (  # noqa: E402
     ServiceUnreachableError,
 )
 from shared.llm_text import strip_reasoning_markup  # noqa: E402
+from shared.web_readability import (  # noqa: E402
+    VOID_TAGS,
+    clean_page_text,
+    should_skip_attrs,
+    source_markdown,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -278,12 +284,13 @@ class _HtmlTextExtractor(HTMLParser):
         self.title = ""
         self._in_title = False
         self._skip: Dict[str, int] = {}
+        self._attr_skip = 0
         self._buf: List[str] = []
         self._parts: List[str] = []
 
     @property
     def _skipping(self) -> bool:
-        return any(depth > 0 for depth in self._skip.values())
+        return self._attr_skip > 0 or any(depth > 0 for depth in self._skip.values())
 
     def _flush(self) -> None:
         text = re.sub(r"\s+", " ", "".join(self._buf)).strip()
@@ -295,21 +302,37 @@ class _HtmlTextExtractor(HTMLParser):
         if tag == "title" and not self.title:
             self._in_title = True
             return
+        # Inside a subtree skipped by class/id/role: count depth on non-void
+        # tags only (void tags have no end tag, so counting them never unwinds).
+        if self._attr_skip > 0:
+            if tag not in VOID_TAGS:
+                self._attr_skip += 1
+            return
         if tag in _SKIP_TAGS:
             self._skip[tag] = self._skip.get(tag, 0) + 1
             return
-        if not self._skipping and tag in _BLOCK_TAGS:
+        if self._skipping:
+            return
+        if tag not in VOID_TAGS and should_skip_attrs(attrs):
+            self._attr_skip = 1
+            return
+        if tag in _BLOCK_TAGS:
             self._flush()
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "title":
             self._in_title = False
             return
+        if self._attr_skip > 0:
+            self._attr_skip = max(0, self._attr_skip - 1)
+            return
         if tag in _SKIP_TAGS:
             if self._skip.get(tag, 0) > 0:
                 self._skip[tag] -= 1
             return
-        if not self._skipping and tag in _BLOCK_TAGS:
+        if self._skipping:
+            return
+        if tag in _BLOCK_TAGS:
             self._flush()
 
     def handle_data(self, data: str) -> None:
@@ -337,7 +360,7 @@ def _extract_text(resp) -> Tuple[str, str]:
     parser = _HtmlTextExtractor()
     parser.feed(body)
     parser.close()
-    return re.sub(r"\s+", " ", parser.title).strip(), parser.text()
+    return re.sub(r"\s+", " ", parser.title).strip(), clean_page_text(parser.text())
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +476,9 @@ def summarize_url(url: str = "", **kwargs) -> Dict[str, Any]:
 
     forward = {k: v for k, v in kwargs.items() if k != "text"}
     result = summarize_text(text=text, **forward)
+    comps = result.get("_ui_components")
+    if isinstance(comps, list):
+        comps.insert(0, Text(content=source_markdown(url), variant="markdown").to_dict())
     if isinstance(result.get("_data"), dict):
         result["_data"].update({"url": url, "title": title})
     return result

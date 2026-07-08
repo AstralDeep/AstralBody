@@ -158,7 +158,7 @@ def render_text(c):
     variant = c.get("variant") or "body"
     content = c.get("content", "")
     if variant == "markdown":
-        cls = ("prose prose-invert max-w-none text-sm text-astral-text leading-relaxed "
+        cls = ("astral-md prose prose-invert max-w-none text-sm text-astral-text leading-relaxed "
                "prose-headings:text-astral-text prose-a:text-astral-primary prose-strong:text-astral-text "
                "prose-code:text-astral-accent")
         return f'<div{_base_attrs(c)} class="{cls}">{block_md(content)}</div>'
