@@ -4,4 +4,6 @@
 # the container cannot import.
 target-version = "py311"
 
-exclude = [".venv", "node_modules", "backend/tmp", "backend/data"]
+# apple-clients is a Swift package; its only .py is a container-run fixture
+# generator (needs the installed astralprims wheel — not lintable at repo root).
+exclude = [".venv", "node_modules", "backend/tmp", "backend/data", "apple-clients"]

@@ -97,6 +97,35 @@ def test_build_speech_nothing_speakable():
     assert build_speech(["not-a-dict"]) is None
 
 
+def test_build_speech_fails_open_when_voice_target_raises(monkeypatch):
+    """A voice-rendition exception must yield None (visual delivery unaffected),
+    never propagate."""
+    import webrender.voice as voice_mod
+
+    def _boom(_comps):
+        raise RuntimeError("voice target exploded")
+
+    monkeypatch.setattr(voice_mod, "render_voice", _boom)
+    assert build_speech([{"type": "text", "content": "hello"}]) is None
+
+
+def test_build_speech_none_when_rendition_is_blank(monkeypatch):
+    """Tag-only / whitespace SSML collapses to empty text ⇒ no speech."""
+    import webrender.voice as voice_mod
+    monkeypatch.setattr(voice_mod, "render_voice", lambda _c: "<speak>   </speak>")
+    assert build_speech([{"type": "text", "content": "x"}]) is None
+
+
+def test_speech_for_profile_fails_open_on_bad_profile():
+    """A profile whose device_type access raises degrades to None, not an error."""
+    class _Exploding:
+        @property
+        def device_type(self):
+            raise RuntimeError("no device type")
+
+    assert speech_for_profile(_Exploding(), [{"type": "text", "content": "hi"}]) is None
+
+
 def test_speech_only_for_watch_profile():
     comps = [{"type": "text", "content": "hello"}]
     assert speech_for_profile(WATCH, comps) is not None

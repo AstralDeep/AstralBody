@@ -333,6 +333,31 @@ async def test_refresh_rejected_and_validated(env):
                          http_post=FakePost(), http_get=fake_get())
 
 
+async def test_refresh_flag_off_fails_closed(env, monkeypatch):
+    monkeypatch.setenv("FF_DEVICE_LOGIN", "0")
+    with pytest.raises(dl.DeviceLoginUnavailable):
+        await dl.refresh("astral-watch", "rt",
+                         http_post=FakePost(), http_get=fake_get())
+
+
+async def test_refresh_idp_unreachable_is_unavailable(env):
+    """A transport-level failure talking to the IdP surfaces as unavailable
+    (transient), not a credential rejection."""
+    async def _boom(_url, _data):
+        raise RuntimeError("connection refused")
+
+    with pytest.raises(dl.DeviceLoginUnavailable):
+        await dl.refresh("astral-watch", "rt", http_post=_boom, http_get=fake_get())
+
+
+async def test_refresh_200_without_access_token_is_rejected(env):
+    """A 200 that carries no access_token is still a rejection, not success."""
+    with pytest.raises(dl.RefreshRejected):
+        await dl.refresh("astral-watch", "rt",
+                         http_post=FakePost((200, {"token_type": "Bearer"})),
+                         http_get=fake_get())
+
+
 async def test_flag_default_is_on(env, monkeypatch):
     monkeypatch.delenv("FF_DEVICE_LOGIN", raising=False)
     assert dl.flag_on() is True
