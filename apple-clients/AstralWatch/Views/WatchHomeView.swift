@@ -4,7 +4,7 @@ import SwiftUI
 import AstralCore
 
 struct WatchHomeView: View {
-    @EnvironmentObject var model: WatchModel
+    @Environment(WatchModel.self) var model
 
     var body: some View {
         List {

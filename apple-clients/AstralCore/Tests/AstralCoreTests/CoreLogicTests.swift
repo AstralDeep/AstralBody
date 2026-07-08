@@ -65,6 +65,43 @@ final class ReconnectContractTests: XCTestCase {
     }
 }
 
+final class JSONValueParseTests: XCTestCase {
+    /// The JSONSerialization fast path must keep the Codable route's
+    /// semantics — booleans stay booleans (CFBoolean is an NSNumber), numbers
+    /// stay numbers, and every JSON shape round-trips through `encoded()`.
+    func testScalarKindsSurviveParse() throws {
+        let json = try JSONValue.parse(Data(
+            #"{"b":true,"f":false,"one":1,"pi":3.5,"zero":0,"s":"1","n":null}"#.utf8))
+        XCTAssertEqual(json["b"], .bool(true))
+        XCTAssertEqual(json["f"], .bool(false))
+        XCTAssertEqual(json["one"], .number(1))
+        XCTAssertEqual(json["pi"], .number(3.5))
+        XCTAssertEqual(json["zero"], .number(0))   // NOT .bool(false)
+        XCTAssertEqual(json["s"], .string("1"))    // NOT .number(1)
+        XCTAssertEqual(json["n"], .null)
+    }
+
+    func testNestedTreesAndFragments() throws {
+        let nested = try JSONValue.parse(Data(#"{"a":[{"x":[1,true,"y",null]}]}"#.utf8))
+        XCTAssertEqual(nested["a"]?.arrayValue?.first?["x"],
+                       .array([.number(1), .bool(true), .string("y"), .null]))
+        // Top-level fragments parse (JSONDecoder parity).
+        XCTAssertEqual(try JSONValue.parse(Data("[1,2]".utf8)), .array([.number(1), .number(2)]))
+        XCTAssertEqual(try JSONValue.parse(Data(#""hi""#.utf8)), .string("hi"))
+        XCTAssertEqual(try JSONValue.parse(Data("true".utf8)), .bool(true))
+        XCTAssertThrowsError(try JSONValue.parse(Data("not json".utf8)))
+    }
+
+    func testEncodedRoundTrip() throws {
+        let original: JSONValue = .object([
+            "list": .array([.bool(true), .number(2.5), .string("x")]),
+            "empty": .object([:]),
+            "gap": .null,
+        ])
+        XCTAssertEqual(try JSONValue.parse(original.encoded()), original)
+    }
+}
+
 final class FrameDecodeTests: XCTestCase {
     func testUnknownFrameIsSafelyRepresented() {
         let frame = InboundFrame.parse(#"{"type":"frame_from_the_future","x":1}"#)

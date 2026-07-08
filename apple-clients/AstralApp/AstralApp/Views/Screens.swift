@@ -9,8 +9,8 @@ import AstralCore
 // MARK: - Agents
 
 struct AgentsView: View {
-    @EnvironmentObject var model: AppModel
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(AppModel.self) var model
+    @Environment(ThemeStore.self) var theme
     private var p: AstralPalette { theme.palette }
 
     var body: some View {
@@ -43,8 +43,8 @@ struct AgentsView: View {
 }
 
 private struct AgentCard: View {
-    @EnvironmentObject var model: AppModel
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(AppModel.self) var model
+    @Environment(ThemeStore.self) var theme
     let agent: Agent
     @State private var expanded = false
     private var p: AstralPalette { theme.palette }
@@ -103,8 +103,8 @@ private struct AgentCard: View {
 // MARK: - Audit
 
 struct AuditView: View {
-    @EnvironmentObject var model: AppModel
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(AppModel.self) var model
+    @Environment(ThemeStore.self) var theme
     private var p: AstralPalette { theme.palette }
 
     var body: some View {
@@ -131,7 +131,7 @@ struct AuditView: View {
 }
 
 private struct AuditCard: View {
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(ThemeStore.self) var theme
     let event: AuditEvent
     @State private var expanded = false
     private var p: AstralPalette { theme.palette }
@@ -162,8 +162,8 @@ private struct AuditCard: View {
 // MARK: - SDUI Surface (chrome_surface rendered natively, T039 timeout+retry)
 
 struct SurfaceView: View {
-    @EnvironmentObject var model: AppModel
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(AppModel.self) var model
+    @Environment(ThemeStore.self) var theme
     @State private var timedOut = false
     private var p: AstralPalette { theme.palette }
 
@@ -218,7 +218,7 @@ struct SurfaceView: View {
 // MARK: - Skeleton list (loading placeholder)
 
 struct SkeletonList: View {
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(ThemeStore.self) var theme
     var body: some View {
         VStack(spacing: 10) {
             ForEach(0..<6, id: \.self) { _ in

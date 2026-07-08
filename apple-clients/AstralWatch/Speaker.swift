@@ -3,23 +3,25 @@
 // back to plain `text`. Never re-speaks a turn; navigation/stop obeys
 // immediately; system silent/DND is honored by the platform audio session.
 import AVFoundation
+import Observation
 import AstralCore
 
 // The core package names the rendition `Speech`; alias locally so it can
 // never collide with Apple's Speech framework module in app targets.
 typealias AstralSpeech = AstralCore.Speech
 
-final class Speaker: NSObject, ObservableObject {
+@Observable
+final class Speaker: NSObject {
     private let synthesizer = AVSpeechSynthesizer()
-    private var lastSpokenKey: Int?
-    private var lastSpeech: SpeechPayload?
+    @ObservationIgnored private var lastSpokenKey: Int?
+    @ObservationIgnored private var lastSpeech: SpeechPayload?
 
     struct SpeechPayload {
         let ssml: String
         let text: String
     }
 
-    @Published var isSpeaking = false
+    var isSpeaking = false
 
     override init() {
         super.init()

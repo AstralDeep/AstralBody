@@ -12,7 +12,7 @@ import PhotosUI
 #endif
 
 struct ChatShell: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) var model
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var hSize
     #endif
@@ -42,7 +42,7 @@ struct ChatShell: View {
 // MARK: - Layouts
 
 private struct StackedShell: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) var model
     var body: some View {
         VStack(spacing: 0) {
             CanvasArea().frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -54,8 +54,8 @@ private struct StackedShell: View {
 }
 
 private struct SplitShell: View {
-    @EnvironmentObject var model: AppModel
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(AppModel.self) var model
+    @Environment(ThemeStore.self) var theme
     var body: some View {
         HStack(spacing: 0) {
             VStack(spacing: 0) {
@@ -74,8 +74,8 @@ private struct SplitShell: View {
 // MARK: - Canvas
 
 private struct CanvasArea: View {
-    @EnvironmentObject var model: AppModel
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(AppModel.self) var model
+    @Environment(ThemeStore.self) var theme
     @State private var showTimeline = false
     private var p: AstralPalette { theme.palette }
 
@@ -134,7 +134,7 @@ private struct CanvasArea: View {
 }
 
 private struct SkeletonCanvas: View {
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(ThemeStore.self) var theme
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             ForEach(0..<4, id: \.self) { i in
@@ -151,7 +151,7 @@ private struct SkeletonCanvas: View {
 }
 
 private struct EmptyCanvasHint: View {
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(ThemeStore.self) var theme
     private var p: AstralPalette { theme.palette }
     var body: some View {
         VStack(spacing: 8) {
@@ -167,7 +167,7 @@ private struct EmptyCanvasHint: View {
 }
 
 private struct ReadOnlyBanner: View {
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(ThemeStore.self) var theme
     let label: String?
     let onBackToLive: () -> Void
     private var p: AstralPalette { theme.palette }
@@ -194,7 +194,7 @@ private struct ReadOnlyBanner: View {
 }
 
 private struct TimelinePill: View {
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(ThemeStore.self) var theme
     let count: Int
     let onClick: () -> Void
     private var p: AstralPalette { theme.palette }
@@ -214,7 +214,7 @@ private struct TimelinePill: View {
 }
 
 private struct CanvasTimelineOverlay: View {
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(ThemeStore.self) var theme
     let history: [AppModel.CanvasSnapshot]
     let onSelect: (Int) -> Void
     private var p: AstralPalette { theme.palette }
@@ -254,7 +254,7 @@ private struct CanvasTimelineOverlay: View {
 // MARK: - Messages / rail
 
 private struct StepTrailView: View {
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(ThemeStore.self) var theme
     let lines: [String]
     var body: some View {
         if lines.isEmpty {
@@ -272,8 +272,8 @@ private struct StepTrailView: View {
 }
 
 private struct MessagesPanel: View {
-    @EnvironmentObject var model: AppModel
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(AppModel.self) var model
+    @Environment(ThemeStore.self) var theme
     @State private var expanded = true
     private var p: AstralPalette { theme.palette }
     private var visible: [AppModel.ChatTurn] { model.turns.filter { !$0.text.isEmpty } }
@@ -309,7 +309,7 @@ private struct MessagesPanel: View {
 }
 
 private struct PanelHeader: View {
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(ThemeStore.self) var theme
     let title: String
     var body: some View {
         Text(title.uppercased())
@@ -321,7 +321,7 @@ private struct PanelHeader: View {
 }
 
 private struct ChatList: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) var model
     private var visible: [AppModel.ChatTurn] { model.turns.filter { !$0.text.isEmpty } }
     var body: some View {
         ScrollViewReader { proxy in
@@ -340,7 +340,7 @@ private struct ChatList: View {
 }
 
 private struct StatusLine: View {
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(ThemeStore.self) var theme
     let text: String
     var body: some View {
         HStack(spacing: 6) {
@@ -351,7 +351,7 @@ private struct StatusLine: View {
 }
 
 private struct ChatBubble: View {
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(ThemeStore.self) var theme
     let turn: AppModel.ChatTurn
     private var p: AstralPalette { theme.palette }
     var body: some View {
@@ -387,7 +387,7 @@ private struct ChatBubble: View {
 }
 
 private struct ReasoningSnippet: View {
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(ThemeStore.self) var theme
     let text: String
     @State private var expanded = false
     private var p: AstralPalette { theme.palette }
@@ -414,8 +414,8 @@ private struct ReasoningSnippet: View {
 // MARK: - Input bar
 
 private struct InputBar: View {
-    @EnvironmentObject var model: AppModel
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(AppModel.self) var model
+    @Environment(ThemeStore.self) var theme
     @State private var input = ""
     @State private var showImporter = false
     #if os(iOS)
@@ -511,7 +511,7 @@ private struct InputBar: View {
 }
 
 private struct AttachmentChips: View {
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(ThemeStore.self) var theme
     let staged: [AppModel.StagedAttachment]
     let onRemove: (Int) -> Void
     private var p: AstralPalette { theme.palette }
@@ -546,7 +546,7 @@ private struct AttachmentChips: View {
 }
 
 private struct GlyphButton: View {
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(ThemeStore.self) var theme
     let system: String
     var enabled: Bool = true
     let action: () -> Void
@@ -561,7 +561,7 @@ private struct GlyphButton: View {
 }
 
 private struct SendButton: View {
-    @EnvironmentObject var theme: ThemeStore
+    @Environment(ThemeStore.self) var theme
     let enabled: Bool
     let action: () -> Void
     private var p: AstralPalette { theme.palette }
@@ -625,7 +625,7 @@ extension Array {
             AstralPrims.MetricCard(title: "New users", value: "3,401", variant: "success")),
     ].compactMap { AstralComponent(json: $0.toDict()) }
     return ChatShell()
-        .environmentObject(model)
-        .environmentObject(model.themeStore)
+        .environment(model)
+        .environment(model.themeStore)
         .preferredColorScheme(.dark)
 }

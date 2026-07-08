@@ -4,7 +4,7 @@ import SwiftUI
 import AstralCore
 
 struct DeviceLoginView: View {
-    @EnvironmentObject var model: WatchModel
+    @Environment(WatchModel.self) var model
 
     var body: some View {
         ScrollView {
@@ -27,10 +27,19 @@ struct DeviceLoginView: View {
         VStack(spacing: 6) {
             if let login = model.login {
                 if let png = login.qrPNG, let image = UIImage(data: png) {
+                    // Sized well inside the screen edges so the whole code
+                    // (plus the short code under it) is on screen without
+                    // scrolling — a phone can't scan a half-visible QR. The
+                    // white card keeps a proper light quiet zone around it.
                     Image(uiImage: image)
                         .interpolation(.none)
                         .resizable()
                         .scaledToFit()
+                        .padding(6)
+                        .background(.white, in: RoundedRectangle(cornerRadius: 8))
+                        .containerRelativeFrame(.horizontal) { length, _ in
+                            length * 0.65
+                        }
                         .accessibilityLabel("Sign-in QR code")
                 } else {
                     ProgressView()
