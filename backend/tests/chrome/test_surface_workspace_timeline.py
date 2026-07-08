@@ -413,6 +413,31 @@ async def test_live_falls_back_to_active_chat(env):
 
 
 @pytest.mark.asyncio
+async def test_live_prefers_the_orchestrator_materializer(env):
+    """052: when the orchestrator exposes _canvas_components, back-to-live
+    renders the DESIGNED canvas from it (off the event loop) instead of the
+    flat live_components fallback."""
+    orch, _history, user_id, chat_id = env
+    ws = _FakeWS()
+    orch._ws_timeline_mode[id(ws)] = True
+    designed = [{"type": "text", "content": "materialized canvas"}]
+    calls = []
+
+    def _canvas(c, u):
+        calls.append((c, u))
+        return list(designed)
+
+    orch._canvas_components = _canvas
+
+    live = wt.HANDLERS["chrome_workspace_timeline_live"]
+    await live(orch, ws, user_id, ["user"], {"chat_id": chat_id})
+
+    assert calls == [(chat_id, user_id)]
+    assert len(orch._renders) == 1
+    assert orch._renders[0][1] == designed
+
+
+@pytest.mark.asyncio
 async def test_live_without_any_chat_skips_canvas_render(env):
     orch, _history, user_id, _chat_id = env
     ws = _FakeWS()

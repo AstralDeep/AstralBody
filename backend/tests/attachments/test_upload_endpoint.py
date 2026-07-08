@@ -89,6 +89,29 @@ def test_upload_then_list_then_get_then_delete(app):
     assert client.get("/api/attachments").json()["attachments"] == []
 
 
+def test_upload_reports_parser_status_from_coverage_check(app, monkeypatch):
+    """With an orchestrator on app state, the eager coverage check runs
+    off-loop and its status lands in the response body (feature 031/052)."""
+    from orchestrator import attachment_autoparse
+
+    seen = {}
+
+    def _coverage(orch, *, extension, category):
+        seen.update(extension=extension, category=category)
+        return {"status": "covered"}
+
+    monkeypatch.setattr(attachment_autoparse, "coverage_status", _coverage)
+    app.state.orchestrator = object()
+    client = _client(app)
+    res = client.post(
+        "/api/upload",
+        files={"file": ("notes.md", b"# hi", "text/markdown")},
+    )
+    assert res.status_code == 201
+    assert res.json()["parser_status"] == "covered"
+    assert seen == {"extension": "md", "category": "text"}
+
+
 # ---------------------------------------------------------------------------
 # Negative paths
 # ---------------------------------------------------------------------------

@@ -302,6 +302,27 @@ def test_auth_session_one_shot_resumed(memory_only, monkeypatch):
         web_auth._SESSIONS.pop(sid, None)
 
 
+def test_auth_session_resumed_flip_writes_through_the_store(db, store, monkeypatch):
+    """028 FR-011 + 052: the async /auth/session one-shot flip persists to the
+    durable row off the event loop (store.amark_resumed), so a restart after
+    the first fetch still reports resumed:true."""
+    sid, user = _ids()
+    token = _fake_jwt({"sub": user, "exp": int(time.time()) + 3600})
+    store.create(sid, user_id=user, access_token=token, refresh_token="rt",
+                 hard_max_seconds=3600, resumed=False)
+    _seed_memory(sid, sub=user, access_token=token, resumed=False)
+    _counting_refresh(monkeypatch)
+    try:
+        first = _json(asyncio.run(web_auth.auth_session(_cookie_req(sid))))
+        assert first["authenticated"] is True and first["resumed"] is False
+
+        row = db.fetch_one("SELECT resumed FROM web_session WHERE sid = ?", (sid,))
+        assert bool(row["resumed"]) is True
+    finally:
+        web_auth._SESSIONS.pop(sid, None)
+        store.delete(sid)
+
+
 def test_session_resumed_flag_one_shot_and_persists(db, store):
     """028 FR-011: session_resumed_flag has the same one-shot flip as
     /auth/session — False once right after interactive login, True after —

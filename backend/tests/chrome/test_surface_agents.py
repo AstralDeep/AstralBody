@@ -616,3 +616,18 @@ def test_normalize_credential_entries_shapes():
     assert keys == ["A", "B", "C"]
     assert labels == {"A": "Label A"}
     assert surface._normalize_credential_entries(None) == ([], {})
+# ---------------------------------------------------------------------------
+# 052 — pure helpers: email fallback + preferences-blob disabled set
+# ---------------------------------------------------------------------------
+
+def test_email_fallback_uses_email_shaped_user_id():
+    assert surface._email_fallback("", "dev@example.com") == "dev@example.com"
+    assert surface._email_fallback("real@example.com", "dev@example.com") == "real@example.com"
+    assert surface._email_fallback(None, "not-an-email") == ""
+
+
+def test_disabled_from_preferences_tolerates_malformed_blobs():
+    assert surface._disabled_from_preferences('{"disabled_agents": ["a", "b"]}') == {"a", "b"}
+    assert surface._disabled_from_preferences("not-json{") == set()
+    assert surface._disabled_from_preferences('{"disabled_agents": "not-a-list"}') == set()
+    assert surface._disabled_from_preferences(None) == set()
