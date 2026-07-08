@@ -8,6 +8,7 @@ Accepts requests in application/x-www-form-urlencoded format
 (as sent by oidc-client-ts) and forwards them to Keycloak with
 the client_secret appended.
 """
+import asyncio
 import os
 import logging
 import json
@@ -286,7 +287,7 @@ async def native_logout(request: Request,
     # Feature-025 offline grants die with the sign-out, matching web logout.
     try:
         from orchestrator.offline_grant import OfflineGrantStore
-        OfflineGrantStore().revoke_for_user(user_id)
+        await asyncio.to_thread(lambda: OfflineGrantStore().revoke_for_user(user_id))
     except Exception:
         logger.debug("native logout: offline-grant revocation failed", exc_info=True)
 

@@ -8,6 +8,7 @@ It builds a minimal app mirroring the orchestrator's mount (orchestrator.py:5347
 so it exercises the real shell template + static assets without booting the DB.
 """
 import os
+import re
 
 import pytest
 from fastapi import FastAPI, Request
@@ -22,6 +23,7 @@ SHELL = os.path.join(WEBRENDER, "templates", "shell.html")
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setenv("VITE_USE_MOCK_AUTH", "true")  # so the shell gets 'dev-token'
+    from orchestrator.orchestrator import _apply_asset_versions
     from orchestrator.web_auth import session_token
 
     app = FastAPI()
@@ -29,7 +31,9 @@ def client(monkeypatch):
     @app.get("/", response_class=HTMLResponse)
     async def shell(request: Request):
         html = open(SHELL, encoding="utf-8").read()
-        return HTMLResponse(html.replace("%%ASTRAL_TOKEN%%", session_token(request) or ""))
+        html = html.replace("%%ASTRAL_TOKEN%%", session_token(request) or "")
+        # Feature 052: mirror serve_shell's per-file content-hash substitution.
+        return HTMLResponse(_apply_asset_versions(html, os.path.join(WEBRENDER, "static")))
 
     app.mount("/static", StaticFiles(directory=os.path.join(WEBRENDER, "static")), name="static")
     return TestClient(app)
@@ -44,7 +48,14 @@ def test_shell_served_with_token(client):
     # assertion previously checked the stale product name and failed post-rebrand.
     assert "AstralDeep" in body
     assert "/static/client.js" in body and "/static/astral.css" in body
-    assert '<link rel="icon" type="image/png" href="/static/img/astra-fav.png">' in body
+    # Feature 052: every /static URL carries a per-file 12-hex content hash and
+    # no raw %%ASTRAL_V:<path>%% token survives substitution.
+    assert re.search(
+        r'<link rel="icon" type="image/png" '
+        r'href="/static/img/astra-fav\.png\?v=[0-9a-f]{12}">', body)
+    assert re.search(r'/static/client\.js\?v=[0-9a-f]{12}', body)
+    assert re.search(r'/static/astral\.css\?v=[0-9a-f]{12}', body)
+    assert "%%ASTRAL_V:" not in body               # all version tokens substituted
     assert "%%ASTRAL_TOKEN%%" not in body          # placeholder replaced
     assert 'window.__ASTRAL_TOKEN__ = "dev-token"' in body  # mock token injected, JS var name intact
 

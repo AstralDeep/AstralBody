@@ -9,6 +9,7 @@ Responsibilities:
 5. Dynamic UI assembly (combines tool outputs into cohesive layouts)
 """
 import asyncio
+import contextvars
 import json
 import time
 import os
@@ -59,6 +60,7 @@ from astralprims import (
 from rote.rote import ROTE
 from shared.feature_flags import flags
 from shared.llm_text import strip_reasoning_markup
+from shared.perf import perf_span
 from orchestrator.stream_manager import StreamManager
 
 load_dotenv(override=False)
@@ -312,23 +314,24 @@ _MERGED_COLLIDING_VERBS = frozenset({
 })
 
 
-# ── Feature 040 fix: static-asset cache control ──────────────────────────────
-# StaticFiles sends no Cache-Control, so browsers heuristically cache
-# /static/* and can serve a STALE client.js/astral.css after a rebuild — which
-# is exactly why the slash-command menu did not appear after rebuilding. Two
-# defenses: revalidate every static response (``no-cache`` → fast 304 when
-# unchanged), and version the shell's asset URLs by content hash so a changed
-# file is fetched under a new URL with no manual hard refresh.
 _ASSET_VERSION_CACHE: Dict[str, str] = {}
+_ASSET_VERSION_MAP_CACHE: Dict[str, Dict[str, str]] = {}
+_ASSET_TOKEN_RE = re.compile(r"%%ASTRAL_V:([^%]+)%%")
+
+# Feature 052 (FR-015): the chat loop opts its route-LLM call into narrative
+# streaming through this context (value = the turn's chat id) instead of new
+# _call_llm arguments, so the many tests and callers that stub _call_llm with
+# the historical signature keep working unchanged.
+_NARRATIVE_STREAM_CHAT: contextvars.ContextVar = contextvars.ContextVar(
+    "narrative_stream_chat", default=None)
 
 
 def _static_asset_version(static_dir: str) -> str:
-    """Return a short content hash of the primary static assets.
+    """Return a short combined content hash of ``client.js`` + ``astral.css``.
 
-    Hashes ``client.js`` + ``astral.css`` so the shell can cache-bust their
-    ``<script>``/``<link>`` URLs; a changed asset yields a new version and is
-    fetched fresh. Memoized per directory (assets are baked, immutable for the
-    process lifetime).
+    Legacy feature-040 helper kept for its existing callers/tests; the shell
+    now versions every asset individually via :func:`_static_version_map`.
+    Memoized per directory (assets are baked, immutable per process).
     """
     cached = _ASSET_VERSION_CACHE.get(static_dir)
     if cached:
@@ -347,17 +350,72 @@ def _static_asset_version(static_dir: str) -> str:
     return ver
 
 
-class _NoCacheStaticFiles(StaticFiles):
-    """StaticFiles that asks browsers to revalidate every asset (``no-cache``).
+def _static_version_map(static_dir: str) -> Dict[str, str]:
+    """Per-file content-hash version map over the whole static tree.
 
-    Preserves the efficient ETag/Last-Modified 304 flow but stops heuristic
-    freshness from serving a stale ``client.js``/``astral.css`` after a rebuild.
+    Maps each asset's path relative to ``static_dir`` (forward slashes, e.g.
+    ``fonts/inter-latin.woff2``) to ``sha1(file bytes)[:12]``. Built once per
+    directory per process (feature 052, contracts/static-asset-caching.md):
+    a deploy is a new process, so new bytes always get new URLs.
+    """
+    cached = _ASSET_VERSION_MAP_CACHE.get(static_dir)
+    if cached is not None:
+        return cached
+    import hashlib
+    import os as _o
+    versions: Dict[str, str] = {}
+    with perf_span("static.version_map"):
+        for root, _dirs, files in _o.walk(static_dir):
+            for name in files:
+                full = _o.path.join(root, name)
+                rel = _o.path.relpath(full, static_dir).replace(_o.sep, "/")
+                try:
+                    h = hashlib.sha1()
+                    with open(full, "rb") as fh:
+                        for block in iter(lambda: fh.read(1 << 20), b""):
+                            h.update(block)
+                    versions[rel] = h.hexdigest()[:12]
+                except OSError:
+                    continue
+    _ASSET_VERSION_MAP_CACHE[static_dir] = versions
+    return versions
+
+
+def _apply_asset_versions(shell: str, static_dir: str) -> str:
+    """Substitute every ``%%ASTRAL_V:<relpath>%%`` shell token with that
+    file's current content hash (``dev`` for an unknown path so the URL is
+    still well-formed and served under the no-cache flow)."""
+    versions = _static_version_map(static_dir)
+    return _ASSET_TOKEN_RE.sub(lambda m: versions.get(m.group(1), "dev"), shell)
+
+
+class _NoCacheStaticFiles(StaticFiles):
+    """Version-aware static files: immutable when the URL proves freshness.
+
+    A request whose ``?v=`` matches the file's current content hash is
+    immutable by construction (changed bytes get a new URL from the shell),
+    so it gets a year-long ``immutable`` Cache-Control. Every other request
+    keeps the feature-040 ``no-cache`` + ETag/Last-Modified 304 flow — this
+    includes the deliberately unversioned CSS ``@font-face`` URLs.
     """
 
     async def get_response(self, path, scope):
+        """Serve the asset with a version-dependent Cache-Control header."""
         response = await super().get_response(path, scope)
+        cache_control = "no-cache"
         try:
-            response.headers.setdefault("Cache-Control", "no-cache")
+            from urllib.parse import parse_qs
+            query = (scope.get("query_string") or b"").decode("latin-1")
+            requested = (parse_qs(query).get("v") or [None])[0]
+            if requested:
+                rel = str(path).replace("\\", "/").lstrip("/")
+                current = _static_version_map(str(self.directory)).get(rel)
+                if current and requested == current:
+                    cache_control = "public, max-age=31536000, immutable"
+        except Exception:
+            cache_control = "no-cache"
+        try:
+            response.headers["Cache-Control"] = cache_control
         except Exception:
             pass
         return response
@@ -724,7 +782,8 @@ class Orchestrator:
         # registry. Best-effort — a transient DB error must not block agent
         # registration. Idempotent: subsequent calls find nothing to delete.
         try:
-            self.tool_permissions.cleanup_stale_tool_overrides(
+            await asyncio.to_thread(
+                self.tool_permissions.cleanup_stale_tool_overrides,
                 card.agent_id, list(tool_scope_map.keys())
             )
         except Exception as e:
@@ -805,23 +864,29 @@ class Orchestrator:
 
         # Auto-assign ownership if this agent has no owner yet
         tool_names = [c["name"] for c in caps]
-        ownership = self.history.db.get_agent_ownership(card.agent_id)
-        if not ownership:
-            default_owner = os.environ.get("DEFAULT_AGENT_OWNER", "")
-            if default_owner:
-                # Feature 030: ownerless registrations are operator-bundled
-                # agents (user-created agents get explicit creator ownership
-                # from agent_lifecycle before they register), so default them
-                # PUBLIC — otherwise they are invisible in every Agents tab
-                # and users cannot discover or enable them. Drafts stay
-                # private.
-                self.history.db.set_agent_ownership(
-                    card.agent_id, default_owner,
-                    is_public=not self._is_draft_agent(card.agent_id))
-                ownership = self.history.db.get_agent_ownership(card.agent_id) or {}
-                logger.info(f"Auto-assigned agent '{card.agent_id}' to {default_owner}")
-            else:
-                ownership = {}
+
+        def _resolve_ownership():
+            """Ownership read/auto-assign off the event loop (sync DB reads)."""
+            ownership = self.history.db.get_agent_ownership(card.agent_id)
+            if not ownership:
+                default_owner = os.environ.get("DEFAULT_AGENT_OWNER", "")
+                if default_owner:
+                    # Feature 030: ownerless registrations are operator-bundled
+                    # agents (user-created agents get explicit creator ownership
+                    # from agent_lifecycle before they register), so default them
+                    # PUBLIC — otherwise they are invisible in every Agents tab
+                    # and users cannot discover or enable them. Drafts stay
+                    # private.
+                    self.history.db.set_agent_ownership(
+                        card.agent_id, default_owner,
+                        is_public=not self._is_draft_agent(card.agent_id))
+                    ownership = self.history.db.get_agent_ownership(card.agent_id) or {}
+                    logger.info(f"Auto-assigned agent '{card.agent_id}' to {default_owner}")
+                else:
+                    ownership = {}
+            return ownership
+
+        ownership = await asyncio.to_thread(_resolve_ownership)
 
         # Hook: AGENT_REGISTERED
         if flags.is_enabled("hook_system"):
@@ -832,15 +897,17 @@ class Orchestrator:
             ))
 
         # Don't broadcast draft agents to UI — they only appear in the Drafts tab
-        if self._is_draft_agent(card.agent_id):
+        if await asyncio.to_thread(self._is_draft_agent, card.agent_id):
             return
 
         # Notify all UI clients (include per-user scopes, tool_scope_map, and security flags)
         for ui in self.ui_clients:
             try:
                 user_id = self._get_user_id(ui)
-                scopes = self.tool_permissions.get_agent_scopes(user_id, card.agent_id)
-                permissions = self.tool_permissions.get_effective_permissions(
+                scopes = await asyncio.to_thread(
+                    self.tool_permissions.get_agent_scopes, user_id, card.agent_id)
+                permissions = await asyncio.to_thread(
+                    self.tool_permissions.get_effective_permissions,
                     user_id, card.agent_id, tool_names
                 )
                 msg = {
@@ -1085,49 +1152,54 @@ class Orchestrator:
                 
                 # Check for token validation (skip if not configured or in debug/dev mode if desired, but we want security)
                 if token:
-                    user_data = await self.validate_token(token)
+                    with perf_span("register_ui.validate"):
+                        user_data = await self.validate_token(token)
                 
                 if user_data:
                     logger.info(f"UI registered: {user_data.get('preferred_username', 'unknown')}")
                     user_data["_raw_token"] = token  # Store raw token for RFC 8693 delegation
                     self.ui_sessions[websocket] = user_data
+                    _register_started = time.monotonic()
+                    user_id = user_data.get("sub", "legacy")
 
-                    # Persist user profile to database
-                    self._save_user_profile(user_data)
+                    # Feature 052 (FR-012): profile save + login audit events
+                    # leave the first-paint critical path. One task keeps the
+                    # two auth events in order (the recorder then serializes
+                    # per user), and the profile upsert runs off-loop.
+                    asyncio.create_task(
+                        asyncio.to_thread(self._save_user_profile, user_data))
 
-                    # Audit: WebSocket login lifecycle event (auth.ws_register)
-                    try:
-                        from audit.hooks import record_auth_event
-                        await record_auth_event(
-                            claims=user_data,
-                            action="ws_register",
-                            description=f"WebSocket session established for {user_data.get('preferred_username', user_data.get('sub', 'unknown'))}",
-                        )
-                    except Exception as _e:
-                        logger.debug(f"WS register audit record failed: {_e}")
+                    async def _record_register_audit(claims=user_data, m=msg):
+                        """Emit ws_register then the 016 entry-point action, in order."""
+                        try:
+                            from audit.hooks import record_auth_event
+                            await record_auth_event(
+                                claims=claims,
+                                action="ws_register",
+                                description=f"WebSocket session established for {claims.get('preferred_username', claims.get('sub', 'unknown'))}",
+                            )
+                            resumed_flag = bool(getattr(m, "resumed", False))
+                            action = "session_resumed" if resumed_flag else "login_interactive"
+                            await record_auth_event(
+                                claims={**claims, "_pl_resumed": resumed_flag},
+                                action=action,
+                                description=(
+                                    "Silent session resumed from stored credential"
+                                    if resumed_flag
+                                    else "Interactive login completed; new session established"
+                                ),
+                            )
+                        except Exception as _e:
+                            logger.debug(f"register audit records failed: {_e}")
 
-                    # Feature 016 (FR-015): Record the persistent-login-aware
-                    # entry-point action. The client tells us via msg.resumed
-                    # whether it reached this WS connect via a silent resume
-                    # from a stored credential (True) or via a fresh
-                    # interactive Keycloak login (False — also the legacy
-                    # default for older clients). Three distinct action_type
-                    # values let the audit log distinguish these flows.
-                    try:
-                        from audit.hooks import record_auth_event
-                        resumed_flag = bool(getattr(msg, "resumed", False))
-                        action = "session_resumed" if resumed_flag else "login_interactive"
-                        await record_auth_event(
-                            claims={**user_data, "_pl_resumed": resumed_flag},
-                            action=action,
-                            description=(
-                                "Silent session resumed from stored credential"
-                                if resumed_flag
-                                else "Interactive login completed; new session established"
-                            ),
-                        )
-                    except Exception as _e:
-                        logger.debug(f"persistent-login audit record failed: {_e}")
+                    asyncio.create_task(_record_register_audit())
+
+                    # Feature 052 (FR-012): the handshake's independent reads
+                    # run concurrently while the frames below go out.
+                    _prefs_task = asyncio.create_task(asyncio.to_thread(
+                        self.history.db.get_user_preferences, user_id))
+                    _tools_task = asyncio.create_task(asyncio.to_thread(
+                        self.compute_tools_available_for_user, user_id))
 
                     # Feature 006: pick up any LLM credentials the browser
                     # forwarded with this register_ui (the user's browser
@@ -1183,25 +1255,31 @@ class Orchestrator:
                     except Exception as _e:  # pragma: no cover — non-fatal push
                         logger.debug(f"chrome_menu push failed (non-fatal): {_e}")
 
+                    # Dashboard build starts only after rote_config is on the
+                    # wire so clients keep seeing their device profile first.
+                    _dash_task = asyncio.create_task(self.send_dashboard(websocket))
+
                     # Send stored user preferences (theme, etc.)
-                    user_id = user_data.get("sub", "legacy")
-                    try:
-                        prefs = self.history.db.get_user_preferences(user_id)
-                        if prefs:
-                            await self._safe_send(websocket, json.dumps({
-                                "type": "user_preferences",
-                                "preferences": prefs,
-                            }))
-                    except Exception as e:
-                        logger.warning(f"Failed to load user preferences: {e}")
+                    with perf_span("register_ui.reads", user=user_id):
+                        try:
+                            prefs = await _prefs_task
+                            if prefs:
+                                await self._safe_send(websocket, json.dumps({
+                                    "type": "user_preferences",
+                                    "preferences": prefs,
+                                }))
+                        except Exception as e:
+                            logger.warning(f"Failed to load user preferences: {e}")
 
-                    # Mark registration complete so queued messages can proceed
-                    evt = self._registered_events.get(id(websocket))
-                    if evt:
-                        evt.set()
+                        # Mark registration complete so queued messages can proceed
+                        evt = self._registered_events.get(id(websocket))
+                        if evt:
+                            evt.set()
 
-                    # Notify UI of success (optional, or just send dashboard)
-                    await self.send_dashboard(websocket)
+                        try:
+                            _tools_avail = await _tools_task
+                        except Exception:
+                            _tools_avail = True
 
                     # Initial canvas: server-driven welcome examples when this
                     # socket has no chat to resume — ordinary astralprims
@@ -1214,20 +1292,24 @@ class Orchestrator:
                             # tools are dispatchable so it can lead with the
                             # enable-agents consent card instead of promising
                             # examples that would silently degrade to text.
-                            _welcome_user = self._get_user_id(websocket)
-                            try:
-                                _tools_avail = self.compute_tools_available_for_user(_welcome_user)
-                            except Exception:
-                                _tools_avail = True
                             # speak=False: chrome, not a conversation turn —
                             # a watch must not narrate the welcome canvas on
                             # every (re)connect.
-                            await self.send_ui_render(
-                                websocket, welcome_components(tools_available=_tools_avail),
-                                speak=False)
+                            with perf_span("welcome.render", user=user_id):
+                                await self.send_ui_render(
+                                    websocket, welcome_components(tools_available=_tools_avail),
+                                    speak=False)
                             self._ws_welcome[id(websocket)] = True
                     except Exception as _e:  # non-fatal — an empty canvas is fine
                         logger.debug(f"welcome canvas render failed (non-fatal): {_e}")
+
+                    try:
+                        await _dash_task
+                    except Exception:
+                        logger.warning("register_ui dashboard delivery failed", exc_info=True)
+                    logger.info(
+                        "perf register_ui.total duration_ms=%d user=%s",
+                        int((time.monotonic() - _register_started) * 1000), user_id)
                 else:
                     logger.warning("UI registration failed: Invalid or missing token")
                     # Feature 016 (FR-015): When the client said it was
@@ -1394,15 +1476,18 @@ class Orchestrator:
 
                     # If no chat_id provided, create one
                     if not chat_id:
-                        chat_id = self.history.create_chat(user_id=user_id)
+                        chat_id = await asyncio.to_thread(
+                            self.history.create_chat, user_id=user_id)
                         # Inform UI about new chat ID
                         await self._safe_send(websocket, json.dumps({
                             "type": "chat_created",
                             "payload": {"chat_id": chat_id, "from_message": True}
                         }))
                     else:
-                        if not self.history.get_chat(chat_id, user_id=user_id):
-                            self.history.create_chat(chat_id, user_id=user_id)
+                        if not await asyncio.to_thread(
+                                self.history.get_chat, chat_id, user_id=user_id):
+                            await asyncio.to_thread(
+                                self.history.create_chat, chat_id, user_id=user_id)
                             await self._safe_send(websocket, json.dumps({
                                 "type": "chat_created",
                                 "payload": {"chat_id": chat_id, "from_message": True}
@@ -1569,7 +1654,8 @@ class Orchestrator:
                     # Feature 037: show the server-driven skeleton while the
                     # recent-chats query runs, then push the rendered list.
                     await self._push_history_surface(websocket, loading=True)
-                    chats = self.history.get_recent_chats(user_id=user_id)
+                    chats = await asyncio.to_thread(
+                        self.history.get_recent_chats, user_id=user_id)
                     await self._safe_send(websocket, json.dumps({
                         "type": "history_list",
                         "chats": chats
@@ -1578,7 +1664,8 @@ class Orchestrator:
 
                 elif msg.action == "load_chat":
                     chat_id = msg.payload.get("chat_id")
-                    chat = self.history.get_chat(chat_id, user_id=user_id)
+                    chat = await asyncio.to_thread(
+                        self.history.get_chat, chat_id, user_id=user_id)
                     if chat:
                         # 001-tool-stream-ui (US2 T042): pause any push
                         # streams this websocket has in its previous chat
@@ -1612,37 +1699,41 @@ class Orchestrator:
                         # shown on the canvas, which re-hydrates from the
                         # workspace below. A message with no text-only content
                         # gets no html (the client renders no bubble for it).
-                        try:
-                            for m in chat.get("messages", []):
-                                if not isinstance(m.get("content"), str) and isinstance(m.get("content"), list):
-                                    _t_html = self._transcript_html(m["content"])
-                                    if _t_html:
-                                        m["html"] = _t_html
-                        except Exception:
-                            logger.exception("webrender unavailable for transcript rendering")
+                        def _hydrate_loaded_chat():
+                            """Render transcript HTML and re-attach chips off the event loop."""
+                            try:
+                                for m in chat.get("messages", []):
+                                    if not isinstance(m.get("content"), str) and isinstance(m.get("content"), list):
+                                        _t_html = self._transcript_html(m["content"])
+                                        if _t_html:
+                                            m["html"] = _t_html
+                            except Exception:
+                                logger.exception("webrender unavailable for transcript rendering")
 
-                        # Feature 031: re-hydrate per-turn attachment references
-                        # so the client re-renders attachment chips on loaded
-                        # user messages (additive `attachments` field).
-                        try:
-                            from orchestrator.attachments.message_attachment_repo import MessageAttachmentRepository
-                            from orchestrator.attachments.repository import AttachmentRepository
-                            _link_repo = MessageAttachmentRepository(self.history.db)
-                            _att_repo = AttachmentRepository(self.history.db)
-                            for m in chat.get("messages", []):
-                                if m.get("role") != "user" or not m.get("id"):
-                                    continue
-                                links = _link_repo.list_for_message(m["id"], user_id)
-                                atts = []
-                                for ln in links:
-                                    a = _att_repo.get_by_id(ln["attachment_id"], user_id)
-                                    if a is not None:
-                                        atts.append({"attachment_id": a.attachment_id,
-                                                     "filename": a.filename, "category": a.category})
-                                if atts:
-                                    m["attachments"] = atts
-                        except Exception:
-                            logger.debug("attachment re-hydration failed (non-fatal)", exc_info=True)
+                            # Feature 031: re-hydrate per-turn attachment references
+                            # so the client re-renders attachment chips on loaded
+                            # user messages (additive `attachments` field).
+                            try:
+                                from orchestrator.attachments.message_attachment_repo import MessageAttachmentRepository
+                                from orchestrator.attachments.repository import AttachmentRepository
+                                _link_repo = MessageAttachmentRepository(self.history.db)
+                                _att_repo = AttachmentRepository(self.history.db)
+                                for m in chat.get("messages", []):
+                                    if m.get("role") != "user" or not m.get("id"):
+                                        continue
+                                    links = _link_repo.list_for_message(m["id"], user_id)
+                                    atts = []
+                                    for ln in links:
+                                        a = _att_repo.get_by_id(ln["attachment_id"], user_id)
+                                        if a is not None:
+                                            atts.append({"attachment_id": a.attachment_id,
+                                                         "filename": a.filename, "category": a.category})
+                                    if atts:
+                                        m["attachments"] = atts
+                            except Exception:
+                                logger.debug("attachment re-hydration failed (non-fatal)", exc_info=True)
+
+                        await asyncio.to_thread(_hydrate_loaded_chat)
 
                         await self._safe_send(websocket, json.dumps({
                             "type": "chat_loaded",
@@ -1655,7 +1746,8 @@ class Orchestrator:
                         # precedent below). No capabilities re-run.
                         try:
                             # Feature 029: materialized arrangements re-hydrate too.
-                            ws_components = self._canvas_components(chat_id, user_id)
+                            ws_components = await asyncio.to_thread(
+                                self._canvas_components, chat_id, user_id)
                             if ws_components:
                                 # speak=False: re-hydration re-presents old
                                 # turns — never re-spoken (FR-030).
@@ -1986,13 +2078,15 @@ class Orchestrator:
                         and all(isinstance(a, str) for a in requested)
                     ):
                         return
-                    enabled_now = self._enable_recommended_agent_scopes(user_id, requested)
+                    enabled_now = await asyncio.to_thread(
+                        self._enable_recommended_agent_scopes, user_id, requested)
                     if self._ws_welcome.get(id(websocket)):
                         # Welcome canvas is showing — re-render it so the
                         # consent card disappears and the examples are live.
                         from orchestrator.welcome import welcome_components
                         await self.send_ui_render(websocket, welcome_components(
-                            tools_available=self.compute_tools_available_for_user(user_id)))
+                            tools_available=await asyncio.to_thread(
+                                self.compute_tools_available_for_user, user_id)))
                     else:
                         await self.send_ui_render(websocket, [Alert(
                             message=(
@@ -2074,7 +2168,9 @@ class Orchestrator:
                     theme_data = msg.payload.get("theme")
                     if theme_data:
                         try:
-                            self.history.db.set_user_preferences(user_id, {"theme": theme_data})
+                            await asyncio.to_thread(
+                                self.history.db.set_user_preferences,
+                                user_id, {"theme": theme_data})
                         except Exception as e:
                             logger.warning(f"Failed to save theme for {user_id}: {e}")
 
@@ -2092,7 +2188,8 @@ class Orchestrator:
 
                         components = []
                         for cid in component_ids:
-                            comp = self.history.get_component_by_id(cid, user_id=user_id)
+                            comp = await asyncio.to_thread(
+                                self.history.get_component_by_id, cid, user_id=user_id)
                             if comp:
                                 components.append(comp)
 
@@ -2993,11 +3090,16 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 # for THAT agent is applied; if the chat is unbound, no
                 # agent-specific selection applies and the orchestrator
                 # uses its full default.
-                bound_agent_id = self.history.db.get_chat_agent(chat_id) if chat_id else None
-                if bound_agent_id is not None:
-                    saved = self.history.db.get_user_tool_selection(user_id, bound_agent_id)
-                    if saved is not None and len(saved) > 0:
-                        selected_tools = saved
+                def _saved_tool_selection():
+                    """Bound-agent saved tool selection, read off the event loop."""
+                    bound_agent_id = self.history.db.get_chat_agent(chat_id) if chat_id else None
+                    if bound_agent_id is None:
+                        return None
+                    return self.history.db.get_user_tool_selection(user_id, bound_agent_id)
+
+                saved = await asyncio.to_thread(_saved_tool_selection)
+                if saved is not None and len(saved) > 0:
+                    selected_tools = saved
             except Exception as e:  # pragma: no cover — defensive
                 logger.debug(f"Could not resolve saved tool selection: {e}")
         # Feature 031: an attachments-only turn (no typed text) still proceeds —
@@ -3072,7 +3174,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         
         # Save User Message to History. If display_message is provided, save that instead.
         msg_to_save = display_message if display_message else message
-        self.history.add_message(chat_id, "user", msg_to_save, user_id=user_id)
+        await asyncio.to_thread(
+            self.history.add_message, chat_id, "user", msg_to_save, user_id=user_id)
 
         # Feature 030 — fire-and-forget PHI awareness notice (notify-only,
         # fail-open; persistence/audit posture unchanged).
@@ -3091,7 +3194,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         try:
             from orchestrator.chat_steps import ChatStepRecorder
 
-            turn_message_id = self.history.get_latest_message_id(chat_id, user_id)
+            turn_message_id = await asyncio.to_thread(
+                self.history.get_latest_message_id, chat_id, user_id)
             recorder = ChatStepRecorder(
                 db=self.history.db,
                 websocket=websocket,
@@ -3122,7 +3226,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             original_name = upload_match.group(1)
             backend_path = upload_match.group(2)
             logger.info(f"Captured file upload mapping: {original_name} -> {backend_path}")
-            self.history.add_file_mapping(chat_id, original_name, backend_path, user_id=user_id)
+            await asyncio.to_thread(
+                self.history.add_file_mapping, chat_id, original_name, backend_path,
+                user_id=user_id)
 
         # Feature 031: validate/link/surface this turn's structured attachments.
         # Augments the LLM-facing `message` with an "Attachments on this turn"
@@ -3135,11 +3241,20 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 logger.warning("attachment turn-processing failed (non-fatal)", exc_info=True)
 
         # Async title summarization for new chats
-        chat_data = self.history.get_chat(chat_id, user_id=user_id)
+        chat_data = await asyncio.to_thread(self.history.get_chat, chat_id, user_id=user_id)
         if chat_data and len(chat_data.get("messages", [])) == 1:
             asyncio.create_task(
                 self.summarize_chat_title(chat_id, msg_to_save, user_id=user_id, websocket=websocket)
             )
+
+        # Feature 052 (FR-019): one permission memo spans the whole turn —
+        # the tool-list build below and the execute phase resolve each
+        # distinct (user, agent, tool, kind) against the database once.
+        # Exited in the turn's finally (and before the draft early-return);
+        # the next turn always re-reads, so revocations stay visible.
+        from orchestrator.tool_permissions import turn_permission_memo
+        _perm_memo = turn_permission_memo()
+        _perm_memo.__enter__()
 
         # Build tool definitions from registered agents
         # Filter by user's per-agent tool permissions (RFC 8693 delegation)
@@ -3166,7 +3281,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # always work even if you've disabled the live version.
         try:
             disabled_agents = (
-                set(self.history.db.get_user_disabled_agents(user_id))
+                set(await asyncio.to_thread(self.history.db.get_user_disabled_agents, user_id))
                 if user_id and not draft_agent_id
                 else set()
             )
@@ -3178,77 +3293,86 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # stack, and accumulate the survivors. We can't emit yet —
         # qualification depends on knowing the full set first (Phase B).
         eligible: List[Tuple[str, Any]] = []
-        for agent_id, card in self.agent_cards.items():
-            if agent_id not in self.agents and agent_id not in self.local_agents:
-                continue
 
-            # Draft test: only include tools from the draft agent being tested
-            if draft_agent_id and agent_id != draft_agent_id:
-                continue
+        def _collect_eligible():
+            """Run the per-(agent, skill) gate stack off the event loop.
 
-            # 030 follow-up: NON-LIVE drafts never enter normal chats. A
-            # draft under self-test registers with the orchestrator and the
-            # test flow enables its scopes — without this skip its generated
-            # tools leaked into every chat, colliding with (and shadowing)
-            # first-party tools (live incident: a generated Serper-keyed
-            # web_search shadowed the keyless built-in one).
-            if not draft_agent_id and self._is_draft_agent(agent_id):
-                logger.debug(
-                    f"Agent '{agent_id}' excluded user={user_id} reason=draft_not_live"
+            The permission reads inside are the turn's hottest DB path; the
+            active turn memo makes each distinct tool resolve once.
+            """
+            for agent_id, card in self.agent_cards.items():
+                if agent_id not in self.agents and agent_id not in self.local_agents:
+                    continue
+
+                # Draft test: only include tools from the draft agent being tested
+                if draft_agent_id and agent_id != draft_agent_id:
+                    continue
+
+                # 030 follow-up: NON-LIVE drafts never enter normal chats. A
+                # draft under self-test registers with the orchestrator and the
+                # test flow enables its scopes — without this skip its generated
+                # tools leaked into every chat, colliding with (and shadowing)
+                # first-party tools (live incident: a generated Serper-keyed
+                # web_search shadowed the keyless built-in one).
+                if not draft_agent_id and self._is_draft_agent(agent_id):
+                    logger.debug(
+                        f"Agent '{agent_id}' excluded user={user_id} reason=draft_not_live"
+                    )
+                    continue
+
+                # Per-user agent disable (Feature 013 follow-up): user has
+                # muted this agent; skip ALL its tools without touching
+                # scope/permission state. Logged so operators can see when
+                # it kicks in.
+                if agent_id in disabled_agents:
+                    logger.debug(
+                        f"Agent '{agent_id}' excluded user={user_id} reason=user_disabled_agent"
+                    )
+                    continue
+
+                # Draft test (Feature 013 follow-up): when the user is testing
+                # THEIR OWN draft agent, bypass scope/per-tool permission checks
+                # so they can exercise the agent's tools without first granting
+                # themselves scopes. Strictly isolated to the draft being tested
+                # — `agent_id == draft_agent_id` is the only way this branch
+                # fires, so other agents (live or otherwise) are unaffected.
+                in_draft_test_for_this_agent = (
+                    draft_agent_id is not None and agent_id == draft_agent_id
                 )
-                continue
 
-            # Per-user agent disable (Feature 013 follow-up): user has
-            # muted this agent; skip ALL its tools without touching
-            # scope/permission state. Logged so operators can see when
-            # it kicks in.
-            if agent_id in disabled_agents:
-                logger.debug(
-                    f"Agent '{agent_id}' excluded user={user_id} reason=user_disabled_agent"
-                )
-                continue
+                for skill in card.skills:
+                    # System-level security block always wins, even in draft test
+                    # — security flags reflect proactive review and we never
+                    # want a draft to short-circuit a flagged tool.
+                    agent_flags = self.security_flags.get(agent_id, {})
+                    if skill.id in agent_flags and agent_flags[skill.id].get("blocked"):
+                        logger.debug(
+                            f"Tool '{skill.id}' excluded user={user_id} agent={agent_id} reason=system_blocked"
+                        )
+                        continue
 
-            # Draft test (Feature 013 follow-up): when the user is testing
-            # THEIR OWN draft agent, bypass scope/per-tool permission checks
-            # so they can exercise the agent's tools without first granting
-            # themselves scopes. Strictly isolated to the draft being tested
-            # — `agent_id == draft_agent_id` is the only way this branch
-            # fires, so other agents (live or otherwise) are unaffected.
-            in_draft_test_for_this_agent = (
-                draft_agent_id is not None and agent_id == draft_agent_id
-            )
+                    # Check if the user has allowed this tool for this agent
+                    # (Feature 013 / FR-013: per-(tool, kind) row > legacy
+                    # NULL-kind override > agent_scopes fallback). Skipped
+                    # for the draft being tested — see the comment above.
+                    if not in_draft_test_for_this_agent and not self.tool_permissions.is_tool_allowed(user_id, agent_id, skill.id):
+                        logger.debug(
+                            f"Tool '{skill.id}' excluded user={user_id} agent={agent_id} reason=scope_or_override"
+                        )
+                        continue
 
-            for skill in card.skills:
-                # System-level security block always wins, even in draft test
-                # — security flags reflect proactive review and we never
-                # want a draft to short-circuit a flagged tool.
-                agent_flags = self.security_flags.get(agent_id, {})
-                if skill.id in agent_flags and agent_flags[skill.id].get("blocked"):
-                    logger.debug(
-                        f"Tool '{skill.id}' excluded user={user_id} agent={agent_id} reason=system_blocked"
-                    )
-                    continue
+                    # Feature 013 / FR-018, FR-020, FR-023: in-chat tool
+                    # picker narrowing. Only ever subtracts — applied AFTER
+                    # the scope/permission checks so it cannot widen.
+                    if selected_tools is not None and skill.id not in selected_tools:
+                        logger.debug(
+                            f"Tool '{skill.id}' excluded user={user_id} agent={agent_id} reason=user_selection"
+                        )
+                        continue
 
-                # Check if the user has allowed this tool for this agent
-                # (Feature 013 / FR-013: per-(tool, kind) row > legacy
-                # NULL-kind override > agent_scopes fallback). Skipped
-                # for the draft being tested — see the comment above.
-                if not in_draft_test_for_this_agent and not self.tool_permissions.is_tool_allowed(user_id, agent_id, skill.id):
-                    logger.debug(
-                        f"Tool '{skill.id}' excluded user={user_id} agent={agent_id} reason=scope_or_override"
-                    )
-                    continue
+                    eligible.append((agent_id, skill))
 
-                # Feature 013 / FR-018, FR-020, FR-023: in-chat tool
-                # picker narrowing. Only ever subtracts — applied AFTER
-                # the scope/permission checks so it cannot widen.
-                if selected_tools is not None and skill.id not in selected_tools:
-                    logger.debug(
-                        f"Tool '{skill.id}' excluded user={user_id} agent={agent_id} reason=user_selection"
-                    )
-                    continue
-
-                eligible.append((agent_id, skill))
+        await asyncio.to_thread(_collect_eligible)
 
         # Phase B: detect skill-id collisions across the surviving pairs.
         # A skill id owned by >1 distinct agent_id needs qualification so
@@ -3362,6 +3486,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             desktop_codegen_injected = True
 
         if not tools_desc and draft_agent_id:
+            _perm_memo.__exit__(None, None, None)
             await self.send_ui_render(websocket, [
                 Alert(
                     message=(
@@ -3383,7 +3508,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             # SYSTEM PROMPT
             # ------------------------------------------------------------------
             # Fetch file mappings for this chat
-            file_mappings = self.history.get_file_mappings(chat_id, user_id=user_id)
+            file_mappings = await asyncio.to_thread(
+                self.history.get_file_mappings, chat_id, user_id=user_id)
             file_context = ""
             if file_mappings:
                 file_context = "\nFILES ACCESSED IN THIS CHAT (Original Name -> Backend Path):\n"
@@ -3520,7 +3646,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             # ------------------------------------------------------------------
             # Fetch recent history
             history_messages = []
-            chat_data = self.history.get_chat(chat_id, user_id=user_id)
+            chat_data = await asyncio.to_thread(
+                self.history.get_chat, chat_id, user_id=user_id)
             if chat_data and "messages" in chat_data:
                 # Get last 10 messages (excluding the one we just added)
                 raw_history = chat_data["messages"][:-1]
@@ -3594,7 +3721,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     await self.send_ui_render(websocket, [
                         Alert(message="Processing was cancelled.", variant="info").to_dict()
                     ], target="chat")
-                    self.history.add_message(chat_id, "assistant", [
+                    await asyncio.to_thread(self.history.add_message, chat_id, "assistant", [
                         Alert(message="Processing was cancelled.", variant="info").to_dict()
                     ], user_id=user_id)
                     await self._safe_send(websocket, json.dumps({
@@ -3651,10 +3778,12 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                         )
                     except Exception:
                         logger.debug("phase step start failed (non-fatal)", exc_info=True)
+                _stream_token = _NARRATIVE_STREAM_CHAT.set(chat_id)
                 try:
-                    llm_msg, usage = await self._call_llm(
-                        websocket, messages, tools_desc, feature=call_feature
-                    )
+                    with perf_span("turn.route", chat=chat_id):
+                        llm_msg, usage = await self._call_llm(
+                            websocket, messages, tools_desc, feature=call_feature,
+                        )
                 except Exception:
                     if _phase_recorder is not None and _phase_step_id:
                         try:
@@ -3662,6 +3791,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                         except Exception:
                             pass
                     raise
+                finally:
+                    _NARRATIVE_STREAM_CHAT.reset(_stream_token)
                 if _phase_recorder is not None and _phase_step_id:
                     try:
                         await _phase_recorder.complete(_phase_step_id)
@@ -3695,7 +3826,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     # already re-hydrates to the chat rail on reload
                     # (collapsible is a _TEXT_ONLY_TYPES member).
                     await self.send_ui_render(websocket, reasoning_components, target="chat")
-                    self.history.add_message(chat_id, "assistant", reasoning_components, user_id=user_id)
+                    await asyncio.to_thread(
+                        self.history.add_message, chat_id, "assistant",
+                        reasoning_components, user_id=user_id)
 
                 # Check if LLM wants to call tools
                 if llm_msg.tool_calls:
@@ -3719,26 +3852,27 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                                        current_tool=", ".join(tool_names_for_task),
                                        turn_count=turn_count)
                     tool_results = []
-                    if len(llm_msg.tool_calls) == 1:
-                        tc = llm_msg.tool_calls[0]
-                        res = await self.execute_single_tool(websocket, tc, tool_to_agent, chat_id, user_id=user_id, tool_to_unqualified=tool_to_unqualified)
-                        if res:
-                            tool_results.append(res)
-                    else:
-                        # 033 fan-out (C-N8): an oversized parallel wave is split
-                        # into bounded batches run in sequence; otherwise one
-                        # wave as before. No-op (single wave) when off / small.
-                        _batches = turn_hooks.fanout_batches(list(llm_msg.tool_calls))
-                        if _batches:
-                            logger.info("fanout chat=%s calls=%d batches=%d",
-                                        chat_id, len(llm_msg.tool_calls), len(_batches))
-                            for _batch in _batches:
-                                tool_results.extend(await self.execute_parallel_tools(
-                                    websocket, _batch, tool_to_agent, chat_id,
-                                    user_id=user_id, tool_to_unqualified=tool_to_unqualified))
+                    with perf_span("turn.tools", chat=chat_id):
+                        if len(llm_msg.tool_calls) == 1:
+                            tc = llm_msg.tool_calls[0]
+                            res = await self.execute_single_tool(websocket, tc, tool_to_agent, chat_id, user_id=user_id, tool_to_unqualified=tool_to_unqualified)
+                            if res:
+                                tool_results.append(res)
                         else:
-                            res_list = await self.execute_parallel_tools(websocket, llm_msg.tool_calls, tool_to_agent, chat_id, user_id=user_id, tool_to_unqualified=tool_to_unqualified)
-                            tool_results.extend(res_list)
+                            # 033 fan-out (C-N8): an oversized parallel wave is split
+                            # into bounded batches run in sequence; otherwise one
+                            # wave as before. No-op (single wave) when off / small.
+                            _batches = turn_hooks.fanout_batches(list(llm_msg.tool_calls))
+                            if _batches:
+                                logger.info("fanout chat=%s calls=%d batches=%d",
+                                            chat_id, len(llm_msg.tool_calls), len(_batches))
+                                for _batch in _batches:
+                                    tool_results.extend(await self.execute_parallel_tools(
+                                        websocket, _batch, tool_to_agent, chat_id,
+                                        user_id=user_id, tool_to_unqualified=tool_to_unqualified))
+                            else:
+                                res_list = await self.execute_parallel_tools(websocket, llm_msg.tool_calls, tool_to_agent, chat_id, user_id=user_id, tool_to_unqualified=tool_to_unqualified)
+                                tool_results.extend(res_list)
 
                     # 033 — flow budget (C-S1), plan-deviation (C-S12), and the
                     # success trace for skill induction (C-N10). No-op when off.
@@ -3826,16 +3960,22 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                             user_request=message,
                         )
                         if chat_id:
-                            self.history.add_message(chat_id, "assistant", tool_ui_components, user_id=user_id)
+                            await asyncio.to_thread(
+                                self.history.add_message, chat_id, "assistant",
+                                tool_ui_components, user_id=user_id)
                             if ws_ops:
                                 # FR-030: capture the workspace state this turn produced.
-                                try:
-                                    self.workspace.snapshot(
-                                        chat_id, user_id, cause="turn",
-                                        turn_message_id=self.history.get_latest_message_id(chat_id, user_id=user_id),
-                                    )
-                                except Exception:
-                                    logger.debug("workspace snapshot failed (tool turn)", exc_info=True)
+                                def _snapshot_tool_turn():
+                                    """Persist the turn's workspace snapshot off the event loop."""
+                                    try:
+                                        self.workspace.snapshot(
+                                            chat_id, user_id, cause="turn",
+                                            turn_message_id=self.history.get_latest_message_id(chat_id, user_id=user_id),
+                                        )
+                                    except Exception:
+                                        logger.debug("workspace snapshot failed (tool turn)", exc_info=True)
+
+                                await asyncio.to_thread(_snapshot_tool_turn)
 
                     # Append tool outputs to LLM conversation history. The
                     # LLM-visible text is the two-tier digest (a tool's
@@ -3913,7 +4053,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     # the tool the model wanted (DSML / OpenAI-leak / Qwen /
                     # Mistral / etc.) and surface a friendly disabled-tool
                     # alert. See Orchestrator._diagnose_leaked_tool_calls.
-                    leak_alerts = self._diagnose_leaked_tool_calls(raw_content, user_id, chat_id)
+                    leak_alerts = await asyncio.to_thread(
+                        self._diagnose_leaked_tool_calls, raw_content, user_id, chat_id)
                     content = _sanitize_text_response(raw_content)
                     if content != raw_content.strip():
                         logger.warning(
@@ -4066,6 +4207,12 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     
                     logger.info("LLM provided final response. conversation complete.")
 
+                    # Manual span (no reindent of the delivery block): closed
+                    # after the turn's transcript write below; an exception
+                    # skips the perf line but changes nothing else.
+                    _narrative_span = perf_span("turn.narrative", chat=chat_id)
+                    _narrative_span.__enter__()
+
                     final_ops = []
                     if parsed_components:
                         if self._is_text_only_components(parsed_components):
@@ -4137,18 +4284,26 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                             response_components = [narrative_doc] + response_components
 
                     # Save complete interaction to history
-                    self.history.add_message(chat_id, "assistant", response_components, user_id=user_id)
+                    await asyncio.to_thread(
+                        self.history.add_message, chat_id, "assistant",
+                        response_components, user_id=user_id)
 
                     # Feature 028 (FR-030): close the turn with a workspace
                     # snapshot when this turn changed the workspace.
                     if final_ops and chat_id:
-                        try:
-                            self.workspace.snapshot(
-                                chat_id, user_id, cause="turn",
-                                turn_message_id=self.history.get_latest_message_id(chat_id, user_id=user_id),
-                            )
-                        except Exception:
-                            logger.debug("workspace snapshot failed (final turn)", exc_info=True)
+                        def _snapshot_final_turn():
+                            """Persist the final-turn workspace snapshot off the event loop."""
+                            try:
+                                self.workspace.snapshot(
+                                    chat_id, user_id, cause="turn",
+                                    turn_message_id=self.history.get_latest_message_id(chat_id, user_id=user_id),
+                                )
+                            except Exception:
+                                logger.debug("workspace snapshot failed (final turn)", exc_info=True)
+
+                        await asyncio.to_thread(_snapshot_final_turn)
+
+                    _narrative_span.__exit__(None, None, None)
 
                     # Signal that processing is complete
                     await self._safe_send(websocket, json.dumps({
@@ -4176,7 +4331,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     # components those tools just delivered.
                     await self.send_ui_render(websocket, summary_components, target="chat")
                     if chat_id:
-                        self.history.add_message(chat_id, "assistant", summary_components, user_id=user_id)
+                        await asyncio.to_thread(
+                            self.history.add_message, chat_id, "assistant",
+                            summary_components, user_id=user_id)
                 else:
                     # Fallback if LLM summary fails — descriptive, not boilerplate.
                     await self.send_ui_render(websocket, [
@@ -4253,6 +4410,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     Alert(message=error_text, variant="error", title="Error").to_dict()
                 ])
         finally:
+            _perm_memo.__exit__(None, None, None)
             heartbeat_task.cancel()
 
     def _accumulate_usage(self, chat_id: Optional[str], usage):
@@ -4342,8 +4500,20 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
     async def _call_llm(self, websocket, messages, tools_desc=None, temperature=None,
                         feature: str = "tool_dispatch", response_format=None,
-                        reasoning_effort=None):
+                        reasoning_effort=None, allow_stream: bool = False,
+                        stream_chat_id: Optional[str] = None):
         """Helper to call LLM with retries and exponential backoff.
+
+        Feature 052 (FR-015): when the caller opts in — ``allow_stream=True``
+        or an active ``_NARRATIVE_STREAM_CHAT`` context (how the chat loop's
+        route call opts in without changing this signature) — and
+        ``FF_LLM_STREAMING`` is on (default), the call runs with
+        ``stream=True`` — chunks buffer until the first discriminating delta;
+        a prose narrative streams to ``websocket`` as ``ui_stream_data``
+        frames scoped to ``stream_chat_id``, a tool-call round emits no
+        frames, and any streaming error silently retries non-streaming
+        (contracts/narrative-streaming.md). The returned ``(message, usage)``
+        is equivalent to the non-streamed shape either way.
 
         Only retries on transient errors (502, 503, 504). Fails fast on
         non-transient errors like 424 (model not found) or 401 (auth).
@@ -4427,6 +4597,11 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             except Exception:
                 logger.debug("model_router: selection failed — using default model",
                              exc_info=True)
+        if not allow_stream and _NARRATIVE_STREAM_CHAT.get() is not None:
+            allow_stream = True
+            stream_chat_id = _NARRATIVE_STREAM_CHAT.get()
+        stream_allowed = (allow_stream and websocket is not None
+                          and self._llm_streaming_enabled())
         attempt = 0
         while attempt < self.MAX_RETRIES:
             attempt += 1
@@ -4442,10 +4617,21 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     kwargs["temperature"] = temperature
                 kwargs.update(extra_kwargs)
 
-                response = await asyncio.to_thread(
-                    client.chat.completions.create,
-                    **kwargs
-                )
+                response = None
+                if stream_allowed:
+                    try:
+                        response = await self._call_llm_streamed(
+                            websocket, client, kwargs, stream_chat_id)
+                    except Exception as _stream_exc:
+                        logger.warning(
+                            "LLM streaming failed (%s) — falling back to "
+                            "non-streaming for this call", _stream_exc)
+                        stream_allowed = False
+                if response is None:
+                    response = await asyncio.to_thread(
+                        client.chat.completions.create,
+                        **kwargs
+                    )
                 # Defensive: some upstream proxies return a 200 status with
                 # an HTML maintenance page body (e.g. an Apache 503/502 from
                 # an in-front load balancer that swallowed the upstream
@@ -4592,6 +4778,196 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 await asyncio.sleep(backoff)
         # Defensive: should be unreachable since the MAX_RETRIES branch raises.
         return None, None
+
+    @staticmethod
+    def _llm_streaming_enabled() -> bool:
+        """FF_LLM_STREAMING kill switch (default on), env-read per call so
+        operators and tests can flip it without a restart."""
+        return os.getenv("FF_LLM_STREAMING", "true").lower() in ("true", "1", "yes")
+
+    async def _call_llm_streamed(self, websocket, client, kwargs, chat_id):
+        """One ``stream=True`` completion with buffer-until-discriminate delivery.
+
+        Runs the provider's sync stream in a worker thread, marshaling chunks
+        onto the event loop. The first meaningful delta decides the mode:
+        ``tool_calls`` ⇒ consume silently and return a normal tool-call
+        response (no UI frames); ``content`` ⇒ progressively emit the
+        narrative as ``ui_stream_data`` frames scoped to ``chat_id``
+        (JSON/fence-shaped output stays silent — it is a component payload the
+        final render must deliver whole). Returns a response object shaped
+        like the non-streamed one; any failure propagates so the caller
+        retries the call non-streaming (contracts/narrative-streaming.md).
+        """
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+
+        def _pump():
+            """Iterate the sync provider stream and feed chunks to the loop."""
+            try:
+                for chunk in client.chat.completions.create(stream=True, **kwargs):
+                    loop.call_soon_threadsafe(queue.put_nowait, ("chunk", chunk))
+                loop.call_soon_threadsafe(queue.put_nowait, ("done", None))
+            except Exception as exc:
+                loop.call_soon_threadsafe(queue.put_nowait, ("error", exc))
+
+        pump_task = asyncio.create_task(asyncio.to_thread(_pump))
+        content_parts: List[str] = []
+        tool_calls_acc: Dict[int, Dict[str, Any]] = {}
+        usage = None
+        finish_reason = None
+        mode = None
+        stream_id = "narrative-" + _uuid.uuid4().hex[:12]
+        seq = 0
+        emitted = False
+        last_emit = 0.0
+        try:
+            while True:
+                kind, payload = await queue.get()
+                if kind == "done":
+                    break
+                if kind == "error":
+                    raise payload
+                chunk = payload
+                if getattr(chunk, "usage", None) is not None:
+                    usage = chunk.usage
+                choices = getattr(chunk, "choices", None) or []
+                if not choices:
+                    continue
+                choice = choices[0]
+                if getattr(choice, "finish_reason", None):
+                    finish_reason = choice.finish_reason
+                delta = getattr(choice, "delta", None)
+                if delta is None:
+                    continue
+                if getattr(delta, "tool_calls", None):
+                    if mode is None:
+                        mode = "tool"
+                    for tc in delta.tool_calls:
+                        idx = getattr(tc, "index", 0) or 0
+                        acc = tool_calls_acc.setdefault(
+                            idx, {"id": None, "name": "", "arguments": ""})
+                        if getattr(tc, "id", None):
+                            acc["id"] = tc.id
+                        fn = getattr(tc, "function", None)
+                        if fn is not None:
+                            if getattr(fn, "name", None):
+                                acc["name"] += fn.name
+                            if getattr(fn, "arguments", None):
+                                acc["arguments"] += fn.arguments
+                d_content = getattr(delta, "content", None)
+                if d_content:
+                    content_parts.append(d_content)
+                    if mode is None:
+                        head = "".join(content_parts).lstrip()
+                        if head:
+                            mode = "silent" if head[0] in "{[`" else "content"
+                    if mode == "content" and (
+                            not emitted or time.monotonic() - last_emit >= 0.15):
+                        await self._emit_narrative_frame(
+                            websocket, chat_id, stream_id, seq,
+                            "".join(content_parts), terminal=False)
+                        seq += 1
+                        emitted = True
+                        last_emit = time.monotonic()
+            if emitted:
+                await self._emit_narrative_frame(
+                    websocket, chat_id, stream_id, seq, "", terminal=True)
+        except Exception:
+            # Clear any partial streamed text so the non-streaming retry's
+            # final render is not visually duplicated; then let the caller
+            # fall back.
+            if emitted:
+                try:
+                    await self._emit_narrative_frame(
+                        websocket, chat_id, stream_id, seq, "", terminal=True)
+                except Exception:
+                    logger.debug("narrative stream cleanup failed", exc_info=True)
+            raise
+        await pump_task
+        message = self._assemble_streamed_message(
+            "".join(content_parts), tool_calls_acc)
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=message, finish_reason=finish_reason)],
+            usage=usage,
+        )
+
+    @staticmethod
+    def _assemble_streamed_message(content: str, tool_calls_acc: Dict[int, Dict[str, Any]]):
+        """Reconstruct a non-streamed-equivalent completion message from
+        accumulated deltas.
+
+        Prefers the real OpenAI model types so a tool-round message can be
+        appended back into ``messages`` and serialized on the next API call;
+        falls back to attribute-compatible namespaces when unavailable.
+        """
+        from types import SimpleNamespace
+        tool_calls = None
+        if tool_calls_acc:
+            ordered = [acc for _idx, acc in sorted(tool_calls_acc.items())]
+            try:
+                from openai.types.chat.chat_completion_message_tool_call import (
+                    ChatCompletionMessageToolCall, Function)
+                tool_calls = [
+                    ChatCompletionMessageToolCall(
+                        id=acc["id"] or f"call_{i}", type="function",
+                        function=Function(name=acc["name"], arguments=acc["arguments"]))
+                    for i, acc in enumerate(ordered)
+                ]
+            except Exception:
+                tool_calls = [
+                    SimpleNamespace(
+                        id=acc["id"] or f"call_{i}", type="function",
+                        function=SimpleNamespace(name=acc["name"],
+                                                 arguments=acc["arguments"]))
+                    for i, acc in enumerate(ordered)
+                ]
+        try:
+            from openai.types.chat import ChatCompletionMessage
+            return ChatCompletionMessage(
+                role="assistant", content=content or None, tool_calls=tool_calls)
+        except Exception:
+            return SimpleNamespace(role="assistant", content=content,
+                                   tool_calls=tool_calls)
+
+    async def _emit_narrative_frame(self, websocket, chat_id, stream_id, seq,
+                                    text, *, terminal):
+        """Send one narrative ``ui_stream_data`` frame (existing wire shape).
+
+        Dual shape per 026 FR-018: structured component for native clients
+        plus a web HTML fragment when renderable. The terminal frame carries
+        empty content so every client clears the stream node — the turn's
+        final ``ui_render`` is the authoritative replacement.
+        """
+        if text:
+            component = Text(content=text, variant="markdown").to_dict()
+        else:
+            component = {"type": "text", "content": ""}
+        components = [component]
+        html = "" if terminal else None
+        if not terminal:
+            try:
+                profile = self.rote.get_profile(websocket)
+                adapted = self.rote.adapt(websocket, [component])
+                if adapted:
+                    components = adapted
+                from webrender import render_component_fragment
+                html = render_component_fragment(
+                    components[0] if components else component, profile)
+            except Exception:
+                logger.debug("narrative frame render failed (structured only)",
+                             exc_info=True)
+        await self._safe_send(websocket, json.dumps({
+            "type": "ui_stream_data",
+            "stream_id": stream_id,
+            "session_id": chat_id,
+            "seq": seq,
+            "components": components,
+            "html": html,
+            "raw": None,
+            "terminal": terminal,
+            "error": None,
+        }))
 
     _REASONING_EFFORTS = ("minimal", "low", "medium", "high")
 
@@ -5256,7 +5632,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             )
 
         # Permission enforcement gate (RFC 8693 delegation)
-        if user_id and agent_id and not self.tool_permissions.is_tool_allowed(user_id, agent_id, tool_name):
+        if user_id and agent_id and not await asyncio.to_thread(
+                self.tool_permissions.is_tool_allowed, user_id, agent_id, tool_name):
             err_msg = f"Tool '{tool_name}' is restricted for this agent. Update permissions in the sidebar to enable it."
             logger.warning(f"Permission denied: user={user_id} agent={agent_id} tool={tool_name}")
             alert = Alert(message=err_msg, variant="warning")
@@ -5376,7 +5753,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
         # Map file paths if chat_id provided
         if chat_id:
-            args = self._map_file_paths(chat_id, args, user_id=user_id)
+            args = await asyncio.to_thread(
+                self._map_file_paths, chat_id, args, user_id=user_id)
             args["session_id"] = chat_id
             if user_id:
                 args["user_id"] = user_id
@@ -5419,7 +5797,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         if not agent_id and tool_name:
             owner = self._find_tool_owner(tool_name)
             if owner is not None:
-                diag = self._diagnose_disabled_tool(tool_name, user_id, chat_id)
+                diag = await asyncio.to_thread(
+                    self._diagnose_disabled_tool, tool_name, user_id, chat_id)
                 alert = self._alert_for_disabled_tool(diag, tool_name)
                 logger.info(
                     "Dispatch blocked by disabled-tool gate: tool=%s owner=%s status=%s user=%s chat=%s",
@@ -5716,7 +6095,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 continue
 
             if chat_id:
-                args = self._map_file_paths(chat_id, args, user_id=user_id)
+                args = await asyncio.to_thread(
+                    self._map_file_paths, chat_id, args, user_id=user_id)
                 args["session_id"] = chat_id
                 if user_id:
                     args["user_id"] = user_id
@@ -5752,7 +6132,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 continue
 
             # Permission check
-            if user_id and agent_id and not self.tool_permissions.is_tool_allowed(user_id, agent_id, tool_name):
+            if user_id and agent_id and not await asyncio.to_thread(
+                    self.tool_permissions.is_tool_allowed, user_id, agent_id, tool_name):
                 err_msg = f"Tool '{tool_name}' is restricted for this agent. Update permissions in the sidebar to enable it."
                 logger.warning(f"Permission denied (parallel): user={user_id} agent={agent_id} tool={tool_name}")
                 async def _perm_err(msg=err_msg):
@@ -6279,18 +6660,21 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
             # Build the effective scope: only tools that pass BOTH checks
             agent_flags = self.security_flags.get(agent_id, {})
-            allowed_tools = []
-            for skill in card.skills:
-                # Exclude system-blocked
-                if skill.id in agent_flags and agent_flags[skill.id].get("blocked"):
-                    continue
-                # Exclude user-disabled
-                if not self.tool_permissions.is_tool_allowed(user_id, agent_id, skill.id):
-                    continue
-                allowed_tools.append(skill.id)
 
-            # Get enabled scope names for the delegation token
-            enabled_scopes = self.tool_permissions.get_enabled_scope_names(user_id, agent_id)
+            def _scope_reads():
+                """Per-skill permission reads + scope names off the event loop."""
+                allowed = []
+                for skill in card.skills:
+                    # Exclude system-blocked
+                    if skill.id in agent_flags and agent_flags[skill.id].get("blocked"):
+                        continue
+                    # Exclude user-disabled
+                    if not self.tool_permissions.is_tool_allowed(user_id, agent_id, skill.id):
+                        continue
+                    allowed.append(skill.id)
+                return allowed, self.tool_permissions.get_enabled_scope_names(user_id, agent_id)
+
+            allowed_tools, enabled_scopes = await asyncio.to_thread(_scope_reads)
 
             result = await self.delegation.exchange_token_for_agent(
                 raw_token, agent_id, allowed_tools, user_id, enabled_scopes
@@ -6487,7 +6871,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             return
 
         # Permission check (mirrors legacy poll path)
-        if not self.tool_permissions.is_tool_allowed(user_id, agent_id, tool_name):
+        if not await asyncio.to_thread(
+                self.tool_permissions.is_tool_allowed, user_id, agent_id, tool_name):
             await self._safe_send(websocket, json.dumps({
                 "type": "stream_error",
                 "request_action": "stream_subscribe",
@@ -6597,7 +6982,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
         # Permission check
         user_id = self._get_user_id(websocket)
-        if not self.tool_permissions.is_tool_allowed(user_id, agent_id, tool_name):
+        if not await asyncio.to_thread(
+                self.tool_permissions.is_tool_allowed, user_id, agent_id, tool_name):
             await self._safe_send(websocket, json.dumps({
                 "type": "stream_error", "tool_name": tool_name,
                 "error": "Permission denied for this tool"
@@ -6683,7 +7069,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     break
 
                 # Re-check permission each iteration (user may revoke mid-stream)
-                if not self.tool_permissions.is_tool_allowed(user_id, agent_id, tool_name):
+                if not await asyncio.to_thread(
+                        self.tool_permissions.is_tool_allowed, user_id, agent_id, tool_name):
                     await self._safe_send(websocket, json.dumps({
                         "type": "stream_error", "tool_name": tool_name,
                         "error": "Permission revoked"
@@ -6780,7 +7167,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
         tasks = []
         for uid, clients in clients_by_user.items():
-            history_list = self.history.get_recent_chats(user_id=uid)
+            history_list = await asyncio.to_thread(
+                self.history.get_recent_chats, user_id=uid)
             msg = json.dumps({"type": "history_list", "chats": history_list})
             for c in clients:
                 tasks.append(self._safe_send(c, msg))
@@ -6878,7 +7266,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         """Full-canvas ui_render (materialized arrangements) to every socket of
         the user on this chat — the same fan-out + per-socket ROTE adaptation
         the legacy reconciliation path uses."""
-        components = self._canvas_components(chat_id, user_id)
+        components = await asyncio.to_thread(self._canvas_components, chat_id, user_id)
         targets = [
             ws for ws in self.ui_clients
             if self._get_user_id(ws) == user_id
@@ -6893,12 +7281,14 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                                         user_id: str, *, user_request: str = "") -> List[Dict]:
         """Feature 029: deliver one round's rich components to the canvas.
 
-        Rounds with ≥2 components (flag-gated) get the adaptive designer pass:
-        components persist first (identities assigned by the unchanged 028
-        upsert), one LLM call arranges them (reference leaves + garnish), the
-        arrangement persists, and the full designed canvas fans out. EVERY
-        failure mode falls back to the legacy flat append — same persistence,
-        same ``ui_upsert`` delivery, no user-visible error (FR-022).
+        Feature 052 (FR-013) delivery order — upsert FIRST: components persist
+        (identities assigned by the unchanged 028 upsert) and the flat
+        ``ui_upsert`` goes out immediately, exactly like the native branch;
+        THEN rounds with ≥2 components (flag-gated) get the adaptive designer
+        pass, whose designed canvas lands as a later in-place refinement
+        (morph anchors preserve identity). ANY designer failure simply means
+        the refinement never arrives — the already-delivered flat components
+        are the legacy fallback rendering, no user-visible error (FR-022).
         """
         from orchestrator import ui_designer
         from orchestrator.workspace import layout_key_for
@@ -6919,14 +7309,19 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         if not chat_id or not ui_designer.should_design(components, timeline_mode=timeline):
             return await self._send_or_replace_components(websocket, components, chat_id, user_id)
         try:
-            ops = self.workspace.upsert(chat_id, user_id, components)
+            ops = await asyncio.to_thread(self.workspace.upsert, chat_id, user_id, components)
         except Exception:
             logger.exception("workspace upsert failed — falling back to transient render")
             await self.send_ui_render(websocket, components)
             return []
+        # Feature 052 (FR-013): upsert-first — the flat components reach the
+        # user immediately (exactly the native-branch delivery); the designed
+        # arrangement below arrives as a later in-place refinement.
+        await self.send_ui_upsert(websocket, chat_id, user_id, ops)
         layout = None
         try:
-            turn_marker = str(self.history.get_latest_message_id(chat_id, user_id=user_id) or "")
+            turn_marker = str(await asyncio.to_thread(
+                self.history.get_latest_message_id, chat_id, user_id=user_id) or "")
             layout_key = layout_key_for(chat_id, turn_marker)
 
             _designer_pass = {"n": 0}
@@ -6957,35 +7352,46 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             # lets the designer avoid re-arranging it for a marginal gain.
             _current_layout = None
             try:
-                for _lay in self.workspace.live_layouts(chat_id, user_id):
+                for _lay in await asyncio.to_thread(
+                        self.workspace.live_layouts, chat_id, user_id):
                     if _lay.get("layout_key") == layout_key:
                         _current_layout = _lay.get("layout")
                         break
             except Exception:
                 _current_layout = None
-            layout = await ui_designer.design_round(
-                user_request=user_request,
-                round_components=components,
-                canvas_rows=self.workspace.live_rows(chat_id, user_id),
-                chat_id=chat_id,
-                layout_key=layout_key,
-                allowed_types=set(allowed_primitive_types()),
-                llm_call=_designer_llm,
-                current_layout=_current_layout,
-            )
+            canvas_rows = await asyncio.to_thread(
+                self.workspace.live_rows, chat_id, user_id)
+            with perf_span("turn.designer", chat=chat_id):
+                layout = await ui_designer.design_round(
+                    user_request=user_request,
+                    round_components=components,
+                    canvas_rows=canvas_rows,
+                    chat_id=chat_id,
+                    layout_key=layout_key,
+                    allowed_types=set(allowed_primitive_types()),
+                    llm_call=_designer_llm,
+                    current_layout=_current_layout,
+                )
         except Exception:
-            logger.exception("ui_designer crashed — falling back to flat append")
+            logger.exception("ui_designer crashed — flat ui_upsert already delivered")
             layout = None
-        delivered_designed = False
         if layout:
             try:
-                self.workspace.upsert_layout(chat_id, user_id, layout_key, layout)
-                await self._push_canvas(chat_id, user_id, originating_ws=websocket)
-                delivered_designed = True
+                await asyncio.to_thread(
+                    self.workspace.upsert_layout, chat_id, user_id, layout_key, layout)
+                # Stale-chat guard (FR-013): the designed refinement is only
+                # forced to the originating socket while it still views this
+                # chat; other sockets are chat-filtered inside _push_canvas.
+                if self._ws_active_chat.get(id(websocket)) == chat_id:
+                    await self._push_canvas(chat_id, user_id, originating_ws=websocket)
+                else:
+                    logger.info(
+                        "ui_designer: originating socket left chat %s — "
+                        "designed render not forced to it", chat_id)
+                    await self._push_canvas(chat_id, user_id, originating_ws=None)
             except Exception:
-                logger.exception("designed canvas delivery failed — falling back to ui_upsert")
-        if not delivered_designed:
-            await self.send_ui_upsert(websocket, chat_id, user_id, ops)
+                logger.exception(
+                    "designed canvas delivery failed — flat ui_upsert already delivered")
         # Audit the mutation (FR-023) — identical to the flat path.
         try:
             from audit.hooks import record_workspace_event
@@ -7016,8 +7422,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             await self.send_ui_render(websocket, components)
             return []
         try:
-            ops = self.workspace.upsert(chat_id, user_id, components,
-                                        force_component_id=force_component_id)
+            ops = await asyncio.to_thread(
+                self.workspace.upsert, chat_id, user_id, components,
+                force_component_id=force_component_id)
         except Exception:
             logger.exception("workspace upsert failed — falling back to transient render")
             await self.send_ui_render(websocket, components)
@@ -7115,7 +7522,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             ], target="chat")
             return
         agent_id, tool_name = remap_merged_source(agent_id, tool_name)
-        allowed, deny_reason = self._component_action_allowed(user_id, agent_id, tool_name)
+        allowed, deny_reason = await asyncio.to_thread(
+            self._component_action_allowed, user_id, agent_id, tool_name)
         if not allowed:
             await self._audit_workspace_denial(user_id, chat_id, component_id, deny_reason)
             await self.send_ui_render(websocket, [
@@ -7179,21 +7587,25 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         if not chat_id:
             return
         try:
-            now_ms = int(time.time() * 1000)
-            for row in self.workspace.live_rows(chat_id, user_id):
-                if row.get("component_id"):
-                    continue
-                data = row.get("component_data")
-                if not isinstance(data, dict):
-                    continue
-                cid = self.workspace.resolve_identity(data)
-                self.history.db.execute(
-                    "UPDATE saved_components SET component_id = ?, component_data = ?, updated_at = ? "
-                    "WHERE id = ? AND user_id = ?",
-                    (cid, json.dumps(data), now_ms, row["id"], user_id),
-                )
-            self.workspace.snapshot(chat_id, user_id, cause=cause)
-            ws_components = self._canvas_components(chat_id, user_id)
+            def _stamp_and_snapshot():
+                """Stamp identities, snapshot, and materialize off the event loop."""
+                now_ms = int(time.time() * 1000)
+                for row in self.workspace.live_rows(chat_id, user_id):
+                    if row.get("component_id"):
+                        continue
+                    data = row.get("component_data")
+                    if not isinstance(data, dict):
+                        continue
+                    cid = self.workspace.resolve_identity(data)
+                    self.history.db.execute(
+                        "UPDATE saved_components SET component_id = ?, component_data = ?, updated_at = ? "
+                        "WHERE id = ? AND user_id = ?",
+                        (cid, json.dumps(data), now_ms, row["id"], user_id),
+                    )
+                self.workspace.snapshot(chat_id, user_id, cause=cause)
+                return self._canvas_components(chat_id, user_id)
+
+            ws_components = await asyncio.to_thread(_stamp_and_snapshot)
             # FR-040: the replacement is a workspace change — every socket of
             # this user on this chat gets the re-render, not just the
             # originator (REST-initiated calls pass websocket=None).
@@ -7463,7 +7875,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             chat_core = [Text(content=f"✓ {note}").to_dict()]
 
         try:
-            self.history.add_message(cid, "assistant", chat_core, user_id=uid)
+            await asyncio.to_thread(
+                self.history.add_message, cid, "assistant", chat_core, user_id=uid)
         except Exception:
             logger.debug("job narration persist failed", exc_info=True)
         for ws in self._sockets_on_chat(uid, cid):
@@ -7576,7 +7989,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         Server-side OIDC session (or 'dev-token' under mock auth)."""
         try:
             from orchestrator.web_auth import session_token
-            return session_token(request)
+            return await asyncio.to_thread(session_token, request)
         except Exception:
             logger.debug("web_auth: session_token unavailable", exc_info=True)
             return ""
@@ -7643,9 +8056,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 return True
         return False
 
-    async def send_dashboard(self, websocket):
-        """Send the initial dashboard view."""
-        user_id = self._get_user_id(websocket)
+    def _build_dashboard_agent_list(self, user_id: str) -> List[Dict[str, Any]]:
+        """Assemble the per-user dashboard agent entries (sync DB reads —
+        callers on the event loop run this via ``asyncio.to_thread``)."""
         ownership_map = {o["agent_id"]: o for o in self.history.db.get_all_agent_ownership()}
         agent_list = []
         for agent_id, card in self.agent_cards.items():
@@ -7676,6 +8089,12 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             if getattr(card, 'metadata', None):
                 entry["metadata"] = card.metadata
             agent_list.append(entry)
+        return agent_list
+
+    async def send_dashboard(self, websocket):
+        """Send the initial dashboard view."""
+        user_id = self._get_user_id(websocket)
+        agent_list = await asyncio.to_thread(self._build_dashboard_agent_list, user_id)
 
         # Calculate total available tools for this user based on permissions
         total_tools = 0
@@ -7921,35 +8340,41 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
     async def send_agent_list(self, websocket):
         """Send list of connected agents."""
         user_id = self._get_user_id(websocket)
-        ownership_map = {o["agent_id"]: o for o in self.history.db.get_all_agent_ownership()}
-        agents = []
-        for agent_id, card in self.agent_cards.items():
-            # Hide draft agents that aren't live yet
-            if self._is_draft_agent(agent_id):
-                continue
-            available_tools = [s.id for s in card.skills]
-            scopes = self.tool_permissions.get_agent_scopes(user_id, agent_id)
-            tool_scope_map = self.tool_permissions.get_tool_scope_map(agent_id)
-            permissions = self.tool_permissions.get_effective_permissions(
-                user_id, agent_id, available_tools
-            )
-            ownership = ownership_map.get(agent_id, {})
-            entry = {
-                "id": card.agent_id,
-                "name": card.name,
-                "description": card.description,
-                "tools": [{"name": s.id, "description": s.description} for s in card.skills],
-                "scopes": scopes,
-                "tool_scope_map": tool_scope_map,
-                "permissions": permissions,
-                "security_flags": self.security_flags.get(agent_id, {}),
-                "status": "connected",
-                "owner_email": ownership.get("owner_email"),
-                "is_public": bool(ownership.get("is_public", False)),
-            }
-            if getattr(card, 'metadata', None):
-                entry["metadata"] = card.metadata
-            agents.append(entry)
+
+        def _build_agent_list():
+            """Assemble the per-user agent entries off the event loop."""
+            ownership_map = {o["agent_id"]: o for o in self.history.db.get_all_agent_ownership()}
+            agents = []
+            for agent_id, card in self.agent_cards.items():
+                # Hide draft agents that aren't live yet
+                if self._is_draft_agent(agent_id):
+                    continue
+                available_tools = [s.id for s in card.skills]
+                scopes = self.tool_permissions.get_agent_scopes(user_id, agent_id)
+                tool_scope_map = self.tool_permissions.get_tool_scope_map(agent_id)
+                permissions = self.tool_permissions.get_effective_permissions(
+                    user_id, agent_id, available_tools
+                )
+                ownership = ownership_map.get(agent_id, {})
+                entry = {
+                    "id": card.agent_id,
+                    "name": card.name,
+                    "description": card.description,
+                    "tools": [{"name": s.id, "description": s.description} for s in card.skills],
+                    "scopes": scopes,
+                    "tool_scope_map": tool_scope_map,
+                    "permissions": permissions,
+                    "security_flags": self.security_flags.get(agent_id, {}),
+                    "status": "connected",
+                    "owner_email": ownership.get("owner_email"),
+                    "is_public": bool(ownership.get("is_public", False)),
+                }
+                if getattr(card, 'metadata', None):
+                    entry["metadata"] = card.metadata
+                agents.append(entry)
+            return agents
+
+        agents = await asyncio.to_thread(_build_agent_list)
 
         # Feature 008-llm-text-only-chat (FR-007a, contracts/ws-agent-list.md).
         # Broadcast a single boolean for this user that collapses the
@@ -7957,7 +8382,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # agents connected, all tools blocked by user permissions, all
         # blocked by security flags). The frontend uses this to toggle
         # the persistent text-only banner.
-        tools_available_for_user = self.compute_tools_available_for_user(user_id)
+        tools_available_for_user = await asyncio.to_thread(
+            self.compute_tools_available_for_user, user_id)
 
         await self._safe_send(websocket, json.dumps({
             "type": "agent_list",
@@ -8123,6 +8549,16 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
         asyncio.create_task(_revocation_queue_loop())
 
+        # Feature 052 (FR-011): warm the IdP signing keys at boot and keep
+        # them fresh in the background so interactive token validation never
+        # pays a cold JWKS fetch. Never blocks boot or /readyz.
+        asyncio.create_task(self._jwks_warm_loop())
+
+        # Feature 052 (FR-028): pre-load the PHI analyzer singleton in a
+        # daemon thread so the first personalization write doesn't stall on
+        # the 2-5 s Presidio+spaCy build. Readiness never waits on it.
+        self._start_phi_warm()
+
         # 030: purge permission rows leaked by drafts discarded before the
         # delete-time purge existed (run in a thread — pure DB/dir checks).
         try:
@@ -8205,7 +8641,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         async def _relaunch_generated_agents():
             await asyncio.sleep(5)  # let the static-fleet monitor settle first
             try:
-                rows = self.history.db.fetch_all(
+                rows = await self.history.db.afetch_all(
                     "SELECT id, agent_name FROM draft_agents WHERE status = 'live'")
             except Exception:
                 logger.exception("relaunch: could not list live generated agents")
@@ -8339,7 +8775,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             try:
                 from orchestrator.web_auth import shell_gate
                 from fastapi.responses import RedirectResponse as _Redirect
-                gate = shell_gate(request)
+                gate = await asyncio.to_thread(shell_gate, request)
                 if gate:
                     return _Redirect(gate, status_code=302)
             except Exception:
@@ -8366,7 +8802,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             try:
                 from orchestrator.web_auth import session_roles
                 from webrender.chrome import render_topbar
-                topbar = render_topbar(roles=session_roles(request))
+                topbar = render_topbar(roles=await asyncio.to_thread(session_roles, request))
             except Exception:
                 logger.exception("chrome: topbar render failed — serving bare shell")
             shell = shell.replace("%%ASTRAL_TOKEN%%", token or "")
@@ -8376,7 +8812,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             resumed_flag = "true"
             try:
                 from orchestrator.web_auth import session_resumed_flag
-                resumed_flag = "true" if session_resumed_flag(request) else "false"
+                resumed_flag = "true" if await asyncio.to_thread(session_resumed_flag, request) else "false"
             except Exception:
                 logger.debug("session_resumed_flag failed", exc_info=True)
             shell = shell.replace("%%ASTRAL_RESUMED%%", resumed_flag)
@@ -8390,13 +8826,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             except Exception:
                 logger.debug("attachment accept-list injection failed", exc_info=True)
             shell = shell.replace("%%ASTRAL_ACCEPT%%", accept_attr)
-            # Feature 040 fix: cache-bust the shell's static asset URLs by
-            # content hash so a rebuilt client.js/astral.css is fetched fresh
-            # (no manual hard refresh required).
-            shell = shell.replace(
-                "%%ASTRAL_ASSET_VER%%",
-                _static_asset_version(_os.path.join(_webrender_dir, "static")),
-            )
+            # Feature 052: per-file content-hash asset URLs — a changed file is
+            # fetched under a new URL, unchanged files stay immutable-cached.
+            shell = _apply_asset_versions(shell, _os.path.join(_webrender_dir, "static"))
             resp = _HTMLResponse(shell.replace("%%ASTRAL_TOPBAR%%", topbar))
             # The shell carries a per-session token and references versioned
             # assets — never cache it (security + always-fresh asset URLs).
@@ -8492,6 +8924,72 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         logger.info(f"API docs available at http://localhost:{PORT}/docs")
         logger.info(f"A2A endpoint: http://localhost:{PORT}/a2a/")
         await server.serve()
+
+    async def _jwks_warm_loop(self):
+        """Warm the Keycloak JWKS at boot, then refresh it in the background.
+
+        Feature 052 (FR-011): the first fetch removes the cold IdP round trip
+        from the interactive sign-in path; the periodic refetch (default 500 s,
+        inside the cache's 600 s TTL) keeps it warm. IdP failures log and back
+        off — boot, /readyz, and the fail-closed validation path are untouched
+        (a failed fetch never caches anything). Skipped cleanly under mock
+        auth or when no authority is configured.
+        """
+        from shared import jwks_cache
+        authority = (os.getenv("VITE_KEYCLOAK_AUTHORITY") or "").strip()
+        if not authority or os.getenv("VITE_USE_MOCK_AUTH", "").lower() == "true":
+            logger.info("jwks warm: skipped (mock auth or no authority configured)")
+            return
+        jwks_url = f"{authority.rstrip('/')}/protocol/openid-connect/certs"
+        interval = float(os.getenv("JWKS_REFRESH_SECONDS", "500"))
+        backoff = 5.0
+        warmed = False
+        while True:
+            try:
+                if warmed:
+                    # _fetch bypasses the TTL — get_jwks would no-op inside
+                    # its 600 s window and let the cache go cold at expiry.
+                    await jwks_cache._fetch(jwks_url)
+                else:
+                    with perf_span("boot.jwks_warm"):
+                        await jwks_cache.get_jwks(jwks_url)
+                    warmed = True
+                    logger.info("jwks warm: keys cached for %s", jwks_url)
+                backoff = 5.0
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("jwks warm/refresh failed (%s) — retrying in %.0fs",
+                               exc, backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 300.0)
+
+    def _start_phi_warm(self):
+        """Spawn a daemon thread that builds the PHI analyzer singleton.
+
+        Feature 052 (FR-028): the Presidio+spaCy load happens in the
+        background instead of stalling the first interactive use. Readiness
+        is independent; a first request racing the warm-up just blocks on the
+        singleton exactly as before. ``FF_PHI_WARM=false`` disables the
+        pre-warm (lazy first-use semantics are then unchanged).
+        """
+        if os.getenv("FF_PHI_WARM", "true").lower() not in ("true", "1", "yes"):
+            logger.info("phi warm: disabled via FF_PHI_WARM")
+            return
+
+        def _phi_warm_worker():
+            """Build the PHI gate singleton off the boot path."""
+            try:
+                from personalization.phi_gate import get_phi_gate
+                with perf_span("boot.phi_warm"):
+                    get_phi_gate()
+                logger.info("phi warm: analyzer ready")
+            except Exception:
+                logger.debug("phi warm-up failed (non-fatal)", exc_info=True)
+
+        import threading
+        threading.Thread(target=_phi_warm_worker, name="phi-warm", daemon=True).start()
 
     async def _monitor_agents(self, start_port: int, max_ports: int = 10):
         """Continuously monitor and discover agents across a range of ports."""

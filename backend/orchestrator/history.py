@@ -218,21 +218,26 @@ class HistoryManager:
         human text: component-list message content is flattened via
         _component_preview_text() instead of leaking its Python repr,
         and every preview is truncated to PREVIEW_MAX_CHARS.
+
+        Single round trip (feature 052): the last-message preview comes
+        from a correlated subquery and the saved-components flag from the
+        chats row itself, replacing the previous 1 + 2N per-chat lookups.
         """
         rows = self.db.fetch_all(
-            "SELECT * FROM chats WHERE user_id = ? AND id NOT LIKE 'draft-test-%' "
-            "AND EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = chats.id AND m.user_id = chats.user_id) "
+            "SELECT id, title, agent_id, updated_at, has_saved_components, "
+            "(SELECT m.content FROM messages m WHERE m.chat_id = chats.id "
+            "AND m.user_id = chats.user_id ORDER BY m.timestamp DESC LIMIT 1) AS last_content "
+            "FROM chats WHERE user_id = ? AND id NOT LIKE 'draft-test-%' "
+            "AND EXISTS (SELECT 1 FROM messages m2 WHERE m2.chat_id = chats.id AND m2.user_id = chats.user_id) "
             "ORDER BY updated_at DESC LIMIT ?",
             (user_id, limit),
         )
 
         results = []
         for row in rows:
-            # Get last message for preview
-            last_msg = self.db.fetch_one("SELECT content FROM messages WHERE chat_id = ? AND user_id = ? ORDER BY timestamp DESC LIMIT 1", (row['id'], user_id))
+            content = row.get("last_content")
             preview = ""
-            if last_msg:
-                content = last_msg['content']
+            if content is not None:
                 try:
                     content_obj = json.loads(content)
                 except Exception:
@@ -248,18 +253,15 @@ class HistoryManager:
                 if len(preview) > PREVIEW_MAX_CHARS:
                     preview = preview[:PREVIEW_MAX_CHARS] + "..."
 
-            # Check if chat has saved components
-            has_saved = self.chat_has_saved_components(row['id'], user_id)
-            
             results.append({
                 "id": row['id'],
                 "title": row['title'],
                 "agent_id": row.get("agent_id"),
                 "updated_at": row['updated_at'],
                 "preview": preview,
-                "has_saved_components": has_saved
+                "has_saved_components": bool(row.get("has_saved_components"))
             })
-            
+
         return results
     
     def delete_chat(self, chat_id: str, user_id: str = 'legacy'):

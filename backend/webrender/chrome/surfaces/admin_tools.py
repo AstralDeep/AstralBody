@@ -24,6 +24,7 @@ rejections) when the check fails.
 
 Escape-by-default: every dynamic interpolation goes through ``esc()``.
 """
+import asyncio
 import json
 import logging
 
@@ -108,9 +109,9 @@ async def render(orch, user_id, roles, params) -> str:
     if tab not in ("quality", "tutorial"):
         tab = "quality"
     if tab == "quality":
-        body = _render_quality(orch)
+        body = await asyncio.to_thread(_render_quality, orch)
     else:
-        body = _render_tutorial(orch, params)
+        body = await asyncio.to_thread(_render_tutorial, orch, params)
     return _tab_bar(tab) + body
 
 
@@ -643,7 +644,8 @@ async def handle_step_save(orch, websocket, user_id, roles, payload):
         except ValidationError as exc:
             return (SURFACE_KEY, err_params, notice_block("error", _validation_message(exc)))
         try:
-            dto = repo.create_step(
+            dto = await asyncio.to_thread(
+                repo.create_step,
                 editor_user_id=user_id,
                 slug=req.slug, audience=req.audience, display_order=req.display_order,
                 target_kind=req.target_kind, target_key=req.target_key,
@@ -668,7 +670,7 @@ async def handle_step_save(orch, websocket, user_id, roles, payload):
         AdminTutorialStepUpdateRequest(**patch)
     except ValidationError as exc:
         return (SURFACE_KEY, err_params, notice_block("error", _validation_message(exc)))
-    current = repo.get_step(step_id)
+    current = await asyncio.to_thread(repo.get_step, step_id)
     if current is None:
         return (SURFACE_KEY, {"tab": "tutorial"}, notice_block("error", "Step not found."))
     merged_kind = patch.get("target_kind", current.target_kind)
@@ -680,7 +682,8 @@ async def handle_step_save(orch, websocket, user_id, roles, payload):
         return (SURFACE_KEY, err_params, notice_block(
             "error", f"Target kind '{merged_kind}' requires a non-empty target key."))
     try:
-        dto, changed = repo.update_step(
+        dto, changed = await asyncio.to_thread(
+            repo.update_step,
             step_id=step_id, editor_user_id=user_id, partial=patch,
         )
     except StepNotFound:
@@ -713,9 +716,11 @@ async def _toggle_archive(orch, user_id, roles, payload, *, archive: bool):
                 notice_block("error", "Onboarding subsystem not initialized."))
     try:
         if archive:
-            dto = repo.archive_step(step_id=step_id, editor_user_id=user_id)
+            dto = await asyncio.to_thread(
+                repo.archive_step, step_id=step_id, editor_user_id=user_id)
         else:
-            dto = repo.restore_step(step_id=step_id, editor_user_id=user_id)
+            dto = await asyncio.to_thread(
+                repo.restore_step, step_id=step_id, editor_user_id=user_id)
     except StepNotFound:
         return (SURFACE_KEY, tparams, notice_block("error", "Step not found."))
     change_kind = "archive" if archive else "restore"

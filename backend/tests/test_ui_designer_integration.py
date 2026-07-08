@@ -155,19 +155,28 @@ def _design_json_for(fake, chat_id, user_id, comps):
 
 def test_designed_round_persists_layout_and_renders_canvas(chat_env, audit_events, monkeypatch):
     monkeypatch.delenv("FF_UI_DESIGNER", raising=False)
+    # A host .env can re-leak these after conftest's ambient strip (load_dotenv
+    # runs at orchestrator import); both change the deterministic pass count.
+    monkeypatch.delenv("FF_UI_DESIGNER_TASKMODEL", raising=False)
+    monkeypatch.delenv("UI_DESIGNER_MAX_ROUNDS", raising=False)
     history, user_id, chat_id = chat_env
     comps = [_comp("agent-x", "tool_a", {"p": 1}, title="A"),
              _comp("agent-y", "tool_b", {"q": 2}, title="B")]
     design, ids = _design_json_for(None, chat_id, user_id, comps)
     fake = _make_fake(history, user_id, llm_content=design)
     ws = _FakeWS("origin")
+    # 052 stale-chat guard: the designed render is only forced onto the
+    # originating socket while it still views this chat (production marks
+    # the active chat before every turn).
+    fake._ws_active_chat[id(ws)] = chat_id
 
     ops = _run(fake._deliver_round_components(ws, comps, chat_id, user_id,
                                               user_request="compare things"))
     assert [op["component_id"] for op in ops] == ids
-    # Every designer pass runs under the ui_designer audit feature. The stub
-    # regurgitates the same layout, so the multi-round loop deterministically
-    # converges at draft + one stable refinement = exactly 2 passes.
+    # Every designer pass runs under the ui_designer audit feature. With the
+    # default single round (052) that is one draft pass; with more rounds the
+    # stub regurgitates the same layout, deterministically converging at
+    # draft + one stable refinement = 2 passes.
     assert {c["feature"] for c in fake._llm_calls} == {"ui_designer"}
     assert len(fake._llm_calls) == min(2, ui_designer.designer_max_rounds())
     # Arrangement persisted with the deterministic round key.
@@ -176,7 +185,10 @@ def test_designed_round_persists_layout_and_renders_canvas(chat_env, audit_event
     expected_key = layout_key_for(
         chat_id, str(history.get_latest_message_id(chat_id, user_id=user_id)))
     assert live[0]["layout_key"] == expected_key
-    # Full designed canvas rendered to the originating socket (not ui_upsert).
+    # 052 upsert-first delivery: the flat components go out immediately, then
+    # the designed full canvas lands as the in-place refinement.
+    assert any(m.get("type") == "ui_upsert" for _, m in fake._sent), \
+        "flat ui_upsert must precede the design pass (FR-013)"
     assert len(fake._renders) == 1
     _, rendered, target = fake._renders[0]
     assert target == "canvas"
@@ -184,7 +196,6 @@ def test_designed_round_persists_layout_and_renders_canvas(chat_env, audit_event
     for cid in ids:
         assert cid in rendered_json, "every round component present in the designed render"
     assert rendered[0]["type"] == "metric", "garnish leads the arrangement"
-    assert not any(m.get("type") == "ui_upsert" for _, m in fake._sent)
     # Audit parity with the flat path.
     assert {e["action"] for e in audit_events} == {"component_added"}
 

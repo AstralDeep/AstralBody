@@ -80,6 +80,14 @@ android {
     }
 }
 
+composeCompiler {
+    // :core is pure Kotlin (no Compose dep), so its wire types are declared
+    // stable via this config instead of @Immutable annotations (feature 052).
+    stabilityConfigurationFiles.add(rootProject.layout.projectDirectory.file("compose_stability.conf"))
+    metricsDestination = layout.buildDirectory.dir("compose-metrics")
+    reportsDestination = layout.buildDirectory.dir("compose-reports")
+}
+
 dependencies {
     implementation(project(":core"))
 

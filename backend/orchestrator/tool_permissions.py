@@ -15,13 +15,40 @@ Persists to PostgreSQL via the agent_scopes table.
 
 Part of the RFC 8693 Delegated Authorization framework.
 """
+import contextvars
 import os
 import json
 import time
 import logging
+from contextlib import contextmanager
 from typing import Dict, List
 
 logger = logging.getLogger("ToolPermissions")
+
+_TURN_PERMISSION_MEMO: contextvars.ContextVar = contextvars.ContextVar(
+    "turn_permission_memo", default=None
+)
+
+
+@contextmanager
+def turn_permission_memo():
+    """Memoize is_tool_allowed decisions for the duration of one chat turn.
+
+    While active, :meth:`ToolPermissionManager.is_tool_allowed` caches its
+    final decision keyed ``(user_id, agent_id, tool_name, required_kind)``,
+    so a tool checked repeatedly within a single turn resolves against the
+    database once (feature 052, FR-019). The memo lives in a contextvar:
+    it propagates into ``asyncio`` tasks and ``asyncio.to_thread`` workers
+    spawned inside the block, and two concurrent turns can never observe
+    each other's decisions. There is no cross-turn reuse — the memo dies
+    with the block, so a revocation is visible on the next message. When
+    no memo is active, behavior is exactly the per-call resolution.
+    """
+    token = _TURN_PERMISSION_MEMO.set({})
+    try:
+        yield
+    finally:
+        _TURN_PERMISSION_MEMO.reset(token)
 
 # The canonical scopes aligned with the Keycloak astral-agent-service client.
 # "tools:files" (general agent's file/volume readers) was registered by tools
@@ -251,8 +278,25 @@ class ToolPermissionManager:
           2. Else, if a legacy tool-wide override row (permission_kind IS
              NULL) exists and is False, the tool is blocked.
           3. Else, fall back to the agent-wide scope (`agent_scopes`).
+
+        Inside an active :func:`turn_permission_memo` block, the final
+        decision is memoized per ``(user_id, agent_id, tool_name, kind)``
+        for the rest of the turn.
         """
         required_scope = self.get_tool_scope(agent_id, tool_name)
+        memo = _TURN_PERMISSION_MEMO.get()
+        key = (user_id, agent_id, tool_name, required_scope)
+        if memo is not None and key in memo:
+            return memo[key]
+        allowed = self._resolve_tool_allowed(user_id, agent_id, tool_name, required_scope)
+        if memo is not None:
+            memo[key] = allowed
+        return allowed
+
+    def _resolve_tool_allowed(
+        self, user_id: str, agent_id: str, tool_name: str, required_scope: str
+    ) -> bool:
+        """Resolve a tool decision against the database (unmemoized)."""
         # 1. Per-(tool, kind) row takes priority
         kind_row = self.db.fetch_one(
             """SELECT enabled FROM tool_overrides
@@ -386,25 +430,22 @@ class ToolPermissionManager:
         if not scope_map:
             return {}
         scope_state = self.get_agent_scopes(user_id, agent_id)
-        # Pull per-kind rows for this user/agent in one query
-        kind_rows = self.db.fetch_all(
+        # Pull per-kind AND legacy override rows in one query, split in Python.
+        override_rows = self.db.fetch_all(
             """SELECT tool_name, permission_kind, enabled FROM tool_overrides
-               WHERE user_id = ? AND agent_id = ? AND permission_kind IS NOT NULL""",
+               WHERE user_id = ? AND agent_id = ?""",
             (user_id, agent_id),
         )
         kind_lookup: Dict[str, Dict[str, bool]] = {}
-        for row in kind_rows:
-            kind_lookup.setdefault(row["tool_name"], {})[row["permission_kind"]] = bool(
-                row["enabled"]
-            )
-        legacy_rows = self.db.fetch_all(
-            """SELECT tool_name, enabled FROM tool_overrides
-               WHERE user_id = ? AND agent_id = ? AND permission_kind IS NULL""",
-            (user_id, agent_id),
-        )
-        legacy_disabled = {
-            row["tool_name"] for row in legacy_rows if not bool(row["enabled"])
-        }
+        legacy_disabled = set()
+        for row in override_rows:
+            if row["permission_kind"] is None:
+                if not bool(row["enabled"]):
+                    legacy_disabled.add(row["tool_name"])
+            else:
+                kind_lookup.setdefault(row["tool_name"], {})[row["permission_kind"]] = bool(
+                    row["enabled"]
+                )
         result: Dict[str, Dict[str, bool]] = {}
         for tool_name, required_scope in scope_map.items():
             if tool_name in legacy_disabled:

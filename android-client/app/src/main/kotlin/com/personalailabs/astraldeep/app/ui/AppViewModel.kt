@@ -1,6 +1,7 @@
 package com.personalailabs.astraldeep.app.ui
 
 import android.util.Log
+import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
@@ -37,6 +38,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
 
+@Immutable
 data class ChatTurn(val role: String, val text: String)
 
 /**
@@ -48,6 +50,7 @@ data class ChatTurn(val role: String, val text: String)
 enum class Screen { Chat, Agents, History, Audit, Surface }
 
 /** A paperclip-staged upload chip (feature 031). */
+@Immutable
 data class StagedAttachment(
     val uid: Long,
     val filename: String,
@@ -59,8 +62,10 @@ data class StagedAttachment(
 )
 
 /** A read-only snapshot of a past turn's finished canvas (client-side timeline). */
+@Immutable
 data class CanvasSnapshot(val label: String, val components: List<Component>)
 
+@Immutable
 data class UiState(
     val connection: ConnectionState = ConnectionState.Disconnected,
     val screen: Screen = Screen.Chat,

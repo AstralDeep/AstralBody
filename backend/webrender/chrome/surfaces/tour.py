@@ -15,6 +15,7 @@ writes first, audit emission after, mirroring the endpoint bodies. The
 handler always returns ``None``: the tour runs outside the modal, so no
 surface re-render is pushed.
 """
+import asyncio
 import json
 import logging
 
@@ -135,7 +136,7 @@ async def render(orch, user_id, roles, params) -> str:
             "error", "The tour is unavailable right now (onboarding subsystem offline)."
         )
     include_admin = "admin" in (roles or [])
-    steps = repo.list_steps_for_user(include_admin=include_admin)
+    steps = await asyncio.to_thread(repo.list_steps_for_user, include_admin=include_admin)
     if not steps:
         return intro + notice_block("info", "No tour steps are available yet.")
     payload = json.dumps(
@@ -196,10 +197,12 @@ async def _handle_tour_event(orch, websocket, user_id, roles, payload):
 
     principal = _principal(orch, websocket, user_id)
     is_admin = "admin" in (roles or [])
-    step_id = _validated_step_id(repo, payload.get("step_id"), is_admin)
+    step_id = await asyncio.to_thread(
+        _validated_step_id, repo, payload.get("step_id"), is_admin)
 
     if event == "dismissed":
-        new_state = repo.record_dismissal(user_id, max_dismissals=2)
+        new_state = await asyncio.to_thread(
+            repo.record_dismissal, user_id, max_dismissals=2)
         logger.info(
             "chrome tour: user %s dismissed tour (count=%d, status=%s)",
             user_id, new_state.dismiss_count, new_state.status,
@@ -207,12 +210,13 @@ async def _handle_tour_event(orch, websocket, user_id, roles, payload):
         return None
 
     if event == "started":
-        prior = repo.get_state(user_id)
+        prior = await asyncio.to_thread(repo.get_state, user_id)
         await record_onboarding_replayed(
             actor_user_id=user_id, auth_principal=principal, prior_status=prior.status,
         )
         if prior.status not in _TERMINAL_STATUSES:
-            new_state, prior_status = repo.upsert_state(
+            new_state, prior_status = await asyncio.to_thread(
+                repo.upsert_state,
                 user_id=user_id, status="in_progress", last_step_id=step_id,
             )
             if prior_status is None or prior_status == "not_started":
@@ -224,7 +228,8 @@ async def _handle_tour_event(orch, websocket, user_id, roles, payload):
         return None
 
     # completed | skipped — PUT /api/onboarding/state semantics.
-    new_state, prior_status = repo.upsert_state(
+    new_state, prior_status = await asyncio.to_thread(
+        repo.upsert_state,
         user_id=user_id, status=event, last_step_id=step_id,
     )
     if event == "completed" and prior_status != "completed":

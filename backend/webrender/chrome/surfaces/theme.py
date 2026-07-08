@@ -14,6 +14,7 @@ persists ``{"theme": {"preset": name}}`` and the re-render notice embeds a
 rendered ``theme_apply`` block so the client applies the CSS variables
 instantly on insert.
 """
+import asyncio
 import json
 import logging
 import re
@@ -141,7 +142,7 @@ def _preset_card(name: str, active: bool) -> str:
 
 async def render(orch, user_id, roles, params) -> str:
     """Render the Theme surface body: summary, preset cards, color pickers."""
-    theme = _stored_theme(orch, user_id)
+    theme = await asyncio.to_thread(_stored_theme, orch, user_id)
     active_preset = theme.get("preset") if theme.get("preset") in PRESETS else None
     colors = _effective_colors(theme)
 
@@ -171,7 +172,7 @@ async def components(orch, user_id, roles, params):
     per-key ``color_picker`` primitives are reused verbatim (US3 live restyle is
     the native client's job — the handler already ships the chosen preset).
     """
-    theme = _stored_theme(orch, user_id)
+    theme = await asyncio.to_thread(_stored_theme, orch, user_id)
     active = theme.get("preset") if theme.get("preset") in PRESETS else None
     colors = _effective_colors(theme)
 
@@ -233,7 +234,8 @@ async def _handle_theme_preset(orch, websocket, user_id, roles, payload):
     if preset not in PRESETS:
         return ("theme", {}, notice_block("error", f"Unknown theme preset: {preset or '(none)'}"))
     try:
-        orch.history.db.set_user_preferences(user_id, {"theme": {"preset": preset}})
+        await asyncio.to_thread(
+            orch.history.db.set_user_preferences, user_id, {"theme": {"preset": preset}})
     except Exception:
         logger.exception("chrome theme: failed to save preset %s for %s", preset, user_id)
         return ("theme", {}, notice_block("error", "Failed to save theme. Please retry."))

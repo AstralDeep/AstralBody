@@ -90,6 +90,7 @@ def _make_fake(*, validate=None):
         _safe_send=_safe_send,
         send_ui_render=send_ui_render,
         send_dashboard=send_dashboard,
+        compute_tools_available_for_user=lambda uid: True,
     )
     fake.validate_token = validate if validate is not None else (
         types.MethodType(Orchestrator.validate_token, fake))
@@ -124,6 +125,25 @@ def _register_msg(token=None, **extra) -> str:
 
 def _types(fake):
     return [m["type"] for _, m in fake._sent]
+
+
+def _run_and_drain(coro):
+    """Run the handler, then drain its background tasks before asserting.
+
+    Feature 052 (FR-012) moved the profile save and the ws_register/
+    login_interactive audit pair off the handshake's critical path into
+    tasks that complete shortly after — the success-path assertions must
+    wait for them rather than race ``asyncio.run``'s loop shutdown.
+    """
+    async def _main():
+        await coro
+        for _ in range(10):
+            pending = [t for t in asyncio.all_tasks()
+                       if t is not asyncio.current_task()]
+            if not pending:
+                break
+            await asyncio.gather(*pending, return_exceptions=True)
+    asyncio.run(_main())
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +241,7 @@ def test_mock_auth_mode_registers_normally(auth_audit, monkeypatch):
     evt = asyncio.Event()
     fake._registered_events[id(ws)] = evt
 
-    asyncio.run(fake.handle_ui_message(ws, _register_msg(token="dev-token")))
+    _run_and_drain(fake.handle_ui_message(ws, _register_msg(token="dev-token")))
 
     assert "auth_required" not in _types(fake)
     # Session established for the mock user, raw token retained.

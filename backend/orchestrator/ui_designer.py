@@ -1,15 +1,16 @@
 """The adaptive UI designer.
 
 After a chat round produces two or more rich components, the designer runs a
-bounded multi-round LLM conversation that produces an *arrangement*: a layout
+bounded LLM conversation that produces an *arrangement*: a layout
 tree built ONLY from existing astralprims types whose leaves REFERENCE the
 round's workspace components by ``component_id``
 (``{"type": "ref", "component_id": ...}``). The first pass drafts the
-arrangement; while rounds remain (``UI_DESIGNER_MAX_ROUNDS``, default 3) the
-designer is shown its own current arrangement and asked to critique and
-improve it — replying ``DONE`` ends the loop early, and any failed refinement
-keeps the best arrangement so far. A first pass that produces unusable JSON
-gets bounded format-retries with the failure reason fed back.
+arrangement; while rounds remain (``UI_DESIGNER_MAX_ROUNDS``, default 1 —
+a single draft pass, per the feature-052 latency budget) the designer is
+shown its own current arrangement and asked to critique and improve it —
+replying ``DONE`` ends the loop early, and any failed refinement keeps the
+best arrangement so far. A first pass that produces unusable JSON gets
+bounded format-retries with the failure reason fed back.
 
 Tool-produced content is never rewritten, merged, or dropped — identities,
 in-place refresh, pagination and supersede semantics survive intact (the
@@ -47,8 +48,9 @@ MIN_DESIGN_COMPONENTS = 2
 DEFAULT_TIMEOUT_SECONDS = 8.0
 
 #: Max LLM passes per design (1 draft + refinements/format-retries);
-#: operator override via UI_DESIGNER_MAX_ROUNDS. 1 == legacy single pass.
-DEFAULT_MAX_ROUNDS = 3
+#: operator override via UI_DESIGNER_MAX_ROUNDS. Default 1 (a single draft
+#: pass — feature-052 latency budget); raise it to enable critique rounds.
+DEFAULT_MAX_ROUNDS = 1
 
 REF_TYPE = "ref"
 GARNISH_ID_PREFIX = "dg_"

@@ -9,6 +9,7 @@ which attachment/chat triggered it, which admin approved it).
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from typing import List, Optional
@@ -115,6 +116,35 @@ class AttachmentParserRepository:
             (status,),
         )
         return [dict(r) for r in (rows or [])]
+
+    # ── async facade (event-loop-safe twins of the sync methods above) ────
+    async def aget_by_gap(self, gap_fingerprint: str) -> Optional[dict]:
+        """Async twin of :meth:`get_by_gap`, run off the event loop."""
+        return await asyncio.to_thread(self.get_by_gap, gap_fingerprint)
+
+    async def aget_by_draft(self, draft_agent_id: str) -> Optional[dict]:
+        """Async twin of :meth:`get_by_draft`, run off the event loop."""
+        return await asyncio.to_thread(self.get_by_draft, draft_agent_id)
+
+    async def acreate_pending(self, **kwargs) -> dict:
+        """Async twin of :meth:`create_pending`, run off the event loop."""
+        return await asyncio.to_thread(self.create_pending, **kwargs)
+
+    async def amark_live(self, gap_fingerprint: str, *, live_agent_id: str,
+                         tool_name: str, approved_by: Optional[str]) -> None:
+        """Async twin of :meth:`mark_live`, run off the event loop."""
+        return await asyncio.to_thread(
+            self.mark_live, gap_fingerprint, live_agent_id=live_agent_id,
+            tool_name=tool_name, approved_by=approved_by,
+        )
+
+    async def amark_status(self, gap_fingerprint: str, status: str) -> None:
+        """Async twin of :meth:`mark_status`, run off the event loop."""
+        return await asyncio.to_thread(self.mark_status, gap_fingerprint, status)
+
+    async def alist_by_status(self, status: str) -> List[dict]:
+        """Async twin of :meth:`list_by_status`, run off the event loop."""
+        return await asyncio.to_thread(self.list_by_status, status)
 
 
 __all__ = [

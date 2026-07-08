@@ -14,6 +14,7 @@ owned-and-public agents appear in both tabs.
 
 Every dynamic interpolation goes through ``esc()`` (escape-by-default).
 """
+import asyncio
 import json
 import logging
 
@@ -73,6 +74,14 @@ def _payload(data) -> str:
     return esc(json.dumps(data))
 
 
+def _email_fallback(email, user_id) -> str:
+    """Apply the mock-auth fallback: an email-shaped user_id stands in."""
+    email = email or ""
+    if not email and "@" in str(user_id or ""):
+        email = str(user_id)
+    return str(email)
+
+
 def _user_email(orch, user_id) -> str:
     """Resolve the user's email (owner checks mirror the REST JWT email).
 
@@ -87,9 +96,24 @@ def _user_email(orch, user_id) -> str:
         email = (user or {}).get("email") or ""
     except Exception:  # pragma: no cover — defensive: profile lookup only
         logger.exception("chrome agents: user profile lookup failed for %s", user_id)
-    if not email and "@" in str(user_id or ""):
-        email = str(user_id)
-    return email
+    return _email_fallback(email, user_id)
+
+
+def _disabled_from_preferences(raw) -> set:
+    """Disabled agent-id set from a raw ``user_preferences.preferences`` value.
+
+    Mirrors ``Database.get_user_disabled_agents`` (empty set on missing or
+    malformed JSON) so the consolidated context query resolves the per-user
+    disabled state without a second round trip.
+    """
+    try:
+        prefs = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        prefs = {}
+    value = prefs.get("disabled_agents") if isinstance(prefs, dict) else None
+    if not isinstance(value, list):
+        return set()
+    return {str(v) for v in value}
 
 
 def _snippet(text, limit: int = 110) -> str:
@@ -100,11 +124,36 @@ def _snippet(text, limit: int = 110) -> str:
     return flat[: limit - 1].rstrip() + "…"
 
 
-def _agent_rows(orch, user_id):
-    """Agent dicts mirroring ``GET /api/agents`` (api.py ``list_agents``)."""
+_USER_CONTEXT_SQL = (
+    "SELECT (SELECT email FROM users WHERE id = ?) AS email, "
+    "(SELECT preferences FROM user_preferences WHERE user_id = ?) AS preferences"
+)
+
+
+async def _list_context(orch, user_id):
+    """``(user_email, ownership_map, disabled_set)`` in ≤2 DB round trips.
+
+    On a real ``Database`` the user email and preferences resolve in one
+    consolidated query plus one ownership scan; objects without the async
+    facade (test fakes) fall back to the legacy per-method reads off-loop.
+    """
     db = orch.history.db
-    ownership_map = {o["agent_id"]: o for o in db.get_all_agent_ownership()}
-    disabled_set = set(db.get_user_disabled_agents(user_id))
+    if hasattr(db, "afetch_one"):
+        row = await db.afetch_one(_USER_CONTEXT_SQL, (user_id, user_id)) or {}
+        email = _email_fallback(row.get("email"), user_id)
+        disabled_set = _disabled_from_preferences(row.get("preferences"))
+        ownership_rows = await db.afetch_all(
+            "SELECT agent_id, owner_email, is_public FROM agent_ownership")
+    else:
+        email = await asyncio.to_thread(_user_email, orch, user_id)
+        disabled_set = set(await asyncio.to_thread(db.get_user_disabled_agents, user_id))
+        ownership_rows = await asyncio.to_thread(db.get_all_agent_ownership)
+    ownership_map = {o["agent_id"]: dict(o) for o in ownership_rows}
+    return email, ownership_map, disabled_set
+
+
+def _agent_rows(orch, ownership_map, disabled_set):
+    """Agent dicts mirroring ``GET /api/agents`` (api.py ``list_agents``)."""
     rows = []
     for agent_id, card in orch.agent_cards.items():
         if orch._is_draft_agent(agent_id):
@@ -206,9 +255,10 @@ def _render_agent_row(agent: dict, tab: str, user_email: str) -> str:
     )
 
 
-def _render_list(orch, user_id, tab: str) -> str:
-    user_email = _user_email(orch, user_id)
-    rows = _agent_rows(orch, user_id)
+async def _render_list(orch, user_id, tab: str) -> str:
+    """Render the agent list body for one tab (≤2 DB round trips)."""
+    user_email, ownership_map, disabled_set = await _list_context(orch, user_id)
+    rows = await asyncio.to_thread(_agent_rows, orch, ownership_map, disabled_set)
     if tab == "public":
         visible = [a for a in rows if a["is_public"]]
         empty_msg = "No public agents are available."
@@ -403,8 +453,8 @@ def _normalize_credential_entries(raw) -> "tuple[list, dict]":
     return keys, labels
 
 
-def _render_credentials(orch, user_id, agent_id: str, card, tab: str = "mine") -> str:
-    keys = orch.credential_manager.list_credential_keys(user_id, agent_id)
+def _render_credentials(keys, agent_id: str, card, tab: str = "mine") -> str:
+    """Render the credentials section from already-fetched stored ``keys``."""
     metadata = getattr(card, "metadata", None) or {}
     required, req_labels = _normalize_credential_entries(
         metadata.get("required_credentials"))
@@ -464,30 +514,96 @@ def _render_credentials(orch, user_id, agent_id: str, card, tab: str = "mine") -
     return "".join(parts)
 
 
-def _render_detail(orch, user_id, roles, agent_id: str, tab: str) -> str:
+_DETAIL_CONTEXT_SQL = (
+    "SELECT (SELECT email FROM users WHERE id = ?) AS email, "
+    "(SELECT preferences FROM user_preferences WHERE user_id = ?) AS preferences, "
+    "(SELECT owner_email FROM agent_ownership WHERE agent_id = ?) AS owner_email, "
+    "(SELECT is_public FROM agent_ownership WHERE agent_id = ?) AS is_public, "
+    "(SELECT is_safe FROM agent_trust WHERE agent_id = ?) AS is_safe, "
+    "(SELECT string_agg(credential_key, chr(10)) FROM user_credentials"
+    " WHERE user_id = ? AND agent_id = ?) AS credential_keys, "
+    "(SELECT string_agg(scope || '=' || (CASE WHEN enabled THEN '1' ELSE '0' END), ',')"
+    " FROM agent_scopes WHERE user_id = ? AND agent_id = ?) AS scope_state"
+)
+
+
+def _parse_scope_state(raw) -> dict:
+    """Decode the context query's ``scope=flag`` aggregate into the
+    ``get_agent_scopes`` shape (every known kind present, default False)."""
+    state = {kind: False for kind in PERMISSION_KINDS}
+    for pair in str(raw or "").split(","):
+        scope, sep, flag = pair.partition("=")
+        if sep and scope in state:
+            state[scope] = flag == "1"
+    return state
+
+
+def _detail_context_legacy(orch, user_id, agent_id) -> dict:
+    """Detail-view context via the legacy per-method reads (test fakes)."""
+    db = orch.history.db
+    ownership = db.get_agent_ownership(agent_id) or {}
+    try:
+        is_safe, safe_known = bool(db.get_agent_is_safe(agent_id)), True
+    except Exception:
+        logger.debug("safe-marking lookup failed", exc_info=True)
+        is_safe, safe_known = False, False
+    return {
+        "user_email": _user_email(orch, user_id),
+        "owner_email": ownership.get("owner_email"),
+        "is_public": bool(ownership.get("is_public", False)),
+        "is_safe": is_safe,
+        "safe_known": safe_known,
+        "enabled": not db.is_user_agent_disabled(user_id, agent_id),
+        "credential_keys": orch.credential_manager.list_credential_keys(user_id, agent_id),
+        "scope_state": dict(orch.tool_permissions.get_agent_scopes(user_id, agent_id)),
+    }
+
+
+async def _detail_context(orch, user_id, agent_id) -> dict:
+    """All non-permission detail-view reads in ONE consolidated round trip.
+
+    Covers user email, per-user disabled state, ownership, the feature-040
+    safe marker, stored credential keys, and the agent-wide scope state.
+    Objects without the async facade fall back to the legacy reads off-loop.
+    """
+    db = orch.history.db
+    if not hasattr(db, "afetch_one"):
+        return await asyncio.to_thread(_detail_context_legacy, orch, user_id, agent_id)
+    params = (user_id, user_id, agent_id, agent_id, agent_id,
+              user_id, agent_id, user_id, agent_id)
+    row = await db.afetch_one(_DETAIL_CONTEXT_SQL, params) or {}
+    keys_raw = row.get("credential_keys")
+    disabled_set = _disabled_from_preferences(row.get("preferences"))
+    return {
+        "user_email": _email_fallback(row.get("email"), user_id),
+        "owner_email": row.get("owner_email"),
+        "is_public": bool(row.get("is_public") or False),
+        "is_safe": bool(row.get("is_safe") or False),
+        "safe_known": True,
+        "enabled": agent_id not in disabled_set,
+        "credential_keys": str(keys_raw).split("\n") if keys_raw else [],
+        "scope_state": _parse_scope_state(row.get("scope_state")),
+    }
+
+
+async def _render_detail(orch, user_id, roles, agent_id: str, tab: str) -> str:
+    """Render the per-agent detail body (≤3 DB round trips total)."""
     card = orch.agent_cards.get(agent_id)
     if not card:
         return (
             notice_block("error", f"Agent '{agent_id}' not found.")
             + f'<div class="pt-2">{_back_button(tab)}</div>'
         )
-    # FR-015 lazy backfill — same call the GET-permissions route makes.
-    try:
-        orch.tool_permissions.backfill_per_tool_rows(user_id, agent_id)
-    except Exception as e:  # pragma: no cover — defensive logging only
-        logger.warning(
-            "Per-tool backfill failed for user=%s agent=%s: %s", user_id, agent_id, e
-        )
-    tool_scope_map = orch.tool_permissions.get_tool_scope_map(agent_id)
-    per_tool = orch.tool_permissions.get_effective_tool_permissions(user_id, agent_id)
-    scope_state = orch.tool_permissions.get_agent_scopes(user_id, agent_id)
+    tp = orch.tool_permissions
+    tool_scope_map = tp.get_tool_scope_map(agent_id)
+    per_tool = await asyncio.to_thread(tp.get_effective_tool_permissions, user_id, agent_id)
+    ctx = await _detail_context(orch, user_id, agent_id)
+    scope_state = ctx["scope_state"]
     tool_descriptions = {s.id: s.description for s in card.skills}
 
-    db = orch.history.db
-    ownership = db.get_agent_ownership(agent_id) or {}
-    user_email = _user_email(orch, user_id)
-    is_owner = bool(user_email) and ownership.get("owner_email") == user_email
-    enabled = not db.is_user_agent_disabled(user_id, agent_id)
+    user_email = ctx["user_email"]
+    is_owner = bool(user_email) and ctx["owner_email"] == user_email
+    enabled = ctx["enabled"]
 
     header = (
         f'<div class="flex items-start justify-between gap-3">'
@@ -501,14 +617,14 @@ def _render_detail(orch, user_id, roles, agent_id: str, tab: str) -> str:
     sections = [header, _render_perm_sections(
         agent_id, tool_scope_map, per_tool, scope_state, tool_descriptions, tab)]
     if is_owner:
-        sections.append(_render_visibility(agent_id, bool(ownership.get("is_public", False)), tab))
+        sections.append(_render_visibility(agent_id, ctx["is_public"], tab))
     # Feature 040 (US2): owner/admin safe-marking control.
     if is_owner or "admin" in (roles or []):
-        try:
-            sections.append(_render_safe(agent_id, bool(db.get_agent_is_safe(agent_id)), tab))
-        except Exception:
-            logger.debug("safe-marking control render skipped", exc_info=True)
-    sections.append(_render_credentials(orch, user_id, agent_id, card, tab))
+        if ctx["safe_known"]:
+            sections.append(_render_safe(agent_id, ctx["is_safe"], tab))
+        else:
+            logger.debug("safe-marking control render skipped")
+    sections.append(_render_credentials(ctx["credential_keys"], agent_id, card, tab))
     return (
         f'<div class="astral-agent-detail space-y-4" data-agent-id="{esc(agent_id)}">'
         + "".join(sections)
@@ -534,8 +650,8 @@ async def render(orch, user_id, roles, params) -> str:
         tab = "mine"
     agent_id = params.get("agent_id")
     if agent_id:
-        return _render_detail(orch, user_id, roles, str(agent_id), tab)
-    return _render_list(orch, user_id, tab)
+        return await _render_detail(orch, user_id, roles, str(agent_id), tab)
+    return await _render_list(orch, user_id, tab)
 
 
 # ---------------------------------------------------------------------------
@@ -554,6 +670,39 @@ def _list_params(payload) -> dict:
     if tab not in ("mine", "public"):
         tab = "mine"
     return {"tab": tab}
+
+
+def _apply_perm_writes(tp, user_id, agent_id, masters, per_tool_permissions,
+                       tool_scope_map) -> None:
+    """Persist a validated permission-save payload (runs off the event loop).
+
+    Writes the per-tool rows (an off master forces its whole section off,
+    including tools missing from the submitted fields), then mirrors the
+    result up to the ``agent_scopes`` layer so the legacy filter path stays
+    coherent — masters write straight through, kinds without a master keep
+    the any-enabled-tool → scope-true mirror.
+    """
+    for tool_name, kind_map in per_tool_permissions.items():
+        for kind, enabled in kind_map.items():
+            if masters.get(kind) is False:
+                enabled = False  # section gate wins
+            tp.set_tool_permission(user_id, agent_id, tool_name, kind, bool(enabled))
+    for kind, master_on in masters.items():
+        if master_on:
+            continue
+        for tool_name, required in tool_scope_map.items():
+            if required == kind and kind not in per_tool_permissions.get(tool_name, {}):
+                tp.set_tool_permission(user_id, agent_id, tool_name, kind, False)
+    scope_state = tp.get_agent_scopes(user_id, agent_id)
+    derived = {**scope_state}
+    for kind, master_on in masters.items():
+        derived[kind] = bool(master_on)
+    per_tool = tp.get_effective_tool_permissions(user_id, agent_id)
+    for tool_name, kind_map in per_tool.items():
+        for kind, enabled in kind_map.items():
+            if enabled and kind not in masters:
+                derived[kind] = True
+    tp.set_agent_scopes(user_id, agent_id, derived)
 
 
 async def handle_perms_save(orch, websocket, user_id, roles, payload):
@@ -609,34 +758,10 @@ async def handle_perms_save(orch, websocket, user_id, roles, payload):
                     f"Permission kind '{kind}' does not apply to tool "
                     f"'{tool_name}' (required: '{required}').",
                 ))
-    for tool_name, kind_map in per_tool_permissions.items():
-        for kind, enabled in kind_map.items():
-            if masters.get(kind) is False:
-                enabled = False  # section gate wins
-            orch.tool_permissions.set_tool_permission(
-                user_id, agent_id, tool_name, kind, bool(enabled)
-            )
-    # A master turned off blankets every tool of that kind, including any
-    # missing from the submitted fields (the form normally collects all).
-    for kind, master_on in masters.items():
-        if master_on:
-            continue
-        for tool_name, required in tool_scope_map.items():
-            if required == kind and kind not in per_tool_permissions.get(tool_name, {}):
-                orch.tool_permissions.set_tool_permission(
-                    user_id, agent_id, tool_name, kind, False
-                )
-    # Mirror up to the agent_scopes layer (legacy filter path stays coherent).
-    scope_state = orch.tool_permissions.get_agent_scopes(user_id, agent_id)
-    derived = {**scope_state}
-    for kind, master_on in masters.items():
-        derived[kind] = bool(master_on)
-    per_tool = orch.tool_permissions.get_effective_tool_permissions(user_id, agent_id)
-    for tool_name, kind_map in per_tool.items():
-        for kind, enabled in kind_map.items():
-            if enabled and kind not in masters:
-                derived[kind] = True
-    orch.tool_permissions.set_agent_scopes(user_id, agent_id, derived)
+    await asyncio.to_thread(
+        _apply_perm_writes, orch.tool_permissions, user_id, agent_id,
+        masters, per_tool_permissions, tool_scope_map,
+    )
     logger.info(
         "Agent permissions updated: user=%s agent=%s shape=sections "
         "masters_changed=%d tools_changed=%d",
@@ -651,18 +776,18 @@ async def handle_visibility_set(orch, websocket, user_id, roles, payload):
     agent_id = str(payload.get("agent_id") or "")
     params = _detail_params(agent_id, payload)
     db = orch.history.db
-    ownership = db.get_agent_ownership(agent_id)
+    ownership = await asyncio.to_thread(db.get_agent_ownership, agent_id)
     if not ownership:
         return ("agents", params, notice_block(
             "error", f"No ownership record for agent '{agent_id}'."
         ))
-    user_email = _user_email(orch, user_id)
+    user_email = await asyncio.to_thread(_user_email, orch, user_id)
     if not user_email or ownership.get("owner_email") != user_email:
         return ("agents", params, notice_block(
             "error", "Only the agent owner can change visibility."
         ))
     is_public = bool(payload.get("is_public"))
-    db.set_agent_visibility(agent_id, is_public)
+    await asyncio.to_thread(db.set_agent_visibility, agent_id, is_public)
     state = "public" if is_public else "private"
     return ("agents", params, notice_block("success", f"Agent is now {state}."))
 
@@ -685,8 +810,8 @@ async def handle_safe_set(orch, websocket, user_id, roles, payload):
     # (otherwise a Keycloak realm role literally named "owner" would grant
     # blanket safe-marking of any agent).
     eff_roles = [r for r in (roles or []) if r != "owner"]
-    ownership = db.get_agent_ownership(agent_id) or {}
-    user_email = _user_email(orch, user_id)
+    ownership = await asyncio.to_thread(db.get_agent_ownership, agent_id) or {}
+    user_email = await asyncio.to_thread(_user_email, orch, user_id)
     if user_email and ownership.get("owner_email") == user_email:
         eff_roles.append("owner")
     res = await agent_trust.mark_safe(
@@ -725,7 +850,8 @@ async def handle_credentials_save(orch, websocket, user_id, roles, payload):
     }
     if not credentials:
         return ("agents", params, notice_block("error", "No credential values entered."))
-    orch.credential_manager.set_bulk_credentials(user_id, agent_id, credentials)
+    await asyncio.to_thread(
+        orch.credential_manager.set_bulk_credentials, user_id, agent_id, credentials)
 
     # Save-time credential probe (FR-008) — mirrors set_agent_credentials.
     verdict_note = ""
@@ -735,7 +861,8 @@ async def handle_credentials_save(orch, websocket, user_id, roles, payload):
         verdict = "unreachable"
         detail = None
         try:
-            creds = orch.credential_manager.get_agent_credentials_encrypted(user_id, agent_id)
+            creds = await asyncio.to_thread(
+                orch.credential_manager.get_agent_credentials_encrypted, user_id, agent_id)
             args = {}
             if creds:
                 args["_credentials"] = creds
@@ -781,7 +908,7 @@ async def handle_credential_delete(orch, websocket, user_id, roles, payload):
     key = str(payload.get("key") or "")
     if not key:
         return ("agents", params, notice_block("error", "No credential key given."))
-    orch.credential_manager.delete_credential(user_id, agent_id, key)
+    await asyncio.to_thread(orch.credential_manager.delete_credential, user_id, agent_id, key)
     return ("agents", params, notice_block(
         "success", f"Credential '{key}' deleted for agent '{agent_id}'."
     ))
@@ -795,7 +922,8 @@ async def handle_agent_enabled(orch, websocket, user_id, roles, payload):
         return ("agents", _list_params(payload),
                 notice_block("error", f"Agent '{agent_id}' not found."))
     enabled = bool(payload.get("enabled"))
-    orch.history.db.set_user_agent_disabled(user_id, agent_id, not enabled)
+    await asyncio.to_thread(
+        orch.history.db.set_user_agent_disabled, user_id, agent_id, not enabled)
     logger.info(
         "Agent enabled state updated: user=%s agent=%s enabled=%s",
         user_id, agent_id, enabled,

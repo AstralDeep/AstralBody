@@ -6,6 +6,7 @@ read-only, with an explicit "Back to live" affordance (FR-031/FR-032).
 Viewing history is audited (FR-033) and mutating component actions are
 refused server-side while a socket is in timeline mode.
 """
+import asyncio
 import json
 from datetime import datetime, timezone
 
@@ -39,8 +40,10 @@ async def render(orch, user_id, roles, params) -> str:
     if not chat_id:
         return ('<p class="text-sm text-astral-muted">Open a chat first — the timeline '
                 'shows that chat’s workspace as it was at each turn.</p>')
-    snaps = orch.workspace.list_snapshots(chat_id, user_id, limit=_PAGE_SIZE, offset=page * _PAGE_SIZE)
-    total = orch.workspace.count_snapshots(chat_id, user_id)
+    snaps = await asyncio.to_thread(
+        orch.workspace.list_snapshots, chat_id, user_id,
+        limit=_PAGE_SIZE, offset=page * _PAGE_SIZE)
+    total = await asyncio.to_thread(orch.workspace.count_snapshots, chat_id, user_id)
     if not snaps:
         return ('<p class="text-sm text-astral-muted">No workspace history yet for this chat. '
                 'Snapshots appear as turns produce or update components.</p>')
@@ -102,8 +105,10 @@ async def components(orch, user_id, roles, params):
     if not chat_id:
         return [_sdui.alert("Open a chat first — the timeline shows that chat's "
                             "workspace as it was at each turn.", "info")]
-    snaps = orch.workspace.list_snapshots(chat_id, user_id, limit=_PAGE_SIZE, offset=page * _PAGE_SIZE)
-    total = orch.workspace.count_snapshots(chat_id, user_id)
+    snaps = await asyncio.to_thread(
+        orch.workspace.list_snapshots, chat_id, user_id,
+        limit=_PAGE_SIZE, offset=page * _PAGE_SIZE)
+    total = await asyncio.to_thread(orch.workspace.count_snapshots, chat_id, user_id)
     if not snaps:
         return [_sdui.alert("No workspace history yet for this chat. Snapshots appear "
                             "as turns produce or update components.", "info")]
@@ -164,7 +169,7 @@ async def _view(orch, websocket, user_id, roles, payload):
     except (TypeError, ValueError):
         return ("workspace_timeline", {"chat_id": chat_id},
                 '<p class="text-xs text-red-400 mb-2">That snapshot link is invalid.</p>')
-    snap = orch.workspace.get_snapshot(snapshot_id, user_id)
+    snap = await asyncio.to_thread(orch.workspace.get_snapshot, snapshot_id, user_id)
     if snap is None or (chat_id and snap.get("chat_id") != chat_id):
         return ("workspace_timeline", {"chat_id": chat_id},
                 '<p class="text-xs text-red-400 mb-2">That snapshot no longer exists.</p>')
@@ -227,8 +232,11 @@ async def _live(orch, websocket, user_id, roles, payload):
             # Feature 029: back-to-live restores the designed canvas when the
             # orchestrator provides the materializer (test fakes may not).
             canvas_fn = getattr(orch, "_canvas_components", None)
-            components = (canvas_fn(chat_id, user_id) if canvas_fn
-                          else orch.workspace.live_components(chat_id, user_id))
+            if canvas_fn:
+                components = await asyncio.to_thread(canvas_fn, chat_id, user_id)
+            else:
+                components = await asyncio.to_thread(
+                    orch.workspace.live_components, chat_id, user_id)
             await orch.send_ui_render(websocket, components or [])
         except Exception:
             import logging

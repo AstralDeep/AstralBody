@@ -192,7 +192,8 @@ async def handle_meta_tool(orch, tool_name: str, args: Dict[str, Any], *,
         return MCPResponse(error={"message": f"Unknown scheduling tool '{tool_name}'",
                                   "retryable": False})
     try:
-        cleaned, next_run = _validate_proposal(orch, user_id, args or {})
+        cleaned, next_run = await asyncio.to_thread(
+            _validate_proposal, orch, user_id, args or {})
     except ValueError as exc:
         alert = Alert(message=f"That schedule cannot be created: {exc}",
                       variant="warning").to_dict()
@@ -270,7 +271,7 @@ async def handle_decision(orch, websocket, user_id: str, payload: Dict[str, Any]
     try:
         # Re-validate at approval time (caps/cadence may have changed since
         # the proposal) and recompute the first run.
-        cleaned, next_run = _validate_proposal(orch, user_id, args)
+        cleaned, next_run = await asyncio.to_thread(_validate_proposal, orch, user_id, args)
     except ValueError as exc:
         _proposals(orch).pop(proposal_id, None)
         await _say(f"That schedule can no longer be created: {exc}", "warning")
@@ -278,12 +279,14 @@ async def handle_decision(orch, websocket, user_id: str, payload: Dict[str, Any]
 
     consented: List[str] = []
     if cleaned["agent_id"]:
-        current = orch.tool_permissions.get_agent_scopes(user_id, cleaned["agent_id"])
+        current = await asyncio.to_thread(
+            orch.tool_permissions.get_agent_scopes, user_id, cleaned["agent_id"])
         consented = sorted(s for s, on in current.items() if on)
 
     from scheduler.store import ScheduledJobStore
     store = ScheduledJobStore(orch.history.db)
-    job = store.create_job(
+    job = await asyncio.to_thread(
+        store.create_job,
         user_id, name=cleaned["name"], instruction=cleaned["instruction"],
         schedule_kind=cleaned["schedule_kind"], schedule_expr=cleaned["schedule_expr"],
         timezone=cleaned["timezone"], consented_scopes=consented,

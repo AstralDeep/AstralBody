@@ -506,7 +506,10 @@ def test_format_retry_recovers_unusable_draft():
     assert "could not be used" in retry_messages[-1]["content"]
 
 
-def test_max_rounds_one_is_single_pass():
+def test_max_rounds_one_is_single_pass(monkeypatch):
+    # A host .env can re-leak the taskmodel flag after conftest's ambient
+    # strip (load_dotenv at import time); its pre-pass would add an LLM call.
+    monkeypatch.delenv("FF_UI_DESIGNER_TASKMODEL", raising=False)
     llm, calls = _scripted_llm([_DRAFT])
     layout = asyncio.run(design_round(
         user_request="compare things",

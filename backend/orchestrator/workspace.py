@@ -44,6 +44,7 @@ Deterministic component actions bypass all of this: they target an explicit
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -632,3 +633,56 @@ class WorkspaceManager:
             "layouts": layouts,
             "created_at": row["created_at"],
         }
+
+    # ── async facade (event-loop-safe twins of the sync methods above) ───
+    async def alive_rows(self, chat_id: str, user_id: str) -> List[Dict[str, Any]]:
+        """Async twin of :meth:`live_rows`, run off the event loop."""
+        return await asyncio.to_thread(self.live_rows, chat_id, user_id)
+
+    async def alive_components(self, chat_id: str, user_id: str) -> List[Dict[str, Any]]:
+        """Async twin of :meth:`live_components`, run off the event loop."""
+        return await asyncio.to_thread(self.live_components, chat_id, user_id)
+
+    async def aget_by_component_id(self, chat_id: str, user_id: str,
+                                   component_id: str) -> Optional[Dict[str, Any]]:
+        """Async twin of :meth:`get_by_component_id`, run off the event loop."""
+        return await asyncio.to_thread(self.get_by_component_id, chat_id, user_id, component_id)
+
+    async def aupsert(self, chat_id: str, user_id: str, components: List[Dict[str, Any]],
+                      *, force_component_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Async twin of :meth:`upsert`, run off the event loop."""
+        return await asyncio.to_thread(
+            self.upsert, chat_id, user_id, components,
+            force_component_id=force_component_id,
+        )
+
+    async def alive_layouts(self, chat_id: str, user_id: str) -> List[Dict[str, Any]]:
+        """Async twin of :meth:`live_layouts`, run off the event loop."""
+        return await asyncio.to_thread(self.live_layouts, chat_id, user_id)
+
+    async def aupsert_layout(self, chat_id: str, user_id: str, layout_key: str,
+                             layout: List[Dict[str, Any]]) -> bool:
+        """Async twin of :meth:`upsert_layout`, run off the event loop."""
+        return await asyncio.to_thread(self.upsert_layout, chat_id, user_id, layout_key, layout)
+
+    async def aremove(self, chat_id: str, user_id: str, component_id: str) -> bool:
+        """Async twin of :meth:`remove`, run off the event loop."""
+        return await asyncio.to_thread(self.remove, chat_id, user_id, component_id)
+
+    async def asnapshot(self, chat_id: str, user_id: str, cause: str,
+                        turn_message_id: Optional[int] = None) -> Optional[int]:
+        """Async twin of :meth:`snapshot`, run off the event loop."""
+        return await asyncio.to_thread(self.snapshot, chat_id, user_id, cause, turn_message_id)
+
+    async def alist_snapshots(self, chat_id: str, user_id: str, limit: int = 50,
+                              offset: int = 0) -> List[Dict[str, Any]]:
+        """Async twin of :meth:`list_snapshots`, run off the event loop."""
+        return await asyncio.to_thread(self.list_snapshots, chat_id, user_id, limit, offset)
+
+    async def acount_snapshots(self, chat_id: str, user_id: str) -> int:
+        """Async twin of :meth:`count_snapshots`, run off the event loop."""
+        return await asyncio.to_thread(self.count_snapshots, chat_id, user_id)
+
+    async def aget_snapshot(self, snapshot_id: int, user_id: str) -> Optional[Dict[str, Any]]:
+        """Async twin of :meth:`get_snapshot`, run off the event loop."""
+        return await asyncio.to_thread(self.get_snapshot, snapshot_id, user_id)

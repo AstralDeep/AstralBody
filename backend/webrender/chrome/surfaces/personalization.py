@@ -31,6 +31,7 @@ string is escaped via ``esc()``.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -153,6 +154,29 @@ def _params(tab: str, **extra) -> dict:
     return out
 
 
+def _contains_phi(value) -> bool:
+    """PHI-gate check (may lazily load the analyzer; run off the event loop)."""
+    return get_phi_gate().contains_phi(value)
+
+
+def _phi_reject_field(body, notes):
+    """First PHI-rejected soul-form field label, or None (run off the loop)."""
+    gate = get_phi_gate()
+    if body.profession and gate.contains_phi(body.profession):
+        return "profession"
+    for goal in body.goals or []:
+        if gate.contains_phi(goal):
+            return "goals"
+    if notes and gate.contains_phi(notes):
+        return "personality notes"
+    return None
+
+
+def _run_manual_sweep(repo, user_id):
+    """Run a manual consolidation sweep (sync + CPU-heavy; run off the loop)."""
+    return run_sweep(repo, get_phi_gate(), user_id, trigger="manual")
+
+
 def _phi_notice(field: str) -> str:
     """Error notice matching the REST PHI-rejection reason text."""
     return notice_block(
@@ -218,15 +242,15 @@ async def render(orch, user_id, roles, params) -> str:
     if tab not in _TAB_KEYS:
         tab = "soul"
     if tab == "soul":
-        body = _render_soul(orch, user_id, params)
+        body = await asyncio.to_thread(_render_soul, orch, user_id, params)
     elif tab == "memory":
         body = await _render_memory(orch, user_id)
     elif tab == "skills":
-        body = _render_skills(orch, user_id)
+        body = await asyncio.to_thread(_render_skills, orch, user_id)
     elif tab == "schedule":
-        body = _render_schedule(orch, user_id)
+        body = await asyncio.to_thread(_render_schedule, orch, user_id)
     else:
-        body = _render_dreaming(orch, user_id)
+        body = await asyncio.to_thread(_render_dreaming, orch, user_id)
     return f'<div class="space-y-4">{_tab_bar(tab)}{body}</div>'
 
 
@@ -275,7 +299,7 @@ async def _render_memory(orch, user_id: str) -> str:
     svc = _svc(orch)
     if svc is None:
         return _unavailable("Personalization subsystem is not available.")
-    items = svc.repo.list_memory(user_id)
+    items = await asyncio.to_thread(svc.repo.list_memory, user_id)
     # The REST GET records a memory.view event — preserve that here.
     await record_generic(
         claims={"sub": user_id}, event_class="memory", action_type="memory.view",
@@ -538,15 +562,15 @@ async def components(orch, user_id, roles, params):
         direction="row",
     )
     if tab == "soul":
-        body = _components_soul(orch, user_id, params)
+        body = await asyncio.to_thread(_components_soul, orch, user_id, params)
     elif tab == "memory":
         body = await _components_memory(orch, user_id)
     elif tab == "skills":
-        body = _components_skills(orch, user_id)
+        body = await asyncio.to_thread(_components_skills, orch, user_id)
     elif tab == "schedule":
-        body = _components_schedule(orch, user_id)
+        body = await asyncio.to_thread(_components_schedule, orch, user_id)
     else:
-        body = _components_dreaming(orch, user_id)
+        body = await asyncio.to_thread(_components_dreaming, orch, user_id)
     return [tab_bar, *body]
 
 
@@ -581,7 +605,7 @@ async def _components_memory(orch, user_id):
     svc = _svc(orch)
     if svc is None:
         return [_sdui.alert("Personalization subsystem is not available.", "warning")]
-    items = svc.repo.list_memory(user_id)
+    items = await asyncio.to_thread(svc.repo.list_memory, user_id)
     # Preserve the render()-time memory.view audit event.
     await record_generic(
         claims={"sub": user_id}, event_class="memory", action_type="memory.view",
@@ -759,18 +783,13 @@ async def _handle_profile_save(orch, websocket, user_id, roles, payload):
                 notice_block("error", f"Couldn't save — {loc}: {msg}"))
 
     # PHI gate on every free-text value before anything persists (FR-017).
-    gate = get_phi_gate()
-    if body.profession and gate.contains_phi(body.profession):
-        return (SURFACE_KEY, fail_params, _phi_notice("profession"))
-    for goal in body.goals or []:
-        if gate.contains_phi(goal):
-            return (SURFACE_KEY, fail_params, _phi_notice("goals"))
-    if notes and gate.contains_phi(notes):
-        return (SURFACE_KEY, fail_params, _phi_notice("personality notes"))
+    rejected = await asyncio.to_thread(_phi_reject_field, body, notes)
+    if rejected:
+        return (SURFACE_KEY, fail_params, _phi_notice(rejected))
 
     # Merge notes into the existing personality so chat-set traits
     # (tone/directness/humor/verbosity) are preserved by this form.
-    existing = svc.repo.get_profile(user_id) or {}
+    existing = await asyncio.to_thread(svc.repo.get_profile, user_id) or {}
     existing_personality = dict(existing.get("personality") or {})
     personality_dict = None
     if notes != str(existing_personality.get("notes") or ""):
@@ -781,7 +800,8 @@ async def _handle_profile_save(orch, websocket, user_id, roles, payload):
             merged.pop("notes", None)
         personality_dict = merged
 
-    svc.repo.upsert_profile(
+    await asyncio.to_thread(
+        svc.repo.upsert_profile,
         user_id, profession=profession, goals=goals, personality=personality_dict,
     )
 
@@ -815,9 +835,9 @@ async def _handle_memory_update(orch, websocket, user_id, roles, payload):
     if not value:
         return (SURFACE_KEY, _params("memory"),
                 notice_block("error", "Memory value cannot be empty."))
-    if get_phi_gate().contains_phi(value):
+    if await asyncio.to_thread(_contains_phi, value):
         return (SURFACE_KEY, _params("memory"), _phi_notice("value"))
-    if not svc.repo.update_memory_value(user_id, mem_id, value):
+    if not await asyncio.to_thread(svc.repo.update_memory_value, user_id, mem_id, value):
         return (SURFACE_KEY, _params("memory"),
                 notice_block("error", "Memory item not found."))
     await record_generic(
@@ -838,7 +858,7 @@ async def _handle_memory_delete(orch, websocket, user_id, roles, payload):
     if not mem_id:
         return (SURFACE_KEY, _params("memory"),
                 notice_block("error", "Missing memory item id."))
-    if not svc.repo.delete_memory(user_id, mem_id):
+    if not await asyncio.to_thread(svc.repo.delete_memory, user_id, mem_id):
         return (SURFACE_KEY, _params("memory"),
                 notice_block("error", "Memory item not found."))
     await record_generic(
@@ -863,7 +883,8 @@ async def _handle_skill_toggle(orch, websocket, user_id, roles, payload):
                 notice_block("error", "Missing skill identifier."))
     required_scope = tp.get_tool_scope(agent_id, tool_name)
     # FR-011: enabling a skill can never exceed the user's granted scope.
-    if enabled and not tp.is_scope_enabled(user_id, agent_id, required_scope):
+    if enabled and not await asyncio.to_thread(
+            tp.is_scope_enabled, user_id, agent_id, required_scope):
         return (SURFACE_KEY, _params("skills"), notice_block(
             "error",
             f"This skill needs the '{required_scope}' permission, which you haven't "
@@ -871,7 +892,7 @@ async def _handle_skill_toggle(orch, websocket, user_id, roles, payload):
         ))
     # 027 fix: write the per-(tool, kind) row that is_tool_allowed actually
     # honors (the legacy NULL-kind row is outranked whenever a kind row exists).
-    tp.set_skill_enabled(user_id, agent_id, tool_name, enabled)
+    await asyncio.to_thread(tp.set_skill_enabled, user_id, agent_id, tool_name, enabled)
     verb = "Enabled" if enabled else "Disabled"
     await record_generic(
         claims=_claims(orch, websocket, user_id), event_class="skill",
@@ -894,7 +915,7 @@ async def _job_set_status(orch, websocket, user_id, payload, *, status, action_t
     if not job_id:
         return (SURFACE_KEY, _params("schedule"),
                 notice_block("error", "Missing job id."))
-    if not store.set_status(user_id, job_id, status):
+    if not await asyncio.to_thread(store.set_status, user_id, job_id, status):
         return (SURFACE_KEY, _params("schedule"),
                 notice_block("error", "Job not found."))
     await record_generic(
@@ -942,7 +963,7 @@ async def _handle_job_run_now(orch, websocket, user_id, roles, payload):
     if not job_id:
         return (SURFACE_KEY, _params("schedule"),
                 notice_block("error", "Missing job id."))
-    job = store.get_job(user_id, job_id)
+    job = await asyncio.to_thread(store.get_job, user_id, job_id)
     if not job:
         return (SURFACE_KEY, _params("schedule"),
                 notice_block("error", "Job not found."))
@@ -952,7 +973,8 @@ async def _handle_job_run_now(orch, websocket, user_id, roles, payload):
     now_ms = int(time.time() * 1000)
     # The scheduler loop dispatches jobs whose next_run_at has passed; pulling
     # it to now queues the run without bypassing the runner's auth checks.
-    store.db.execute(
+    await asyncio.to_thread(
+        store.db.execute,
         "UPDATE scheduled_job SET next_run_at = ?, updated_at = ? "
         "WHERE id = ? AND user_id = ?",
         (now_ms, now_ms, job_id, user_id),
@@ -973,7 +995,7 @@ async def _handle_dreaming_toggle(orch, websocket, user_id, roles, payload):
         return (SURFACE_KEY, _params("dreaming"),
                 _unavailable("Personalization subsystem is not available."))
     enabled = bool(payload.get("enabled"))
-    svc.repo.set_dreaming_enabled(user_id, enabled)
+    await asyncio.to_thread(svc.repo.set_dreaming_enabled, user_id, enabled)
     await record_generic(
         claims=_claims(orch, websocket, user_id), event_class="dreaming",
         action_type="dreaming.enable" if enabled else "dreaming.disable",
@@ -990,7 +1012,7 @@ async def _handle_dreaming_trigger(orch, websocket, user_id, roles, payload):
     if svc is None:
         return (SURFACE_KEY, _params("dreaming"),
                 _unavailable("Personalization subsystem is not available."))
-    sweep = run_sweep(svc.repo, get_phi_gate(), user_id, trigger="manual")
+    sweep = await asyncio.to_thread(_run_manual_sweep, svc.repo, user_id)
     await record_generic(
         claims=_claims(orch, websocket, user_id), event_class="dreaming",
         action_type="dreaming.sweep", description="Ran a manual consolidation sweep",

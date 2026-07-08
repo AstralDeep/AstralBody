@@ -68,6 +68,9 @@ def _create_test_app():
     # behavior is covered by tests/test_rest_legacy_workspace.py.
     mock_orch.workspace = MagicMock()
     mock_orch.workspace.upsert.return_value = []
+    mock_orch.workspace.aupsert = AsyncMock(return_value=[])
+    mock_orch.workspace.aget_by_component_id = AsyncMock(return_value=None)
+    mock_orch.workspace.asnapshot = AsyncMock(return_value=None)
     mock_orch.send_ui_upsert = AsyncMock()
     mock_orch._reconcile_legacy_replacement = AsyncMock()
 

@@ -20,9 +20,9 @@ Note on actual behavior: ``_view`` stores ``True`` (not the snapshot id) in
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
-import time
 import types
 import uuid
 from pathlib import Path
@@ -132,11 +132,17 @@ def _comp(body, *, agent="agent-wt", tool="show_table"):
     }
 
 
-def _snap(orch, chat_id, user_id, cause="turn"):
-    time.sleep(0.002)  # distinct created_at ms (id DESC tiebreak also holds)
-    snap_id = orch.workspace.snapshot(chat_id, user_id, cause)
+async def _snap(orch, chat_id, user_id, cause="turn"):
+    """Take a snapshot off the event loop (loop-guard clean test setup)."""
+    await asyncio.sleep(0.002)  # distinct created_at ms (id DESC tiebreak also holds)
+    snap_id = await asyncio.to_thread(orch.workspace.snapshot, chat_id, user_id, cause)
     assert snap_id is not None
     return snap_id
+
+
+async def _upsert(orch, chat_id, user_id, comps):
+    """Workspace upsert off the event loop (loop-guard clean test setup)."""
+    return await asyncio.to_thread(orch.workspace.upsert, chat_id, user_id, comps)
 
 
 def _msgs(orch, mtype):
@@ -179,10 +185,10 @@ async def test_render_empty_history_message(env):
 @pytest.mark.asyncio
 async def test_render_lists_snapshots_newest_first_with_cause_labels(env):
     orch, _history, user_id, chat_id = env
-    orch.workspace.upsert(chat_id, user_id, [_comp("a")])
-    id1 = _snap(orch, chat_id, user_id, "turn")
-    id2 = _snap(orch, chat_id, user_id, "component_action")
-    id3 = _snap(orch, chat_id, user_id, "remove")
+    await _upsert(orch, chat_id, user_id, [_comp("a")])
+    id1 = await _snap(orch, chat_id, user_id, "turn")
+    id2 = await _snap(orch, chat_id, user_id, "component_action")
+    id3 = await _snap(orch, chat_id, user_id, "remove")
 
     html = await wt.render(orch, user_id, ["user"], {"chat_id": chat_id})
 
@@ -211,10 +217,10 @@ async def test_render_lists_snapshots_newest_first_with_cause_labels(env):
 async def test_render_paging_older_newer(env, monkeypatch):
     orch, _history, user_id, chat_id = env
     monkeypatch.setattr(wt, "_PAGE_SIZE", 2)
-    orch.workspace.upsert(chat_id, user_id, [_comp("a")])
-    id1 = _snap(orch, chat_id, user_id)
-    id2 = _snap(orch, chat_id, user_id)
-    id3 = _snap(orch, chat_id, user_id)
+    await _upsert(orch, chat_id, user_id, [_comp("a")])
+    id1 = await _snap(orch, chat_id, user_id)
+    id2 = await _snap(orch, chat_id, user_id)
+    id3 = await _snap(orch, chat_id, user_id)
 
     page0 = await wt.render(orch, user_id, ["user"], {"chat_id": chat_id})
     assert f"&quot;snapshot_id&quot;: {id3}" in page0
@@ -241,12 +247,13 @@ async def test_render_paging_older_newer(env, monkeypatch):
 async def test_view_pushes_exact_historical_canvas_and_mode_flag(env, audit_events):
     orch, _history, user_id, chat_id = env
     ws = _FakeWS("viewer")
-    orch.workspace.upsert(chat_id, user_id, [_comp("v1")])
-    snap_id = _snap(orch, chat_id, user_id, "turn")
+    await _upsert(orch, chat_id, user_id, [_comp("v1")])
+    snap_id = await _snap(orch, chat_id, user_id, "turn")
     # Mutate the live workspace AFTER the snapshot so historical != live.
-    orch.workspace.upsert(chat_id, user_id, [_comp("v2"), _comp("extra", tool="other_tool")])
-    snap = orch.workspace.get_snapshot(snap_id, user_id)
-    assert snap["components"] != orch.workspace.live_components(chat_id, user_id)
+    await _upsert(orch, chat_id, user_id, [_comp("v2"), _comp("extra", tool="other_tool")])
+    snap = await asyncio.to_thread(orch.workspace.get_snapshot, snap_id, user_id)
+    live_now = await asyncio.to_thread(orch.workspace.live_components, chat_id, user_id)
+    assert snap["components"] != live_now
 
     handler = wt.HANDLERS["chrome_workspace_timeline_view"]
     result = await handler(orch, ws, user_id, ["user"],
@@ -308,8 +315,8 @@ async def test_view_invalid_snapshot_id_returns_notice(env, audit_events):
 async def test_view_missing_or_mismatched_snapshot(env, audit_events):
     orch, history, user_id, chat_id = env
     ws = _FakeWS()
-    orch.workspace.upsert(chat_id, user_id, [_comp("a")])
-    snap_id = _snap(orch, chat_id, user_id)
+    await _upsert(orch, chat_id, user_id, [_comp("a")])
+    snap_id = await _snap(orch, chat_id, user_id)
     handler = wt.HANDLERS["chrome_workspace_timeline_view"]
 
     # Nonexistent snapshot id (user-scoped lookup ⇒ guaranteed miss).
@@ -321,7 +328,7 @@ async def test_view_missing_or_mismatched_snapshot(env, audit_events):
     assert "no longer exists" in notice
 
     # Snapshot exists but belongs to a DIFFERENT chat than the payload claims.
-    other_chat = history.create_chat(user_id=user_id)
+    other_chat = await asyncio.to_thread(history.create_chat, user_id=user_id)
     try:
         surface, params, notice = await handler(
             orch, ws, user_id, ["user"],
@@ -330,7 +337,7 @@ async def test_view_missing_or_mismatched_snapshot(env, audit_events):
         assert params == {"chat_id": other_chat}
         assert "no longer exists" in notice
     finally:
-        history.delete_chat(other_chat, user_id=user_id)
+        await asyncio.to_thread(history.delete_chat, other_chat, user_id=user_id)
 
     assert orch._ws_timeline_mode == {}
     assert orch._renders == []
@@ -345,8 +352,8 @@ async def test_view_missing_or_mismatched_snapshot(env, audit_events):
 async def test_live_restores_exact_current_workspace(env, audit_events):
     orch, _history, user_id, chat_id = env
     ws = _FakeWS("traveler")
-    orch.workspace.upsert(chat_id, user_id, [_comp("v1")])
-    snap_id = _snap(orch, chat_id, user_id)
+    await _upsert(orch, chat_id, user_id, [_comp("v1")])
+    snap_id = await _snap(orch, chat_id, user_id)
     view = wt.HANDLERS["chrome_workspace_timeline_view"]
     await view(orch, ws, user_id, ["user"], {"chat_id": chat_id, "snapshot_id": snap_id})
     assert orch._ws_timeline_mode.get(id(ws)) is True
@@ -355,7 +362,7 @@ async def test_live_restores_exact_current_workspace(env, audit_events):
     orch._renders.clear()
 
     # A component lands in the live workspace WHILE the past is open.
-    orch.workspace.upsert(chat_id, user_id, [_comp("while-away", tool="new_tool")])
+    await _upsert(orch, chat_id, user_id, [_comp("while-away", tool="new_tool")])
 
     live = wt.HANDLERS["chrome_workspace_timeline_live"]
     result = await live(orch, ws, user_id, ["user"], {"chat_id": chat_id})
@@ -372,7 +379,8 @@ async def test_live_restores_exact_current_workspace(env, audit_events):
     assert len(orch._renders) == 1
     render_ws, comps, target = orch._renders[0]
     assert render_ws is ws and target == "canvas"
-    assert comps == orch.workspace.live_components(chat_id, user_id)
+    assert comps == await asyncio.to_thread(
+        orch.workspace.live_components, chat_id, user_id)
     assert [c["rows"] for c in comps] == [[["v1"]], [["while-away"]]]
     assert all(c.get("type") != "alert" for c in comps)
 
@@ -388,7 +396,7 @@ async def test_live_restores_exact_current_workspace(env, audit_events):
 async def test_live_falls_back_to_active_chat(env):
     orch, _history, user_id, chat_id = env
     ws = _FakeWS()
-    orch.workspace.upsert(chat_id, user_id, [_comp("v1")])
+    await _upsert(orch, chat_id, user_id, [_comp("v1")])
     orch._ws_active_chat[id(ws)] = chat_id
     orch._ws_timeline_mode[id(ws)] = True
 
@@ -400,7 +408,8 @@ async def test_live_falls_back_to_active_chat(env):
     assert modes == [{"type": "workspace_timeline_mode", "active": False,
                       "chat_id": chat_id}]
     assert len(orch._renders) == 1
-    assert orch._renders[0][1] == orch.workspace.live_components(chat_id, user_id)
+    assert orch._renders[0][1] == await asyncio.to_thread(
+        orch.workspace.live_components, chat_id, user_id)
 
 
 @pytest.mark.asyncio
@@ -440,25 +449,28 @@ async def test_ec5_live_upsert_during_timeline_mode(env, audit_events):
     orch.ui_clients = [ws]
     orch._ws_active_chat[id(ws)] = chat_id
 
-    orch.workspace.upsert(chat_id, user_id, [_comp("v1")])
-    snap_id = _snap(orch, chat_id, user_id)
+    await _upsert(orch, chat_id, user_id, [_comp("v1")])
+    snap_id = await _snap(orch, chat_id, user_id)
     view = wt.HANDLERS["chrome_workspace_timeline_view"]
     await view(orch, ws, user_id, ["user"], {"chat_id": chat_id, "snapshot_id": snap_id})
     assert orch._ws_timeline_mode.get(id(ws)) is True
-    frozen = orch.workspace.get_snapshot(snap_id, user_id)["components"]
+    frozen = (await asyncio.to_thread(
+        orch.workspace.get_snapshot, snap_id, user_id))["components"]
     orch._sent.clear()
     orch._renders.clear()
-    count_before = orch.workspace.count_snapshots(chat_id, user_id)
+    count_before = await asyncio.to_thread(
+        orch.workspace.count_snapshots, chat_id, user_id)
 
     # Live mutation while the historical view is open.
-    ops = orch.workspace.upsert(chat_id, user_id, [_comp("live-update", tool="other_tool")])
+    ops = await _upsert(orch, chat_id, user_id, [_comp("live-update", tool="other_tool")])
     assert len(ops) == 1 and ops[0]["created"] is True
     cid = ops[0]["component_id"]
-    new_snap = orch.workspace.snapshot(chat_id, user_id, "turn")
+    new_snap = await asyncio.to_thread(orch.workspace.snapshot, chat_id, user_id, "turn")
     assert new_snap is not None and new_snap != snap_id
 
     # The snapshot list grew — the turn was recorded normally.
-    assert orch.workspace.count_snapshots(chat_id, user_id) == count_before + 1
+    assert (await asyncio.to_thread(
+        orch.workspace.count_snapshots, chat_id, user_id)) == count_before + 1
 
     # Drive the real fan-out: the timeline-mode socket still RECEIVES it.
     await orch.send_ui_upsert(None, chat_id, user_id, ops)
@@ -473,7 +485,8 @@ async def test_ec5_live_upsert_during_timeline_mode(env, audit_events):
 
     # Server-side historical state is untouched by the live update.
     assert orch._ws_timeline_mode.get(id(ws)) is True
-    assert orch.workspace.get_snapshot(snap_id, user_id)["components"] == frozen
+    assert (await asyncio.to_thread(
+        orch.workspace.get_snapshot, snap_id, user_id))["components"] == frozen
     # … and the live workspace really does carry both components now.
-    live_now = orch.workspace.live_components(chat_id, user_id)
+    live_now = await asyncio.to_thread(orch.workspace.live_components, chat_id, user_id)
     assert [c["rows"] for c in live_now] == [[["v1"]], [["live-update"]]]

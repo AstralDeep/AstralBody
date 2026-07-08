@@ -4,6 +4,7 @@ import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -65,6 +66,7 @@ private val AstralDarkColors =
  * scheme; a non-null palette drives [paletteToColorScheme] so a theme change
  * restyles the whole app live (recomposition), matching the web/Windows clients.
  */
+@Immutable
 data class ThemePalette(
     val bg: String,
     val surface: String,
