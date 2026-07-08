@@ -238,6 +238,53 @@ def test_missing_key_refused_when_key_configured(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# 2b. Ownerless auto-assign default — built-in public, external private
+# ---------------------------------------------------------------------------
+
+def _ownerless_fake(builtin_ids):
+    """register_agent fake whose db is ownerless (no prior ownership row) and
+    records set_agent_ownership, exposing _FIRST_PARTY_PUBLIC_AGENT_IDS so the
+    built-in-vs-external default can be asserted."""
+    set_calls = []
+    stored = {}
+
+    def _get_ownership(aid):
+        return stored.get(aid)
+
+    def _set_ownership(aid, owner_email, is_public=False):
+        set_calls.append((aid, owner_email, is_public))
+        stored[aid] = {"owner_email": owner_email, "is_public": is_public}
+
+    fake = _make_fake()
+    fake.history = types.SimpleNamespace(db=types.SimpleNamespace(
+        get_agent_ownership=_get_ownership,
+        set_agent_ownership=_set_ownership,
+        _FIRST_PARTY_PUBLIC_AGENT_IDS=tuple(builtin_ids),
+    ))
+    fake._set_ownership_calls = set_calls
+    return fake
+
+
+def test_ownerless_builtin_public_external_private(monkeypatch):
+    """With DEFAULT_AGENT_OWNER set, an ownerless registration defaults PUBLIC
+    only for a bundled first-party id; every other (external) agent defaults
+    PRIVATE — off until an admin turns it on."""
+    monkeypatch.setenv("ASTRAL_ENV", "development")
+    monkeypatch.delenv("AGENT_API_KEY", raising=False)
+    monkeypatch.setenv("DEFAULT_AGENT_OWNER", "op@test")
+
+    fake = _ownerless_fake(builtin_ids=("weather-1",))
+    asyncio.run(fake.register_agent(
+        _FakeAgentWS(), RegisterAgent(agent_card=_make_card("weather-1"))))
+    asyncio.run(fake.register_agent(
+        _FakeAgentWS(), RegisterAgent(agent_card=_make_card("external-x"))))
+
+    by_agent = {aid: is_public for aid, _owner, is_public in fake._set_ownership_calls}
+    assert by_agent["weather-1"] is True, "bundled first-party agent defaults public"
+    assert by_agent["external-x"] is False, "external agent defaults private (off)"
+
+
+# ---------------------------------------------------------------------------
 # 3. Source-level — base agent presents the env key
 # ---------------------------------------------------------------------------
 

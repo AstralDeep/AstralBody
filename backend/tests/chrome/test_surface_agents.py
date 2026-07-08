@@ -89,7 +89,7 @@ class FakePerms:
     def get_tool_scope_map(self, agent_id):
         return dict(self.scope_map)
 
-    def get_effective_tool_permissions(self, user_id, agent_id):
+    def get_effective_tool_permissions(self, user_id, agent_id, safe_default=None):
         return {t: dict(k) for t, k in self.per_tool.items()}
 
     def set_tool_permission(self, user_id, agent_id, tool, kind, enabled):

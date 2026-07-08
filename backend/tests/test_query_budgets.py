@@ -149,7 +149,8 @@ def test_effective_tool_permissions_merged_query_parity(perms, user_id):
     )
 
     with count_queries(manager.db) as counter:
-        result = manager.get_effective_tool_permissions(user_id, agent_id)
+        result = manager.get_effective_tool_permissions(
+            user_id, agent_id, safe_default=False)
 
     assert counter.count == 2, "one agent_scopes read + ONE merged tool_overrides read"
     assert result == {
@@ -168,7 +169,8 @@ def test_effective_tool_permissions_no_rows_scope_fallback(perms, user_id):
     manager.set_agent_scopes(user_id, agent_id, {"tools:read": True})
 
     with count_queries(manager.db) as counter:
-        result = manager.get_effective_tool_permissions(user_id, agent_id)
+        result = manager.get_effective_tool_permissions(
+            user_id, agent_id, safe_default=False)
 
     assert counter.count == 2
     assert result["gen_chart"] == {"tools:read": True}
@@ -176,3 +178,25 @@ def test_effective_tool_permissions_no_rows_scope_fallback(perms, user_id):
     assert result["modify"] == {"tools:write": False}
     assert result["search_web"] == {"tools:search": False}
     assert result["sys_tool"] == {"tools:system": False}
+
+
+def test_effective_tool_permissions_safe_default_flips_absent_scopes(perms, user_id):
+    """Feature 040: with safe_default=True (a safe + public agent) a tool with no
+    explicit row shows ON, matching is_tool_allowed's deny→allow flip, while an
+    explicit opt-out still shows OFF. Still two reads (safe_default is passed)."""
+    manager, agent_id = perms
+    manager.set_agent_scopes(user_id, agent_id, {"tools:read": False})
+
+    with count_queries(manager.db) as counter:
+        result = manager.get_effective_tool_permissions(
+            user_id, agent_id, safe_default=True)
+
+    assert counter.count == 2
+    # explicit opt-out on tools:read stays OFF
+    assert result["gen_chart"] == {"tools:read": False}
+    assert result["legacy_true_tool"] == {"tools:read": False}
+    # absent scopes fall through to the safe default (ON)
+    assert result["modify"] == {"tools:write": True}
+    assert result["search_web"] == {"tools:search": True}
+    assert result["both_tool"] == {"tools:write": True}
+    assert result["sys_tool"] == {"tools:system": True}
