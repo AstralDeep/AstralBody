@@ -50,6 +50,15 @@
 
   var canvas = document.getElementById("astral-canvas");
   var chat = document.getElementById("astral-chat");
+  // Shared cross-client canvas empty state: the node ships in shell.html; it is
+  // detached on the first render with content and re-attached on canvas clears.
+  var canvasEmpty = document.getElementById("astral-canvas-empty");
+  function hideCanvasEmpty() {
+    if (canvasEmpty && canvasEmpty.parentNode) canvasEmpty.parentNode.removeChild(canvasEmpty);
+  }
+  function showCanvasEmpty() {
+    if (canvasEmpty && !canvasEmpty.parentNode) canvas.insertBefore(canvasEmpty, canvas.firstChild);
+  }
   var statusEl = document.getElementById("astral-status");
   var input = document.getElementById("astral-input");
   var form = document.getElementById("astral-form");
@@ -177,6 +186,7 @@
       return;
     }
     var ops = msg.ops || [];
+    if (ops.length) hideCanvasEmpty(); // content is arriving on the canvas
     var renderer = canvas.querySelector(".dynamic-renderer");
     if (!renderer) {
       renderer = document.createElement("div");
@@ -216,6 +226,7 @@
     if (!htmlStr && !msg.terminal) return;
     if (node) { node.innerHTML = htmlStr; processSideEffects(node); }
     else if (htmlStr) {
+      hideCanvasEmpty();
       node = document.createElement("div"); node.id = id; node.innerHTML = htmlStr;
       canvas.appendChild(node); processSideEffects(node);
     }
@@ -228,11 +239,11 @@
       case "ui_render":
         if (data.target === "chat") appendChatBubble("assistant", data.html);
         else if (data.target === "history") { var hr = document.getElementById("astral-history"); if (hr) setHTML(hr, data.html); }
-        else setHTML(canvas, data.html);
+        else { setHTML(canvas, data.html); if (!data.html) showCanvasEmpty(); }
         break;
       case "ui_upsert": applyUpsert(data); break; // in-place workspace updates
-      case "ui_update": setHTML(canvas, data.html); break;
-      case "ui_append": appendHTML(canvas, data.html); break;
+      case "ui_update": setHTML(canvas, data.html); if (!data.html) showCanvasEmpty(); break;
+      case "ui_append": hideCanvasEmpty(); appendHTML(canvas, data.html); break;
       case "workspace_timeline_mode": // read-only history view
         timelineMode = !!data.active;
         setStatus(timelineMode ? "Viewing workspace history (read-only)" : "");
@@ -241,6 +252,7 @@
         if (data.chat_id && data.chat_id === activeChatId) {
           activeChatId = null; timelineMode = false;
           setHTML(canvas, "");
+          showCanvasEmpty();
           setStatus("This chat was deleted.");
         }
         break;
@@ -277,6 +289,7 @@
       case "chat_created": if (data.payload) { activeChatId = data.payload.chat_id; } break;
       case "chat_loaded":
         activeChatId = data.chat && data.chat.id; chat.innerHTML = ""; canvas.innerHTML = "";
+        showCanvasEmpty(); // cleared canvas; the workspace ui_render (if any) replaces it
         timelineMode = false; setStatus("");
         // The chat rail is TEXT ONLY. Component messages carry a
         // server-rendered `html` form containing only their text primitives

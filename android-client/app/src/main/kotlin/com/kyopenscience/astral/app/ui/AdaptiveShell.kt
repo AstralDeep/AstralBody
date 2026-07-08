@@ -7,6 +7,7 @@ import android.provider.OpenableColumns
 import android.speech.RecognizerIntent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -392,7 +393,7 @@ private fun EmptyCanvasHint(modifier: Modifier = Modifier) {
             )
             Spacer(Modifier.height(6.dp))
             Text(
-                "Ask something below and AstralBody will build a live interface for it.",
+                "Ask something below and AstralDeep will build a live interface for it.",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 13.sp,
                 textAlign = TextAlign.Center,
@@ -521,10 +522,23 @@ private fun ChatBubble(turn: ChatTurn) {
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
     ) {
+        // User bubbles follow the shared tinted convention (web `.msg-user`,
+        // Apple clients): a translucent primary fill + hairline primary border.
         Surface(
-            color = if (isUser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-            contentColor = if (isUser) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
-            shape = RoundedCornerShape(16.dp),
+            color =
+                if (isUser) {
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.20f)
+                } else {
+                    MaterialTheme.colorScheme.surfaceVariant
+                },
+            contentColor = MaterialTheme.colorScheme.onSurface,
+            shape = RoundedCornerShape(if (isUser) 10.dp else 16.dp),
+            border =
+                if (isUser) {
+                    BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.30f))
+                } else {
+                    null
+                },
             modifier = if (isUser) Modifier.widthIn(max = 300.dp) else Modifier.fillMaxWidth(0.96f),
         ) {
             Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {

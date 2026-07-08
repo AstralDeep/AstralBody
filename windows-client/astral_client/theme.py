@@ -152,6 +152,8 @@ QPushButton {{ background: {SURFACE_2}; border: 1px solid {BORDER}; border-radiu
 QPushButton:hover {{ border-color: {PRIMARY}; }}
 QPushButton#primary {{ background: {GRAD}; border: none; color: white; font-weight: 600; }}
 QPushButton#primary:hover {{ background: {SECONDARY}; }}
+QPushButton#danger {{ background: {_SEMANTIC["error"][0]}; border: none; color: white; font-weight: 600; }}
+QPushButton#danger:hover {{ background: #DC2626; }}
 QTableWidget {{ background: {SURFACE}; gridline-color: {BORDER}; border: 1px solid {BORDER};
            border-radius: 10px; }}
 QTableWidget::item {{ padding: 4px 8px; color: {TEXT}; }}
