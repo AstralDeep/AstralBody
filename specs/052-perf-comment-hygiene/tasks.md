@@ -19,10 +19,10 @@
 
 **Purpose**: Measurement capability first; baselines captured BEFORE any optimization lands (FR-030/FR-032).
 
-- [ ] T001 Create `backend/shared/perf.py` with `perf_span(name, **ctx)` context manager emitting `perf <name> duration_ms=<int> <ctx>` log lines (stdlib only, no PHI/PII), plus unit tests in `backend/tests/test_perf_span.py`
-- [ ] T002 Instrument spans from data-model.md §5 — `surface.render.<key>` in `backend/orchestrator/chrome_events.py`; `register_ui.*`/`welcome.render`, `turn.route/tools/designer/narrative`, `boot.init_db/jwks_warm/phi_warm`, `static.version_map` in `backend/orchestrator/orchestrator.py` (depends on T001)
-- [ ] T003 [P] Create `backend/scripts/perf_report.py` summarizing perf lines to P50/P95 per span (consumed by quickstart.md protocol)
-- [ ] T004 Capture pre-change baselines per quickstart.md protocol into `specs/052-perf-comment-hygiene/baselines.md` — per-surface open, first-login warm/cold, turn non-model overhead, Windows launch-to-window, container boot-to-ready, repeat-visit static transfer (depends on T002, T003; BLOCKS all optimization phases)
+- [X] T001 Create `backend/shared/perf.py` with `perf_span(name, **ctx)` context manager emitting `perf <name> duration_ms=<int> <ctx>` log lines (stdlib only, no PHI/PII), plus unit tests in `backend/tests/test_perf_span.py`
+- [X] T002 Instrument spans from data-model.md §5 — `surface.render.<key>` in `backend/orchestrator/chrome_events.py`; `register_ui.*`/`welcome.render`, `turn.route/tools/designer/narrative`, `boot.init_db/jwks_warm/phi_warm`, `static.version_map` in `backend/orchestrator/orchestrator.py` (depends on T001)
+- [X] T003 [P] Create `backend/scripts/perf_report.py` summarizing perf lines to P50/P95 per span (consumed by quickstart.md protocol)
+- [X] T004 Capture pre-change baselines per quickstart.md protocol into `specs/052-perf-comment-hygiene/baselines.md` — per-surface open, first-login warm/cold, turn non-model overhead, Windows launch-to-window, container boot-to-ready, repeat-visit static transfer (depends on T002, T003; BLOCKS all optimization phases)
 
 ---
 
@@ -30,14 +30,14 @@
 
 **Purpose**: The systemic fixes every perf story depends on (research R1–R3). **⚠️ No user story work until this phase completes.**
 
-- [ ] T005 [P] Create event-loop guard: `backend/tests/plugins/event_loop_guard.py` fixture wrapping `Database.fetch_one/fetch_all/execute` to raise `BlockingDBOnEventLoop` when called on the loop thread, with transitional allowlist module `backend/tests/loop_guard_allowlist.py`; wire into `backend/tests/conftest.py` in REPORT-ONLY mode (contracts/db-async-and-detector.md)
-- [ ] T006 [P] Create query-count test helper `backend/tests/helpers/query_count.py` (`count_queries()` fixture wrapping Database methods)
-- [ ] T007 Add `ThreadedConnectionPool` to `backend/shared/database.py` — `_get_connection()` borrows, `putconn` in `finally`, `DB_POOL_MIN`(2)/`DB_POOL_MAX`(10) env, stale-recovery (discard + one retry on OperationalError/InterfaceError), `DB_POOL_DISABLE=1` kill switch, pool close on shutdown; tests in `backend/tests/test_db_pool.py` (leak count zero after suite, restart recovery, kill switch) (research R1)
-- [ ] T008 Add async facade `afetch_one/afetch_all/aexecute` (= `asyncio.to_thread` twins) to `backend/shared/database.py` with tests proving identical results/exceptions (same file as T007 — sequential) (research R2)
-- [ ] T009 Migrate `backend/orchestrator/orchestrator.py` async hot paths to the facade — `register_ui` handshake reads, `handle_chat_message` reads (e.g. current `:2996`, `:3169`), `load_chat` hydration, WS handlers, `send_dashboard` (depends on T008)
-- [ ] T010 [P] Migrate all `backend/webrender/chrome/surfaces/*.py` `render()`/HANDLERS DB access and `backend/orchestrator/chrome_events.py` dispatch to the facade (depends on T008)
-- [ ] T011 [P] Migrate remaining loop-reachable call sites — `backend/orchestrator/api.py`, `session_store.py`, `workspace.py`, `history.py` callers, attachment repos (depends on T008)
-- [ ] T012 Flip the event-loop guard to ENFORCING with an empty allowlist; full backend suite green under it (SC-005) (depends on T009–T011)
+- [X] T005 [P] Create event-loop guard: `backend/tests/plugins/event_loop_guard.py` fixture wrapping `Database.fetch_one/fetch_all/execute` to raise `BlockingDBOnEventLoop` when called on the loop thread, with transitional allowlist module `backend/tests/loop_guard_allowlist.py`; wire into `backend/tests/conftest.py` in REPORT-ONLY mode (contracts/db-async-and-detector.md)
+- [X] T006 [P] Create query-count test helper `backend/tests/helpers/query_count.py` (`count_queries()` fixture wrapping Database methods)
+- [X] T007 Add `ThreadedConnectionPool` to `backend/shared/database.py` — `_get_connection()` borrows, `putconn` in `finally`, `DB_POOL_MIN`(2)/`DB_POOL_MAX`(10) env, stale-recovery (discard + one retry on OperationalError/InterfaceError), `DB_POOL_DISABLE=1` kill switch, pool close on shutdown; tests in `backend/tests/test_db_pool.py` (leak count zero after suite, restart recovery, kill switch) (research R1)
+- [X] T008 Add async facade `afetch_one/afetch_all/aexecute` (= `asyncio.to_thread` twins) to `backend/shared/database.py` with tests proving identical results/exceptions (same file as T007 — sequential) (research R2)
+- [X] T009 Migrate `backend/orchestrator/orchestrator.py` async hot paths to the facade — `register_ui` handshake reads, `handle_chat_message` reads (e.g. current `:2996`, `:3169`), `load_chat` hydration, WS handlers, `send_dashboard` (depends on T008)
+- [X] T010 [P] Migrate all `backend/webrender/chrome/surfaces/*.py` `render()`/HANDLERS DB access and `backend/orchestrator/chrome_events.py` dispatch to the facade (depends on T008)
+- [X] T011 [P] Migrate remaining loop-reachable call sites — `backend/orchestrator/api.py`, `session_store.py`, `workspace.py`, `history.py` callers, attachment repos (depends on T008)
+- [X] T012 Flip the event-loop guard to ENFORCING with an empty allowlist; full backend suite green under it (SC-005) (depends on T009–T011)
 
 **Checkpoint**: Event loop never blocks on DB; pooled connections; user stories can start (in parallel if staffed).
 
@@ -49,15 +49,15 @@
 
 **Independent Test**: quickstart SC-001 measurements per surface + `test_query_budgets.py` + `concurrent_surfaces.py --n 20`.
 
-- [ ] T013 [P] [US1] Rewrite `get_recent_chats` in `backend/orchestrator/history.py` as a single query (correlated subquery for last-message preview, `_translate_query`-portable); add `backend/tests/test_query_budgets.py::test_recent_chats_single_query` == 1 (research R4)
-- [ ] T014 [P] [US1] Merge the two `fetch_all`s in `get_effective_tool_permissions` (`backend/orchestrator/tool_permissions.py:390-404`) into one (split per-kind vs legacy in Python); tests prove identical resolution
-- [ ] T015 [US1] Promote `backfill_per_tool_rows` to a one-time guarded `_init_db` migration `_migrate_backfill_tool_kinds_052` in `backend/shared/database.py`; delete the per-render call from `backend/webrender/chrome/surfaces/agents.py:476` and any API callers; idempotency test (data-model.md §2)
-- [ ] T016 [US1] Consolidate agent-detail render in `backend/webrender/chrome/surfaces/agents.py` to ≤3 DB round trips (combine ownership + disabled + safe + credential-keys reads); `test_query_budgets.py::test_agent_detail_max_3` (depends on T014, T015)
-- [ ] T017 [P] [US1] Agents-list render ≤2 queries (combine `get_all_agent_ownership` + `get_user_disabled_agents` paths) in `backend/webrender/chrome/surfaces/agents.py`; `test_query_budgets.py::test_agents_list_max_2`
-- [ ] T018 [US1] Per-turn permission memo keyed `(user_id, agent_id, tool, kind)` created in `handle_chat_message` and threaded into `is_tool_allowed` (`backend/orchestrator/tool_permissions.py`); tests: repeated tool in one turn = one lookup set, revocation visible next turn (research R5, FR-019)
-- [ ] T019 [P] [US1] Web modal skeleton: on `chrome_open` click render skeleton into `#astral-modal` immediately (reuse `astral-skeleton` pattern) with ~6s timeout → retry state, in `backend/webrender/static/client.js` (+ any `astral.css` additions); `chrome_render` replaces it (FR-002, research R6)
-- [ ] T020 [P] [US1] Create `backend/tests/perf/concurrent_surfaces.py` — 20 parallel surface opens via in-process `VirtualWebSocket` harness asserting P95 ≤ 2× single-user P95 (SC-011)
-- [ ] T021 [US1] Measure SC-001/SC-002 per quickstart in the reference environment; record results in `specs/052-perf-comment-hygiene/verification.md` (depends on T013–T020)
+- [X] T013 [P] [US1] Rewrite `get_recent_chats` in `backend/orchestrator/history.py` as a single query (correlated subquery for last-message preview, `_translate_query`-portable); add `backend/tests/test_query_budgets.py::test_recent_chats_single_query` == 1 (research R4)
+- [X] T014 [P] [US1] Merge the two `fetch_all`s in `get_effective_tool_permissions` (`backend/orchestrator/tool_permissions.py:390-404`) into one (split per-kind vs legacy in Python); tests prove identical resolution
+- [X] T015 [US1] Promote `backfill_per_tool_rows` to a one-time guarded `_init_db` migration `_migrate_backfill_tool_kinds_052` in `backend/shared/database.py`; delete the per-render call from `backend/webrender/chrome/surfaces/agents.py:476` and any API callers; idempotency test (data-model.md §2)
+- [X] T016 [US1] Consolidate agent-detail render in `backend/webrender/chrome/surfaces/agents.py` to ≤3 DB round trips (combine ownership + disabled + safe + credential-keys reads); `test_query_budgets.py::test_agent_detail_max_3` (depends on T014, T015)
+- [X] T017 [P] [US1] Agents-list render ≤2 queries (combine `get_all_agent_ownership` + `get_user_disabled_agents` paths) in `backend/webrender/chrome/surfaces/agents.py`; `test_query_budgets.py::test_agents_list_max_2`
+- [X] T018 [US1] Per-turn permission memo keyed `(user_id, agent_id, tool, kind)` created in `handle_chat_message` and threaded into `is_tool_allowed` (`backend/orchestrator/tool_permissions.py`); tests: repeated tool in one turn = one lookup set, revocation visible next turn (research R5, FR-019)
+- [X] T019 [P] [US1] Web modal skeleton: on `chrome_open` click render skeleton into `#astral-modal` immediately (reuse `astral-skeleton` pattern) with ~6s timeout → retry state, in `backend/webrender/static/client.js` (+ any `astral.css` additions); `chrome_render` replaces it (FR-002, research R6)
+- [X] T020 [P] [US1] Create `backend/tests/perf/concurrent_surfaces.py` — 20 parallel surface opens via in-process `VirtualWebSocket` harness asserting P95 ≤ 2× single-user P95 (SC-011)
+- [X] T021 [US1] Measure SC-001/SC-002 per quickstart in the reference environment; record results in `specs/052-perf-comment-hygiene/verification.md` (depends on T013–T020)
 
 **Checkpoint**: US1 independently demonstrable — surfaces near-instant with budgets enforced by CI.
 
@@ -69,13 +69,13 @@
 
 **Independent Test**: quickstart SC-003/SC-004 browser measurements + `test_shell_assets.py` + JWKS warm tests.
 
-- [ ] T022 [P] [US2] Self-host fonts: audit actually-used weights, vendor Inter + JetBrains Mono woff2 into `backend/webrender/static/fonts/`, replace the googleapis `@import` (`astral.css:11`) with `@font-face` + `font-display: swap`, add `<link rel="preload">` to `backend/webrender/templates/shell.html` (FR-007, research R7; same families per Constitution XII)
-- [ ] T023 [US2] Per-file asset version map + version-aware caching in `backend/orchestrator/orchestrator.py` (`_static_asset_version` → map; `_NoCacheStaticFiles` → `public, max-age=31536000, immutable` on matching `?v=`, `no-cache` otherwise); per-file `?v=` for every asset in `shell.html`; header-matrix + hash-change tests (contracts/static-asset-caching.md)
-- [ ] T024 [US2] Plotly lazy-load: remove the `<head>` tag from `shell.html`; loader in `backend/webrender/static/client.js` injecting on first chart render with `initCharts` re-scan on script `load` (fixes the verified no-re-init gap) + `requestIdleCallback` prefetch; add `backend/tests/test_shell_assets.py` asserting no external origins, no plotly tag in shell, versioned URLs on all assets (FR-008, CI asset-budget check) (depends on T023)
-- [ ] T025 [P] [US2] Remove `setTimeout(connect, 200)` (`client.js:1026`) — connect immediately (FR-010)
-- [ ] T026 [P] [US2] JWKS warm-at-boot + ~500s background refresh task in orchestrator startup using `backend/shared/jwks_cache.py`; IdP-down at boot = log + backoff retry, boot/`/readyz` unblocked, validation stays fail-closed; tests (FR-011, research R8)
-- [ ] T027 [US2] `register_ui` pipeline: `asyncio.gather` the independent reads (prefs, `compute_tools_available_for_user`, dashboard data), send welcome `ui_render` as early as possible, move profile-save/audit emission off the critical path via `create_task` with audit completeness preserved; ordering tests (FR-012) (depends on T009)
-- [ ] T028 [US2] Measure SC-003 (warm + cold profile) and SC-004 per quickstart; record in `verification.md` (depends on T022–T027)
+- [X] T022 [P] [US2] Self-host fonts: audit actually-used weights, vendor Inter + JetBrains Mono woff2 into `backend/webrender/static/fonts/`, replace the googleapis `@import` (`astral.css:11`) with `@font-face` + `font-display: swap`, add `<link rel="preload">` to `backend/webrender/templates/shell.html` (FR-007, research R7; same families per Constitution XII)
+- [X] T023 [US2] Per-file asset version map + version-aware caching in `backend/orchestrator/orchestrator.py` (`_static_asset_version` → map; `_NoCacheStaticFiles` → `public, max-age=31536000, immutable` on matching `?v=`, `no-cache` otherwise); per-file `?v=` for every asset in `shell.html`; header-matrix + hash-change tests (contracts/static-asset-caching.md)
+- [X] T024 [US2] Plotly lazy-load: remove the `<head>` tag from `shell.html`; loader in `backend/webrender/static/client.js` injecting on first chart render with `initCharts` re-scan on script `load` (fixes the verified no-re-init gap) + `requestIdleCallback` prefetch; add `backend/tests/test_shell_assets.py` asserting no external origins, no plotly tag in shell, versioned URLs on all assets (FR-008, CI asset-budget check) (depends on T023)
+- [X] T025 [P] [US2] Remove `setTimeout(connect, 200)` (`client.js:1026`) — connect immediately (FR-010)
+- [X] T026 [P] [US2] JWKS warm-at-boot + ~500s background refresh task in orchestrator startup using `backend/shared/jwks_cache.py`; IdP-down at boot = log + backoff retry, boot/`/readyz` unblocked, validation stays fail-closed; tests (FR-011, research R8)
+- [X] T027 [US2] `register_ui` pipeline: `asyncio.gather` the independent reads (prefs, `compute_tools_available_for_user`, dashboard data), send welcome `ui_render` as early as possible, move profile-save/audit emission off the critical path via `create_task` with audit completeness preserved; ordering tests (FR-012) (depends on T009)
+- [X] T028 [US2] Measure SC-003 (warm + cold profile) and SC-004 per quickstart; record in `verification.md` (depends on T022–T027)
 
 **Checkpoint**: First login demonstrably fast; asset contract CI-guarded.
 
@@ -87,11 +87,11 @@
 
 **Independent Test**: frame-order tests (upsert precedes design), streaming discrimination/fallback tests, drift guards green, SC-006/SC-007 measurements.
 
-- [ ] T029 [US3] Upsert-first web delivery in `_deliver_round_components` (`backend/orchestrator/orchestrator.py:6892-6988`): send `ui_upsert(ops)` immediately (as the native branch does), then run design passes; push designed `ui_render` as in-place refinement; drop the push if the socket's active chat changed; tests assert frame order, identity preservation (morph anchors), and unchanged failure fallback (FR-013, research R9)
-- [ ] T030 [P] [US3] `DEFAULT_MAX_ROUNDS` 3 → 1 in `backend/orchestrator/ui_designer.py:51`; `UI_DESIGNER_MAX_ROUNDS` override unchanged; update tests + default-budget test (FR-014, clarification)
-- [ ] T031 [US3] Streaming mode in `_call_llm` (`backend/orchestrator/orchestrator.py:4343-4594`): `stream=True` iterated in the worker thread, deltas marshaled via `loop.call_soon_threadsafe`, buffer-until-discriminate (`delta.tool_calls` → abort to non-streamed path; `delta.content` → stream), per-call fallback on provider error, `FF_LLM_STREAMING` (default on); unit tests via a fake streaming client through `llm_config/client_factory.py` (contracts/narrative-streaming.md)
-- [ ] T032 [US3] Emit the streamed narrative through the existing `ui_stream_data` path with the final `ui_render` superseding; transcript persistence unchanged (full final text); tests incl. mixed-client tolerance (depends on T031)
-- [ ] T033 [US3] Verify zero protocol drift: `backend/shared/ui_protocol.json` diff empty; run all three stacks' drift-guard/parity suites; measure SC-006/SC-007 per quickstart into `verification.md` (depends on T029–T032)
+- [X] T029 [US3] Upsert-first web delivery in `_deliver_round_components` (`backend/orchestrator/orchestrator.py:6892-6988`): send `ui_upsert(ops)` immediately (as the native branch does), then run design passes; push designed `ui_render` as in-place refinement; drop the push if the socket's active chat changed; tests assert frame order, identity preservation (morph anchors), and unchanged failure fallback (FR-013, research R9)
+- [X] T030 [P] [US3] `DEFAULT_MAX_ROUNDS` 3 → 1 in `backend/orchestrator/ui_designer.py:51`; `UI_DESIGNER_MAX_ROUNDS` override unchanged; update tests + default-budget test (FR-014, clarification)
+- [X] T031 [US3] Streaming mode in `_call_llm` (`backend/orchestrator/orchestrator.py:4343-4594`): `stream=True` iterated in the worker thread, deltas marshaled via `loop.call_soon_threadsafe`, buffer-until-discriminate (`delta.tool_calls` → abort to non-streamed path; `delta.content` → stream), per-call fallback on provider error, `FF_LLM_STREAMING` (default on); unit tests via a fake streaming client through `llm_config/client_factory.py` (contracts/narrative-streaming.md)
+- [X] T032 [US3] Emit the streamed narrative through the existing `ui_stream_data` path with the final `ui_render` superseding; transcript persistence unchanged (full final text); tests incl. mixed-client tolerance (depends on T031)
+- [X] T033 [US3] Verify zero protocol drift: `backend/shared/ui_protocol.json` diff empty; run all three stacks' drift-guard/parity suites; measure SC-006/SC-007 per quickstart into `verification.md` (depends on T029–T032)
 
 **Checkpoint**: Rich turns paint progressively; designer latency invisible; streaming live with clean fallback.
 
@@ -103,14 +103,14 @@
 
 **Independent Test**: `test_launch_timing.py` (offscreen) + auth-flow tests; Android reference-identity test + Compose stability report.
 
-- [ ] T034 [US4] Window-first launch in `windows-client/astral_client/app.py` `main()` (`:2635-2652`): construct+show `MainWindow` with "Signing in…" status immediately; run `resolve_auth` in a `QThread` worker; on token reuse the existing rebuild-with-new-token flow (`app.py:1936-1953`); cancel aborts the loopback wait with retry/quit; defer the first-run config prompt until after first paint; update `windows-client/tests/test_auth.py` (FR-023, research R14)
-- [ ] T035 [US4] Defer `_init_workspace` (`app.py:2336-2362`) from `MainWindow.__init__` to first win_agent/file-tool use; update `windows-client/tests/test_workspace_override.py` (depends on T034)
-- [ ] T036 [P] [US4] Cheap early-exit in `Canvas.set_components` (`app.py:357-425`): skip reconciliation when the incoming list is reference/`==`-identical to `_last_components`; extend `windows-client/tests/test_canvas_convergence.py`; document theme-restyle full rebuild as intentional (FR-024 disposition per research R14)
-- [ ] T037 [US4] Add `windows-client/tests/test_launch_timing.py` on the offscreen harness (stub pattern from `test_message_routing.py:49-54` + stubbed `resolve_auth`) asserting window-visible ≤1s (SC-008) (depends on T034)
-- [ ] T038 [P] [US4] Add `@Immutable` to Android state/wire types — `core/.../sdui/Component.kt`, UiState-held types in `core/.../protocol/Messages.kt`, `core/.../chrome/ChromeMenu.kt`, `app/.../ui/AppViewModel.kt` (`UiState`, `ChatTurn`, `StagedAttachment`, `CanvasSnapshot`), `app/.../ui/theme/Theme.kt` (`ThemePalette`) (FR-025, research R15)
-- [ ] T039 [P] [US4] Enable Compose compiler metrics/reports for debug builds in `android-client/app/build.gradle.kts`
-- [ ] T040 [US4] Add `android-client/app/src/test/.../ui/CanvasIdentityTest.kt` asserting untouched components keep reference identity across `Canvas.apply` (the skipping precondition); verify the stability report shows the annotated types stable (SC-009) (depends on T038, T039)
-- [ ] T041 [US4] Run full windows-client + android-client suites and drift guards; measure SC-008/SC-009 into `verification.md` (depends on T034–T040)
+- [X] T034 [US4] Window-first launch in `windows-client/astral_client/app.py` `main()` (`:2635-2652`): construct+show `MainWindow` with "Signing in…" status immediately; run `resolve_auth` in a `QThread` worker; on token reuse the existing rebuild-with-new-token flow (`app.py:1936-1953`); cancel aborts the loopback wait with retry/quit; defer the first-run config prompt until after first paint; update `windows-client/tests/test_auth.py` (FR-023, research R14)
+- [X] T035 [US4] Defer `_init_workspace` (`app.py:2336-2362`) from `MainWindow.__init__` to first win_agent/file-tool use; update `windows-client/tests/test_workspace_override.py` (depends on T034)
+- [X] T036 [P] [US4] Cheap early-exit in `Canvas.set_components` (`app.py:357-425`): skip reconciliation when the incoming list is reference/`==`-identical to `_last_components`; extend `windows-client/tests/test_canvas_convergence.py`; document theme-restyle full rebuild as intentional (FR-024 disposition per research R14)
+- [X] T037 [US4] Add `windows-client/tests/test_launch_timing.py` on the offscreen harness (stub pattern from `test_message_routing.py:49-54` + stubbed `resolve_auth`) asserting window-visible ≤1s (SC-008) (depends on T034)
+- [X] T038 [P] [US4] Add `@Immutable` to Android state/wire types — `core/.../sdui/Component.kt`, UiState-held types in `core/.../protocol/Messages.kt`, `core/.../chrome/ChromeMenu.kt`, `app/.../ui/AppViewModel.kt` (`UiState`, `ChatTurn`, `StagedAttachment`, `CanvasSnapshot`), `app/.../ui/theme/Theme.kt` (`ThemePalette`) (FR-025, research R15)
+- [X] T039 [P] [US4] Enable Compose compiler metrics/reports for debug builds in `android-client/app/build.gradle.kts`
+- [X] T040 [US4] Add `android-client/app/src/test/.../ui/CanvasIdentityTest.kt` asserting untouched components keep reference identity across `Canvas.apply` (the skipping precondition); verify the stability report shows the annotated types stable (SC-009) (depends on T038, T039)
+- [X] T041 [US4] Run full windows-client + android-client suites and drift guards; measure SC-008/SC-009 into `verification.md` (depends on T034–T040)
 
 **Checkpoint**: Both native clients verified; parity suites green.
 
@@ -122,11 +122,11 @@
 
 **Independent Test**: fast-path unit tests + source-hash guard; timed `docker compose up` → `/readyz` vs baselines.md.
 
-- [ ] T042 [US5] `schema_meta` table + `SCHEMA_REVISION` constant + fast path in `backend/shared/database.py::_init_db` (marker match → skip; mismatch/absent → full idempotent run then upsert marker); rollback = delete marker row (data-model.md §1); tests: fast-path skip, mismatch full-run, ≤250ms budget (FR-027, research R11)
-- [ ] T043 [US5] Source-hash guard test: hash the `_init_db`(+helpers) source region and fail when it changes without a `SCHEMA_REVISION` bump, in `backend/tests/test_schema_revision_guard.py` (depends on T042)
-- [ ] T044 [P] [US5] PHI analyzer pre-warm daemon thread at orchestrator startup (calls `get_phi_gate()`; flag-respecting; `/readyz` untouched); test that readiness never waits on it (FR-028, research R12)
-- [ ] T045 [P] [US5] `backend/start.py`: replace `time.sleep(2)` (`:85`) with a bounded `/healthz` poll; drop the 1s-per-custom-agent sleep (`:119`); preserve supervisor exit-code propagation (production-posture smoke unchanged) (FR-029, research R13)
-- [ ] T046 [US5] Measure `boot.init_db` fast path + container boot-to-ready vs `baselines.md` (SC-010) into `verification.md` (depends on T042–T045)
+- [X] T042 [US5] `schema_meta` table + `SCHEMA_REVISION` constant + fast path in `backend/shared/database.py::_init_db` (marker match → skip; mismatch/absent → full idempotent run then upsert marker); rollback = delete marker row (data-model.md §1); tests: fast-path skip, mismatch full-run, ≤250ms budget (FR-027, research R11)
+- [X] T043 [US5] Source-hash guard test: hash the `_init_db`(+helpers) source region and fail when it changes without a `SCHEMA_REVISION` bump, in `backend/tests/test_schema_revision_guard.py` (depends on T042)
+- [X] T044 [P] [US5] PHI analyzer pre-warm daemon thread at orchestrator startup (calls `get_phi_gate()`; flag-respecting; `/readyz` untouched); test that readiness never waits on it (FR-028, research R12)
+- [X] T045 [P] [US5] `backend/start.py`: replace `time.sleep(2)` (`:85`) with a bounded `/healthz` poll; drop the 1s-per-custom-agent sleep (`:119`); preserve supervisor exit-code propagation (production-posture smoke unchanged) (FR-029, research R13)
+- [X] T046 [US5] Measure `boot.init_db` fast path + container boot-to-ready vs `baselines.md` (SC-010) into `verification.md` (depends on T042–T045)
 
 **Checkpoint**: Boot measurably faster; migration safety net (revision guard) in place.
 
@@ -136,10 +136,10 @@
 
 **Purpose**: Prove every perf SC, ship PR 1.
 
-- [ ] T047 Complete `specs/052-perf-comment-hygiene/verification.md`: full SC-001..SC-011 + SC-013 sweep in the reference environment per quickstart.md (depends on T021, T028, T033, T041, T046)
+- [X] T047 Complete `specs/052-perf-comment-hygiene/verification.md`: full SC-001..SC-011 + SC-013 sweep in the reference environment per quickstart.md (depends on T021, T028, T033, T041, T046)
 - [ ] T048 [P] Live three-client verification against the dev backend (browser + Windows client + Android emulator): surfaces, first login, one rich chat turn (streamed narrative + designed refinement), theme switch (Constitution X / XII)
 - [ ] T049 [P] Production evidence report (SC-001/003/004 metrics, one-time capture against the deployed instance) → `specs/052-perf-comment-hygiene/production-report.md` (SC-014; evidence, not a gate)
-- [ ] T050 [P] Document new operator knobs in `docs/production-deployment.md` (`DB_POOL_MIN/MAX`, `DB_POOL_DISABLE`, `FF_LLM_STREAMING`, `UI_DESIGNER_MAX_ROUNDS` default change, `ASTRAL_DEBUG_SLOW_CALLBACKS`) and quickstart kill-switch table cross-check
+- [X] T050 [P] Document new operator knobs in `docs/production-deployment.md` (`DB_POOL_MIN/MAX`, `DB_POOL_DISABLE`, `FF_LLM_STREAMING`, `UI_DESIGNER_MAX_ROUNDS` default change, `ASTRAL_DEBUG_SLOW_CALLBACKS`) and quickstart kill-switch table cross-check
 - [ ] T051 Open **PR 1** from `052-perf-comment-hygiene`: all Constitution XI gates green (ruff repo-root, both in-image pytest runs incl. detector + query budgets + asset check, diff-cover ≥90%, image build, smoke exit-78, gitleaks); PR documents the psycopg2.pool usage + vendored fonts under Constitution V (depends on T047–T050)
 
 ---

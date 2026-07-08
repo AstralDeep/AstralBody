@@ -137,6 +137,7 @@ jobs:
             -e DB_PASSWORD=astral_ci \
             -e AGENT_API_KEY=ci-test-agent-key \
             -e AUDIT_HMAC_SECRET=ci-test-hmac-secret \
+            -e LOOP_GUARD_ENFORCE=1 \
             -w /app/backend --entrypoint bash astralbody:ci \
             -c "pip install pytest-cov 'coverage[toml]' && python -m pytest -q -m 'not integration' --cov=. --cov-report= && python -m pytest audit/tests llm_config/tests orchestrator/tests onboarding/tests personalization/tests scheduler/tests dreaming/tests verification/tests -q --cov=. --cov-append --cov-report=xml:coverage.xml"
       # coverage.xml lands in the mounted checkout at backend/coverage.xml.

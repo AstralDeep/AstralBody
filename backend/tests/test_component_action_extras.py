@@ -254,7 +254,8 @@ async def test_component_action_concurrent_calls_serialize(chat_env, audit_event
     and the final workspace state is the LAST completed result."""
     history, user_id, chat_id = chat_env
     fake = _make_fake(history, user_id)
-    cid = _seed_component(fake.workspace, chat_id, user_id, params={"page": 1})
+    cid = await asyncio.to_thread(
+        _seed_component, fake.workspace, chat_id, user_id, params={"page": 1})
 
     gate = asyncio.Event()
     order = []
@@ -270,20 +271,26 @@ async def test_component_action_concurrent_calls_serialize(chat_env, audit_event
 
     fake._execute_with_retry = _blocking_exec
 
+    async def _settle(condition, timeout=5.0):
+        """Poll until condition() holds (the handler hops through worker
+        threads, so plain zero-sleep drains are not enough)."""
+        deadline = asyncio.get_running_loop().time() + timeout
+        while not condition():
+            assert asyncio.get_running_loop().time() < deadline
+            await asyncio.sleep(0.01)
+
     t1 = asyncio.create_task(fake._handle_component_action(
         _FakeWS("first"), user_id,
         {"chat_id": chat_id, "component_id": cid, "kind": "refresh",
          "params_patch": {"page": 2}}))
-    for _ in range(5):
-        await asyncio.sleep(0)
+    await _settle(lambda: order == [("enter", 0)])
     assert order == [("enter", 0)]  # first call inside execution, lock held
 
     t2 = asyncio.create_task(fake._handle_component_action(
         _FakeWS("second"), user_id,
         {"chat_id": chat_id, "component_id": cid, "kind": "refresh",
          "params_patch": {"page": 3}}))
-    for _ in range(5):
-        await asyncio.sleep(0)
+    await asyncio.sleep(0.2)
     # Second call is parked on the per-chat lock — it has NOT entered.
     assert order == [("enter", 0)]
 
@@ -296,10 +303,10 @@ async def test_component_action_concurrent_calls_serialize(chat_env, audit_event
     assert order == [("enter", 0), ("exit", 0), ("enter", 1), ("exit", 1)]
 
     # Final state = last completed call; still a single workspace row.
-    row = fake.workspace.get_by_component_id(chat_id, user_id, cid)
+    row = await fake.workspace.aget_by_component_id(chat_id, user_id, cid)
     assert row["component_data"]["rows"] == [["call-1"]]
     assert row["component_data"]["_source_params"]["page"] == 3
-    assert len(fake.workspace.live_rows(chat_id, user_id)) == 1
+    assert len(await fake.workspace.alive_rows(chat_id, user_id)) == 1
 
     # Both turns completed (one chat_status done per call) and each pushed
     # its own in-place upsert of the same component.

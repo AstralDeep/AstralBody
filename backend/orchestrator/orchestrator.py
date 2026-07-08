@@ -3521,7 +3521,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             # workspace state the user sees, keyed by the stable component_id
             # the upsert path matches on — so "update the table" turns
             # actually update the table the user is looking at.
-            canvas_saved = self.workspace.live_rows(chat_id, user_id=user_id) if chat_id else []
+            canvas_saved = (await self.workspace.alive_rows(chat_id, user_id)) if chat_id else []
             canvas_context = ""
             if canvas_saved:
                 canvas_context = "\nCOMPONENTS CURRENTLY ON CANVAS:\n"
@@ -7494,7 +7494,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                       variant="warning").to_dict()
             ], target="chat")
             return
-        row = self.workspace.get_by_component_id(chat_id, user_id, component_id)
+        row = await self.workspace.aget_by_component_id(chat_id, user_id, component_id)
         if row is None or not isinstance(row.get("component_data"), dict):
             await self.send_ui_render(websocket, [
                 Alert(message="This component is no longer available.", variant="warning").to_dict()
@@ -7537,7 +7537,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # Per-user credentials ride along exactly as on the chat path.
         args = dict(params)
         try:
-            creds = self.credential_manager.get_agent_credentials_encrypted(user_id, agent_id)
+            creds = await asyncio.to_thread(
+                self.credential_manager.get_agent_credentials_encrypted, user_id, agent_id)
             if creds:
                 args["_credentials"] = creds
                 args["_credentials_encrypted"] = True
@@ -7560,7 +7561,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     )
                     if ops:
                         try:
-                            self.workspace.snapshot(chat_id, user_id, cause="component_action")
+                            await self.workspace.asnapshot(chat_id, user_id, cause="component_action")
                         except Exception:
                             logger.debug("workspace snapshot failed (component_action)", exc_info=True)
                 elif result and result.error:
@@ -7858,7 +7859,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # 1) The result component → persistent workspace (canvas) + live upsert.
         component_id = None
         try:
-            ops = self.workspace.upsert(cid, uid, [component])
+            ops = await self.workspace.aupsert(cid, uid, [component])
             component_id = component.get("component_id")
             await self.send_ui_upsert(None, cid, uid, ops)
         except Exception:

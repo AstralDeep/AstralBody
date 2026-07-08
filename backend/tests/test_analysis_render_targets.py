@@ -13,6 +13,7 @@ Components themselves reach the canvas via ``_deliver_round_components``
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -80,10 +81,14 @@ def _usage():
     return SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2)
 
 
-def _chat(o):
+async def _chat(o):
     chat_id = f"target-{uuid.uuid4().hex[:8]}"
-    o.history.create_chat(chat_id, user_id=USER)
+    await asyncio.to_thread(o.history.create_chat, chat_id, user_id=USER)
     return chat_id
+
+
+async def _cleanup(o, chat_id):
+    await asyncio.to_thread(o.history.delete_chat, chat_id, user_id=USER)
 
 
 def _target_of(call) -> str:
@@ -108,7 +113,7 @@ def _components_json(call) -> str:
 async def test_reasoning_goes_to_chat_and_never_replaces_canvas(orch):
     _register(orch)
     ws = _ws(orch)
-    chat_id = _chat(orch)
+    chat_id = await _chat(orch)
     orch.execute_single_tool = AsyncMock(return_value=SimpleNamespace(
         result={"ok": True}, error=None,
         ui_components=[{"type": "chart", "title": "Daily highs"}],
@@ -136,7 +141,7 @@ async def test_reasoning_goes_to_chat_and_never_replaces_canvas(orch):
     # canvas only through _deliver_round_components (upsert semantics).
     assert all(_target_of(c) != "canvas" for c in renders)
     orch._deliver_round_components.assert_awaited()
-    orch.history.delete_chat(chat_id, user_id=USER)
+    await _cleanup(orch, chat_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -147,7 +152,7 @@ async def test_reasoning_goes_to_chat_and_never_replaces_canvas(orch):
 async def test_cancellation_alert_goes_to_chat(orch):
     _register(orch)
     ws = _ws(orch)
-    chat_id = _chat(orch)
+    chat_id = await _chat(orch)
     orch.cancelled_sessions[id(ws)] = True
     orch._call_llm = AsyncMock(return_value=(_msg(content="unused"), _usage()))
 
@@ -157,7 +162,7 @@ async def test_cancellation_alert_goes_to_chat(orch):
                     if "cancelled" in _components_json(c)]
     assert cancel_calls, "expected the cancellation alert to be rendered"
     assert all(_target_of(c) == "chat" for c in cancel_calls)
-    orch.history.delete_chat(chat_id, user_id=USER)
+    await _cleanup(orch, chat_id)
 
 
 @pytest.mark.asyncio
@@ -171,7 +176,7 @@ async def test_denial_loop_warning_goes_to_chat(orch, monkeypatch):
                             lambda draft_agent_id: False)
     _register(orch)
     ws = _ws(orch)
-    chat_id = _chat(orch)
+    chat_id = await _chat(orch)
     orch.execute_single_tool = AsyncMock(return_value=SimpleNamespace(
         result=None, error={"message": "This tool is restricted by your permissions."},
         ui_components=[], correlation_id=None))
@@ -187,14 +192,14 @@ async def test_denial_loop_warning_goes_to_chat(orch, monkeypatch):
                   if "restricted by your permission settings" in _components_json(c)]
     assert warn_calls, "expected the all-tools-denied warning to be rendered"
     assert all(_target_of(c) == "chat" for c in warn_calls)
-    orch.history.delete_chat(chat_id, user_id=USER)
+    await _cleanup(orch, chat_id)
 
 
 @pytest.mark.asyncio
 async def test_max_turns_summary_goes_to_chat(orch):
     _register(orch)
     ws = _ws(orch)
-    chat_id = _chat(orch)
+    chat_id = await _chat(orch)
     orch.execute_single_tool = AsyncMock(return_value=SimpleNamespace(
         result={"ok": True}, error=None, ui_components=[], correlation_id=None))
     orch._generate_tool_summary = AsyncMock(return_value=[
@@ -212,14 +217,14 @@ async def test_max_turns_summary_goes_to_chat(orch):
                      if "Round results" in _components_json(c)]
     assert summary_calls, "expected the max-turns summary to be rendered"
     assert all(_target_of(c) == "chat" for c in summary_calls)
-    orch.history.delete_chat(chat_id, user_id=USER)
+    await _cleanup(orch, chat_id)
 
 
 @pytest.mark.asyncio
 async def test_max_turns_fallback_card_goes_to_chat(orch):
     _register(orch)
     ws = _ws(orch)
-    chat_id = _chat(orch)
+    chat_id = await _chat(orch)
     orch.execute_single_tool = AsyncMock(return_value=SimpleNamespace(
         result={"ok": True}, error=None, ui_components=[], correlation_id=None))
     orch._generate_tool_summary = AsyncMock(return_value=None)  # LLM summary failed
@@ -235,4 +240,4 @@ async def test_max_turns_fallback_card_goes_to_chat(orch):
                       if "Multiple tool operations were completed" in _components_json(c)]
     assert fallback_calls, "expected the fallback summary card to be rendered"
     assert all(_target_of(c) == "chat" for c in fallback_calls)
-    orch.history.delete_chat(chat_id, user_id=USER)
+    await _cleanup(orch, chat_id)
