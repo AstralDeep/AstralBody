@@ -144,25 +144,49 @@ Per RFC 8693 §4.1, delegation tokens should include the `act` claim identifying
 
 ---
 
-## Step 7: Create Tool Scopes (Optional)
+## Step 7: Create and Assign Tool Scopes
 
-To control which tools agents can access via scoped tokens, create custom scopes:
+The orchestrator requests scope-level claims in the token exchange (the set is
+`tool_permissions.VALID_SCOPES`). Each requested scope must (a) exist as a client
+scope and (b) be assigned to the **requesting** client, or the exchange fails
+`invalid_scope: Invalid scopes: ...`.
 
-1. **Client scopes → Create client scope** for each permission level:
+1. **Client scopes → Create client scope** for each (Protocol `openid-connect`,
+   Type `Optional`, **Include in token scope** ON):
 
    | Scope Name | Description |
    |------------|-------------|
    | `tools:read` | Read-only tools (system status, search, charts) |
    | `tools:write` | Data-modifying tools (modify_data) |
-   | `tools:system` | System information tools |
    | `tools:search` | Search tools (Wikipedia, arXiv) |
+   | `tools:system` | System information tools |
+   | `tools:files` | File/volume access tools (general agent file readers) |
+   | `tools:execute` | Command-execution tools (run_command, run_shell) |
 
-2. Assign these to `astral-agent-service`:
-   - Go to **Clients → `astral-agent-service` → Client scopes**
-   - Add all four scopes as **Optional**
+2. Assign all six to **BOTH** clients as **Optional**:
+   - **Clients → `astral-frontend` → Client scopes → Add client scope** —
+     **REQUIRED.** Keycloak validates the token-exchange `scope` parameter
+     against the *requesting* client, and the orchestrator authenticates the
+     exchange as `astral-frontend` (`KEYCLOAK_CLIENT_ID`). Assigning the scopes
+     only to `astral-agent-service` is **not** enough — that is the most common
+     cause of `invalid_scope` after everything else looks correct.
+   - **Clients → `astral-agent-service` → Client scopes → Add client scope** —
+     the audience/actor client.
+
+> [!IMPORTANT]
+> Assign the scopes to `astral-frontend`, not only `astral-agent-service`. A user
+> who has never enabled a per-agent scope may exchange with an empty scope (which
+> succeeds), but the moment any tool scope is requested Keycloak rejects it unless
+> `astral-frontend` carries that scope. The native login clients
+> (`astral-mobile`/`astral-desktop`/`astral-watch`) do **not** need these scopes —
+> they never perform the exchange; only the confidential `astral-frontend` client
+> does.
 
 > [!TIP]
-> The orchestrator's tool permission system (the UI toggle) provides **fine-grained per-tool control** on top of these coarse scope categories. The Keycloak scopes serve as the outer security boundary. You can skip this step and rely solely on the UI-level permissions.
+> The orchestrator's tool permission system (the UI toggle) provides
+> **fine-grained per-tool control** on top of these coarse scope categories. The
+> Keycloak scopes are the outer security boundary; the UI toggles are the inner
+> one. In production posture both must allow a tool for it to run.
 
 ---
 
@@ -259,6 +283,7 @@ automatically by `backend/shared/__init__.py` — use the un-prefixed names.)
 | Token exchange toggle not visible | Keycloak < 26.2 | Upgrade to 26.2+, or use legacy `--features=token-exchange` |
 | `"error": "not_allowed"` | Exchange not enabled on client | Verify Steps 1 and 3 — toggle on both clients |
 | `"error": "invalid_client"` | Wrong client secret | Check `AGENT_SERVICE_CLIENT_SECRET` in `.env` |
+| `"error": "invalid_scope"` (`Invalid scopes: tools:...`) | Requested `tools:*` scope not assigned to the **requesting** client | Assign the scope to **`astral-frontend`** (Step 7), not just `astral-agent-service` |
 | `"error": "invalid_token"` | Expired user token | Refresh the user token before exchanging |
 | Missing `act` claim | Mapper not configured | Verify Step 6 — `actor-claim` mapper on `agent-delegation` scope |
 | `"error": "access_denied"` | Exchange/audience misconfigured | Re-check Steps 1–4 (exchange toggles + audience mapper); V2 needs no client policies (Step 5) |
