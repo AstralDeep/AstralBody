@@ -98,6 +98,21 @@ async def test_get_history_pushes_skeleton_then_list(orch, registered_ws):
     assert isinstance(listings[-1].get("chats"), list)
 
 
+async def test_ui_event_before_auth_is_dropped_silently(orch):
+    """A ui_event on an unauthenticated socket (register_ui not yet succeeded)
+    must NOT paint a dead-end 'Unauthorized' alert. On a cold boot register_ui
+    can transiently fail and send the recoverable auth_required frame; a
+    concurrently-gated get_history reaching this branch would otherwise render
+    a stale error the instant re-auth succeeds. It is dropped silently.
+    """
+    ws = _fresh_socket()
+    assert ws not in orch.ui_sessions
+    await orch.handle_ui_message(ws, json.dumps(
+        {"type": "ui_event", "action": "get_history", "payload": {}}))
+    assert "Unauthorized" not in json.dumps(ws.task.outputs)
+    assert _frames(ws, "history_list") == []  # dropped, not processed
+
+
 async def test_load_chat_hydrates_transcript_html_off_loop(
         orch, registered_ws, chat_env):
     ws, chat_id = registered_ws, chat_env
