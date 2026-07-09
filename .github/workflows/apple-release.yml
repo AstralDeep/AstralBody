@@ -267,6 +267,25 @@ jobs:
             -exportPath "$RUNNER_TEMP/export-macos" \
             -exportOptionsPlist "$RUNNER_TEMP/ExportOptions-macos.plist"
 
+          echo "--- export-ios ---";   ls -la "$RUNNER_TEMP/export-ios"
+          echo "--- export-macos ---"; ls -la "$RUNNER_TEMP/export-macos"
+
+          # `xcodebuild` can report EXPORT SUCCEEDED and still not emit the artifact
+          # (e.g. a macOS App Store export whose installer identity never matched).
+          # Assert both exist here; otherwise altool is handed an empty path, exits 0,
+          # and the whole job goes green having uploaded nothing.
+          IPA=$(find "$RUNNER_TEMP/export-ios"   -name '*.ipa' | head -1)
+          PKG=$(find "$RUNNER_TEMP/export-macos" -name '*.pkg' | head -1)
+          [ -f "$IPA" ] || { echo "::error::iOS export produced no .ipa"; exit 1; }
+          [ -f "$PKG" ] || {
+            echo "::error::macOS export produced no .pkg. A Mac App Store submission must be a"
+            echo "::error::signed installer package. Check installerSigningCertificate in"
+            echo "::error::apple-clients/ExportOptions-macos.plist against the identity actually"
+            echo "::error::present in the keychain ('3rd Party Mac Developer Installer: …')."
+            exit 1; }
+          echo "IPA=$IPA" >> "$GITHUB_ENV"
+          echo "PKG=$PKG" >> "$GITHUB_ENV"
+
       - name: Materialize the App Store Connect API key
         env:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
@@ -281,19 +300,19 @@ jobs:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
         run: |
-          IPA=$(find "$RUNNER_TEMP/export-ios" -name '*.ipa' | head -1)
-          PKG=$(find "$RUNNER_TEMP/export-macos" -name '*.pkg' | head -1)
-          xcrun altool --validate-app -f "$IPA" -t ios      --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
-          xcrun altool --validate-app -f "$PKG" -t macos    --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+          echo "validating iOS:   $IPA"
+          xcrun altool --validate-app -f "$IPA" -t ios   --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+          echo "validating macOS: $PKG"
+          xcrun altool --validate-app -f "$PKG" -t macos --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
 
       - name: Upload both builds to the single Universal Purchase record
         env:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
         run: |
-          IPA=$(find "$RUNNER_TEMP/export-ios" -name '*.ipa' | head -1)
-          PKG=$(find "$RUNNER_TEMP/export-macos" -name '*.pkg' | head -1)
+          echo "uploading iOS:   $IPA"
           xcrun altool --upload-app -f "$IPA" -t ios   --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+          echo "uploading macOS: $PKG"
           xcrun altool --upload-app -f "$PKG" -t macos --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
 
       # Submitting for review requires a COMPLETE store listing (screenshots for
