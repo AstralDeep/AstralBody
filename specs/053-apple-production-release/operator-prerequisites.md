@@ -6,6 +6,10 @@ named; all engineering work is complete and verified without them (see
 
 **No secret value appears in this repository.** Only key *names* are listed.
 
+> **Step-by-step commands:** [`docs/apple-distribution-runbook.md`](../../docs/apple-distribution-runbook.md)
+> — what the apps require (spoiler: **zero** App ID capabilities), how to export the
+> two certificates, create the three profiles, and run the release.
+
 ---
 
 ## 1. Apple Developer + App Store Connect
