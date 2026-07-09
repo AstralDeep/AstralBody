@@ -179,6 +179,32 @@ So the watch QR device-login broker will **not** fail closed on the realm side.
 
 ---
 
+## Signed release — executed 2026-07-09
+
+Tag `apple-v1.0` → run [29036053155](https://github.com/AstralDeep/AstralBody/actions/runs/29036053155), conclusion **success**.
+
+```
+✓ validate iOS    ✓ validate macOS
+✓ upload iOS      ✓ upload macOS
+VERIFY SUCCEEDED : 2      UPLOAD SUCCEEDED : 2      FAILED with : 0
+  export-ios/AstralDeep.ipa   -> Delivery UUID b6a0f233-3b11-4a21-87ff-329041395b7d
+  export-macos/AstralDeep.pkg -> Delivery UUID fd1f2dd6-f874-4d7d-8d0c-4d8a6e9351dc
+```
+
+Both platform builds are in the single Universal Purchase App Store Connect record.
+Four defects had to be fixed to get here, each caught by execution rather than review:
+
+| # | Symptom | Root cause |
+|---|---|---|
+| 1 | `No '3rd Party Mac Developer Installer' identity` | a Mac App Store `.pkg` is signed by a **second** certificate |
+| 2 | `"AstralApp"/"AstralWatch" requires a provisioning profile` | manual signing needs a profile **per target and per platform**; one command-line value hits every target |
+| 3 | `exportOptionsPlist error for key "method" expected one {}` | the watch had `SKIP_INSTALL = NO`, so the archive held a **second top-level app**; Xcode wrote no `ApplicationProperties`, so every distribution method rejected it |
+| 4 | Green job, only iOS uploaded | Apple rejected the `.pkg` for a missing `LSApplicationCategoryType`, and **`altool` exited 0 while printing `UPLOAD FAILED`** |
+
+Defect 4 is the dangerous one: the pipeline reported success having shipped half the
+release. `Scripts/altool_strict.sh` now fails on a non-zero exit, on any failure
+marker, and on the *absence* of a success marker.
+
 ## Outstanding
 
 Not verified, and not claimed to be:
