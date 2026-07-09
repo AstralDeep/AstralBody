@@ -175,7 +175,7 @@ gains only a `generate_app_icons.py --check` step). It runs on `macos-15` and
 does **archive → sign → export → validate → upload**. It does **not** submit for
 review (see below).
 
-**Trigger.** Push a tag matching `apple-v*` (e.g. `apple-v1.0.0`), or run it
+**Trigger.** Push a tag matching `apple-v*` that equals `apple-v$MARKETING_VERSION` exactly (currently `apple-v1.0`; a mismatched tag fails the guard), or run it
 manually (`workflow_dispatch`). The `apple-v*` namespace is deliberately
 disjoint from the Windows release's `v*` trigger — a `v-apple-*` tag would
 double-fire that workflow — so do not rename it. On a tag push the workflow

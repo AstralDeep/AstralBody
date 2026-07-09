@@ -254,7 +254,8 @@ files (FR-015..FR-017, D14).
 
 ```bash
 # 1) Trigger via an Apple-scoped tag (namespace avoids the Windows v* trigger, D14)
-git tag apple-v1.0.0 && git push origin apple-v1.0.0
+# the tag MUST equal apple-v$MARKETING_VERSION (currently 1.0)
+git tag -a apple-v1.0 -m 'AstralDeep 1.0' && git push origin apple-v1.0
 gh run watch --workflow apple-release.yml     # observe archive→export(app-store)→(validate|upload→submit)
 #    two archives only: iOS (embedded watch) + macOS, into ONE Universal Purchase record (D19)
 
