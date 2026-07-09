@@ -60,7 +60,7 @@ Dev posture: `.env` must have `ASTRAL_ENV=development` (unset == production fail
 
 ## Code Style
 
-Python 3.11+ (backend), TypeScript 5.x on Vite + React 18 (frontend): Follow standard conventions
+Python 3.11+ (backend); ES5 vanilla JS maintained by the orchestrator render layer (`backend/webrender/static/`, no build step): Follow standard conventions
 
 ## Recent Changes
 - 052-perf-comment-hygiene: System-wide performance PR-1 — psycopg2 connection pooling (idle-retaining, IPv4-normalized) + async `Database` facade with a CI-enforced event-loop-blocking detector (empty allowlist); N+1 eliminations (recent-chats 1 query, agent detail ≤3, list ≤2, bulk attachment hydration) + per-turn permission memo; `schema_meta` revision fast path with source-hash bump guard; self-hosted fonts + per-file immutable asset versioning + Plotly lazy-load + modal skeletons; JWKS boot warm; designer upsert-first delivery (1 pass default) + `FF_LLM_STREAMING` narrative streaming over existing `ui_stream_data` frames (manifest untouched); Windows window-first launch with in-window OIDC; Android `@Immutable`/stability-config recomposition skipping; PHI pre-warm + start.py readiness polling. Kill switches: `DB_POOL_DISABLE`, `FF_LLM_STREAMING=0`, `UI_DESIGNER_MAX_ROUNDS`. Zero new third-party runtime deps. PR-2 (repo-wide comment hygiene, excludes apple-clients) pends.
