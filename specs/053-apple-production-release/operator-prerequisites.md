@@ -17,7 +17,8 @@ named; all engineering work is complete and verified without them (see
 | Input | Why | Blocks |
 |---|---|---|
 | Apple Developer Program membership + **Team ID** | signs every build | signed archive, upload |
-| **Apple Distribution** certificate (`.p12` + its password) | the signing identity | signed archive |
+| **Apple Distribution** certificate (`.p12` + password) | signs the `.app` | signed archive |
+| **3rd Party Mac Developer Installer** certificate | signs the macOS `.pkg` | macOS export |
 | **Three** App Store provisioning profiles | see below | export, upload |
 | App Store Connect **app record** for `com.personalailabs.astraldeep` | the destination | upload |
 | App Store Connect **API key** (`.p8`, key id, issuer id) | headless upload | upload |
@@ -48,8 +49,10 @@ these is empty, naming the missing keys and never their values.
 | Secret | Contents |
 |---|---|
 | `APPLE_TEAM_ID` | the 10-character Team ID |
-| `APPLE_DISTRIBUTION_CERT_P12_BASE64` | base64 of the Apple Distribution `.p12` |
-| `APPLE_CERT_PASSWORD` | the `.p12` export password |
+| `APPLE_DISTRIBUTION_CERT_P12_BASE64` | base64 `.p12` — Apple Distribution (ideally **plus** the installer identity) |
+| `APPLE_CERT_PASSWORD` | that `.p12`'s export password |
+| `APPLE_INSTALLER_CERT_P12_BASE64` | *optional* — base64 `.p12` of the installer identity, if not bundled above |
+| `APPLE_INSTALLER_CERT_PASSWORD` | *optional* — only if its password differs |
 | `APPLE_PROVISION_PROFILE_BASE64` | base64 of a tar containing all **three** profiles |
 | `ASC_KEY_ID` | App Store Connect API key id |
 | `ASC_ISSUER_ID` | App Store Connect API issuer id |
@@ -118,11 +121,15 @@ Still to confirm for the shipped Apple identities:
 ## 5. Releasing
 
 ```bash
-# 1. bump the human-facing version
-#    (apple-clients/AstralApp/AstralApp.xcodeproj → MARKETING_VERSION)
-# 2. tag with the apple-scoped namespace — NOT v-apple-*, which the Windows
-#    release workflow's `v*` filter would also match and double-fire
-git tag apple-v1.0.0 && git push origin apple-v1.0.0
+# The tag MUST equal apple-v$MARKETING_VERSION, and MARKETING_VERSION is currently 1.0.
+#   apple-v1.0    ✓ passes the guard
+#   apple-v1.0.0  ✗ fails it
+# The `apple-` prefix is required: release-windows.yml fires on `v*`, which matches
+# any v-prefixed tag and would double-fire it.
+git tag -a apple-v1.0 -m "AstralDeep 1.0" && git push origin apple-v1.0
+
+# Already tagged? A rerun re-reads the CURRENT secret values -- no re-tagging needed:
+gh run rerun 29031162527 --failed -R AstralDeep/AstralBody
 ```
 
 The build number is stamped from `GITHUB_RUN_NUMBER`, so successive runs never
