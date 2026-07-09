@@ -53,9 +53,11 @@ final class WatchModel {
 
     // MARK: config + session
 
-    /// Dev default from the shared config (backend .env PUBLIC_BASE_URL);
-    /// long-press the QR screen to change in a later polish task.
-    var serverBase = URL(string: AstralConfig.serverBaseURL)!
+    /// The backend this watch talks to: a validated override pushed by the iPhone
+    /// companion if one has ever arrived, else the build-time endpoint from
+    /// Config/*.xcconfig (feature 053, FR-011). A watch with no companion — which
+    /// is a fully supported state — simply keeps the build-time value.
+    var serverBase = WatchOverrideSync.resolvedServerBase()
     /// The server-issued chat id this session is talking to. The backend
     /// routes by `session_id` FIRST — a made-up id would send every message
     /// to a phantom chat, so this is adopted from chat_created/chat_loaded
@@ -68,6 +70,9 @@ final class WatchModel {
         InMemoryTokenStore()
         #endif
     }()
+
+    /// Retained so the companion-override observer outlives `bootstrap()`.
+    @ObservationIgnored private var overrideObserver: NSObjectProtocol?
 
     @ObservationIgnored private var tokens: TokenSet?
     @ObservationIgnored private var loginTask: Task<Void, Never>?
@@ -93,6 +98,23 @@ final class WatchModel {
     // MARK: lifecycle
 
     func bootstrap() async {
+        // Feature 053 — listen for an endpoint override from the iPhone companion.
+        // Opportunistic: activate() no-ops without a companion, and the observer
+        // simply never fires. `deviceLogin`/`rest` are computed from `serverBase`,
+        // so adopting a new endpoint rebuilds them on the next use.
+        WatchOverrideSync.shared.activate()
+        overrideObserver = NotificationCenter.default.addObserver(
+            forName: WatchOverrideSync.didChangeNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            // Delivered on `queue: .main`, and WatchModel is MainActor-isolated,
+            // so we are already where we need to be — no hop, no captured-var
+            // concurrency warning.
+            MainActor.assumeIsolated {
+                self?.serverBase = WatchOverrideSync.resolvedServerBase()
+            }
+        }
+
         if let stored = store.load() {
             tokens = stored.tokenSet
             // Enter the signed-in home IMMEDIATELY: the WS dial starts now

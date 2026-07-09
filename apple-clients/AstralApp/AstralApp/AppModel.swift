@@ -55,7 +55,14 @@ final class AppModel: NSObject {
     // UserDefaults-backed (the former @AppStorage pair — property wrappers
     // aren't allowed on @Observable stored properties). Seeded in init.
     var serverBaseText: String {
-        didSet { UserDefaults.standard.set(serverBaseText, forKey: "serverBase") }
+        didSet {
+            UserDefaults.standard.set(serverBaseText, forKey: "serverBase")
+            // Feature 053 — mirror the endpoint to the paired watch. Best-effort:
+            // the watch runs independently and falls back to its build-time default.
+            #if os(iOS)
+            WatchOverrideSync.shared.push(serverBaseText)
+            #endif
+        }
     }
     var authorityText: String {
         didSet { UserDefaults.standard.set(authorityText, forKey: "authority") }
@@ -174,6 +181,12 @@ final class AppModel: NSObject {
         super.init()
         if storedBase.isEmpty { defaults.set(AstralConfig.serverBaseURL, forKey: "serverBase") }
         if storedAuthority.isEmpty { defaults.set(AstralConfig.keycloakAuthority, forKey: "authority") }
+        // Feature 053 — activate the watch link and seed it with the current
+        // endpoint. No-ops when there is no paired watch app.
+        #if os(iOS)
+        WatchOverrideSync.shared.activate()
+        WatchOverrideSync.shared.push(serverBaseText)
+        #endif
     }
 
     func bootstrap() async {

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Feature 053 — Mac App Store requires the App Sandbox. Least privilege:
+	     the app is a network + keychain client and needs nothing else. Keychain
+	     access uses the default per-app access group, so no keychain-access-groups
+	     entitlement (and therefore no Keychain Sharing capability) is requested. -->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
+</dict>
+</plist>
