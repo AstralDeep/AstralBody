@@ -27,6 +27,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Swift version
         run: swift --version
+      # Feature 053 — an icon regression must fail here, loudly, rather than at
+      # App Store upload. Asserts every slot size, that the iOS/watchOS App Store
+      # icons carry no alpha channel (ITMS-90717), and that the macOS slots keep
+      # the transparent gutter their rounded-rect shape depends on.
+      - name: App icon assets are submission-valid
+        run: python3 apple-clients/Scripts/generate_app_icons.py --check
       - name: Run AstralCore tests
         run: swift test --package-path apple-clients/AstralCore
 
