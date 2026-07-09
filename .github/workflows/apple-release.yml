@@ -181,7 +181,9 @@ jobs:
           while IFS= read -r prof; do
             cp "$prof" "$IOS_DIR/"; cp "$prof" "$MAC_DIR/"
             name=$(security cms -D -i "$prof" 2>/dev/null | plutil -extract Name raw - 2>/dev/null || echo "?")
-            appid=$(security cms -D -i "$prof" 2>/dev/null | plutil -extract Entitlements.application-identifier raw - 2>/dev/null || echo "?")
+            appid=$(security cms -D -i "$prof" 2>/dev/null | plutil -extract Entitlements.application-identifier raw - 2>/dev/null \
+                    || security cms -D -i "$prof" 2>/dev/null | plutil -extract 'Entitlements.com\.apple\.application-identifier' raw - 2>/dev/null \
+                    || echo "?")
             plat=$(security cms -D -i "$prof" 2>/dev/null | plutil -extract Platform.0 raw - 2>/dev/null || echo "?")
             echo "  installed: $name  [$appid, platform=$plat]"
             count=$((count + 1))
@@ -217,27 +219,36 @@ jobs:
           done
 
       # The iOS archive carries the embedded watch app; the macOS archive must not.
+      # Manual signing needs a profile per target AND per platform. A value passed
+      # on the command line hits every target, so the names go in as variables and
+      # project.pbxproj maps each target/sdk to the right one. The iOS archive also
+      # builds the embedded watch app, hence both names here.
       - name: Archive iOS (with the embedded watch app)
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_PROFILE_IOS: ${{ secrets.APPLE_PROFILE_IOS }}
+          APPLE_PROFILE_WATCH: ${{ secrets.APPLE_PROFILE_WATCH }}
         run: |
           xcodebuild archive -project "$PROJECT" -scheme "$SCHEME" \
             -destination 'generic/platform=iOS' -configuration Release \
             -archivePath "$RUNNER_TEMP/AstralDeep-ios.xcarchive" \
             CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
-            ASTRAL_DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CODE_SIGN_STYLE=Manual
+            ASTRAL_DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CODE_SIGN_STYLE=Manual \
+            ASTRAL_PROFILE_IOS="$APPLE_PROFILE_IOS" ASTRAL_PROFILE_WATCH="$APPLE_PROFILE_WATCH"
           test -d "$RUNNER_TEMP/AstralDeep-ios.xcarchive/Products/Applications/AstralDeep.app/Watch/AstralWatch.app" \
             || { echo "::error::iOS archive is missing the embedded watch app"; exit 1; }
 
       - name: Archive macOS (Mac App Store)
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_PROFILE_MACOS: ${{ secrets.APPLE_PROFILE_MACOS }}
         run: |
           xcodebuild archive -project "$PROJECT" -scheme "$SCHEME" \
             -destination 'generic/platform=macOS' -configuration Release \
             -archivePath "$RUNNER_TEMP/AstralDeep-macos.xcarchive" \
             CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
-            ASTRAL_DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CODE_SIGN_STYLE=Manual
+            ASTRAL_DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CODE_SIGN_STYLE=Manual \
+            ASTRAL_PROFILE_MACOS="$APPLE_PROFILE_MACOS"
           # A macOS app must not contain a watchOS app. The embed phase is
           # platform-filtered to iOS; assert the filter actually held.
           if find "$RUNNER_TEMP/AstralDeep-macos.xcarchive" -name 'AstralWatch.app' | grep -q .; then

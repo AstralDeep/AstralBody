@@ -16,3 +16,14 @@ ASTRAL_KEYCLOAK_AUTHORITY = https:/$()/iam.ai.uky.edu/realms/Astral
 // value: `xcodebuild ... ASTRAL_DEVELOPMENT_TEAM=$APPLE_TEAM_ID`. Never committed.
 ASTRAL_DEVELOPMENT_TEAM =
 DEVELOPMENT_TEAM = $(ASTRAL_DEVELOPMENT_TEAM)
+
+// App Store provisioning-profile NAMES, injected by the release workflow.
+//
+// Manual signing needs one profile per target AND per platform, and a value passed
+// on the xcodebuild command line would apply to every target at once. So the names
+// arrive as these variables and project.pbxproj maps each target/sdk to the right
+// one. Empty here, so a clean clone and every unsigned build keep working —
+// an empty PROVISIONING_PROFILE_SPECIFIER is simply ignored.
+ASTRAL_PROFILE_IOS =
+ASTRAL_PROFILE_MACOS =
+ASTRAL_PROFILE_WATCH =
