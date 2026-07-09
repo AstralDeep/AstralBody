@@ -3,15 +3,19 @@
 Tag-triggered, signed **App Store** release workflow that produces **two archives** —
 iOS (carrying the **embedded watch app**) and macOS (**Mac App Store**) — and uploads
 both into the **single Universal Purchase App Store Connect record** they share (bundle
-id `com.personalailabs.astraldeep`), then submits that version **once**. A direct analogue of
+id `com.personalailabs.astraldeep`). The pipeline stops at a **validated upload** and
+reports the next step; the final **Submit for Review is operator-performed** (Apple's API
+refuses an incomplete listing). A direct analogue of
 [`.github/workflows/release-windows.yml`](../../../.github/workflows/release-windows.yml)
 (tag-triggered, version-guarded, secret-injected, additive) on the Apple toolchain.
 Realizes research decisions **D14** (workflow shape), **D19** (one-record topology),
-**D5** (build-number automation), **D6** (App-Store submission flow — **no notarytool**),
-**D1** (manual distribution signing in a temp keychain — App Store profiles for **both**
-bundle ids), and **D7** (Mac App Store entitlements). Zero new third-party dependencies
-(Constitution V) — everything is `xcrun` / `xcodebuild` / `security` / `agvtool` from the
-Apple toolchain (no fastlane, no `match`).
+**D5** (build-number automation), **D6** (App-Store upload flow — **no notarytool**),
+**D1** (manual distribution signing in a temp keychain — **three** App Store profiles across
+the two bundle ids: iOS + macOS for `com.personalailabs.astraldeep`, watchOS for `…​.watch`),
+and **D7** (Mac App Store entitlements). Zero new third-party dependencies
+(Constitution V) — everything is `xcrun` / `xcodebuild` / `security` from the
+Apple toolchain (no fastlane, no `match`; the build number is a `xcodebuild`
+build-setting override, not `agvtool`).
 
 ## Trigger
 
@@ -73,40 +77,46 @@ Each step is a named contract obligation, in this exact order:
    `APPLE_DISTRIBUTION_CERT_P12_BASE64` and `APPLE_PROVISION_PROFILE_BASE64` from
    base64 secrets to files; `security create-keychain` → `security import` the `.p12`
    with `APPLE_CERT_PASSWORD` → `security set-key-partition-list` → install **every**
-   provisioning profile into `~/Library/MobileDevice/Provisioning Profiles/`. Because the
-   iOS archive carries the embedded watch app, App Store provisioning profiles are needed
-   for **all three** platform/bundle-id pairs — iOS + macOS (`com.personalailabs.astraldeep`) **and**
+   provisioning profile into `~/Library/MobileDevice/Provisioning Profiles/`. A single
+   `.mobileprovision` is per bundle-id **and** platform, so **three** App Store profiles
+   are needed: **iOS** and **macOS** for `com.personalailabs.astraldeep` (the shared app
+   bundle id still needs one profile per platform) **and** **watchOS** for
    `com.personalailabs.astraldeep.watch` (US1 scenario 3: the embedded watch app carries
-   its own App Store profile) — plus the macOS App Store profile for
-   `com.personalailabs.astraldeep`. A single `.mobileprovision` is per-bundle-id, so
-   `APPLE_PROVISION_PROFILE_BASE64` MUST carry **both** profiles (a base64 archive/`tar`
-   of the two `.mobileprovision` files; all are installed at import). The keychain is
-   **ephemeral** (created this run, deleted on cleanup); `DEVELOPMENT_TEAM` comes from
-   `APPLE_TEAM_ID` via env/xcconfig, never committed.
+   its own App Store profile). `APPLE_PROVISION_PROFILE_BASE64` MUST therefore carry **all
+   three** `.mobileprovision` files (one base64 archive/`tar`; all installed at import).
+   The keychain is **ephemeral** (created this run, deleted on cleanup); `DEVELOPMENT_TEAM`
+   comes from `APPLE_TEAM_ID` via env/xcconfig, never committed.
    - **Missing-material fast-fail (FR-015 edge)**: if any required signing secret is
      absent/empty, fail *here* with a clear "missing signing material" message naming
      the missing secret **by key, never by value**, and **do not proceed to archive** —
      no unsigned artifact is ever produced and no secret bytes reach the logs.
 5. **Set build number from the run** (D5) — derive `CURRENT_PROJECT_VERSION` from
-   `GITHUB_RUN_NUMBER` (e.g. `agvtool new-version -all "$GITHUB_RUN_NUMBER"` or an
-   archive-time `-setting CURRENT_PROJECT_VERSION=…` / xcconfig override), so
-   successive archives carry distinct, monotonically increasing build numbers with no
-   manual source edit (FR-008; Build-number-collision edge case).
+   `GITHUB_RUN_NUMBER` and pass it to `xcodebuild` at archive time
+   (`CURRENT_PROJECT_VERSION=$GITHUB_RUN_NUMBER` as a build-setting override, **not**
+   `agvtool`), so successive archives carry distinct, monotonically increasing build
+   numbers with no manual source edit (FR-008; Build-number-collision edge case).
 6. **`xcodebuild archive` per target** — archive iOS (`-scheme AstralApp`, iOS
    destination, carrying the embedded watch app) and macOS (`-scheme AstralApp`, macOS
    destination) with `CODE_SIGN_STYLE=Manual`, the imported Apple Distribution
-   identity, and the **Release** configuration (App Sandbox + Hardened Runtime for
-   macOS per D7; ATS-clean per D3). Output `.xcarchive`s to the runner workspace.
-7. **`xcodebuild -exportArchive` with per-platform `ExportOptions` (`method = app-store`)**
+   identity, `CURRENT_PROJECT_VERSION=$GITHUB_RUN_NUMBER` (step 5), and the **Release**
+   configuration (App Sandbox + Hardened Runtime for macOS per D7; ATS-clean per D3).
+   Output `.xcarchive`s to the runner workspace. The workflow **asserts** the iOS archive
+   contains `Watch/AstralWatch.app` and the macOS archive contains **no** watch app
+   (the iOS-only embed platform filter, D20/FR-011b) — a wrong result fails the run.
+7. **`xcodebuild -exportArchive` with per-platform `ExportOptions` (`method = app-store-connect`)**
    (D6) — export each archive to a signed `.ipa` (iOS+watch) / `.pkg` (macOS) using a
    **per-platform** options plist: `apple-clients/ExportOptions-ios.plist` for the iOS
-   archive and `apple-clients/ExportOptions-macos.plist` for the macOS archive. The two
-   are split because the iOS and macOS App-Store exports differ (product form `.ipa` vs
-   `.pkg`, and the iOS plist's per-bundle-id profile mapping must name the embedded
-   watch profile as well). Each has `method` = `app-store`, `teamID` = `APPLE_TEAM_ID`,
-   `signingStyle` = `manual`, and **`manageAppVersionAndBuildNumber = false`** so App
-   Store Connect does not auto-rewrite the run-number build we set in step 5. **This is
-   the App-Store export path** — no Developer-ID export is produced.
+   archive and `apple-clients/ExportOptions-macos.plist` for the macOS archive. Both are
+   version-controlled **templates** rendered at job time by the stdlib
+   `apple-clients/Scripts/render_export_options.py` (team id / profile mapping filled from
+   secrets; the script exits non-zero if any placeholder has no value). The two are split
+   because the iOS and macOS App-Store exports differ (product form `.ipa` vs `.pkg`, and
+   the iOS plist's per-bundle-id profile mapping must name the embedded watch profile as
+   well). Each sets `method` = **`app-store-connect`** (the old `app-store` spelling is
+   deprecated), `teamID` = `APPLE_TEAM_ID`, `signingStyle` = `manual`, and
+   **`manageAppVersionAndBuildNumber = false`** so App Store Connect does not auto-rewrite
+   the run-number build we set in step 5. **This is the App-Store export path** — no
+   Developer-ID export is produced.
 8. **`xcrun altool --validate-app`** — validate each exported build against App Store
    Connect using the App Store Connect API key (`--apiKey $ASC_KEY_ID
    --apiIssuer $ASC_ISSUER_ID`, `.p8` materialized from `ASC_KEY_P8_BASE64`). A
@@ -120,19 +130,23 @@ Each step is a named contract obligation, in this exact order:
    **NO `xcrun notarytool` step** (D6). `notarytool` is the Developer-ID *outside-store*
    path, which this feature does not produce; adding it would be incorrect for App
    Store (incl. Mac App Store) distribution.
-10. **Submit for review — once** — via the App Store Connect API
-    (`reviewSubmissions` / `appStoreVersionSubmissions`) using the same key, submit the
-    **single** version (both platforms of the one Universal Purchase record) **exactly
-    once**, gated on a complete store listing existing (FR-015a, operator prerequisite).
-    The Definition of Done is the submission action *completing*; Apple's review verdict
-    is out of scope.
+10. **Report the next step — the operator submits** — the pipeline does **NOT** call the
+    App Store Connect submission API. Pressing **Submit for Review** requires a **complete
+    store listing** — screenshots for iPhone 6.9", iPad 13", Mac, and Apple Watch;
+    description; privacy-policy URL; age rating — that only the operator can author, and
+    Apple's API refuses an incomplete listing (FR-015a). So after a successful upload the
+    workflow prints the remaining operator action (complete the listing, then Submit for
+    Review **once** for the single Universal Purchase record) and stops. The pipeline's
+    Definition of Done is the **validated upload of both builds**; the one-time submission
+    is performed by the operator from App Store Connect.
 11. **Cleanup (`if: always()`)** — delete the temporary keychain and the decoded
     cert / profile / `.p8` files even on failure, so no signing material lingers on the
     runner.
 
 > **No notarytool anywhere.** For App Store (incl. Mac App Store) distribution the flow
-> is archive → export(app-store) → validate → upload → (submit). Notarization is a
-> distinct Developer-ID flow this feature explicitly does not use (D6; plan Complexity note).
+> is archive → export(app-store-connect) → validate → upload → **operator submit**.
+> Notarization is a distinct Developer-ID flow this feature explicitly does not use
+> (D6; plan Complexity note).
 
 ## Required GitHub secrets (runtime-injected, never committed)
 
@@ -170,8 +184,9 @@ workspace, and deleted in the cleanup step. Logs name secrets **by key, never by
   *verification* failure (a compile break — `apple-ci.yml`'s job — or a drift-guard
   break in `swift test`). The release workflow does not re-run or subsume the
   verification gates.
-- **No new dependency (FR-026, Constitution V)**: only `xcodebuild`, `xcrun altool`,
-  `security`, `agvtool` / `sips` from the Apple toolchain — no fastlane, no `match`.
+- **No new dependency (FR-026, Constitution V)**: only `xcodebuild`, `xcrun altool`, and
+  `security` from the Apple toolchain — build number via `xcodebuild`'s
+  `CURRENT_PROJECT_VERSION` override (not `agvtool`); no fastlane, no `match`.
 - **Build-number monotonicity (FR-008)**: `GITHUB_RUN_NUMBER`-derived build numbers are
   monotonic and collision-free across runs; App Store Connect never sees a duplicate.
 

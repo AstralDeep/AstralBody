@@ -77,26 +77,38 @@ Generate Fernet keys with
 - A different user signing in on the same browser revokes the prior user's
   session first.
 
-## Feature 051 — native Apple clients (`astral-ios`, `astral-macos`, `astral-watch`)
+## Feature 051 — native Apple clients (shared clients + `astral-watch`)
 
-Three additional **public** clients (no secret, PKCE S256), following the
-`astral-desktop`/`astral-mobile` pattern:
+The Apple clients do **not** get dedicated `astral-ios` / `astral-macos` OIDC
+clients and there is no `astral://oauth2redirect` scheme. The shipped clients
+**reuse the existing shared public clients**, matching how the code
+authenticates:
 
-| Client | Flow | Redirect URIs |
+| Apple client | OIDC client it uses | Flow |
 |---|---|---|
-| `astral-ios` | Standard flow + PKCE (system browser session) | `astral://oauth2redirect` |
-| `astral-macos` | Standard flow + PKCE (system browser session) | `astral://oauth2redirect`, `http://127.0.0.1:*` (loopback) |
-| `astral-watch` | **OAuth 2.0 Device Authorization Grant only** | — (no redirect; approval happens on another device) |
+| iOS | **`astral-mobile`** (shared with Android) | Standard flow + PKCE (system browser session) |
+| macOS | **`astral-desktop`** (shared with Windows) | Standard flow + PKCE (system browser session) |
+| watchOS | **`astral-watch`** (dedicated) | **OAuth 2.0 Device Authorization Grant only** |
+
+Because iOS/macOS reuse the shared clients, deploying the Apple family adds no
+new `azp` beyond `astral-watch`. The only realm change the phone/desktop apps
+require is registering the Apple redirect URI on the clients they reuse.
 
 Setup:
 
-1. Create the three clients as *public*; enable **Proof Key for Code Exchange**
-   (S256) on `astral-ios`/`astral-macos`.
-2. On `astral-watch`: Capability config → enable **OAuth 2.0 Device
-   Authorization Grant**; Standard/Direct-access flows OFF. The realm's
-   well-known must then advertise `device_authorization_endpoint` — the
-   orchestrator's device-login broker fails closed (HTTP 503) until it does.
-3. Append the ids you deploy to `KEYCLOAK_ALLOWED_AZP`, and keep
+1. **Apple redirect URI on the shared clients.** iOS and macOS use the
+   redirect `com.personalailabs.astraldeep:/oauth2redirect`. Add it as a
+   **Valid Redirect URI on BOTH `astral-mobile` and `astral-desktop`** (in
+   addition to whatever Android/Windows already register). No `astral-ios` /
+   `astral-macos` client is created.
+2. **Watch client `astral-watch`** — create it as *public* (no secret).
+   Capability config → enable **OAuth 2.0 Device Authorization Grant**;
+   Standard/Direct-access flows OFF (no redirect URI; approval happens on
+   another device). The realm's well-known must then advertise
+   `device_authorization_endpoint` — the orchestrator's device-login broker
+   fails closed (HTTP 503) until it does.
+3. Append `astral-watch` to `KEYCLOAK_ALLOWED_AZP` (alongside `astral-mobile`
+   and `astral-desktop`, which the shared clients already require), and keep
    `KEYCLOAK_DEVICE_CLIENTS=astral-watch` (only the watch may use the device
    grant through the broker).
 4. Session semantics (research D7): the device-grant approval is an

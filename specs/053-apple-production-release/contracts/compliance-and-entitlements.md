@@ -14,88 +14,78 @@ The **icon gap is now CLOSED** — the icons are generated, committed, and build
 in this feature; §4 states only the compliance surface and defers the full icon
 contract to [`contracts/brand-assets.md`](brand-assets.md).
 
-Current state (ground truth, branch `053-apple-production-release`):
+Implemented state (ground truth, branch `053-apple-production-release` — **this contract's surface is DONE and verified**):
 
-- `apple-clients/` has **no** `*.entitlements` file and **no** `PrivacyInfo.xcprivacy` (both absent — must be added).
-- `AstralApp/Info.plist` already sets `ITSAppUsesNonExemptEncryption=false`; `WatchInfo.plist` does **not** (must be added), and `WatchInfo.plist` still carries `WKWatchOnly=true` with **no** companion keys — the watch-only → embedded-companion conversion (D12/FR-011a, keys owned by [`contracts/build-config.md`](build-config.md)) is a prerequisite for the single-record topology this contract validates against.
-- `AstralApp/AstralApp/Assets.xcassets/AppIcon.appiconset/` is now **populated** (was `Contents.json` only, zero PNGs): the generated opaque 1024×1024 iOS marketing icon (+ dark variant) and the ten macOS rounded-rect slots. A **new** `AstralWatch/Assets.xcassets/AppIcon.appiconset/` now exists (the watch target previously had **no** asset catalog). The only remaining icon-wiring task is setting `ASSETCATALOG_COMPILER_APPICON_NAME` on the **AstralWatch** target (FR-004a, §4).
+- Exactly **one** `*.entitlements` file exists — `apple-clients/AstralApp/AstralApp-macOS.entitlements` (`com.apple.security.app-sandbox` + `com.apple.security.network.client`), wired via `CODE_SIGN_ENTITLEMENTS[sdk=macosx*]` on the **Release** config, alongside `ENABLE_APP_SANDBOX[sdk=macosx*] = YES` and `ENABLE_HARDENED_RUNTIME[sdk=macosx*] = YES`. There is **no** iOS entitlements file and **no** watch entitlements file — and **no `keychain-access-groups`** anywhere (tokens use the default per-app keychain access group; see §1).
+- Both privacy manifests exist — `apple-clients/AstralApp/AstralApp/PrivacyInfo.xcprivacy` (iOS/macOS) and `apple-clients/AstralWatch/PrivacyInfo.xcprivacy` (watch), each **inside its file-system-synchronized folder** so it is actually bundled; each declares `NSPrivacyTracking=false` and the `UserDefaults` required reason `CA92.1` (§2).
+- `ITSAppUsesNonExemptEncryption=false` is now present in **both** `Info.plist` and `WatchInfo.plist` (§3). `WatchInfo.plist` has been converted to the embedded companion (`WKWatchOnly` removed; `WKCompanionAppBundleIdentifier` + `WKRunsIndependentlyOfCompanionApp` added; keys owned by [`contracts/build-config.md`](build-config.md)).
+- `AstralApp/AstralApp/Assets.xcassets/AppIcon.appiconset/` is populated and the **new** `AstralWatch/Assets.xcassets/AppIcon.appiconset/` exists; `ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon` is now set on the **AstralWatch** target (§4).
+- **No microphone / speech usage strings were added — none are needed** (the watch dictates via SwiftUI `TextFieldLink` out-of-process and only plays audio; §2, "Usage / purpose strings").
 
 ---
 
 ## 1. Entitlements per target (FR-002, FR-003 · D7)
 
-Each target MUST declare **only** the entitlements its capabilities require
-(least privilege — no temporary-exception entitlements, D7). Entitlement files are
-version-controlled and wired to the build via the `CODE_SIGN_ENTITLEMENTS` build
-setting on the target's Release (and Debug) configuration in `project.pbxproj`.
+Each target declares **only** the entitlements its capabilities require (least
+privilege — no temporary-exception entitlements, D7). In the shipped implementation
+that means exactly **one** entitlements file — for macOS — because neither iOS nor
+watchOS needs one.
 
-### Files & wiring
+### File & wiring
 
-| File (repo-relative) | Target(s) | Wired via |
+| File (repo-relative) | Target / SDK | Wired via |
 |---|---|---|
-| `apple-clients/AstralApp/AstralApp.entitlements` | AstralApp (iOS **and** macOS) | `CODE_SIGN_ENTITLEMENTS = AstralApp/AstralApp.entitlements` |
-| `apple-clients/AstralApp/AstralWatch.entitlements` | AstralWatch (watchOS) | `CODE_SIGN_ENTITLEMENTS = AstralApp/AstralWatch.entitlements` |
+| `apple-clients/AstralApp/AstralApp-macOS.entitlements` | AstralApp, **macOS only** | `CODE_SIGN_ENTITLEMENTS[sdk=macosx*] = AstralApp/AstralApp-macOS.entitlements` on the **Release** config |
 
-> If iOS and macOS need divergent entitlement sets (they do — macOS adds the App
-> Sandbox keys, iOS does not), split into `AstralApp-iOS.entitlements` and
-> `AstralApp-macOS.entitlements` and wire each per the platform-conditioned build
-> setting. The default is one shared file plus macOS-only keys gated by config; the
-> reviewer MUST confirm the sandbox keys land on the macOS product only.
+There is **no** `AstralApp.entitlements` (iOS) and **no** `AstralWatch.entitlements`
+file, and **no `keychain-access-groups`** entitlement on any target. The sdk-scoped
+wiring guarantees the sandbox/entitlements land on the macOS product only.
 
-### iOS — `AstralApp.entitlements` (iOS)
+### iOS & watchOS — no entitlements file (least privilege, D7)
 
-MUST contain **only**:
+Neither the iOS app nor the embedded watch app ships an entitlements file. Both store
+tokens under the **default per-app keychain access group**, so a
+`keychain-access-groups` (Keychain Sharing) entitlement would be needless privilege
+(research D7). iOS is always sandboxed implicitly and needs no network entitlement, so
+it carries no entitlements file at all.
 
-- `keychain-access-groups` — one group, `$(AppIdentifierPrefix)com.personalailabs.astraldeep`
-  (Team-ID-prefixed; the prefix resolves once `DEVELOPMENT_TEAM` is supplied, D1). Backs
-  the existing Keychain token store; retires the KNOWN-ISSUES "legacy keychain until real
-  signing" note (D7).
+The watch, in particular, MUST **NOT** declare `com.apple.security.application-groups`:
+the companion server-endpoint override (D12) is delivered over `WatchConnectivity` into
+the watch's **own** `UserDefaults`, not a shared App Group container, so no App Group
+entitlement is needed on either the watch or the phone (override wiring owned by
+[`contracts/build-config.md`](build-config.md)).
 
-MUST NOT contain: App Sandbox keys (iOS is always sandboxed implicitly), network
-entitlements (not required on iOS), or any `com.apple.security.temporary-exception.*`.
-
-### watchOS — `AstralWatch.entitlements`
-
-The watch is an **embedded companion** app (D12/FR-011a) that ships *inside* the iOS
-archive, so its bundle id is the iOS id plus a `.watch` suffix
-(`com.personalailabs.astraldeep.watch`) and it needs **its own App Store provisioning
-profile** for that id — distinct from the app's profile — imported alongside the app's at
-CI signing time (secret injection owned by [`contracts/release-pipeline.md`](release-pipeline.md)).
-
-MUST contain **only**:
-
-- `keychain-access-groups` — the same Team-ID-prefixed group as iOS so a paired token
-  store is coherent.
-
-MUST NOT contain any sandbox/network/temporary-exception keys, and — critically — MUST
-**NOT** declare `com.apple.security.application-groups`. The companion server-endpoint
-override (D12) is delivered over `WatchConnectivity` into the watch's **own**
-`UserDefaults`, not a shared App Group container, so no App Group entitlement is needed on
-either the watch or the phone; adding one would be gratuitous privilege (D7) and an extra
-provisioning capability. The override wiring itself is owned by
-[`contracts/build-config.md`](build-config.md).
+The watch is an **embedded companion** (D12/FR-011a) whose bundle id is the iOS id plus
+a `.watch` suffix (`com.personalailabs.astraldeep.watch`). Even with no entitlements
+file, signing still requires the watch's **own** App Store provisioning profile for that
+id (a `.mobileprovision` is per bundle-id **and** platform), imported alongside the
+app's profiles at CI signing time (secret injection owned by
+[`contracts/release-pipeline.md`](release-pipeline.md)).
 
 ### macOS — App Sandbox + Hardened Runtime (FR-003 · D7)
 
-The macOS product ships to the **Mac App Store**, so its Release configuration MUST
-enable **App Sandbox** and **Hardened Runtime**, with a network+keychain client's minimum
-entitlement set:
+The macOS product ships to the **Mac App Store**, so its Release configuration enables
+**App Sandbox** and **Hardened Runtime** with a network client's minimum entitlement
+set. `AstralApp-macOS.entitlements` contains **only**:
 
 - `com.apple.security.app-sandbox` = `true` — **mandatory for Mac App Store** (FR-003).
 - `com.apple.security.network.client` = `true` — outbound WSS/HTTPS to the backend (the app makes no inbound connections, so **no** `network.server`).
-- `keychain-access-groups` — the Team-ID-prefixed group (data-protection keychain under sandbox).
 
-Hardened Runtime is enabled via the build setting **`ENABLE_HARDENED_RUNTIME = YES`** on
-the macOS Release configuration (not an entitlement key). No `com.apple.security.cs.*`
-Hardened-Runtime exceptions (e.g. `disable-library-validation`, `allow-jit`) may be present
-— the app needs none.
+It carries **no `keychain-access-groups`** (the default per-app group backs the token
+store under the sandbox). Sandbox and Hardened Runtime are enabled via build settings on
+the macOS Release configuration — `ENABLE_APP_SANDBOX[sdk=macosx*] = YES` and
+`ENABLE_HARDENED_RUNTIME[sdk=macosx*] = YES` — alongside the `CODE_SIGN_ENTITLEMENTS[sdk=macosx*]`
+wiring above (not entitlement keys). No `com.apple.security.cs.*` Hardened-Runtime
+exceptions (e.g. `disable-library-validation`, `allow-jit`) are present — the app needs
+none.
 
 **MUST NOT** (all platforms): any `com.apple.security.temporary-exception.*` entitlement,
-`com.apple.security.application-groups` (the watch override uses WatchConnectivity → per-app
-`UserDefaults`, not a shared App Group — D12), `get-task-allow=true` in a
-Release/distribution build, or `com.apple.security.app-sandbox` scoped so broadly (e.g.
-`files.user-selected.read-write`, `network.server`, `device.*`) beyond the network-client +
-keychain need. Least privilege is the review-risk mitigation and the D7 mandate.
+`com.apple.security.application-groups` (the watch override uses WatchConnectivity →
+per-app `UserDefaults`, not a shared App Group — D12), `keychain-access-groups` (default
+per-app group is used everywhere), `get-task-allow=true` in a Release/distribution build,
+or any sandbox scope beyond the macOS network-client need (`files.user-selected.*`,
+`network.server`, `device.*`). Least privilege is the review-risk mitigation and the D7
+mandate.
 
 ---
 
@@ -109,8 +99,8 @@ reason-coded API is reached through it, the app-target manifest still accounts f
 
 | File (repo-relative) | Covers |
 |---|---|
-| `apple-clients/AstralApp/PrivacyInfo.xcprivacy` | iOS + macOS app product (added to the Copy-Bundle-Resources phase) |
-| `apple-clients/AstralWatch/PrivacyInfo.xcprivacy` | watchOS app product |
+| `apple-clients/AstralApp/AstralApp/PrivacyInfo.xcprivacy` | iOS + macOS app product (**inside** the file-system-synchronized `AstralApp/` folder so it is bundled — a manifest at the target root would not be) |
+| `apple-clients/AstralWatch/PrivacyInfo.xcprivacy` | watchOS app product (inside the watch's file-system-synchronized folder) |
 
 ### Required keys
 
@@ -125,27 +115,29 @@ reason-coded API is reached through it, the app-target manifest still accounts f
   or location categories the app does not collect). The final set is confirmed during
   implementation by auditing what the client transmits.
 - **`NSPrivacyAccessedAPITypes`** — one required-reason entry per reason-coded API the code
-  **actually** calls. **This list is finalized during implementation by auditing the
-  reason-coded APIs actually invoked** (do not copy a boilerplate set). Likely candidates to
-  verify (declare only those reached):
-  - `NSPrivacyAccessedAPICategoryUserDefaults` — reason `CA92.1` (access to app's own defaults) if `UserDefaults` is used for config/override storage.
-  - `NSPrivacyAccessedAPICategoryFileTimestamp` — reason `C617.1` / `DDA9.1` only if file-timestamp APIs are reached.
-  - `NSPrivacyAccessedAPICategoryDiskSpace` / `NSPrivacyAccessedAPICategorySystemBootTime` — declare only if actually called.
-
-  Keychain access is **not** a reason-coded API category and needs no `NSPrivacyAccessedAPITypes` entry.
+  **actually** calls, finalized by auditing the reason-coded APIs actually invoked (not a
+  boilerplate set). **Shipped result**: each manifest declares exactly one entry —
+  `NSPrivacyAccessedAPICategoryUserDefaults` with reason `CA92.1` (access to the app's own
+  defaults — the endpoint-override / config persistence). No file-timestamp, disk-space, or
+  system-boot-time categories are declared, because none are reached. Keychain access is
+  **not** a reason-coded API category and needs no `NSPrivacyAccessedAPITypes` entry.
 
 ### Usage / purpose strings (FR-005 · D4)
 
 Every runtime permission the app requests MUST have a user-facing purpose string in the
-target's `Info.plist`, or the request crashes at runtime and fails review. Because the
-**watch voice path** (dictation → device-login and voice-target rendition, feature 051)
-exists, the watch target's Info source MUST carry:
+target's `Info.plist`, or the request crashes at runtime and fails review. **In the shipped
+implementation no usage strings are needed, and none were added** — the premise that the
+voice path requires them is disproved.
 
-- **`NSSpeechRecognitionUsageDescription`** — why the watch transcribes speech.
-- **`NSMicrophoneUsageDescription`** — why the watch captures audio.
-
-These belong wherever the voice path is reachable (watch target; and the phone target if it
-brokers dictation). Targets with no such permission MUST NOT carry gratuitous usage strings.
+The watch voice path does **not** call the microphone or Speech-framework APIs: the watch
+dictates via SwiftUI `TextFieldLink` (the system dictation sheet, which runs
+**out-of-process**) and only **plays** audio (`AVAudioSession(.ambient)` + speech
+synthesis). Because the app never invokes microphone capture (`AVAudioEngine`) or
+`SFSpeechRecognizer`, adding **`NSMicrophoneUsageDescription`** /
+**`NSSpeechRecognitionUsageDescription`** would declare capabilities the app does not use —
+gratuitous, and a needless review-risk. Targets with no permission request MUST NOT carry
+gratuitous usage strings, so **none** of the three targets carries a mic/speech usage
+string.
 
 ---
 
@@ -160,8 +152,8 @@ Therefore each target MUST declare non-exempt encryption = false:
 State per target:
 
 - `AstralApp/Info.plist` — **already present** (`<key>ITSAppUsesNonExemptEncryption</key><false/>`). No change.
-- `AstralApp/WatchInfo.plist` — **MUST be ADDED** (currently absent). The watch declaration
-  must be **consistent with the companion phone target** (FR-007): both `false`.
+- `AstralApp/WatchInfo.plist` — **now present** (added in this feature; was previously absent),
+  **consistent with the companion phone target** (FR-007): both `false`.
 
 This lets each upload skip the manual per-build export-compliance questionnaire in App Store
 Connect and keeps the watch consistent with the phone (FR-007).
@@ -198,11 +190,11 @@ Compliance invariants (mechanically checked by the generator's `--check` and ass
   auto-mask, so the artwork itself supplies the rounded-rect shape). A blanket "strip all
   alpha" step would break them — so the opacity rule is scoped to the iOS/watch slots only.
 
-**FR-004a — remaining wiring (a task, not yet done):** the watch's icon renders only once
-`ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon` is set on the **AstralWatch** target's build
-configurations in `project.pbxproj` — it is currently set on **AstralApp** only. Without it
-the new watch catalog is inert and the embedded watch archive fails US1 acceptance scenario 3
-(the watch must carry its own app icon).
+**FR-004a — icon wiring DONE:** `ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon` is now set on
+the **AstralWatch** target's build configurations in `project.pbxproj` (it was previously set
+on **AstralApp** only), so the watch catalog is live and the embedded watch archive carries
+its own app icon (US1 acceptance scenario 3). **Verified**: `assetutil` reports `AppIcon
+idiom=watch 1024x1024` in the compiled watch catalog.
 
 **Build-verified:** `xcodebuild -scheme AstralApp -destination 'generic/platform=iOS
 Simulator' -configuration Debug` **BUILD SUCCEEDED**; `actool` emitted `AppIcon60x60@2x.png`
@@ -215,20 +207,21 @@ dark appearances.
 
 | Item | iOS (AstralApp) | macOS (AstralApp) | watchOS (AstralWatch) | FR |
 |---|---|---|---|---|
-| `keychain-access-groups` entitlement | ✅ | ✅ | ✅ | FR-002 |
+| Entitlements file | — none (default keychain group) | `AstralApp-macOS.entitlements` | — none | FR-002 |
+| `keychain-access-groups` entitlement | ✅ absent | ✅ absent | ✅ absent | FR-002 |
 | `com.apple.security.app-sandbox` | — | ✅ (MAS) | — | FR-003 |
 | `com.apple.security.network.client` | — | ✅ | — | FR-003 |
-| Hardened Runtime (`ENABLE_HARDENED_RUNTIME=YES`) | — | ✅ | — | FR-003 |
+| Hardened Runtime (`ENABLE_HARDENED_RUNTIME[sdk=macosx*]=YES`) | — | ✅ | — | FR-003 |
 | No temporary-exception entitlements | ✅ | ✅ | ✅ | FR-002/003 |
 | No `com.apple.security.application-groups` (D12) | ✅ absent | ✅ absent | ✅ absent | FR-002 |
 | Own App Store provisioning profile | `…astraldeep` | `…astraldeep` | `…astraldeep.watch` | D1 |
 | `PrivacyInfo.xcprivacy` (`NSPrivacyTracking=false`) | ✅ | ✅ | ✅ | FR-005 |
-| `NSPrivacyAccessedAPITypes` (audited set) | ✅ | ✅ | ✅ | FR-005 |
-| Speech + Mic usage strings | (if voice path) | (if voice path) | ✅ | FR-005 |
-| `ITSAppUsesNonExemptEncryption=false` | ✅ present | ✅ present | ➕ **ADD** | FR-007 |
-| `AppIcon.appiconset` populated (generated) | ✅ done | ✅ done | ✅ **new catalog** | FR-004 |
+| `NSPrivacyAccessedAPITypes` (audited: only `CA92.1`) | ✅ | ✅ | ✅ | FR-005 |
+| Speech + Mic usage strings | — not used | — not used | — not used (`TextFieldLink` out-of-process) | FR-005 |
+| `ITSAppUsesNonExemptEncryption=false` | ✅ present | ✅ present | ✅ present | FR-007 |
+| `AppIcon.appiconset` populated (generated) | ✅ done | ✅ done | ✅ new catalog | FR-004 |
 | Opaque 1024×1024 App Store icon (no alpha) | ✅ | n/a (gutter) | ✅ | FR-004 |
-| `ASSETCATALOG_COMPILER_APPICON_NAME=AppIcon` | ✅ set (AstralApp) | ✅ set (AstralApp) | ➕ **ADD** (AstralWatch) | FR-004a |
+| `ASSETCATALOG_COMPILER_APPICON_NAME=AppIcon` | ✅ set (AstralApp) | ✅ set (AstralApp) | ✅ set (AstralWatch) | FR-004a |
 
 ---
 
@@ -236,36 +229,40 @@ dark appearances.
 
 Run before archiving; all MUST pass for the SC-001 zero-compliance-error bar.
 
-- [ ] `AstralApp.entitlements` and `AstralWatch.entitlements` exist and are wired via
-      `CODE_SIGN_ENTITLEMENTS` on every configuration of their targets.
-- [ ] iOS/watch entitlements contain **only** `keychain-access-groups` (Team-prefixed); no
-      sandbox/network/temporary-exception keys, and **no `com.apple.security.application-groups`**
-      (the watch override uses WatchConnectivity → per-app `UserDefaults`, D12).
-- [ ] macOS Release has `com.apple.security.app-sandbox=true`, `com.apple.security.network.client=true`,
-      `keychain-access-groups`, and `ENABLE_HARDENED_RUNTIME=YES` — and **nothing else**.
-- [ ] No `com.apple.security.temporary-exception.*`, no `com.apple.security.application-groups`,
+- [x] Exactly one entitlements file exists — `AstralApp-macOS.entitlements` — wired via
+      `CODE_SIGN_ENTITLEMENTS[sdk=macosx*]` on the macOS Release config. **No** iOS or watch
+      entitlements file, and **no `keychain-access-groups`** on any target (default per-app
+      keychain access group is used everywhere).
+- [x] The watch declares **no `com.apple.security.application-groups`** (the override uses
+      WatchConnectivity → per-app `UserDefaults`, D12).
+- [x] macOS Release has `com.apple.security.app-sandbox=true`, `com.apple.security.network.client=true`,
+      `ENABLE_APP_SANDBOX[sdk=macosx*]=YES`, and `ENABLE_HARDENED_RUNTIME[sdk=macosx*]=YES` — and
+      **nothing else** (no `keychain-access-groups`).
+- [x] No `com.apple.security.temporary-exception.*`, no `com.apple.security.application-groups`,
       no Hardened-Runtime `cs.*` exceptions, no `get-task-allow=true` in any Release/distribution build.
 - [ ] The embedded watch app has **its own App Store provisioning profile** for
       `com.personalailabs.astraldeep.watch`, imported alongside the app profile at CI signing
       (see [`contracts/release-pipeline.md`](release-pipeline.md)).
-- [ ] The watch-companion `WatchInfo.plist` keys are in place — `WKWatchOnly` **removed**,
+- [x] The watch-companion `WatchInfo.plist` keys are in place — `WKWatchOnly` **removed**,
       `WKCompanionAppBundleIdentifier=com.personalailabs.astraldeep`,
-      `WKRunsIndependentlyOfCompanionApp=YES`, `WKApplication=YES` (keys owned by
+      `WKRunsIndependentlyOfCompanionApp=true`, `WKApplication` kept (keys owned by
       [`contracts/build-config.md`](build-config.md); confirmed here because they gate the
       embedded-archive validation).
-- [ ] `PrivacyInfo.xcprivacy` present in each app target's bundle resources (AstralApp + AstralWatch);
+- [x] `PrivacyInfo.xcprivacy` present in each app target's **file-system-synchronized** folder
+      (`AstralApp/AstralApp/PrivacyInfo.xcprivacy`, `AstralWatch/PrivacyInfo.xcprivacy`);
       `NSPrivacyTracking=false`; `NSPrivacyCollectedDataTypes` matches reality (no speculative entries).
-- [ ] `NSPrivacyAccessedAPITypes` finalized by **auditing the reason-coded APIs the code actually
-      calls** (not copied boilerplate); each entry has a valid reason code.
-- [ ] Watch target carries `NSSpeechRecognitionUsageDescription` + `NSMicrophoneUsageDescription`
-      (voice path present); no gratuitous usage strings elsewhere.
-- [ ] `ITSAppUsesNonExemptEncryption=false` present in **both** `Info.plist` **and** `WatchInfo.plist`,
+- [x] `NSPrivacyAccessedAPITypes` finalized by auditing the reason-coded APIs the code actually
+      calls — the one declared entry is `NSPrivacyAccessedAPICategoryUserDefaults` reason `CA92.1`.
+- [x] **No** `NSSpeechRecognitionUsageDescription` / `NSMicrophoneUsageDescription` on any target —
+      the watch dictates via `TextFieldLink` (out-of-process) and only plays audio, so it calls
+      neither the microphone nor Speech APIs; adding them would declare unused capabilities.
+- [x] `ITSAppUsesNonExemptEncryption=false` present in **both** `Info.plist` **and** `WatchInfo.plist`,
       consistent across companion + watch.
-- [ ] `AppIcon.appiconset` populated (generated by `Scripts/generate_app_icons.py`) for iOS + macOS,
-      the **new** `AstralWatch` asset catalog exists, and the generator `--check` passes (slot sizes,
+- [x] `AppIcon.appiconset` populated (generated by `Scripts/generate_app_icons.py`) for iOS + macOS,
+      the **new** `AstralWatch` asset catalog exists, and the generator `--check` runs in CI (slot sizes,
       iOS/watch opacity, macOS gutter) — detail in [`contracts/brand-assets.md`](brand-assets.md).
-- [ ] `ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon` set on the **AstralWatch** target's build configs
-      (FR-004a) — currently set on AstralApp only.
+- [x] `ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon` set on the **AstralWatch** target's build configs
+      (FR-004a) — `assetutil` confirms `AppIcon idiom=watch 1024x1024`.
 - [ ] `xcrun altool --validate-app` (or App Store Connect API validation) per platform archive
       (iOS-with-embedded-watch, macOS) reports **no** missing-icon, missing-privacy-manifest, ATS,
       entitlement, or signing error (SC-001).

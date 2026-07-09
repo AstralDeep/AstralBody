@@ -1,7 +1,8 @@
-# Known issues — apple-clients (feature 051)
+# Known issues — apple-clients (features 051 + 053)
 
 Honest state of the tree (041 convention). Task numbers refer to
-`specs/051-apple-native-clients/tasks.md`.
+`specs/051-apple-native-clients/tasks.md` and
+`specs/053-apple-app-store/tasks.md`.
 
 1. **Realm prerequisites (RESOLVED on the dev realm 2026-07-07, needed per
    realm)**: (a) "OAuth 2.0 Device Authorization Grant" enabled on
@@ -12,13 +13,17 @@ Honest state of the tree (041 convention). Task numbers refer to
    (verification/results.md §Session 2). Note: realms that enforce a PKCE
    policy on `astral-watch` are supported — the broker sends S256
    `code_challenge` on start and the verifier on the token poll.
-2. **macOS keychain is the legacy login keychain.** The macOS target builds
-   unsandboxed with ad-hoc signing ("Sign to Run Locally"), so tokens land in
-   the login keychain: a rebuild that changes the code signature can trigger a
-   keychain prompt or drop access (dev-machine annoyance, not a data leak).
-   Adopting `kSecUseDataProtectionKeychain` needs a real signing identity +
-   keychain-access-group entitlements — deferred until distribution signing
-   exists. iOS/watchOS use the data-protection keychain with
+2. **macOS legacy login keychain — LOCAL ad-hoc builds only.** A local macOS
+   build signed "Sign to Run Locally" (ad-hoc, and unsandboxed under Debug)
+   writes tokens to the login keychain, so a rebuild that changes the code
+   signature can trigger a keychain prompt or drop access (dev-machine
+   annoyance, not a data leak). This does NOT apply to the shipped app: the
+   **Release** configuration now enables App Sandbox + Hardened Runtime
+   (`ENABLE_APP_SANDBOX[sdk=macosx*]` / `ENABLE_HARDENED_RUNTIME[sdk=macosx*]`,
+   entitlements `AstralApp-macOS.entitlements`) and signs with a real
+   distribution identity. Tokens live under the **default** per-app keychain
+   access group — no `keychain-access-groups` entitlement is requested (least
+   privilege, research D7). iOS/watchOS use the data-protection keychain with
    `AfterFirstUnlockThisDeviceOnly`.
 3. **Keychain items survive app deletion on iOS/watchOS.** Deleting the app
    does not revoke the session; a reinstall silently resumes it (inside the

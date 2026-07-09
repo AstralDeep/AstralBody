@@ -75,9 +75,10 @@ record, so the two platforms **cannot** be separate records — they are a singl
 Universal Purchase record with two platform versions, and the embedded watch app
 rides inside the iOS build. The identity set above is therefore also the
 store-topology anchor: one bundle id here means one record, one listing, two
-archives (iOS-with-embedded-watch, macOS). Signing consequently needs App Store
-**three** provisioning profiles (iOS + macOS for the app bundle id; watchOS for `…​.watch`)
-(`com.personalailabs.astraldeep` **and** `com.personalailabs.astraldeep.watch`).
+archives (iOS-with-embedded-watch, macOS). Signing consequently needs **three**
+App Store provisioning profiles — iOS + macOS for the app bundle id
+`com.personalailabs.astraldeep`, and watchOS for `com.personalailabs.astraldeep.watch`
+(a `.mobileprovision` is per bundle-id **and** platform).
 
 ## Divergences that MUST be fixed
 

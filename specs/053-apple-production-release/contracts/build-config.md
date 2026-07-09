@@ -87,19 +87,23 @@ Info.plist keys at runtime** instead of selecting on `#if DEBUG`:
 
 ## 4. ATS contract (D3)
 
-The current blanket `NSAppTransportSecurity → NSAllowsArbitraryLoads = true` in **both**
-`AstralApp/Info.plist` and `WatchInfo.plist` is removed.
+The former blanket `NSAppTransportSecurity → NSAllowsArbitraryLoads = true` in **both**
+`AstralApp/Info.plist` and `WatchInfo.plist` is removed. In its place both plists carry **only**
+`NSAllowsLocalNetworking = true`, **unconditionally** (not per-configuration).
 
-- **Release**: ATS-clean — **no** `NSAllowsArbitraryLoads`, no domain exceptions. The backend is
-  HTTPS (`sandbox.ai.uky.edu`), so no exception is needed; a blanket exception is an App Store
-  review flag (FR-006).
-- **Debug**: the localhost dev endpoint (`http://localhost:8001`) is permitted **only** via
-  `NSAllowsLocalNetworking = true` (matching the *former* `project.yml` intent, now retired — D18), scoped to the
-  Debug configuration — not a blanket arbitrary-loads exception. `NSAllowsLocalNetworking` is the
-  App-Store-safe form and covers `localhost` / `127.0.0.1` / `*.local`.
-- Scoping mechanism: the ATS dict is driven from the active configuration (Debug adds the
-  local-networking key; Release adds nothing), so the arbitrary-loads exception is provably absent
-  from a Release archive.
+- **Why unconditional, not Debug-scoped**: a static `Info.plist` cannot be made per-configuration
+  without maintaining two duplicate plists. `NSAllowsLocalNetworking` is App-Store-safe in a
+  Release build regardless — it relaxes ATS **only** for loopback (`localhost` / `127.0.0.1`) and
+  `*.local` names and **never** permits an insecure load to a public host. Carrying it in every
+  configuration keeps the Debug localhost endpoint working without ever weakening the Release
+  security posture.
+- **Release**: ATS-compliant — **no** `NSAllowsArbitraryLoads`, no domain exceptions. The backend
+  is HTTPS (`sandbox.ai.uky.edu`), which ATS permits by default; the only relaxation present
+  (`NSAllowsLocalNetworking`) cannot reach a public host (FR-006). **VERIFIED** on the macOS
+  Release product: `NSAllowsArbitraryLoads` is absent.
+- **Debug**: the localhost dev endpoint (`http://localhost:8001`) loads under the same
+  `NSAllowsLocalNetworking = true`, which covers `localhost` / `127.0.0.1` / `*.local` — not a
+  blanket arbitrary-loads exception (matching the *former* `project.yml` intent, now retired — D18).
 
 ---
 
@@ -108,7 +112,7 @@ The current blanket `NSAppTransportSecurity → NSAllowsArbitraryLoads = true` i
 | Setting                   | Source                                  | Rule |
 | ------------------------- | --------------------------------------- | ---- |
 | `MARKETING_VERSION`       | Human-set in xcconfig / `project.pbxproj` | Bumped per release; **guarded** by a tag-vs-`MARKETING_VERSION` check in `apple-release.yml` (mirrors `release-windows.yml`) so a mislabeled build cannot ship. |
-| `CURRENT_PROJECT_VERSION` | CI run number, applied at archive time  | Derived automatically (e.g. `GITHUB_RUN_NUMBER` via `agvtool`/`-setting`), never hand-edited; monotonic → successive archives carry **distinct, increasing** build numbers (FR-008), so App Store Connect never rejects a duplicate. |
+| `CURRENT_PROJECT_VERSION` | CI run number, applied at archive time  | Derived automatically — `CURRENT_PROJECT_VERSION=$GITHUB_RUN_NUMBER` passed to `xcodebuild` at archive time (a build-setting override, **not** `agvtool`), never hand-edited; monotonic → successive archives carry **distinct, increasing** build numbers (FR-008), so App Store Connect never rejects a duplicate. |
 
 - Both surface into the plists via the `$(MARKETING_VERSION)` / `$(CURRENT_PROJECT_VERSION)`
   substitutions already present in `Info.plist` / `WatchInfo.plist`
@@ -127,8 +131,9 @@ The current blanket `NSAppTransportSecurity → NSAllowsArbitraryLoads = true` i
   fallback is the sandbox endpoint. Verifiable by searching Release-reachable source/config.
 - **INV-2 (FR-009)** — Repoint without a code change: editing `ASTRAL_SERVER_BASE_URL` /
   `ASTRAL_KEYCLOAK_AUTHORITY` in the xcconfig and rebuilding retargets every target; no Swift edit.
-- **INV-3 (FR-006)** — Release is ATS-clean; any localhost exception is Debug-scoped
-  (`NSAllowsLocalNetworking`), never a Release blanket `NSAllowsArbitraryLoads`.
+- **INV-3 (FR-006)** — Release is ATS-compliant: no blanket `NSAllowsArbitraryLoads` anywhere.
+  The only relaxation is `NSAllowsLocalNetworking` (loopback/`.local` only, App-Store-safe),
+  carried **unconditionally** in both plists; it never permits an insecure load to a public host.
 - **INV-4 (FR-008)** — Every archive carries a marketing version and a unique, monotonically
   increasing, auto-applied build number.
 - **INV-5 (FR-011)** — The watch endpoint default resolves through this contract; the runtime

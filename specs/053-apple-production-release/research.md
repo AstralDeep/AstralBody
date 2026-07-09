@@ -46,7 +46,9 @@ All decisions below resolve the "how" for the spec's requirements. No `NEEDS CLA
 
 ## D5 — Version & build-number automation
 
-**Decision**: Keep `MARKETING_VERSION` as the human-set release version (bumped per release, guarded like `release-windows.yml`'s tag-vs-`__version__` check). Derive `CURRENT_PROJECT_VERSION` (build number) automatically in the release workflow from the CI run (`agvtool new-version -all "$GITHUB_RUN_NUMBER"` or an `xcconfig`/`-setting` override at archive time), so successive archives never collide.
+**Decision**: Keep `MARKETING_VERSION` as the human-set release version (bumped per release, guarded like `release-windows.yml`'s tag-vs-`__version__` check). Derive `CURRENT_PROJECT_VERSION` (build number) automatically in the release workflow from the CI run, so successive archives never collide.
+
+**As built**: the build number is passed directly to `xcodebuild` as `CURRENT_PROJECT_VERSION=$GITHUB_RUN_NUMBER` at archive time rather than rewritten into the project with `agvtool` — a build-setting override leaves the committed project untouched and needs no working-tree mutation or commit step in CI.
 
 **Rationale**: App Store Connect rejects duplicate build numbers; a monotonic CI-run-derived number is collision-free and reproducible. Satisfies FR-008. A tag-vs-`MARKETING_VERSION` guard (mirroring Windows) prevents shipping a mislabeled build.
 
@@ -56,7 +58,9 @@ All decisions below resolve the "how" for the spec's requirements. No `NEEDS CLA
 
 ## D6 — App Store submission flow (terminology correction)
 
-**Decision**: The release pipeline performs **archive → export (App Store distribution) → upload to App Store Connect → submit for review**, using `xcodebuild -exportArchive` with per-platform `ExportOptions-{ios,macos}.plist` (`method = app-store`) and `xcrun altool --upload-app` / Transporter with an **App Store Connect API key** (issuer + key id + `.p8`, all CI secrets). **No `notarytool` step** is used: developer notarization is the Developer-ID (outside-store) path; App Store builds are processed/signed-checked by Apple server-side. The spec's FR-015 word "notarize" maps to Apple's server-side processing of the uploaded build.
+**Decision**: The release pipeline performs **archive → export (App Store distribution) → upload to App Store Connect → (operator) submit for review**, using `xcodebuild -exportArchive` with per-platform `ExportOptions-{ios,macos}.plist` and `xcrun altool --upload-app` / Transporter with an **App Store Connect API key** (issuer + key id + `.p8`, all CI secrets). **No `notarytool` step** is used: developer notarization is the Developer-ID (outside-store) path; App Store builds are processed/signed-checked by Apple server-side. The spec's FR-015 word "notarize" maps to Apple's server-side processing of the uploaded build.
+
+**As built**: the ExportOptions templates set `method = app-store-connect` (the older `app-store` spelling is deprecated). The pipeline automates archive → sign → export → validate → **upload**; the final "Submit for Review" is **operator-performed**, because it requires a complete store listing (screenshots, description, privacy-policy URL, age rating) that only the operator can author and that Apple's API refuses to accept incomplete (see D6-continued in the compliance deviations and FR-015/SC-001a).
 
 **Rationale**: Correctly reflects Apple's two distinct distribution flows. Mac App Store macOS builds go through App Store Connect exactly like iOS — not through `notarytool`. Avoids a wasted/incorrect notarization step. Satisfies FR-015 accurately and is documented in the plan's Complexity note.
 
@@ -242,6 +246,40 @@ Accepted sizes (pick one per class, and use the **same** Apple Watch size across
 This corrects the earlier spec text that assumed three apps, three listings, three archives.
 
 **Sources**: [Add platforms / Universal Purchase](https://developer.apple.com/help/app-store-connect/create-an-app-record/add-platforms/); [Add watchOS app information](https://developer.apple.com/help/app-store-connect/create-an-app-record/add-watchos-app-information) (retrieved 2026-07-08).
+
+---
+
+## D21 — Entitlements are least-privilege and macOS-only
+
+**Decision (SUPERSEDES the entitlement scope in D7)**: Ship exactly **one** entitlements file — `apple-clients/AstralApp/AstralApp-macOS.entitlements` — carrying only `com.apple.security.app-sandbox` and `com.apple.security.network.client`. It is wired via `CODE_SIGN_ENTITLEMENTS[sdk=macosx*]` on the **Release** configuration, alongside `ENABLE_APP_SANDBOX[sdk=macosx*] = YES` and `ENABLE_HARDENED_RUNTIME[sdk=macosx*] = YES`. There is **no iOS entitlements file and no watch entitlements file**, and **no `keychain-access-groups`** entitlement anywhere.
+
+**Rationale**: The macOS Mac App Store build genuinely needs the sandbox + hardened-runtime + network-client set; iOS/watchOS App Store builds do not require an entitlements file for what this app does. Crucially, D7's assumption that a `keychain-access-groups` entitlement is needed was disproved by implementation: the app stores tokens under the **default per-app keychain access group**, which works without any Keychain Sharing capability. Requesting one would declare a capability the app does not use — a needless entitlement that widens the review surface for nothing (least privilege, research D7 intent, honesty per Constitution XIII). Applying the entitlements only to `[sdk=macosx*]` on Release keeps unsigned/clean-clone and iOS/simulator builds untouched.
+
+**Alternatives considered**: A shared/iOS entitlements file with `keychain-access-groups` (as D7 originally sketched) — rejected, it grants a capability the code never exercises. A single blanket entitlements file across all SDKs — rejected, it would attach macOS-only sandbox keys to iOS/watch builds.
+
+---
+
+## D22 — ATS uses `NSAllowsLocalNetworking`, unconditionally
+
+**Decision (SUPERSEDES the "Debug-only exception" mechanism in D3)**: Remove `NSAllowsArbitraryLoads` from **both** `AstralApp/Info.plist` and `WatchInfo.plist`, and give each an `NSAppTransportSecurity` dict carrying **only** `NSAllowsLocalNetworking = true`, **unconditionally** (not gated to Debug).
+
+**Rationale**: D3's plan to scope the localhost exception to Debug only is not expressible in a **static** Info.plist without maintaining two duplicate plists (one per configuration) — the plist is baked into the bundle at build time and cannot read the active build configuration. Rather than duplicate the file, ship the one App-Store-safe key: `NSAllowsLocalNetworking` relaxes ATS **only for loopback and `.local` addresses** and **never** permits an insecure (HTTP) load to a public host. It is therefore harmless to leave on in Release — a Release build talking to `https://sandbox.ai.uky.edu` is fully ATS-compliant regardless of this key, and the dev-localhost path (`http://localhost:8001`) still works in Debug. **Verified** on the macOS Release product: `NSAllowsArbitraryLoads` is absent from the built Info.plist.
+
+**Alternatives considered**: Two duplicated per-configuration Info.plists to keep the exception Debug-only — rejected, a maintenance/drift hazard for zero security gain over `NSAllowsLocalNetworking`. Keep `NSAllowsArbitraryLoads` with a review justification — rejected (the D3 rationale still holds: gratuitous risk, and it is a review flag).
+
+**Sources**: [`NSAllowsLocalNetworking`](https://developer.apple.com/documentation/bundleresources/information-property-list/nsapptransportsecurity/nsallowslocalnetworking); [ATS / `NSAppTransportSecurity`](https://developer.apple.com/documentation/bundleresources/information-property-list/nsapptransportsecurity) (retrieved 2026-07-08).
+
+---
+
+## D23 — No microphone / speech-recognition usage strings
+
+**Decision (SUPERSEDES the usage-string additions in D4)**: Add **neither** `NSMicrophoneUsageDescription` **nor** `NSSpeechRecognitionUsageDescription`. Neither is needed.
+
+**Rationale**: Implementation disproved D4's premise that the watch's dictation/voice path calls the microphone or Speech framework. The watch **dictates via SwiftUI `TextFieldLink`** (`apple-clients/AstralWatch/Views/WatchChatView.swift`), which presents the **system dictation sheet out-of-process** — the app never touches the microphone or the Speech-recognition APIs itself, so no usage string is required for input. On output it only **plays** audio: `apple-clients/AstralWatch/Speaker.swift` configures `AVAudioSession` with the `.ambient` category and drives speech **synthesis** (text-to-speech), which needs no permission and no usage string. Declaring `NSMicrophoneUsageDescription`/`NSSpeechRecognitionUsageDescription` would advertise capabilities the app does not use — an honesty/least-privilege violation (Constitution XIII) that also invites reviewer questions about unused permissions.
+
+**Alternatives considered**: Add the two usage strings "to be safe" — rejected; a purpose string for a permission the app never requests is a false declaration, not a safety margin.
+
+**Sources**: [`TextFieldLink` (watchOS dictation)](https://developer.apple.com/documentation/swiftui/textfieldlink); [`AVAudioSession` categories](https://developer.apple.com/documentation/avfaudio/avaudiosession/category) (retrieved 2026-07-08).
 
 ---
 
