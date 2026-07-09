@@ -63,6 +63,20 @@ mac-16x16@1x.png            16x16   alpha=yes
 
 ### Compliance (FR-003, FR-005, FR-006, FR-007)
 
+macOS Release entitlements, read back off an ad-hoc-signed Release product with
+`codesign -d --entitlements :-`:
+
+```
+com.apple.security.app-sandbox                    => true
+com.apple.security.network.client                 => true
+com.apple.security.files.user-selected.read-write => true
+CodeDirectory flags=0x10002(adhoc,runtime)   <- Hardened Runtime
+```
+
+The file entitlement is required, not optional: `ChatView`'s `.fileImporter` and the macOS
+`NSSavePanel` in `ComponentView` both touch user-selected files, and under the sandbox they
+would open and then silently fail without it.
+
 macOS Release resolved build settings:
 
 ```
