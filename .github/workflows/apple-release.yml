@@ -300,20 +300,21 @@ jobs:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
         run: |
-          echo "validating iOS:   $IPA"
-          xcrun altool --validate-app -f "$IPA" -t ios   --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
-          echo "validating macOS: $PKG"
-          xcrun altool --validate-app -f "$PKG" -t macos --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+          # altool exits 0 even when it prints "VERIFY FAILED"; the wrapper refuses that.
+          bash apple-clients/Scripts/altool_strict.sh "validate iOS" \
+            --validate-app -f "$IPA" -t ios   --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+          bash apple-clients/Scripts/altool_strict.sh "validate macOS" \
+            --validate-app -f "$PKG" -t macos --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
 
       - name: Upload both builds to the single Universal Purchase record
         env:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
         run: |
-          echo "uploading iOS:   $IPA"
-          xcrun altool --upload-app -f "$IPA" -t ios   --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
-          echo "uploading macOS: $PKG"
-          xcrun altool --upload-app -f "$PKG" -t macos --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+          bash apple-clients/Scripts/altool_strict.sh "upload iOS" \
+            --upload-app -f "$IPA" -t ios   --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+          bash apple-clients/Scripts/altool_strict.sh "upload macOS" \
+            --upload-app -f "$PKG" -t macos --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
 
       # Submitting for review requires a COMPLETE store listing (screenshots for
       # iPhone 6.9", iPad 13", Mac and Apple Watch; description; privacy policy
