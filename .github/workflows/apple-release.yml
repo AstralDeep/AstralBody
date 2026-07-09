@@ -87,7 +87,9 @@ jobs:
       - name: Import signing material into an ephemeral keychain
         env:
           APPLE_DISTRIBUTION_CERT_P12_BASE64: ${{ secrets.APPLE_DISTRIBUTION_CERT_P12_BASE64 }}
+          APPLE_INSTALLER_CERT_P12_BASE64: ${{ secrets.APPLE_INSTALLER_CERT_P12_BASE64 }}
           APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_INSTALLER_CERT_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERT_PASSWORD }}
           APPLE_PROVISION_PROFILE_BASE64: ${{ secrets.APPLE_PROVISION_PROFILE_BASE64 }}
         run: |
           KEYCHAIN="$RUNNER_TEMP/astral-signing.keychain-db"
@@ -98,31 +100,103 @@ jobs:
 
           echo "$APPLE_DISTRIBUTION_CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
           security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$APPLE_CERT_PASSWORD" \
-            -T /usr/bin/codesign -T /usr/bin/security
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$PASSWORD" "$KEYCHAIN"
-          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+            -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/productbuild
           rm -f "$RUNNER_TEMP/cert.p12"
 
-          # APPLE_PROVISION_PROFILE_BASE64 is a base64 tar carrying ALL THREE App
-          # Store profiles — iOS, macOS (same bundle id, different platform) and
-          # watchOS — because a .mobileprovision is per bundle-id AND platform.
-          # iOS/watch profiles live in MobileDevice; macOS (.provisionprofile) is
-          # read from the Xcode UserData directory. Install into both, cheaply.
+          # A Mac App Store .pkg is signed by a SECOND identity ("3rd Party Mac
+          # Developer Installer"). It may travel inside the same .p12 as the
+          # Apple Distribution identity; if it does not, supply it separately.
+          if [ -n "$APPLE_INSTALLER_CERT_P12_BASE64" ]; then
+            echo "$APPLE_INSTALLER_CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/installer.p12"
+            security import "$RUNNER_TEMP/installer.p12" -k "$KEYCHAIN" \
+              -P "${APPLE_INSTALLER_CERT_PASSWORD:-$APPLE_CERT_PASSWORD}" \
+              -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/productbuild
+            rm -f "$RUNNER_TEMP/installer.p12"
+          fi
+
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+
+      # Fail in seconds with an actionable message rather than 20 minutes into an
+      # archive. A .p12 only yields a usable identity if it carries the PRIVATE
+      # KEY; a bare .cer imports "successfully" and then signs nothing.
+      - name: Verify the imported identities
+        run: |
+          echo "identities in the ephemeral keychain:"
+          security find-identity -v -p codesigning "$RUNNER_TEMP/astral-signing.keychain-db" || true
+
+          have_app=$(security find-identity -v -p codesigning "$RUNNER_TEMP/astral-signing.keychain-db" \
+                       | grep -c "Apple Distribution" || true)
+          have_pkg=$(security find-identity -v "$RUNNER_TEMP/astral-signing.keychain-db" \
+                       | grep -c "3rd Party Mac Developer Installer" || true)
+
+          fail=0
+          if [ "$have_app" -eq 0 ]; then
+            echo "::error::No 'Apple Distribution' identity after import. The .p12 in"
+            echo "::error::APPLE_DISTRIBUTION_CERT_P12_BASE64 must contain the certificate AND its"
+            echo "::error::private key (export the identity from Keychain Access as .p12 -- a bare"
+            echo "::error::.cer from the developer portal will not work). A 'Developer ID Application'"
+            echo "::error::certificate is for distribution OUTSIDE the App Store and cannot be used here."
+            fail=1
+          fi
+          if [ "$have_pkg" -eq 0 ]; then
+            echo "::error::No '3rd Party Mac Developer Installer' identity. The Mac App Store .pkg is"
+            echo "::error::signed by this SECOND certificate. Either include it in the same .p12 as the"
+            echo "::error::Apple Distribution identity, or add secrets APPLE_INSTALLER_CERT_P12_BASE64"
+            echo "::error::(and APPLE_INSTALLER_CERT_PASSWORD if its password differs)."
+            fail=1
+          fi
+          [ "$fail" -eq 0 ] || exit 1
+          echo "both signing identities present"
+
+      # A .mobileprovision is per bundle-id AND platform, so three profiles are
+      # needed: iOS + macOS (both com.personalailabs.astraldeep, different
+      # platforms) and watchOS (…​.watch). Accept whatever container the operator
+      # produced -- tar, zip, or a single raw profile -- rather than demanding one.
+      - name: Install provisioning profiles
+        env:
+          APPLE_PROVISION_PROFILE_BASE64: ${{ secrets.APPLE_PROVISION_PROFILE_BASE64 }}
+        run: |
           IOS_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
           MAC_DIR="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
-          mkdir -p "$RUNNER_TEMP/profiles" "$IOS_DIR" "$MAC_DIR"
-          echo "$APPLE_PROVISION_PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/profiles.tar"
-          tar -xf "$RUNNER_TEMP/profiles.tar" -C "$RUNNER_TEMP/profiles"
+          SRC="$RUNNER_TEMP/profiles"
+          mkdir -p "$SRC" "$IOS_DIR" "$MAC_DIR"
+
+          echo "$APPLE_PROVISION_PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/profiles.blob"
+          kind=$(file -b --mime-type "$RUNNER_TEMP/profiles.blob")
+          echo "provision blob type: $kind"
+          case "$kind" in
+            application/x-tar|application/gzip|application/x-gzip)
+              tar -xf "$RUNNER_TEMP/profiles.blob" -C "$SRC" ;;
+            application/zip)
+              unzip -qq "$RUNNER_TEMP/profiles.blob" -d "$SRC" ;;
+            *)
+              # A single profile is CMS (DER) or XML; keep it as-is and let the
+              # count check below explain that three are required.
+              cp "$RUNNER_TEMP/profiles.blob" "$SRC/profile-1.mobileprovision" ;;
+          esac
+          rm -f "$RUNNER_TEMP/profiles.blob"
+
           count=0
-          while IFS= read -r p; do
-            cp "$p" "$IOS_DIR/"; cp "$p" "$MAC_DIR/"; count=$((count + 1))
-          done < <(find "$RUNNER_TEMP/profiles" \( -name '*.mobileprovision' -o -name '*.provisionprofile' \))
-          rm -f "$RUNNER_TEMP/profiles.tar"
+          while IFS= read -r prof; do
+            cp "$prof" "$IOS_DIR/"; cp "$prof" "$MAC_DIR/"
+            name=$(security cms -D -i "$prof" 2>/dev/null | plutil -extract Name raw - 2>/dev/null || echo "?")
+            appid=$(security cms -D -i "$prof" 2>/dev/null | plutil -extract Entitlements.application-identifier raw - 2>/dev/null || echo "?")
+            plat=$(security cms -D -i "$prof" 2>/dev/null | plutil -extract Platform.0 raw - 2>/dev/null || echo "?")
+            echo "  installed: $name  [$appid, platform=$plat]"
+            count=$((count + 1))
+          done < <(find "$SRC" \( -name '*.mobileprovision' -o -name '*.provisionprofile' \))
+
           if [ "$count" -lt 3 ]; then
-            echo "::error::expected 3 provisioning profiles (iOS, macOS, watchOS), found $count"
+            echo "::error::found $count provisioning profile(s); three are required --"
+            echo "::error::iOS App Store + macOS App Store (both com.personalailabs.astraldeep)"
+            echo "::error::and watchOS App Store (com.personalailabs.astraldeep.watch)."
+            echo "::error::Pack all three into one tar or zip and base64 that:"
+            echo "::error::  tar -cf profiles.tar *.mobileprovision *.provisionprofile"
+            echo "::error::  base64 -i profiles.tar | pbcopy"
             exit 1
           fi
-          echo "imported $count profile(s)"
+          echo "installed $count profile(s)"
 
       # App Store Connect rejects duplicate build numbers. The CI run number is
       # monotonic and collision-free. Passed straight to xcodebuild rather than

@@ -23,6 +23,10 @@
 	<string>${APPLE_TEAM_ID}</string>
 	<key>signingStyle</key>
 	<string>manual</string>
+	<!-- The Mac App Store .pkg is signed by a SECOND identity, distinct from the
+	     Apple Distribution certificate that signs the .app. -->
+	<key>installerSigningCertificate</key>
+	<string>3rd Party Mac Developer Installer</string>
 	<key>provisioningProfiles</key>
 	<dict>
 		<key>com.personalailabs.astraldeep</key>
