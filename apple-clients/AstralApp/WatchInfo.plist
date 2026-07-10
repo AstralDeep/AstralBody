@@ -22,11 +22,28 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>WKApplication</key>
 	<true/>
-	<key>WKWatchOnly</key>
+	<!-- Feature 053 — the watch is an EMBEDDED COMPANION of the iOS app (it was
+	     previously WKWatchOnly, which Apple defines as having no related iOS app;
+	     that made WatchConnectivity, and therefore the companion-pushed server
+	     override, impossible). It still installs and runs without the phone app,
+	     so QR device-login remains the standalone sign-in path — which is exactly
+	     why WatchConnectivity may only ever be an opportunistic optimization. -->
+	<key>WKCompanionAppBundleIdentifier</key>
+	<string>com.personalailabs.astraldeep</string>
+	<key>WKRunsIndependentlyOfCompanionApp</key>
 	<true/>
+	<!-- Export compliance: standard HTTPS/OS crypto only (exempt). The iOS
+	     Info.plist already declares this; the watch app is its own bundle. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>ASTRALServerBaseURL</key>
+	<string>$(ASTRAL_SERVER_BASE_URL)</string>
+	<key>ASTRALKeycloakAuthority</key>
+	<string>$(ASTRAL_KEYCLOAK_AUTHORITY)</string>
+	<!-- See the iOS Info.plist: ATS-clean; loopback only, for Debug. -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
-		<key>NSAllowsArbitraryLoads</key>
+		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
 </dict>

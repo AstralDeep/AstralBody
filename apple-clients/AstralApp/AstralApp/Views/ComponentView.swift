@@ -54,8 +54,13 @@ struct ComponentView: View {
             progressView
         case "divider":
             Divider().overlay(p.border)
-        case "button", "file_upload":
+        case "button":
             buttonView
+        case "file_upload":
+            // Not a live control here — the chat input owns attachment staging.
+            // A generic action button would emit a bogus component_action and
+            // earn a server error alert.
+            fileUploadHint
         case "input":
             InputComponent(component: component)
         case "param_picker":
@@ -82,14 +87,23 @@ struct ComponentView: View {
 
     // MARK: text
 
+    @ViewBuilder
     private var textView: some View {
         let text = component.textContent ?? component.fallbackText
-        return markdown(text)
-            .font(fontForVariant(component.variant))
-            .foregroundStyle(component.variant == "caption" ? p.muted : p.text)
-            .textSelection(.enabled)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        if component.variant == "markdown" {
+            // The server explicitly declared block content (web parity:
+            // block_md) — headings/fences/lists/tables must not stay literal.
+            MarkdownBlockView(source: text)
+                .foregroundStyle(p.text)
+                .textSelection(.enabled)
+        } else {
+            markdown(text)
+                .font(fontForVariant(component.variant))
+                .foregroundStyle(component.variant == "caption" ? p.muted : p.text)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     private func fontForVariant(_ v: String?) -> Font {
@@ -111,9 +125,10 @@ struct ComponentView: View {
             Image(systemName: alertIcon).foregroundStyle(color)
             VStack(alignment: .leading, spacing: 2) {
                 if let title = component.title, !title.isEmpty {
-                    Text(title).font(.subheadline.bold()).foregroundStyle(color)
+                    markdown(title).font(.subheadline.bold()).foregroundStyle(color)
                 }
-                markdown(component.message ?? component.fallbackText).foregroundStyle(p.text)
+                MarkdownBlockView(source: component.message ?? component.fallbackText)
+                    .foregroundStyle(p.text)
             }
             Spacer(minLength: 0)
         }
@@ -177,12 +192,12 @@ struct ComponentView: View {
         return HStack(spacing: 10) {
             Rectangle().fill(color).frame(width: 3)
             VStack(alignment: .leading, spacing: 2) {
-                Text(component.title ?? component.label ?? "")
+                markdown(component.title ?? component.label ?? "")
                     .font(.caption).foregroundStyle(p.muted)
                     .textCase(.uppercase)
                 Text(component.value ?? "—").font(.title.bold()).foregroundStyle(p.text)
                 if let sub = component.raw["subtitle"]?.stringValue, !sub.isEmpty {
-                    Text(sub).font(.caption).foregroundStyle(p.muted)
+                    markdown(sub).font(.caption).foregroundStyle(p.muted)
                 }
             }
             Spacer(minLength: 0)
@@ -215,10 +230,10 @@ struct ComponentView: View {
                 if let eyebrow = component.raw["eyebrow"]?.stringValue, !eyebrow.isEmpty {
                     Text(eyebrow).font(.caption.bold()).foregroundStyle(p.primary).textCase(.uppercase)
                 }
-                Text(component.raw["heading"]?.stringValue ?? component.title ?? "")
+                markdown(component.raw["heading"]?.stringValue ?? component.title ?? "")
                     .font(.title.bold()).foregroundStyle(p.text)
                 if let sub = component.raw["subtitle"]?.stringValue ?? component.raw["subheading"]?.stringValue {
-                    Text(sub).foregroundStyle(p.muted)
+                    markdown(sub).foregroundStyle(p.muted)
                 }
                 let badges = component.raw["badges"]?.arrayValue ?? []
                 if !badges.isEmpty {
@@ -304,10 +319,10 @@ struct ComponentView: View {
                         if let time = item["time"]?.stringValue, !time.isEmpty {
                             Text(time).font(.caption2).foregroundStyle(p.muted)
                         }
-                        Text(item["title"]?.stringValue ?? item["label"]?.stringValue ?? item.displayText)
+                        markdown(item["title"]?.stringValue ?? item["label"]?.stringValue ?? item.displayText)
                             .font(.callout).foregroundStyle(p.text)
                         if let desc = item["description"]?.stringValue, !desc.isEmpty {
-                            Text(desc).font(.caption).foregroundStyle(p.muted)
+                            markdown(desc).font(.caption).foregroundStyle(p.muted)
                         }
                     }
                     Spacer(minLength: 0)
@@ -317,17 +332,28 @@ struct ComponentView: View {
     }
 
     private var ratingView: some View {
-        let value = Int((component.raw["value"]?.numberValue ?? 0).rounded())
+        let rawValue = component.raw["value"]?.numberValue ?? 0
+        let value = Int(rawValue.rounded())
         let maxValue = Int(component.raw["max_value"]?.numberValue ?? component.raw["max"]?.numberValue ?? 5)
         return VStack(alignment: .leading, spacing: 2) {
             if let label = component.label ?? component.title, !label.isEmpty {
-                Text(label).font(.caption).foregroundStyle(p.muted)
+                markdown(label).font(.caption).foregroundStyle(p.muted)
             }
             HStack(spacing: 2) {
                 ForEach(0..<max(maxValue, 1), id: \.self) { i in
                     Image(systemName: i < value ? "star.fill" : "star")
                         .foregroundStyle(p.accent)
                 }
+                // The stars round — the number is the honest value (web shows
+                // it by default; 3.5/5 must not read as four stars flat).
+                if component.raw["show_value"]?.boolValue != false {
+                    Text("\(rawValue.formatted(.number.precision(.fractionLength(0...1))))/\(maxValue)")
+                        .font(.caption.weight(.semibold)).foregroundStyle(p.text)
+                        .padding(.leading, 4)
+                }
+            }
+            if let sub = component.raw["subtitle"]?.stringValue, !sub.isEmpty {
+                markdown(sub).font(.caption).foregroundStyle(p.muted)
             }
         }
     }
@@ -367,7 +393,17 @@ struct ComponentView: View {
 
     private var progressView: some View {
         VStack(alignment: .leading, spacing: 3) {
-            titleLine
+            // The wire caption field is `label` (progress has no `title`).
+            if let label = component.label ?? component.title, !label.isEmpty {
+                HStack {
+                    markdown(label).font(.caption).foregroundStyle(p.muted)
+                    Spacer(minLength: 8)
+                    if component.raw["show_percentage"]?.boolValue != false {
+                        Text("\(Int((progressFraction * 100).rounded()))%")
+                            .font(.caption).foregroundStyle(p.muted)
+                    }
+                }
+            }
             ProgressView(value: progressFraction).tint(p.primary)
         }
     }
@@ -402,7 +438,18 @@ struct ComponentView: View {
                         model.emit("load_chat", payload: ["chat_id": .string(chatId)])
                     } label: {
                         VStack(alignment: .leading, spacing: 1) {
-                            Text(item["title"]?.stringValue ?? "Chat").foregroundStyle(p.text)
+                            HStack(spacing: 4) {
+                                Text(item["title"]?.stringValue ?? "Chat").foregroundStyle(p.text)
+                                if isTruthy(item["saved"]) {
+                                    Image(systemName: "star.fill")
+                                        .font(.caption2).foregroundStyle(p.accent)
+                                        .accessibilityLabel("Has saved components")
+                                }
+                                Spacer(minLength: 6)
+                                if let time = item["time"]?.stringValue, !time.isEmpty {
+                                    Text(time).font(.caption2).foregroundStyle(p.muted)
+                                }
+                            }
                             if let preview = item["preview"]?.stringValue, !preview.isEmpty {
                                 Text(preview).font(.caption).foregroundStyle(p.muted).lineLimit(1)
                             }
@@ -447,9 +494,25 @@ struct ComponentView: View {
         if let title = component.title, !title.isEmpty {
             HStack(spacing: 6) {
                 Rectangle().fill(p.gradient).frame(width: 3, height: 16)
-                Text(title).font(.headline).foregroundStyle(p.text)
+                markdown(title).font(.headline).foregroundStyle(p.text)
             }
         }
+    }
+
+    /// FR-033-style redirect: file upload lives in the chat input, so this
+    /// component is informational here — never a dead button.
+    private var fileUploadHint: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            if let label = component.label ?? component.title, !label.isEmpty {
+                markdown(label).foregroundStyle(p.text)
+            }
+            Label("Attach files with the paperclip in the chat input",
+                  systemImage: "paperclip")
+                .font(.caption).foregroundStyle(p.muted)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(p.surface.opacity(0.4), in: RoundedRectangle(cornerRadius: AstralRadius.md))
     }
 
     @ViewBuilder
@@ -460,12 +523,14 @@ struct ComponentView: View {
     }
 
     private func markdown(_ string: String) -> Text {
-        if let attributed = try? AttributedString(
-            markdown: string,
-            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
-            return Text(attributed)
-        }
-        return Text(string)
+        Text(InlineMarkdown.attributed(string))
+    }
+
+    private func isTruthy(_ value: JSONValue?) -> Bool {
+        guard let value else { return false }
+        return value.boolValue == true
+            || (value.numberValue ?? 0) > 0
+            || (value.stringValue?.isEmpty == false)
     }
 }
 
@@ -519,15 +584,35 @@ struct DownloadComponent: View {
     }
 
     private var urlString: String? {
-        component.raw["download_url"]?.stringValue ?? component.url
+        // The unavailable variant ships download_url:"" — an empty URL is no URL.
+        (component.raw["download_url"]?.stringValue ?? component.url)
+            .flatMap { $0.isEmpty ? nil : $0 }
     }
     private var filename: String? { component.raw["filename"]?.stringValue }
     private var label: String {
-        component.label ?? filename ?? "Download"
+        component.label ?? filename ?? component.title ?? "Download"
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            // The card's context (what this is, why it's trustworthy, which
+            // platform) — web parity; the button alone says none of it.
+            if let title = component.title, !title.isEmpty {
+                Text(InlineMarkdown.attributed(title))
+                    .font(.subheadline.bold()).foregroundStyle(p.text)
+            }
+            if let desc = component.raw["description"]?.stringValue, !desc.isEmpty {
+                Text(InlineMarkdown.attributed(desc))
+                    .font(.caption).foregroundStyle(p.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            let meta = [component.raw["version"]?.stringValue,
+                        component.raw["platform"]?.stringValue]
+                .compactMap { $0 }.filter { !$0.isEmpty }
+            if !meta.isEmpty {
+                Text(meta.joined(separator: " • "))
+                    .font(.caption2).foregroundStyle(p.muted)
+            }
             switch phase {
             case .idle:
                 Button {
@@ -570,6 +655,12 @@ struct DownloadComponent: View {
                     Button("Retry") { download() }
                         .font(.callout).tint(p.primary)
                 }
+            }
+            if urlString == nil,
+               let page = component.raw["html_url"]?.stringValue,
+               let pageURL = URL(string: page), !page.isEmpty {
+                Link("Open the releases page", destination: pageURL)
+                    .font(.caption).tint(p.primary)
             }
         }
     }
@@ -627,7 +718,7 @@ struct TableComponent: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             if let title = component.title, !title.isEmpty {
-                Text(title).font(.headline).foregroundStyle(p.text)
+                Text(InlineMarkdown.attributed(title)).font(.headline).foregroundStyle(p.text)
             }
             ScrollView(.horizontal, showsIndicators: false) {
                 Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 4) {
@@ -735,7 +826,13 @@ struct ParamPickerComponent: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let title = component.title, !title.isEmpty {
-                Text(title).font(.headline).foregroundStyle(p.text)
+                Text(InlineMarkdown.attributed(title)).font(.headline).foregroundStyle(p.text)
+            }
+            // The form's operative instructions live here (web parity).
+            if let desc = component.raw["description"]?.stringValue, !desc.isEmpty {
+                Text(InlineMarkdown.attributed(desc))
+                    .font(.caption).foregroundStyle(p.muted)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             ForEach(Array(fields.enumerated()), id: \.offset) { _, field in
                 fieldView(field)
@@ -810,6 +907,14 @@ struct ParamPickerComponent: View {
             model.emit(action, payload: ["fields": .object(collected)])
         } else if let template = component.raw["submit_message_template"]?.stringValue {
             var message = template
+            // Whole-form placeholder first (web parity: client.js substitutes
+            // {__values_json__} with the full state) — the classify training
+            // template relies on it; per-field {key} replacement can't fill it.
+            if message.contains("{__values_json__}") {
+                let json = (try? JSONValue.object(collected).encoded())
+                    .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+                message = message.replacingOccurrences(of: "{__values_json__}", with: json)
+            }
             for (key, value) in collected {
                 message = message.replacingOccurrences(of: "{\(key)}", with: value.displayText)
             }
@@ -867,7 +972,11 @@ struct CollapsibleComponent: View {
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: expanded ? "chevron.down" : "chevron.right").foregroundStyle(p.muted)
-                    Text(component.title ?? "Details").font(.headline).foregroundStyle(p.text)
+                    // astralprims always serializes `title` (default "") — treat
+                    // empty as missing like the web does, never a blank header.
+                    Text(InlineMarkdown.attributed(
+                        (component.title?.isEmpty == false) ? component.title! : "Details"))
+                        .font(.headline).foregroundStyle(p.text)
                     Spacer(minLength: 0)
                 }
             }
@@ -925,18 +1034,21 @@ struct ChartComponent: View {
     @Environment(ThemeStore.self) var theme
     private var p: AstralPalette { theme.palette }
 
+    private typealias Series = (name: String?, values: [Double])
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             if let title = component.title, !title.isEmpty {
-                Text(title).font(.headline).foregroundStyle(p.text)
+                Text(InlineMarkdown.attributed(title)).font(.headline).foregroundStyle(p.text)
             }
-            let values = numbers
-            if values.isEmpty {
+            let series = allSeries
+            if series.isEmpty {
                 Text("[\(component.type)]").font(.caption).foregroundStyle(p.muted)
             } else {
-                chart(values)
+                chart(series)
                     .frame(height: 160)
                     .frame(maxWidth: .infinity)
+                legend(series)
             }
         }
         .padding(12)
@@ -944,58 +1056,114 @@ struct ChartComponent: View {
         .background(p.surface.opacity(0.4), in: RoundedRectangle(cornerRadius: AstralRadius.md))
     }
 
+    private var seriesColors: [Color] {
+        [p.primary, p.secondary, p.accent, p.success, p.warning, p.error]
+    }
+
     @ViewBuilder
-    private func chart(_ values: [Double]) -> some View {
+    private func chart(_ series: [Series]) -> some View {
         switch component.type {
         case "pie_chart":
-            pie(values)
+            pie(series.first?.values ?? [])
         case "line_chart":
-            line(values)
+            lines(series)
         default:
-            bars(values)
+            bars(series)
         }
     }
 
-    private func bars(_ values: [Double]) -> some View {
-        let maxV = values.max() ?? 1
+    /// Named multi-trace charts get a legend (the weather daily forecast is a
+    /// two-trace High/Low bar chart — unnamed single traces stay clean). The
+    /// pie draws only the first trace, so a multi-trace legend would name
+    /// series that aren't on screen.
+    @ViewBuilder
+    private func legend(_ series: [Series]) -> some View {
+        if series.count > 1 && component.type != "pie_chart" {
+            HStack(spacing: 10) {
+                ForEach(Array(series.enumerated()), id: \.offset) { index, s in
+                    HStack(spacing: 4) {
+                        Circle().fill(seriesColors[index % seriesColors.count])
+                            .frame(width: 7, height: 7)
+                        Text(s.name ?? "Series \(index + 1)")
+                            .font(.caption2).foregroundStyle(p.muted)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Bars grow away from a TRUE zero baseline (negatives hang below it),
+    /// normalized across every series — mixed-sign data renders honestly and
+    /// can never produce a negative frame height. Missing indices in ragged
+    /// traces draw nothing, never a fabricated zero bar.
+    private func bars(_ series: [Series]) -> some View {
+        let all = series.flatMap(\.values)
+        let top = max(all.max() ?? 0, 0)
+        let bottom = min(all.min() ?? 0, 0)
+        let range = top - bottom
+        let baseline = range > 0 ? (0 - bottom) / range : 0
+        let groups = series.map(\.values.count).max() ?? 0
         return GeometryReader { geo in
             HStack(alignment: .bottom, spacing: 3) {
-                ForEach(Array(values.enumerated()), id: \.offset) { _, v in
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(p.gradient)
-                        .frame(height: maxV > 0 ? geo.size.height * CGFloat(v / maxV) : 0)
-                        .frame(maxWidth: .infinity)
+                ForEach(0..<max(groups, 1), id: \.self) { index in
+                    HStack(alignment: .bottom, spacing: 1) {
+                        ForEach(Array(series.enumerated()), id: \.offset) { s, trace in
+                            if index < trace.values.count, range > 0 {
+                                let fraction = (trace.values[index] - bottom) / range
+                                let lower = min(max(min(fraction, baseline), 0), 1)
+                                let upper = min(max(max(fraction, baseline), 0), 1)
+                                RoundedRectangle(cornerRadius: 3)
+                                    .fill(series.count > 1
+                                          ? AnyShapeStyle(seriesColors[s % seriesColors.count])
+                                          : AnyShapeStyle(p.gradient))
+                                    .frame(height: max(geo.size.height * CGFloat(upper - lower), 1))
+                                    .padding(.bottom, geo.size.height * CGFloat(lower))
+                                    .frame(maxWidth: .infinity)
+                            } else {
+                                Color.clear.frame(maxWidth: .infinity)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
                 }
             }
             .frame(maxHeight: .infinity, alignment: .bottom)
         }
     }
 
-    private func line(_ values: [Double]) -> some View {
-        let maxV = values.max() ?? 1
-        let minV = values.min() ?? 0
+    private func lines(_ series: [Series]) -> some View {
+        let all = series.flatMap(\.values)
+        let maxV = all.max() ?? 1
+        let minV = all.min() ?? 0
         let range = maxV - minV
         return GeometryReader { geo in
-            Path { path in
-                for (i, v) in values.enumerated() {
-                    let x = values.count > 1 ? geo.size.width * CGFloat(i) / CGFloat(values.count - 1) : 0
-                    let y = range > 0 ? geo.size.height * (1 - CGFloat((v - minV) / range)) : geo.size.height / 2
-                    if i == 0 { path.move(to: CGPoint(x: x, y: y)) }
-                    else { path.addLine(to: CGPoint(x: x, y: y)) }
+            ForEach(Array(series.enumerated()), id: \.offset) { s, trace in
+                Path { path in
+                    for (i, v) in trace.values.enumerated() {
+                        let x = trace.values.count > 1
+                            ? geo.size.width * CGFloat(i) / CGFloat(trace.values.count - 1) : 0
+                        let y = range > 0
+                            ? geo.size.height * (1 - CGFloat((v - minV) / range))
+                            : geo.size.height / 2
+                        if i == 0 { path.move(to: CGPoint(x: x, y: y)) }
+                        else { path.addLine(to: CGPoint(x: x, y: y)) }
+                    }
                 }
+                .stroke(series.count > 1 ? seriesColors[s % seriesColors.count] : p.primary,
+                        style: StrokeStyle(lineWidth: 2, lineJoin: .round))
             }
-            .stroke(p.primary, style: StrokeStyle(lineWidth: 2, lineJoin: .round))
         }
     }
 
     private func pie(_ values: [Double]) -> some View {
-        let total = values.reduce(0, +)
-        let colors = [p.primary, p.secondary, p.accent, p.success, p.warning, p.error]
+        let positive = values.filter { $0 > 0 }
+        let total = positive.reduce(0, +)
+        let colors = seriesColors
         return Canvas { context, size in
             let radius = min(size.width, size.height) / 2
             let center = CGPoint(x: size.width / 2, y: size.height / 2)
             var start = Angle.degrees(-90)
-            for (i, v) in values.enumerated() where total > 0 {
+            for (i, v) in positive.enumerated() where total > 0 {
                 let sweep = Angle.degrees(360 * v / total)
                 var path = Path()
                 path.move(to: center)
@@ -1007,21 +1175,33 @@ struct ChartComponent: View {
         }
     }
 
-    private var numbers: [Double] {
+    /// Every series in the payload — simple values, chart.js-style datasets,
+    /// or plotly traces (`y` for bar/line/scatter, `values` for pie).
+    private var allSeries: [Series] {
         if let values = component.raw["values"]?.arrayValue {
-            return values.compactMap { $0.numberValue }
+            let nums = values.compactMap { $0.numberValue }
+            return nums.isEmpty ? [] : [(nil, nums)]
         }
-        if let datasets = component.raw["datasets"]?.arrayValue,
-           let data = datasets.first?["data"]?.arrayValue {
-            return data.compactMap { $0.numberValue }
+        if let datasets = component.raw["datasets"]?.arrayValue {
+            let traces: [Series] = datasets.compactMap { ds in
+                guard let data = ds["data"]?.arrayValue else { return nil }
+                let nums = data.compactMap { $0.numberValue }
+                guard !nums.isEmpty else { return nil }
+                return (ds["label"]?.stringValue ?? ds["name"]?.stringValue, nums)
+            }
+            if !traces.isEmpty { return traces }
         }
         if let data = component.raw["data"]?.arrayValue {
             if data.first?.numberValue != nil {
-                return data.compactMap { $0.numberValue }
+                return [(nil, data.compactMap { $0.numberValue })]
             }
-            if let y = data.first?["y"]?.arrayValue {   // plotly trace
-                return y.compactMap { $0.numberValue }
+            let traces: [Series] = data.compactMap { trace in
+                guard let vals = trace["y"]?.arrayValue ?? trace["values"]?.arrayValue else { return nil }
+                let nums = vals.compactMap { $0.numberValue }
+                guard !nums.isEmpty else { return nil }
+                return (trace["name"]?.stringValue, nums)
             }
+            if !traces.isEmpty { return traces }
         }
         return []
     }

@@ -363,7 +363,10 @@ private struct ChatBubble: View {
                 if isUser { Spacer(minLength: 40) }
                 Group {
                     if isUser { Text(turn.text).foregroundStyle(p.text) }
-                    else { markdown(turn.text).foregroundStyle(p.text) }
+                    // Assistant narrative (incl. doc cards diverted into the
+                    // transcript) carries block markdown — headings, fences,
+                    // lists and tables must render, not show their syntax.
+                    else { MarkdownBlockView(source: turn.text).foregroundStyle(p.text) }
                 }
                 .font(.subheadline)
                 .padding(.horizontal, 14).padding(.vertical, 10)
@@ -378,11 +381,6 @@ private struct ChatBubble: View {
             }
             .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
         }
-    }
-    private func markdown(_ s: String) -> Text {
-        if let a = try? AttributedString(markdown: s,
-            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) { return Text(a) }
-        return Text(s)
     }
 }
 

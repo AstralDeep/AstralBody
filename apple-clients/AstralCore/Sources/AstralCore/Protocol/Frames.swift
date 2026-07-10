@@ -65,10 +65,28 @@ public struct InboundFrame: Sendable, Equatable {
         payload["reason"]?.stringValue ?? "expired"
     }
 
-    /// chat_status / chat_step progress text.
+    /// chat_status / chat_step progress text. The wire `status` is a MACHINE
+    /// code ("thinking"/"executing"/"done"/…) and `message` carries the human
+    /// text; `step` is an object on chat_step. Terminal codes resolve to nil
+    /// so a finished turn clears the status line instead of sticking on a
+    /// literal "done" (parity with the web client's status map).
     public var statusText: String? {
-        payload["status"]?.stringValue ?? payload["step"]?.stringValue
-            ?? payload["message"]?.stringValue
+        let status = payload["status"]?.stringValue
+        if status == "done" || status == "idle" { return nil }
+        if let message = payload["message"]?.stringValue, !message.isEmpty { return message }
+        switch status {
+        case "thinking": return "Thinking…"
+        case "executing", "processing_async", "fixing": return "Working…"
+        default: break
+        }
+        if let step = payload["step"] {
+            if let s = step.stringValue, !s.isEmpty { return s }
+            if let name = step["name"]?.stringValue ?? step["kind"]?.stringValue, !name.isEmpty {
+                return name
+            }
+        }
+        if let status, !status.isEmpty { return status }
+        return nil
     }
 }
 

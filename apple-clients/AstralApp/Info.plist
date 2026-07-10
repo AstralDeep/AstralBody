@@ -22,9 +22,27 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<!-- Required by the Mac App Store: without it, altool rejects the .pkg with
+	     "The product archive is invalid. The Info.plist must contain a
+	     LSApplicationCategoryType key." Harmless on iOS, which ignores it.
+	     This is the Info.plist category; the store listing's category is set
+	     separately in App Store Connect and should agree with it. -->
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.productivity</string>
+	<!-- Feature 053 — the backend URL and Keycloak realm come from the xcconfig
+	     (Config/{Base,Debug,Release}.xcconfig) and are read at launch by
+	     AstralCore.AstralConfig. Repointing a build needs no source edit. -->
+	<key>ASTRALServerBaseURL</key>
+	<string>$(ASTRAL_SERVER_BASE_URL)</string>
+	<key>ASTRALKeycloakAuthority</key>
+	<string>$(ASTRAL_KEYCLOAK_AUTHORITY)</string>
+	<!-- ATS: no NSAllowsArbitraryLoads. Release talks HTTPS to the hosted backend
+	     and is fully ATS-compliant. NSAllowsLocalNetworking only relaxes ATS for
+	     loopback/.local addresses (so Debug can reach http://localhost:8001); it
+	     is App-Store-safe and never permits an insecure load to a public host. -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
-		<key>NSAllowsArbitraryLoads</key>
+		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
 	<key>CFBundleURLTypes</key>

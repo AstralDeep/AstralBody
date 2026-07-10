@@ -24,7 +24,8 @@ struct WatchChatView: View {
                     if let status = model.statusText {
                         HStack(spacing: 4) {
                             ProgressView().controlSize(.mini)
-                            Text(status).font(.footnote).foregroundStyle(.secondary)
+                            Text(InlineMarkdown.attributed(status))
+                                .font(.footnote).foregroundStyle(.secondary)
                         }
                     }
                     if let banner = model.errorBanner {
@@ -96,7 +97,11 @@ struct WatchChatView: View {
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
         case .status(_, let text):
-            Text(text).font(.footnote).foregroundStyle(.secondary)
+            // Loaded assistant narrative arrives as raw markdown (parity with
+            // the phone's ChatBubble) — flatten blocks and parse inline spans;
+            // never show asterisks or `##`/fence syntax.
+            Text(InlineMarkdown.attributed(MarkdownBlocks.plainText(text)))
+                .font(.footnote).foregroundStyle(.secondary)
         case .turn(_, let components):
             VStack(alignment: .leading, spacing: 6) {
                 ForEach(Array(components.enumerated()), id: \.offset) { _, comp in

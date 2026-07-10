@@ -66,17 +66,26 @@ public struct AstralComponent: Equatable, Sendable {
     public var listItems: [String] {
         raw["items"]?.arrayValue?.map { item in
             if let s = item.stringValue { return s }
-            return item["text"]?.stringValue ?? item["label"]?.stringValue ?? item.displayText
+            if let s = item["text"]?.stringValue ?? item["label"]?.stringValue { return s }
+            // Detailed-variant items are {title, url, subtitle, description} —
+            // compose a readable line or every web_search result is a blank bullet.
+            let headline = item["title"]?.stringValue ?? ""
+            let detail = item["subtitle"]?.stringValue ?? item["description"]?.stringValue ?? ""
+            let joined = [headline, detail].filter { !$0.isEmpty }.joined(separator: " — ")
+            return joined.isEmpty ? item.displayText : joined
         } ?? []
     }
 
     public var keyValuePairs: [(String, String)] {
-        raw["pairs"]?.arrayValue?.compactMap { pair in
+        // The wire key is `items[]` of {label, value, hint} (astralprims KeyValue —
+        // the web/voice/ROTE renderers all read it); `pairs[]` is a legacy alias.
+        let entries = raw["items"]?.arrayValue ?? raw["pairs"]?.arrayValue ?? []
+        return entries.compactMap { pair in
             guard let o = pair.objectValue else { return nil }
-            let k = o["key"]?.displayText ?? o["label"]?.displayText ?? ""
+            let k = o["label"]?.displayText ?? o["key"]?.displayText ?? ""
             let v = o["value"]?.displayText ?? ""
             return (k, v)
-        } ?? []
+        }
     }
 
     /// Fallback text used when a client has no native renderer for `type`

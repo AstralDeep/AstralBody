@@ -376,7 +376,12 @@ class ComponentAdapter:
                     else:
                         parts.append(str(cell))
                 items.append(" | ".join(parts))
-            return {"type": "list", "items": items, "ordered": False}
+            degraded = {"type": "list", "items": items, "ordered": False}
+            # Keep the table's name — an anonymous bulleted list gives the
+            # wearer no idea what the data is (parity with _to_list).
+            if comp.get("title"):
+                degraded["title"] = comp["title"]
+            return degraded
 
         # Still supports tables — trim rows/cols if needed
         headers = comp.get("headers", [])
@@ -579,6 +584,12 @@ class ComponentAdapter:
             title = comp.get("title", "")
             msg = comp.get("message", "")
             parts.append(f"{title}: {msg}" if title else msg)
+
+        elif comp_type == "image":
+            # An image degraded to text must say SOMETHING — without this the
+            # watch receives {"type":"text","content":""} and draws nothing.
+            alt = comp.get("alt") or comp.get("caption") or comp.get("title") or ""
+            parts.append(f"Image: {alt}" if alt else "An image (view it on another device)")
 
         elif comp_type == "table":
             headers = comp.get("headers", [])

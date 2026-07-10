@@ -117,6 +117,115 @@ Both are ungated (no user data) and excluded from access logs.
   precedent); the watch refreshes via the backend broker (single TLS peer).
   Silent refresh never extends the 365-day interactive anchor.
 
+## Apple clients (App Store)
+
+Feature 053 ships the `apple-clients/` family — iOS + macOS (one multiplatform
+`AstralApp` target) plus an embedded watchOS companion (`AstralWatch`) — to the
+App Store as a single Universal Purchase record (bundle id
+`com.personalailabs.astraldeep`). Two things are operator-facing: the backend
+`.env` the shipped apps expect, and the signed release pipeline.
+
+### Production `.env` the Apple clients depend on
+
+A stock App Store build compiles in `https://sandbox.ai.uky.edu` and
+`https://iam.ai.uky.edu/realms/Astral` as its endpoint
+(`apple-clients/Config/Release.xcconfig` → both Info.plists → `AstralConfig`).
+The endpoint can be repointed at runtime (FR-011 override) or by rebuilding, but
+a stock build talks to that exact host — so the production posture there must
+satisfy:
+
+| Key | Value | Why the Apple clients need it |
+|---|---|---|
+| `ASTRAL_ENV` | unset (== production) | Fail-closed; mock auth refuses to boot. |
+| `USE_MOCK_AUTH` | `false` | Real tokens only; mock auth would admit anyone as admin. |
+| `KEYCLOAK_AUTHORITY` | `https://iam.ai.uky.edu/realms/Astral` | Must match the authority the Release build ships with. |
+| `KEYCLOAK_ALLOWED_AZP` | includes `astral-mobile`, `astral-desktop`, **and** `astral-watch` | iOS→`astral-mobile`, macOS→`astral-desktop`, watch→`astral-watch`; a token whose `azp` is not listed is rejected. |
+| `KEYCLOAK_DEVICE_CLIENTS` | `astral-watch` | Only the watch may use the backend-brokered device grant. |
+| `FF_DEVICE_LOGIN` | `true` | Enables `POST /api/auth/device/*`; off ⇒ watch QR sign-in returns a clean 503. |
+| `FF_LLM_STREAMING` | `true` (default) | Token-wise narrative streaming the clients render live; any provider error falls back to the non-streamed call. |
+| high-entropy secret set | `WEB_SESSION_ENC_KEY` / `OFFLINE_GRANT_ENC_KEY` (Fernet), `AUDIT_HMAC_SECRET`, `AGENT_API_KEY`, `KEYCLOAK_CLIENT_SECRET` | The exit-78 boot gate refuses placeholders. |
+| `FORWARDED_ALLOW_IPS` | the TLS proxy's address | Makes `request.base_url` https so the OIDC `redirect_uri` the clients round-trip is https. |
+
+Also size the connection pool for the added client fan-in: **`DB_POOL_MAX` ×
+(app process count) must stay below Postgres `max_connections`**. Each instance
+holds up to `DB_POOL_MAX` connections (default 10); N app processes plus the
+`postgres` service's own overhead have to fit under the server ceiling, or a
+sign-in storm exhausts it.
+
+### Realm prerequisites
+
+Per [keycloak-realm-settings.md](keycloak-realm-settings.md) §051 (native Apple
+clients):
+
+- **`astral-mobile`** (shared with Android) serves iOS and **`astral-desktop`**
+  (shared with Windows) serves macOS — both standard flow + PKCE. No realm
+  change beyond registering the Apple redirect URIs already documented for those
+  shared clients.
+- **`astral-watch`** is a dedicated *public* client with **OAuth 2.0 Device
+  Authorization Grant** enabled (Capability config). Append it to
+  `KEYCLOAK_ALLOWED_AZP` and keep `KEYCLOAK_DEVICE_CLIENTS=astral-watch`.
+- All three clients must exist in the realm; the watch never contacts the IdP
+  directly (the backend brokers the device grant).
+
+### Apple release runbook
+
+The Apple release pipeline is `.github/workflows/apple-release.yml` — a separate
+workflow from `ci.yml` (the six backend gates are untouched; `apple-ci.yml`
+gains only a `generate_app_icons.py --check` step). It runs on `macos-15` and
+does **archive → sign → export → validate → upload**. It does **not** submit for
+review (see below).
+
+**Trigger.** Push a tag matching `apple-v*` that equals `apple-v$MARKETING_VERSION` exactly (currently `apple-v1.0`; a mismatched tag fails the guard), or run it
+manually (`workflow_dispatch`). The `apple-v*` namespace is deliberately
+disjoint from the Windows release's `v*` trigger — a `v-apple-*` tag would
+double-fire that workflow — so do not rename it. On a tag push the workflow
+asserts the tag equals `apple-v$(MARKETING_VERSION)`; bump `MARKETING_VERSION`
+in the Xcode project before tagging. The build number is `$GITHUB_RUN_NUMBER`,
+passed to `xcodebuild` as `CURRENT_PROJECT_VERSION` (both Info.plists already
+read it — no agvtool rewrite).
+
+**Required secrets (names only — never commit or echo values).** The workflow
+fails fast, before any signing step, if any of these seven repository secrets is
+unset:
+
+| Secret | Purpose |
+|---|---|
+| `APPLE_TEAM_ID` | Apple Developer Team id (also injected as `ASTRAL_DEVELOPMENT_TEAM`). |
+| `APPLE_DISTRIBUTION_CERT_P12_BASE64` | Base64 of the Apple Distribution certificate `.p12`. |
+| `APPLE_CERT_PASSWORD` | Password for that `.p12`. |
+| `APPLE_PROVISION_PROFILE_BASE64` | Base64 tar carrying **all three** App Store profiles. |
+| `ASC_KEY_ID` | App Store Connect API key id. |
+| `ASC_ISSUER_ID` | App Store Connect API issuer id. |
+| `ASC_KEY_P8_BASE64` | Base64 of the App Store Connect API `.p8` private key. |
+
+Rendering the export-options plists additionally consumes three profile-**name**
+secrets — `APPLE_PROFILE_IOS`, `APPLE_PROFILE_MACOS`, `APPLE_PROFILE_WATCH` —
+through `Scripts/render_export_options.py` (stdlib only; exits non-zero on any
+unset placeholder).
+
+**Three provisioning profiles.** A `.mobileprovision` is per bundle-id *and*
+platform, so the shared `com.personalailabs.astraldeep` id needs one App Store
+profile each for iOS, macOS, and watchOS. All three ride inside
+`APPLE_PROVISION_PROFILE_BASE64`; the import step refuses to proceed if fewer
+than three land.
+
+**Two archives, one record.** The iOS archive embeds `Watch/AstralWatch.app`
+(asserted present); the macOS archive must contain no watch app (asserted absent
+— the embed phase is platform-filtered to iOS). Both are `-exportArchive`-d,
+`altool --validate-app`-ed, and `altool --upload-app`-ed into the one Universal
+Purchase App Store Connect record. There is **no `notarytool` step** — App Store
+(including Mac App Store) builds are signed-checked by Apple after upload;
+notarization is the outside-the-store Developer-ID path.
+
+**Submission is operator-performed.** The pipeline stops at a validated,
+uploaded build. Pressing **Submit for Review** in App Store Connect requires a
+complete store listing — screenshots for iPhone 6.9", iPad 13", Mac, and Apple
+Watch; description; privacy-policy URL; age rating — which only the operator can
+author, and Apple's submission API refuses an incomplete listing. Outstanding
+operator work: the four device-class screenshots, the App Store Connect record +
+listing copy, the operator's Team id / distribution certificate / three
+provisioning profiles / ASC API key, and the on-device verification evidence.
+
 ## Database
 
 - Postgres 17 (compose service `postgres`, named volume `pgdata`).
@@ -208,13 +317,18 @@ KEYCLOAK_AUTHORITY=https://iam.ai.uky.edu/realms/<realm>
 KEYCLOAK_CLIENT_ID=astral-frontend
 KEYCLOAK_CLIENT_SECRET=<client credentials tab>
 
-# Native clients — tokens from the Windows (astral-desktop) and Android
-# (astral-mobile) public clients are ACCEPTED ONLY when their azp is listed
-# here (empty/unset ⇒ web-only: every native sign-in is rejected while the
-# web keeps working, and the Android release build is hardcoded to this very
-# host). Client provisioning: docs/keycloak-windows-client-setup.md and
-# docs/keycloak-android-client-setup.md.
-KEYCLOAK_ALLOWED_AZP=astral-desktop,astral-mobile
+# Native clients — tokens from the Windows/macOS (astral-desktop), Android/iOS
+# (astral-mobile) and watch (astral-watch) public clients are ACCEPTED ONLY when
+# their azp is listed here (empty/unset ⇒ web-only: every native sign-in is
+# rejected while the web keeps working, and the Android/Apple release builds ship
+# pointing at this very host). Client provisioning:
+# docs/keycloak-windows-client-setup.md, docs/keycloak-android-client-setup.md,
+# and docs/keycloak-realm-settings.md §051 (Apple).
+KEYCLOAK_ALLOWED_AZP=astral-desktop,astral-mobile,astral-watch
+
+# Watch QR sign-in (device grant) — Apple watchOS + any watch client
+KEYCLOAK_DEVICE_CLIENTS=astral-watch
+FF_DEVICE_LOGIN=true
 
 # Production posture — the exit-78 boot gate checks all of these
 # (leave ASTRAL_ENV unset: unset == production, fail closed)
@@ -267,10 +381,11 @@ the pulled image refuses to serve and prints one consolidated checklist in
 [ ] KEYCLOAK_* configured; realm per docs/keycloak-realm-settings.md
     (incl. Remember Me OFF, Offline Session ≥ 365 d, roles user/admin)
 [ ] KEYCLOAK_ALLOWED_AZP lists the native clients (astral-desktop,
-    astral-mobile) — unset means Windows/Android sign-ins are rejected
+    astral-mobile, astral-watch) — unset means Windows/macOS/Android/iOS/watch
+    sign-ins are rejected
 [ ] Native client redirect URIs registered: 127.0.0.1 loopback on
-    astral-desktop, com.personalailabs.astraldeep:/oauth2redirect on
-    astral-mobile (see the per-client setup docs)
+    astral-desktop (Windows + macOS), com.personalailabs.astraldeep:/oauth2redirect
+    on astral-mobile (Android + iOS) (see the per-client setup docs)
 [ ] PUBLIC_BASE_URL/BACKEND_PUBLIC_URL = public https origin
 [ ] Reverse proxy terminates TLS, forwards X-Forwarded-*, upgrades /ws
 [ ] FORWARDED_ALLOW_IPS = proxy address
