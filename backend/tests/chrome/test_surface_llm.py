@@ -166,17 +166,24 @@ def test_render_provider_dropdown_offers_all_presets():
     assert html.rindex('<option value="custom"') > html.rindex('<option value="openai"')
 
 
-def test_render_preset_has_no_editable_base_url():
-    """Server-derived endpoints: catalog presets render display-only copy;
-    ONLY custom renders the free-form base_url input."""
+def test_render_endpoint_toggle_preset_vs_custom():
+    """Both endpoint halves are always in the DOM (the static modal toggles
+    them client-side); the preset caption is shown + the custom input hidden
+    for a preset, and vice versa for custom. The provider <select> carries
+    the client-side toggle hook and the form embeds the endpoints map."""
     html = render(make_orch(), params={"provider": "openai"})
-    assert 'name="base_url"' not in html
+    assert 'name="base_url"' in html               # always present (hidden for presets)
     assert "https://api.openai.com/v1" in html
     assert "set automatically" in html
+    assert "astral-llm-provider" in html           # client-side change hook
+    assert "data-llm-endpoints" in html            # embedded provider->url map
+    # For a preset the custom input is hidden and the preset caption is shown.
+    assert 'astral-llm-endpoint-custom' in html and 'style="display:none"' in html
 
     html_custom = render(make_orch(), params={"provider": CUSTOM_PROVIDER_KEY})
     assert 'name="base_url"' in html_custom
-    assert "set automatically" not in html_custom
+    # For custom the preset caption is hidden.
+    assert 'astral-llm-endpoint-preset text-xs text-astral-muted" style="display:none"' in html_custom
 
 
 def test_render_keyless_preset_marks_key_optional():
@@ -267,9 +274,13 @@ def test_components_first_run_carries_local_runtime_note():
     assert any("nothing is built in" in t for t in texts)
 
 
-def test_components_base_url_field_only_for_custom():
+def test_components_always_include_base_url_field():
+    """Native forms can't re-render on provider change, so the base_url field
+    is ALWAYS present — prefilled with the preset endpoint for presets
+    (server ignores it) and editable for custom (source of truth)."""
     picker = _param_picker(components(make_orch(), params={"provider": "openai"}))
-    assert _field(picker, "base_url") is None
+    f = _field(picker, "base_url")
+    assert f is not None and f.get("default") == "https://api.openai.com/v1"
 
     picker = _param_picker(components(make_orch(), params={"provider": "custom"}))
     assert _field(picker, "base_url") is not None
