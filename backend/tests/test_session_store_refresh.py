@@ -47,7 +47,7 @@ def keyed_store(db, fernet_key):
 def auth_env(monkeypatch, db, fernet_key):
     """Clean web_auth state: fresh store, empty session cache, quiet audit,
     fake Keycloak config. Yields the injected WebSessionStore."""
-    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "false")
+    monkeypatch.setenv("USE_MOCK_AUTH", "false")
     web_auth.reset_store_for_tests()
     store = WebSessionStore(db=db)
     web_auth._STORE = store

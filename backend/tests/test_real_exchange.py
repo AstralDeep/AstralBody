@@ -35,8 +35,8 @@ async def main(token: str | None = None):
     env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".env")
     load_env(env_path)
 
-    AUTHORITY = os.getenv("VITE_KEYCLOAK_AUTHORITY")
-    CLIENT_ID = os.getenv("VITE_KEYCLOAK_CLIENT_ID")
+    AUTHORITY = os.getenv("KEYCLOAK_AUTHORITY")
+    CLIENT_ID = os.getenv("KEYCLOAK_CLIENT_ID")
     CLIENT_SECRET = os.getenv("KEYCLOAK_CLIENT_SECRET", "")
     AGENT_CLIENT = os.getenv("AGENT_SERVICE_CLIENT_ID", "astral-agent-service")
     TOKEN_URL = f"{AUTHORITY}/protocol/openid-connect/token"

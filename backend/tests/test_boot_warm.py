@@ -33,8 +33,8 @@ def _bare_orch():
 async def test_jwks_warm_skips_under_mock_auth(monkeypatch):
     """Mock-auth/dev boots must not touch the IdP at all."""
     from shared import jwks_cache
-    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "true")
-    monkeypatch.setenv("VITE_KEYCLOAK_AUTHORITY", "https://idp.example/realms/x")
+    monkeypatch.setenv("USE_MOCK_AUTH", "true")
+    monkeypatch.setenv("KEYCLOAK_AUTHORITY", "https://idp.example/realms/x")
     calls = []
 
     async def _fake_get(url, **kw):
@@ -49,8 +49,8 @@ async def test_jwks_warm_skips_under_mock_auth(monkeypatch):
 async def test_jwks_warm_skips_without_authority(monkeypatch):
     """No configured authority => nothing to warm, clean return."""
     from shared import jwks_cache
-    monkeypatch.delenv("VITE_USE_MOCK_AUTH", raising=False)
-    monkeypatch.delenv("VITE_KEYCLOAK_AUTHORITY", raising=False)
+    monkeypatch.delenv("USE_MOCK_AUTH", raising=False)
+    monkeypatch.delenv("KEYCLOAK_AUTHORITY", raising=False)
     calls = []
 
     async def _fake_get(url, **kw):
@@ -65,8 +65,8 @@ async def test_jwks_warm_skips_without_authority(monkeypatch):
 async def test_jwks_warm_fetches_then_refreshes(monkeypatch):
     """First pass warms via get_jwks; later passes force-refresh via _fetch."""
     from shared import jwks_cache
-    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "false")
-    monkeypatch.setenv("VITE_KEYCLOAK_AUTHORITY", "https://idp.example/realms/x")
+    monkeypatch.setenv("USE_MOCK_AUTH", "false")
+    monkeypatch.setenv("KEYCLOAK_AUTHORITY", "https://idp.example/realms/x")
     monkeypatch.setenv("JWKS_REFRESH_SECONDS", "0.01")
     warm_calls, refresh_calls = [], []
 
@@ -96,8 +96,8 @@ async def test_jwks_warm_fetches_then_refreshes(monkeypatch):
 async def test_jwks_warm_failure_backs_off_without_crashing(monkeypatch):
     """An unreachable IdP logs and retries — the loop never raises out."""
     from shared import jwks_cache
-    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "false")
-    monkeypatch.setenv("VITE_KEYCLOAK_AUTHORITY", "https://idp.example/realms/x")
+    monkeypatch.setenv("USE_MOCK_AUTH", "false")
+    monkeypatch.setenv("KEYCLOAK_AUTHORITY", "https://idp.example/realms/x")
     attempts = []
 
     async def _fake_get(url, **kw):

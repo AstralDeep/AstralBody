@@ -45,14 +45,14 @@ def orch():
     """One real Orchestrator (mock auth) shared by the module's tests.
 
     Mock auth must be forced under BOTH env names AFTER imports: the
-    ``shared`` package normalizes ``USE_MOCK_AUTH``/``VITE_USE_MOCK_AUTH``
+    ``shared`` package normalizes ``USE_MOCK_AUTH``/``USE_MOCK_AUTH``
     at import time and a container-exported ``USE_MOCK_AUTH=false`` would
     otherwise win over a module-level assignment.
     """
     saved = {name: os.environ.get(name)
-             for name in ("USE_MOCK_AUTH", "VITE_USE_MOCK_AUTH")}
+             for name in ("USE_MOCK_AUTH", "USE_MOCK_AUTH")}
     os.environ["USE_MOCK_AUTH"] = "true"
-    os.environ["VITE_USE_MOCK_AUTH"] = "true"
+    os.environ["USE_MOCK_AUTH"] = "true"
     from orchestrator.orchestrator import Orchestrator
     try:
         yield Orchestrator()

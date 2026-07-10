@@ -77,14 +77,14 @@ def _voice_test_app():
 @pytest.fixture
 def client(_voice_test_app):
     """TestClient for the voice test app, with mock auth enabled."""
-    with patch.dict(os.environ, {"VITE_USE_MOCK_AUTH": "true", "SPEACHES_URL": "https://speaches.example.com"}):
+    with patch.dict(os.environ, {"USE_MOCK_AUTH": "true", "SPEACHES_URL": "https://speaches.example.com"}):
         yield TestClient(_voice_test_app)
 
 
 def _env_side_effect(speaches_url):
     """Return a side_effect for patch('os.getenv') that preserves mock auth."""
     def _getenv(key, default=None):
-        if key == "VITE_USE_MOCK_AUTH":
+        if key == "USE_MOCK_AUTH":
             return "true"
         if key == "SPEACHES_URL":
             return speaches_url
@@ -94,7 +94,7 @@ def _env_side_effect(speaches_url):
 
 def _env_not_configured(key, default=None):
     """Side_effect for os.getenv with no SPEACHES_URL but mock auth on."""
-    if key == "VITE_USE_MOCK_AUTH":
+    if key == "USE_MOCK_AUTH":
         return "true"
     if key == "SPEACHES_URL" or key == "SPEACHES_STT_MODEL" or key == "SPEACHES_TTS_MODEL":
         return ""

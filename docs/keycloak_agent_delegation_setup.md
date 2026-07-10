@@ -271,7 +271,7 @@ KEYCLOAK_AUTHORITY=https://iam.ai.uky.edu/realms/Astral
 KEYCLOAK_CLIENT_ID=astral-frontend
 KEYCLOAK_CLIENT_SECRET=<astral-frontend-client-secret>
 ```
-(The React-era `VITE_KEYCLOAK_*` names are deprecated aliases, backfilled
+(The React-era `VITE_KEYCLOAK_*` names are retired; a one-way deprecation shim backfills
 automatically by `backend/shared/__init__.py` — use the un-prefixed names.)
 
 ---

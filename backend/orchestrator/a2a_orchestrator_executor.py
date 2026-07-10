@@ -178,7 +178,7 @@ def build_orchestrator_a2a_card(orchestrator) -> A2AAgentCard:
     """
     port = int(os.getenv("ORCHESTRATOR_PORT", 9001))
     host = os.getenv("HOST", "0.0.0.0")
-    authority = os.getenv("VITE_KEYCLOAK_AUTHORITY", "")
+    authority = os.getenv("KEYCLOAK_AUTHORITY", "")
 
     skills: List[A2AAgentSkill] = []
     for agent_id, caps in orchestrator.agent_capabilities.items():

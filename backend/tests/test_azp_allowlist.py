@@ -8,7 +8,7 @@ from shared import auth_clients
 
 def test_only_primary_when_no_allowlist(monkeypatch):
     monkeypatch.setenv("KEYCLOAK_CLIENT_ID", "astral-frontend")
-    monkeypatch.setenv("VITE_KEYCLOAK_CLIENT_ID", "astral-frontend")
+    monkeypatch.setenv("KEYCLOAK_CLIENT_ID", "astral-frontend")
     monkeypatch.delenv("KEYCLOAK_ALLOWED_AZP", raising=False)
     assert auth_clients.allowed_azps() == {"astral-frontend"}
     assert auth_clients.is_azp_allowed("astral-frontend")

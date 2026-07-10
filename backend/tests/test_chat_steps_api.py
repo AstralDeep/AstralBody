@@ -26,7 +26,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-os.environ["VITE_USE_MOCK_AUTH"] = "true"
+os.environ["USE_MOCK_AUTH"] = "true"
 
 
 def _can_connect_to_db() -> bool:

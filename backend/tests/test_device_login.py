@@ -92,11 +92,11 @@ def env(monkeypatch):
     monkeypatch.setenv("FF_DEVICE_LOGIN", "1")
     monkeypatch.setenv("WEB_SESSION_ENC_KEY", Fernet.generate_key().decode())
     # BOTH spellings: shared/__init__ re-aliases KEYCLOAK_AUTHORITY over the
-    # VITE_ name at (possibly lazy) import time with "new name wins", so a
+    # legacy alias at (possibly lazy) import time (unprefixed name wins), so a
     # container run with a real .env would otherwise clobber the fake realm.
-    monkeypatch.setenv("VITE_KEYCLOAK_AUTHORITY", AUTHORITY)
     monkeypatch.setenv("KEYCLOAK_AUTHORITY", AUTHORITY)
-    monkeypatch.setenv("VITE_KEYCLOAK_CLIENT_ID", "astral-frontend")
+    monkeypatch.setenv("KEYCLOAK_AUTHORITY", AUTHORITY)
+    monkeypatch.setenv("KEYCLOAK_CLIENT_ID", "astral-frontend")
     monkeypatch.setenv(
         "KEYCLOAK_ALLOWED_AZP", "astral-desktop,astral-mobile,astral-ios,astral-macos,astral-watch"
     )

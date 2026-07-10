@@ -40,7 +40,7 @@ async def _drain_background_tasks():
 @pytest.fixture()
 def orch(monkeypatch):
     """A real Orchestrator under mock auth (dev-token => test_user)."""
-    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "true")
+    monkeypatch.setenv("USE_MOCK_AUTH", "true")
     from orchestrator.orchestrator import Orchestrator
     try:
         o = Orchestrator()

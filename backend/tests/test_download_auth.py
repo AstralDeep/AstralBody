@@ -43,14 +43,14 @@ CROSS_USER_FILE = "secret.txt"
 
 @pytest.fixture
 def mock_auth_env(monkeypatch):
-    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "true")
+    monkeypatch.setenv("USE_MOCK_AUTH", "true")
 
 
 @pytest.fixture
 def real_auth_env(monkeypatch):
-    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "false")
-    monkeypatch.setenv("VITE_KEYCLOAK_AUTHORITY", "https://idp.example/realms/astral")
-    monkeypatch.setenv("VITE_KEYCLOAK_CLIENT_ID", "astral-frontend")
+    monkeypatch.setenv("USE_MOCK_AUTH", "false")
+    monkeypatch.setenv("KEYCLOAK_AUTHORITY", "https://idp.example/realms/astral")
+    monkeypatch.setenv("KEYCLOAK_CLIENT_ID", "astral-frontend")
 
 
 @pytest.fixture

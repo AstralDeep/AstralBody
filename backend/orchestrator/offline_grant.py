@@ -124,7 +124,7 @@ class OfflineGrantStore:
             f"{os.getenv('KEYCLOAK_URL', '').rstrip('/')}/realms/"
             f"{os.getenv('KEYCLOAK_REALM', 'astral')}/protocol/openid-connect/token"
         )
-        client_id = os.getenv("KEYCLOAK_CLIENT_ID") or os.getenv("VITE_KEYCLOAK_CLIENT_ID", "astral-frontend")
+        client_id = os.getenv("KEYCLOAK_CLIENT_ID") or os.getenv("KEYCLOAK_CLIENT_ID", "astral-frontend")
         data = {
             "grant_type": "refresh_token",
             "client_id": client_id,

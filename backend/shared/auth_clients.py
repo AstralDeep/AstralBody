@@ -29,7 +29,7 @@ def _primary_client_id() -> str:
     # either name resolves here.
     return (
         os.getenv("KEYCLOAK_CLIENT_ID")
-        or os.getenv("VITE_KEYCLOAK_CLIENT_ID")
+        or os.getenv("KEYCLOAK_CLIENT_ID")
         or ""
     ).strip()
 

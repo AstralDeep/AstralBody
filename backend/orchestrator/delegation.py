@@ -44,8 +44,8 @@ class DelegationService:
     """
 
     def __init__(self):
-        self.authority = os.getenv("VITE_KEYCLOAK_AUTHORITY", "")
-        self.client_id = os.getenv("VITE_KEYCLOAK_CLIENT_ID", "")
+        self.authority = os.getenv("KEYCLOAK_AUTHORITY", "")
+        self.client_id = os.getenv("KEYCLOAK_CLIENT_ID", "")
         self.client_secret = os.getenv("KEYCLOAK_CLIENT_SECRET", "")
         self.agent_service_client_id = os.getenv(
             "AGENT_SERVICE_CLIENT_ID", "astral-agent-service"
@@ -53,7 +53,7 @@ class DelegationService:
         self.agent_service_client_secret = os.getenv(
             "AGENT_SERVICE_CLIENT_SECRET", ""
         )
-        self.mock_auth = os.getenv("VITE_USE_MOCK_AUTH", "false").lower() == "true"
+        self.mock_auth = os.getenv("USE_MOCK_AUTH", "false").lower() == "true"
 
         # RFC 9449 DPoP: Generate ephemeral EC P-256 key pair for
         # cryptographic binding of delegation tokens to this Orchestrator instance.

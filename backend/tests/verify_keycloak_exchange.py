@@ -206,8 +206,8 @@ if __name__ == "__main__":
     env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".env")
     load_env(env_path)
 
-    AUTHORITY = os.getenv("VITE_KEYCLOAK_AUTHORITY", "")
-    CLIENT_ID = os.getenv("VITE_KEYCLOAK_CLIENT_ID", "")
+    AUTHORITY = os.getenv("KEYCLOAK_AUTHORITY", "")
+    CLIENT_ID = os.getenv("KEYCLOAK_CLIENT_ID", "")
     CLIENT_SECRET = os.getenv("KEYCLOAK_CLIENT_SECRET", "")
     AGENT_SERVICE_CLIENT_ID = os.getenv("AGENT_SERVICE_CLIENT_ID", "astral-agent-service")
     AGENT_SERVICE_CLIENT_SECRET = os.getenv("AGENT_SERVICE_CLIENT_SECRET", "")

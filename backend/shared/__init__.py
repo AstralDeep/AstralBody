@@ -3,23 +3,25 @@
 import os as _os
 
 # ---------------------------------------------------------------------------
-# Env-name compatibility (2026-06-10): the auth variables lost their legacy
-# VITE_ prefix in .env/.env.example (the React frontend that needed it is
-# gone). Many backend call sites still read the old names — and some read
-# them at import time — so normalize BOTH directions here, before any other
-# backend module loads. New names win when both are set.
-#   USE_MOCK_AUTH        <-> VITE_USE_MOCK_AUTH
-#   KEYCLOAK_AUTHORITY   <-> VITE_KEYCLOAK_AUTHORITY
-#   KEYCLOAK_CLIENT_ID   <-> VITE_KEYCLOAK_CLIENT_ID
+# Legacy env-name shim (054 cleanup): every backend call site now reads the
+# unprefixed names — the React-era VITE_ aliases are retired. A deployment
+# whose .env still sets a VITE_-prefixed value gets it copied to the real
+# name (unprefixed wins when both are set) with a deprecation warning, so
+# old host configs don't silently break. Remove the shim once no deployed
+# .env carries the old names.
+#   VITE_USE_MOCK_AUTH        -> USE_MOCK_AUTH
+#   VITE_KEYCLOAK_AUTHORITY   -> KEYCLOAK_AUTHORITY
+#   VITE_KEYCLOAK_CLIENT_ID   -> KEYCLOAK_CLIENT_ID
 # ---------------------------------------------------------------------------
 for _new, _old in (
     ("USE_MOCK_AUTH", "VITE_USE_MOCK_AUTH"),
     ("KEYCLOAK_AUTHORITY", "VITE_KEYCLOAK_AUTHORITY"),
     ("KEYCLOAK_CLIENT_ID", "VITE_KEYCLOAK_CLIENT_ID"),
 ):
-    if _os.getenv(_new):
-        _os.environ[_old] = _os.environ[_new]
-    elif _os.getenv(_old):
+    if not _os.getenv(_new) and _os.getenv(_old):
+        import logging as _logging
+        _logging.getLogger("shared.env").warning(
+            "%s is deprecated — rename it to %s in your .env", _old, _new)
         _os.environ[_new] = _os.environ[_old]
 del _new, _old, _os
 

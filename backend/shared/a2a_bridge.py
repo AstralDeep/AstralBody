@@ -90,7 +90,7 @@ def custom_card_to_a2a(card: CustomAgentCard, base_url: str) -> A2AAgentCard:
     """
     skills = [custom_skill_to_a2a(s) for s in card.skills]
 
-    authority = os.getenv("VITE_KEYCLOAK_AUTHORITY", "")
+    authority = os.getenv("KEYCLOAK_AUTHORITY", "")
     security_schemes: Dict[str, SecurityScheme] = {}
     security_requirements: List[SecurityRequirement] = []
     if authority:

@@ -9092,8 +9092,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         auth or when no authority is configured.
         """
         from shared import jwks_cache
-        authority = (os.getenv("VITE_KEYCLOAK_AUTHORITY") or "").strip()
-        if not authority or os.getenv("VITE_USE_MOCK_AUTH", "").lower() == "true":
+        authority = (os.getenv("KEYCLOAK_AUTHORITY") or "").strip()
+        if not authority or os.getenv("USE_MOCK_AUTH", "").lower() == "true":
             logger.info("jwks warm: skipped (mock auth or no authority configured)")
             return
         jwks_url = f"{authority.rstrip('/')}/protocol/openid-connect/certs"
@@ -9247,7 +9247,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
     async def validate_token(self, token: str) -> Optional[Dict]:
         """Validate JWT token against KeyCloak."""
-        if os.getenv("VITE_USE_MOCK_AUTH", "").lower() == "true":
+        if os.getenv("USE_MOCK_AUTH", "").lower() == "true":
             if token == "dev-token":
                 logger.info("Mock Auth: Validated dev-token as test_user")
                 return {
@@ -9277,11 +9277,11 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             }
 
         try:
-            authority = os.getenv("VITE_KEYCLOAK_AUTHORITY")
-            expected_client = os.getenv("VITE_KEYCLOAK_CLIENT_ID")
+            authority = os.getenv("KEYCLOAK_AUTHORITY")
+            expected_client = os.getenv("KEYCLOAK_CLIENT_ID")
             
             if not authority or not expected_client:
-                logger.warning("Auth not configured (VITE_KEYCLOAK_AUTHORITY/CLIENT_ID missing)")
+                logger.warning("Auth not configured (KEYCLOAK_AUTHORITY/CLIENT_ID missing)")
                 return None
 
             # Fetch JWKS (feature 028 D8: cached with kid-miss refetch — the
@@ -9324,7 +9324,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 return None
 
             # Extract Roles
-            client_id = os.getenv("VITE_KEYCLOAK_CLIENT_ID", "astral-frontend")
+            client_id = os.getenv("KEYCLOAK_CLIENT_ID", "astral-frontend")
             roles = payload.get("realm_access", {}).get("roles", [])
             if "resource_access" in payload:
                 if client_id in payload["resource_access"]:
@@ -9363,7 +9363,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             roles = list(set(
                 user_data.get("realm_access", {}).get("roles", []) +
                 user_data.get("resource_access", {}).get(
-                    os.getenv("VITE_KEYCLOAK_CLIENT_ID", "astral-frontend"), {}
+                    os.getenv("KEYCLOAK_CLIENT_ID", "astral-frontend"), {}
                 ).get("roles", [])
             ))
             self.history.db.upsert_user(

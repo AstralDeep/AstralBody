@@ -25,7 +25,7 @@ import shared  # noqa: F401 — normalizes USE_MOCK_AUTH/KEYCLOAK_* env aliases 
 
 logger = logging.getLogger("AuthProxy")
 
-if os.getenv("VITE_USE_MOCK_AUTH", "").lower() == "true":
+if os.getenv("USE_MOCK_AUTH", "").lower() == "true":
     logger.info("Mock auth ENABLED — all tokens accepted as test_user with roles [admin, user]")
 else:
     logger.info("Mock auth disabled — Keycloak JWKS validation active")
@@ -39,8 +39,8 @@ auth_router = APIRouter()
 
 def _get_keycloak_config():
     """Read Keycloak settings from environment."""
-    authority = os.getenv("VITE_KEYCLOAK_AUTHORITY", "")
-    client_id = os.getenv("VITE_KEYCLOAK_CLIENT_ID", "")
+    authority = os.getenv("KEYCLOAK_AUTHORITY", "")
+    client_id = os.getenv("KEYCLOAK_CLIENT_ID", "")
     client_secret = os.getenv("KEYCLOAK_CLIENT_SECRET", "")
     return authority, client_id, client_secret
 
@@ -130,7 +130,7 @@ async def get_current_user_payload(request: Request, credentials: HTTPAuthorizat
             detail="Not authenticated",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    if os.getenv("VITE_USE_MOCK_AUTH", "").lower() == "true":
+    if os.getenv("USE_MOCK_AUTH", "").lower() == "true":
         # Accept any token for mock auth (for testing)
         if token == "dev-token":
             mock_payload = {
@@ -425,7 +425,7 @@ def _extract_roles(user_data: dict) -> list:
     logger.debug(f"Extracting roles from user_data: {json.dumps(user_data, indent=2)}")
     roles = user_data.get("realm_access", {}).get("roles", [])
     if "resource_access" in user_data:
-        client_id = os.getenv("VITE_KEYCLOAK_CLIENT_ID", "astral-frontend")
+        client_id = os.getenv("KEYCLOAK_CLIENT_ID", "astral-frontend")
         logger.debug(f"Client ID: {client_id}")
         if client_id in user_data["resource_access"]:
             client_roles = user_data["resource_access"][client_id].get("roles", [])

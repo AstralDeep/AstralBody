@@ -35,7 +35,7 @@ def _configure_production_secrets(monkeypatch):
 def test_mock_auth_with_env_unset_refuses_boot(monkeypatch):
     """028 FR-015: mock auth on + ASTRAL_ENV unset (default = production)
     must fail fast with SystemExit(78) (EX_CONFIG)."""
-    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "true")
+    monkeypatch.setenv("USE_MOCK_AUTH", "true")
     monkeypatch.delenv("ASTRAL_ENV", raising=False)
     with pytest.raises(SystemExit) as exc:
         assert_production_posture()
@@ -44,7 +44,7 @@ def test_mock_auth_with_env_unset_refuses_boot(monkeypatch):
 
 def test_mock_auth_in_production_refuses_boot(monkeypatch):
     """028 FR-015: mock auth on + ASTRAL_ENV=production must fail fast."""
-    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "true")
+    monkeypatch.setenv("USE_MOCK_AUTH", "true")
     monkeypatch.setenv("ASTRAL_ENV", "production")
     with pytest.raises(SystemExit) as exc:
         assert_production_posture()
@@ -54,7 +54,7 @@ def test_mock_auth_in_production_refuses_boot(monkeypatch):
 def test_mock_auth_in_development_boots(monkeypatch):
     """028 FR-015: explicitly declared development mode keeps mock auth
     usable — no raise."""
-    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "true")
+    monkeypatch.setenv("USE_MOCK_AUTH", "true")
     monkeypatch.setenv("ASTRAL_ENV", "development")
     assert_production_posture()  # must not raise
 
@@ -62,16 +62,16 @@ def test_mock_auth_in_development_boots(monkeypatch):
 def test_real_auth_with_env_unset_boots(monkeypatch):
     """028 FR-015 + hardening: with mock auth off and the production secrets
     configured, ASTRAL_ENV may stay unset — the gate passes."""
-    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "false")
+    monkeypatch.setenv("USE_MOCK_AUTH", "false")
     monkeypatch.delenv("ASTRAL_ENV", raising=False)
     _configure_production_secrets(monkeypatch)
     assert_production_posture()  # must not raise
 
 
 def test_mock_auth_unset_entirely_boots(monkeypatch):
-    """028 FR-015: VITE_USE_MOCK_AUTH absent counts as mock-off — no raise
+    """028 FR-015: USE_MOCK_AUTH absent counts as mock-off — no raise
     when the production secrets are configured."""
-    monkeypatch.delenv("VITE_USE_MOCK_AUTH", raising=False)
+    monkeypatch.delenv("USE_MOCK_AUTH", raising=False)
     monkeypatch.delenv("ASTRAL_ENV", raising=False)
     _configure_production_secrets(monkeypatch)
     assert_production_posture()  # must not raise
@@ -80,7 +80,7 @@ def test_mock_auth_unset_entirely_boots(monkeypatch):
 def test_production_without_session_key_refuses(monkeypatch):
     """Hardening: a production boot without any session encryption key is
     refused (sessions must never hit disk unencrypted)."""
-    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "false")
+    monkeypatch.setenv("USE_MOCK_AUTH", "false")
     monkeypatch.delenv("ASTRAL_ENV", raising=False)
     _configure_production_secrets(monkeypatch)
     monkeypatch.delenv("WEB_SESSION_ENC_KEY", raising=False)
@@ -93,7 +93,7 @@ def test_production_without_session_key_refuses(monkeypatch):
 def test_production_with_placeholder_audit_secret_refuses(monkeypatch):
     """Hardening: the shipped dev AUDIT_HMAC_SECRET placeholder is refused in
     production (the audit hash chain would be forgeable)."""
-    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "false")
+    monkeypatch.setenv("USE_MOCK_AUTH", "false")
     monkeypatch.setenv("ASTRAL_ENV", "production")
     _configure_production_secrets(monkeypatch)
     monkeypatch.setenv("AUDIT_HMAC_SECRET", "dev-audit-hmac-secret-change-me-in-prod")
@@ -105,10 +105,10 @@ def test_production_with_placeholder_audit_secret_refuses(monkeypatch):
 def test_production_without_keycloak_config_refuses(monkeypatch):
     """Hardening: production with mock off but no KEYCLOAK_* cannot serve a
     sign-in at all — refused with EX_CONFIG."""
-    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "false")
+    monkeypatch.setenv("USE_MOCK_AUTH", "false")
     monkeypatch.setenv("ASTRAL_ENV", "production")
     _configure_production_secrets(monkeypatch)
-    for var in ("KEYCLOAK_AUTHORITY", "VITE_KEYCLOAK_AUTHORITY"):
+    for var in ("KEYCLOAK_AUTHORITY", "KEYCLOAK_AUTHORITY"):
         monkeypatch.delenv(var, raising=False)
     with pytest.raises(SystemExit) as exc:
         assert_production_posture()
@@ -119,7 +119,7 @@ def test_dev_mode_skips_production_secret_checks(monkeypatch):
     """Hardening keeps spec A13: development mode boots with no secrets at
     all (the dev carve-outs cover encryption + audit placeholders)."""
     monkeypatch.setenv("ASTRAL_ENV", "development")
-    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "true")
+    monkeypatch.setenv("USE_MOCK_AUTH", "true")
     for var in ("WEB_SESSION_ENC_KEY", "OFFLINE_GRANT_ENC_KEY",
                 "AUDIT_HMAC_SECRET", "KEYCLOAK_AUTHORITY"):
         monkeypatch.delenv(var, raising=False)
@@ -130,7 +130,7 @@ def test_production_without_credential_key_refuses(monkeypatch):
     """Hardening: a production boot without CREDENTIAL_ENCRYPTION_KEY is refused
     — OAuth/Fernet credentials must not fall back to an auto-generated key that
     is lost on an ephemeral volume (silent fail-open)."""
-    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "false")
+    monkeypatch.setenv("USE_MOCK_AUTH", "false")
     monkeypatch.setenv("ASTRAL_ENV", "production")
     _configure_production_secrets(monkeypatch)
     monkeypatch.delenv("CREDENTIAL_ENCRYPTION_KEY", raising=False)
@@ -142,7 +142,7 @@ def test_production_without_credential_key_refuses(monkeypatch):
 def test_production_with_weak_agent_key_refuses(monkeypatch):
     """Hardening: a shipped-placeholder or too-short AGENT_API_KEY is refused in
     production (a forgeable agent registration secret)."""
-    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "false")
+    monkeypatch.setenv("USE_MOCK_AUTH", "false")
     monkeypatch.setenv("ASTRAL_ENV", "production")
     _configure_production_secrets(monkeypatch)
     monkeypatch.setenv("AGENT_API_KEY", "short")
