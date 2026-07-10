@@ -272,8 +272,17 @@ async def start(orch, attachment, *, user_id: str, chat_id: Optional[str] = None
             correlation_id=draft_id,
             outcome="success" if self_test.get("status") == "passed" else "failure",
             chat_id=chat_id, inputs_meta={"draft_id": draft_id})
-    except Exception:
-        logger.exception("autoparse: draft pipeline failed for .%s", extension)
+    except Exception as exc:
+        # Feature 054 (FR-020): codegen runs on the admin system credential;
+        # its absence is an expected, honest degradation — log it by name so
+        # operators can distinguish "configure the System LLM" from a bug.
+        if "LLM not configured" in str(exc):
+            logger.warning(
+                "system_llm_unconfigured: autoparse skipped for .%s — "
+                "configure the System LLM in admin settings", extension)
+        else:
+            logger.exception("autoparse: draft pipeline failed for .%s", extension)
+        parser_repo.mark_status(fp, STATUS_FAILED)
         await _notify_user(orch, user_id,
                            f"Couldn't prepare a reader for .{extension} files.", chat_id)
         return {"status": "unavailable", "gap_fingerprint": fp}

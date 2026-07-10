@@ -301,9 +301,9 @@ def test_mint_fails_safe_on_idp_rejection(db, grant_store, monkeypatch):
 def test_auth_logout_revokes_real_offline_grant(db, grant_store, monkeypatch):
     """028 FR-012: /auth/logout revokes the user's feature-025 offline grants
     through the real store — only the Keycloak revoke HTTP is faked."""
-    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "false")
-    monkeypatch.setenv("VITE_KEYCLOAK_AUTHORITY", "http://keycloak.test/realms/astral")
-    monkeypatch.setenv("VITE_KEYCLOAK_CLIENT_ID", "astral-frontend")
+    monkeypatch.setenv("USE_MOCK_AUTH", "false")
+    monkeypatch.setenv("KEYCLOAK_AUTHORITY", "http://keycloak.test/realms/astral")
+    monkeypatch.setenv("KEYCLOAK_CLIENT_ID", "astral-frontend")
     monkeypatch.delenv("KEYCLOAK_CLIENT_SECRET", raising=False)
     monkeypatch.setenv("WEB_SESSION_ENC_KEY", Fernet.generate_key().decode())
 

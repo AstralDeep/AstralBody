@@ -28,8 +28,6 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from jose import jwt as jose_jwt
 from dotenv import load_dotenv
-from openai import OpenAI
-from httpx import Timeout
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from orchestrator.history import HistoryManager
@@ -519,18 +517,18 @@ class Orchestrator:
         self.a2a_agent_cards: Dict[str, Any] = {}  # agent_id -> official A2A AgentCard
         self.agent_urls: Dict[str, str] = {}  # agent_id -> base URL (for peer registry)
 
-        # LLM Client (feature 006-user-llm-config)
+        # LLM credentials (feature 054-byo-llm-setup; supersedes 006's
+        # operator-default model)
         # ----------------------------------------------------------------
-        # The operator's .env-supplied credentials are used as the
-        # *default* for users who have not configured their own. A user
-        # who has configured personal credentials sees those credentials
-        # used exclusively (no runtime fallback — FR-003 / FR-009).
-        # Per-user credentials are NEVER persisted server-side; they
-        # live in `_session_llm_creds`, keyed by id(websocket), and are
-        # cleared on socket disconnect (FR-002).
+        # There is NO deployment-supplied default LLM credential. Every
+        # user brings their own provider via the mandatory first-run
+        # setup dialog; the record persists server-side (user_llm_config,
+        # API key Fernet-encrypted) and resolves by user_id. Server-
+        # initiated/system work resolves the admin-managed
+        # system_llm_config record instead — never a user's, and never
+        # the other way around (FR-019). The store itself is created
+        # after HistoryManager below (it needs the DB handle).
         from llm_config import (
-            OperatorDefaultCreds,
-            SessionCredentialStore,
             build_llm_client,
             CredentialSource,
             LLMUnavailable,
@@ -540,8 +538,7 @@ class Orchestrator:
             record_llm_call,
             record_llm_unconfigured,
         )
-        self._operator_creds = OperatorDefaultCreds.from_env()
-        self._session_llm_creds = SessionCredentialStore()
+        from llm_config.log_scrub import install_redaction_filter
         # Cache the imports as instance attributes so the hot _call_llm
         # path doesn't re-import on every call.
         self._build_llm_client = build_llm_client
@@ -550,13 +547,15 @@ class Orchestrator:
         self._ResolvedConfig = ResolvedConfig
         self._record_llm_call = record_llm_call
         self._record_llm_unconfigured = record_llm_unconfigured
+        # Root-logger API-key redaction (spec FR-006). The filter existed
+        # since 006 but was never installed; 054 wires it at boot.
+        install_redaction_filter()
 
-        # Default model name — used when the operator default is the
-        # active credential set. Personal-config callers supply their
-        # own model via SessionCreds.model.
-        self.llm_model = self._operator_creds.model or os.getenv(
-            "LLM_MODEL", "meta-llama/Llama-3.2-90B-Vision-Instruct"
-        )
+        # Feature 054 kill switch: governs only the register-time mandatory
+        # dialog push. The credential requirement itself is structural (no
+        # default exists), so gate REFUSALS stay in force with the flag off.
+        self._ff_llm_first_run = os.getenv(
+            "FF_LLM_FIRST_RUN", "true").lower() in ("true", "1", "yes")
 
         # Default reasoning-effort knob threaded through _call_llm. Unset →
         # nothing is sent (zero behavior change on endpoints that predate
@@ -578,35 +577,16 @@ class Orchestrator:
             "DATAMARK_SANITIZE_SPANS", "false"
         ).lower() in ("true", "1", "yes")
 
-        # Pre-built default OpenAI client. Used directly only for the
-        # legacy `_combine_components_llm` call site that does not
-        # accept a websocket; user-initiated calls go through
-        # `_resolve_llm_client_for(websocket)` instead. May be None when
-        # the operator has not provided default credentials, in which
-        # case unconfigured users will see the FR-004a "LLM unavailable"
-        # prompt.
-        if self._operator_creds.is_complete:
-            self.llm_client = OpenAI(
-                api_key=self._operator_creds.api_key,
-                base_url=self._operator_creds.base_url,
-                timeout=Timeout(90.0, connect=10.0),
-                max_retries=0,  # We handle retries in _call_llm — disable SDK-internal retries
-            )
-            logger.info(
-                f"Operator-default LLM configured: {self._operator_creds.base_url} "
-                f"model={self.llm_model}"
-            )
-        else:
-            self.llm_client = None
-            logger.warning(
-                "No operator-default LLM configured — users without personal "
-                "config will see the 'LLM unavailable' prompt"
-            )
-
         # History Manager
         backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
         data_dir = os.path.join(backend_dir, 'data')
         self.history = HistoryManager(data_dir=data_dir)
+
+        # Feature 054: persisted per-user + system LLM configuration store
+        # (user_llm_config / system_llm_config tables; Fernet under
+        # CREDENTIAL_ENCRYPTION_KEY with the shared dev key-file fallback).
+        from llm_config.user_store import UserLLMConfigStore
+        self._llm_store = UserLLMConfigStore(self.history.db, data_dir=data_dir)
 
         # Feature 028 — per-chat persistent workspace (identity, upserts,
         # snapshots/timeline). Owns the saved_components store.
@@ -712,6 +692,9 @@ class Orchestrator:
                 db=self.history.db,
                 knowledge_dir=knowledge_dir,
                 knowledge_index=self.knowledge_index,
+                # Feature 054: cross-user system flow — runs on the admin-
+                # managed system credential, re-resolved per cycle.
+                config_resolver=self._llm_store.get_system_sync,
             )
             self.hooks.register(HookEvent.POST_TOOL_USE, self._interaction_collector.on_tool_use)
             self.hooks.register(HookEvent.POST_TOOL_FAILURE, self._interaction_collector.on_tool_use)
@@ -1206,25 +1189,19 @@ class Orchestrator:
                     _tools_task = asyncio.create_task(asyncio.to_thread(
                         self.compute_tools_available_for_user, user_id))
 
-                    # Feature 006: pick up any LLM credentials the browser
-                    # forwarded with this register_ui (the user's browser
-                    # localStorage is the source of truth for personal config).
-                    try:
-                        from llm_config.ws_handlers import populate_from_register_ui
-                        await populate_from_register_ui(
-                            websocket=websocket,
-                            llm_config=msg.llm_config,
-                            actor_user_id=user_data.get("sub", "legacy"),
-                            auth_principal=(
-                                user_data.get("preferred_username")
-                                or user_data.get("sub")
-                                or "unknown"
-                            ),
-                            creds_store=self._session_llm_creds,
-                            recorder=self.audit_recorder,
-                        )
-                    except Exception as _e:  # pragma: no cover — non-fatal
-                        logger.debug(f"register_ui llm_config seeding failed (non-fatal): {_e}")
+                    # Feature 054: register_ui.llm_config is accepted-and-
+                    # ignored (wire compatibility with pre-054 clients). The
+                    # server-persisted user_llm_config record is authoritative;
+                    # the gate predicate below reads it directly.
+                    if getattr(msg, "llm_config", None):
+                        logger.debug(
+                            "register_ui.llm_config ignored (054: server "
+                            "persistence is authoritative)")
+                    # The mandatory first-run gate needs the predicate before
+                    # the welcome render; resolve it concurrently with the
+                    # other handshake reads.
+                    _llm_gate_task = asyncio.create_task(
+                        self.llm_configured_for(user_data.get("sub", "")))
 
                     # ROTE: register device capabilities and send profile back
                     device_info = msg.device or {}
@@ -1286,12 +1263,43 @@ class Orchestrator:
                         except Exception:
                             _tools_avail = True
 
+                    # Feature 054: mandatory first-run provider-setup gate.
+                    # An unconfigured user's very first post-login surface is
+                    # the setup dialog — pushed HERE, before the welcome
+                    # render, and the welcome is suppressed until setup
+                    # completes (spec FR-013/FR-016). The push itself is
+                    # behind the FF_LLM_FIRST_RUN kill switch; the server-
+                    # side REFUSALS (chat pre-flight, chrome gate) are
+                    # structural and remain with the flag off. The watch is
+                    # excluded by design (chrome-free) — it gets spoken
+                    # guidance on AI use instead (FR-017).
+                    _llm_gated = False
+                    try:
+                        _llm_configured = await _llm_gate_task
+                    except Exception:  # pragma: no cover — fail open to welcome
+                        logger.warning("llm gate predicate failed", exc_info=True)
+                        _llm_configured = True
+                    if not _llm_configured and self._ff_llm_first_run:
+                        try:
+                            _dt = getattr(
+                                rote_profile.device_type, "value",
+                                str(rote_profile.device_type))
+                            if _dt != "watch":
+                                from orchestrator import llm_gate
+                                await llm_gate.push_setup_dialog(
+                                    self, websocket, user_id)
+                                _llm_gated = True
+                        except Exception:  # non-fatal — refusals still gate
+                            logger.warning(
+                                "first-run LLM dialog push failed (refusals "
+                                "still enforce the gate)", exc_info=True)
+
                     # Initial canvas: server-driven welcome examples when this
                     # socket has no chat to resume — ordinary astralprims
                     # components over the normal ui_render path (Constitution
                     # II: ROTE adapts them per device; nothing client-specific).
                     try:
-                        if not self._ws_active_chat.get(id(websocket)):
+                        if not _llm_gated and not self._ws_active_chat.get(id(websocket)):
                             from orchestrator.welcome import welcome_components
                             # Feature 030: tell the welcome canvas whether any
                             # tools are dispatchable so it can lead with the
@@ -1412,24 +1420,40 @@ class Orchestrator:
                     handle_llm_config_clear,
                 )
                 if msg.type == "llm_config_set":
-                    await handle_llm_config_set(
+                    saved = await handle_llm_config_set(
                         safe_send=self._safe_send,
                         websocket=websocket,
                         config=getattr(msg, "config", {}) or {},
                         actor_user_id=actor_user_id,
                         auth_principal=auth_principal,
-                        creds_store=self._session_llm_creds,
+                        store=self._llm_store,
                         recorder=self.audit_recorder,
                     )
+                    if saved:
+                        # Feature 054: a successful save unblocks every one
+                        # of the user's gated sockets (FR-015).
+                        try:
+                            from orchestrator import llm_gate
+                            await llm_gate.unlock_after_save(self, actor_user_id)
+                        except Exception:
+                            logger.warning("llm gate unlock failed", exc_info=True)
                 else:
-                    await handle_llm_config_clear(
+                    removed = await handle_llm_config_clear(
                         safe_send=self._safe_send,
                         websocket=websocket,
                         actor_user_id=actor_user_id,
                         auth_principal=auth_principal,
-                        creds_store=self._session_llm_creds,
+                        store=self._llm_store,
                         recorder=self.audit_recorder,
                     )
+                    if removed:
+                        # Feature 054: clearing re-gates immediately — there
+                        # is no default to revert to (FR-009/FR-013).
+                        try:
+                            from orchestrator import llm_gate
+                            await llm_gate.regate_after_clear(self, actor_user_id)
+                        except Exception:
+                            logger.warning("llm gate re-gate failed", exc_info=True)
 
             elif isinstance(msg, UIEvent):
                 # The _registered_events gate guarantees register_ui has already
@@ -1805,6 +1829,27 @@ class Orchestrator:
                         "type": "chat_created",
                         "payload": {"chat_id": chat_id, "from_message": False}
                     }))
+
+                # Feature 054 (FR-014): LLM-dependent workspace/component
+                # verbs are refused server-side while the acting user has no
+                # LLM configuration, regardless of client behavior. (The
+                # combine/condense execution itself runs on the SYSTEM
+                # credential; this gate is about the unconfigured USER.)
+                elif msg.action in ("combine_components", "condense_components",
+                                    "component_action") \
+                        and user_id \
+                        and not await self.llm_configured_for(user_id):
+                    actor_user_id, auth_principal = self._llm_audit_principals(websocket)
+                    await self._record_llm_unconfigured(
+                        self.audit_recorder,
+                        actor_user_id=actor_user_id,
+                        auth_principal=auth_principal,
+                        feature=f"ui_event:{msg.action}",
+                    )
+                    await self.send_ui_render(websocket, [
+                        Alert(message="Set up your AI provider to use this.",
+                              variant="error").to_dict()
+                    ], target="chat")
 
                 # Saved components actions
                 elif msg.action in ("save_component", "delete_saved_component",
@@ -2445,13 +2490,14 @@ class Orchestrator:
         Returns:
             {"components": [...]} on success, {"error": "..."} on failure.
         """
-        # Feature 006: this is a system-initiated combine (websocket=None
-        # is passed to _call_llm below), so it relies on the operator's
-        # .env defaults — per-user credentials don't apply here (FR-011).
-        # The downstream _call_llm will emit llm_unconfigured if the
-        # operator default is also absent; this fast-path return just
-        # avoids building a long prompt that would never be sent.
-        if not self._operator_creds.is_complete:
+        # Feature 054: combine/condense is a SYSTEM-context helper by
+        # explicit owner decision (websocket=None is passed to _call_llm
+        # below, which resolves the admin-managed system credential —
+        # never the acting user's record). This fast-path return just
+        # avoids building a long prompt that would never be sent; the
+        # downstream _call_llm emits llm_unconfigured when the system
+        # credential is also absent.
+        if await self._llm_store.get_system() is None:
             return {"error": "LLM not configured"}
 
         # Build the component descriptions for the prompt
@@ -2904,6 +2950,25 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         """
         from orchestrator.async_tasks import BackgroundTask, VirtualWebSocket
 
+        # Feature 054 (FR-020): scheduled turns run on the admin-managed
+        # system credential. Fail HONESTLY before executing when it is
+        # absent — the pre-054 path swallowed the unavailability alert
+        # inside the VirtualWebSocket and recorded a "success" run while
+        # nothing actually happened.
+        if await self._llm_store.get_system() is None:
+            try:
+                await self._record_llm_unconfigured(
+                    self.audit_recorder,
+                    actor_user_id=user_id or "system",
+                    auth_principal="system",
+                    feature="scheduled_job",
+                )
+            except Exception:  # pragma: no cover — audit is best-effort
+                logger.debug("scheduled_job llm_unconfigured audit failed",
+                             exc_info=True)
+            raise self._LLMUnavailable(
+                "no system LLM credential configured — scheduled turn not run")
+
         target_chat = chat_id or f"scheduled-{user_id}"
         bg = BackgroundTask(
             task_id=(correlation_id or "sched")[:8],
@@ -3156,14 +3221,15 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             except Exception:  # pragma: no cover - never block a chat turn
                 logger.warning("onboarding submit handling failed (non-fatal)", exc_info=True)
 
-        # Feature 006: pre-flight check — surface the FR-004a "LLM
-        # unavailable" prompt up-front when neither the user's personal
-        # config nor the operator default is usable, instead of letting
-        # the user wait through the loading state for an inevitable failure.
+        # Feature 054: pre-flight gate — refuse the turn up-front when the
+        # caller's context has no LLM configuration, instead of letting the
+        # user wait through the loading state for an inevitable failure.
+        # For a user socket this IS the server-authoritative first-run gate
+        # (FR-014); for system contexts it is the honest-degradation path.
         # The per-call resolver in _call_llm will also catch this, but
         # exiting early avoids the extra UX latency.
         try:
-            self._resolve_llm_client_for(websocket)
+            await self._resolve_llm_client_for(websocket)
         except self._LLMUnavailable:
             actor_user_id, auth_principal = self._llm_audit_principals(websocket)
             await self._record_llm_unconfigured(
@@ -3172,11 +3238,25 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 auth_principal=auth_principal,
                 feature="chat_dispatch",
             )
+            # Device-aware guidance (FR-017): the watch cannot host the
+            # setup dialog, so point it at the phone/web; every other
+            # client gets the setup-dialog copy. Stale native builds that
+            # never rendered the mandatory surface get actionable guidance
+            # too ("on the web").
+            _guide = "Set up your AI provider to start chatting."
+            try:
+                _prof = self.rote.get_profile(websocket)
+                _dt = getattr(getattr(_prof, "device_type", None), "value", None)
+                if _dt == "watch":
+                    _guide = ("Set up your AI provider on your phone or the "
+                              "web first.")
+                elif _dt in ("windows", "android", "ios", "macos"):
+                    _guide = ("Set up your AI provider to start chatting — "
+                              "open Settings, or configure it on the web.")
+            except Exception:
+                pass
             await self.send_ui_render(websocket, [
-                Alert(
-                    message="LLM unavailable — set your own provider in settings.",
-                    variant="error",
-                ).to_dict()
+                Alert(message=_guide, variant="error").to_dict()
             ])
             return
 
@@ -3749,10 +3829,16 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 turn_count += 1
                 logger.info(f"--- Turn {turn_count}/{MAX_TURNS} ---")
 
-                # Message compaction: summarize older turns if context budget exceeded
+                # Message compaction: summarize older turns if context budget
+                # exceeded. Feature 054: compaction is a SYSTEM-context helper
+                # by explicit owner decision — llm_call(None, ...) inside
+                # compact_messages resolves the admin system credential; the
+                # model name here is only used for context-window sizing.
                 if flags.is_enabled("message_compaction"):
+                    _sys_cfg = await self._llm_store.get_system()
                     messages, was_compacted = await compact_messages(
-                        messages, self.llm_model, self._call_llm
+                        messages, getattr(_sys_cfg, "model", None) or "default",
+                        self._call_llm
                     )
                     if was_compacted:
                         logger.info("Context compacted before LLM call")
@@ -4414,7 +4500,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 }))
                 # Show a user-friendly error message
                 if "424" in error_text or "Failed Dependency" in error_text or "Repository Not Found" in error_text:
-                    error_text = f"The LLM server cannot find the configured model '{self.llm_model}'. Please verify the model name in your .env file and that the vLLM server has this model loaded."
+                    error_text = ("The LLM server cannot find the configured model. "
+                                  "Open LLM settings, use “Load models” to pick a model "
+                                  "your provider actually serves, and save again.")
                 elif "502" in error_text or "Bad Gateway" in error_text:
                     error_text = "The AI model returned a 502 Bad Gateway error. It may be overloaded or restarting. Please try again in a moment."
                 elif "504" in error_text or "Gateway Time-out" in error_text:
@@ -4454,29 +4542,84 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
     # Feature 006 — credential resolution helpers
     # ------------------------------------------------------------------
 
-    def _resolve_llm_client_for(self, websocket):
-        """Resolve the (client, source, resolved) tuple for a per-call LLM
-        invocation on behalf of the user behind ``websocket``.
+    def _llm_context_user_id(self, websocket) -> Optional[str]:
+        """Return the user_id owning ``websocket``'s LLM context, or ``None``
+        for a SYSTEM context.
 
-        - If the user has saved personal credentials in their browser and
-          forwarded them on register_ui or via llm_config_set, those are
-          used (CredentialSource.USER).
-        - Otherwise, if the operator has supplied .env defaults, those
-          are used (CredentialSource.OPERATOR_DEFAULT).
-        - Otherwise, raises LLMUnavailable. Callers handle this by
-          emitting an llm_unconfigured audit event and surfacing the
-          'LLM unavailable' UI prompt (FR-004a).
-
-        ``websocket`` may be None for server-initiated background jobs
-        (e.g. the daily feedback quality / proposals job from feature 004).
-        Such jobs always use the operator default — no individual user is
-        the caller. (FR-011)
+        System contexts (feature 054, FR-019): ``websocket is None``
+        (background jobs, compaction, combine/condense, narration) and
+        scheduled-turn ``VirtualWebSocket``s — those run a user's chat turn
+        but bill the admin-managed system credential by explicit owner
+        decision, never the owner's own record.
         """
-        ws_id = id(websocket) if websocket is not None else None
-        session_creds = (
-            self._session_llm_creds.get(ws_id) if ws_id is not None else None
-        )
-        return self._build_llm_client(session_creds, self._operator_creds)
+        if websocket is None:
+            return None
+        from orchestrator.async_tasks import VirtualWebSocket
+        if isinstance(websocket, VirtualWebSocket):
+            return None
+        # A live socket absent from ui_sessions has no user claims yet; the
+        # _registered_events gate guarantees no LLM dispatch happens before
+        # registration, so treating it as SYSTEM here can only surface as an
+        # LLMUnavailable refusal, never a credential borrow.
+        claims = self.ui_sessions.get(websocket) or {}
+        return claims.get("sub")
+
+    async def llm_configured_for(self, user_id: str) -> bool:
+        """The first-run gate predicate: True iff ``user_id`` has a
+        decryptable persisted LLM configuration (spec FR-013/FR-014)."""
+        if not user_id:
+            return False
+        cfg = await self._llm_store.get(user_id)
+        await self._drain_llm_discard_notes()
+        return cfg is not None
+
+    async def _drain_llm_discard_notes(self) -> None:
+        """Audit any undecryptable-record discards queued by the store
+        (FR-010: key rotation/corruption ⇒ audited discard + re-gate)."""
+        while True:
+            note = self._llm_store.pop_discard_note()
+            if note is None:
+                return
+            scope, discard_id = note
+            try:
+                from llm_config.audit_events import record_llm_config_change
+                await record_llm_config_change(
+                    self.audit_recorder,
+                    actor_user_id=discard_id if scope == "user" else "system",
+                    auth_principal="system",
+                    action="discarded_undecryptable",
+                    base_url=None,
+                    model=None,
+                    transport="ws",
+                    scope=scope,
+                )
+            except Exception:  # pragma: no cover — audit is best-effort
+                logger.warning("discarded_undecryptable audit failed", exc_info=True)
+
+    async def _resolve_llm_client_for(self, websocket):
+        """Resolve the (client, source, resolved) tuple for a per-call LLM
+        invocation (feature 054-byo-llm-setup).
+
+        - A live user socket resolves the caller's PERSISTED configuration
+          (``user_llm_config`` by the socket's ``sub`` claim) —
+          CredentialSource.USER. Absent ⇒ LLMUnavailable: the mandatory
+          first-run gate.
+        - ``websocket=None`` and scheduled-turn ``VirtualWebSocket``s
+          resolve the admin-managed SYSTEM record — CredentialSource.SYSTEM.
+          Absent ⇒ LLMUnavailable: background features degrade honestly.
+
+        There is NO fallback in either direction, and no path resolves
+        another user's record (FR-019/FR-007).
+        """
+        user_id = self._llm_context_user_id(websocket)
+        if user_id is None:
+            config = await self._llm_store.get_system()
+            source = self._CredentialSource.SYSTEM
+        else:
+            config = await self._llm_store.get(user_id)
+            source = self._CredentialSource.USER
+        await self._drain_llm_discard_notes()
+        return self._build_llm_client(config, source)
 
     def _llm_audit_principals(self, websocket):
         """Return ``(actor_user_id, auth_principal)`` for audit-event emission
@@ -4563,7 +4706,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         """
         actor_user_id, auth_principal = self._llm_audit_principals(websocket)
         try:
-            client, source, resolved = self._resolve_llm_client_for(websocket)
+            client, source, resolved = await self._resolve_llm_client_for(websocket)
         except self._LLMUnavailable:
             await self._record_llm_unconfigured(
                 self.audit_recorder,
@@ -4573,7 +4716,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             )
             return None, None
         # The resolved.model is the user's chosen model when source=USER,
-        # else the operator default model (== self.llm_model).
+        # else the admin system record's model (source=SYSTEM).
         call_model = resolved.model
         # Assemble the optional enhancement params, minus any this endpoint
         # already told us it doesn't support (probe cache). The in-loop except
@@ -5182,7 +5325,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         feature = "tool_summary"
         actor_user_id, auth_principal = self._llm_audit_principals(websocket)
         try:
-            client, source, resolved = self._resolve_llm_client_for(websocket)
+            client, source, resolved = await self._resolve_llm_client_for(websocket)
         except self._LLMUnavailable:
             await self._record_llm_unconfigured(
                 self.audit_recorder,
@@ -5781,26 +5924,21 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 args["_credentials"] = creds
                 args["_credentials_encrypted"] = True
 
-        # Feature 006: surface the user's personal LLM credentials (if
-        # any) so agent-side tools that fall back to OPENAI_* env vars
-        # pick them up instead. We use a separate kwarg
-        # (``_session_llm_credentials``) to avoid colliding with the
-        # encrypted ``_credentials`` bundle above — agent code that
-        # wants the user's LLM creds reads ``_session_llm_credentials``
-        # in preference to env. mcp_tools.py with its existing
-        # ``creds.get("OPENAI_API_KEY") or os.getenv(...)`` pattern is
-        # NOT modified by this feature; it continues to work against
-        # the operator-default env. Future agent-side wiring may opt
-        # into reading ``_session_llm_credentials`` first.
-        session_llm = (
-            self._session_llm_creds.get(id(websocket))
-            if websocket is not None else None
-        )
-        if session_llm is not None:
+        # Feature 054: surface the resolved LLM credentials for THIS call's
+        # context so agent-side LLM tools can run (they no longer have any
+        # env fallback): the caller's persisted record on a user socket,
+        # the admin system record on system-context turns. The kwarg name
+        # ``_session_llm_credentials`` is kept for agent-side compatibility.
+        _llm_ctx_user = self._llm_context_user_id(websocket)
+        if _llm_ctx_user is None:
+            _llm_cfg = await self._llm_store.get_system()
+        else:
+            _llm_cfg = await self._llm_store.get(_llm_ctx_user)
+        if _llm_cfg is not None:
             args["_session_llm_credentials"] = {
-                "OPENAI_API_KEY": session_llm.api_key,
-                "OPENAI_BASE_URL": session_llm.base_url,
-                "LLM_MODEL": session_llm.model,
+                "OPENAI_API_KEY": _llm_cfg.api_key,
+                "OPENAI_BASE_URL": _llm_cfg.base_url,
+                "LLM_MODEL": _llm_cfg.model,
             }
 
         # 5th gate (015): when no `agent_id` was resolved via `tool_to_agent` —
@@ -8479,9 +8617,10 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 del self.ui_sessions[websocket]
             self._chat_locks.pop(id(websocket), None)
             self._registered_events.pop(id(websocket), None)
-            # Feature 006: clear per-WebSocket LLM credentials (in-memory only;
-            # never persisted server-side per FR-002).
-            self._session_llm_creds.clear(id(websocket))
+            # Feature 054: persisted LLM config SURVIVES disconnect by design;
+            # only the per-socket gate marker is dropped.
+            from orchestrator import llm_gate as _llm_gate
+            _llm_gate.clear_socket(self, websocket)
             self.rote.cleanup(websocket)
             logger.info(f"UI client session cleaned up (total: {len(self.ui_clients)})")
 
@@ -8512,9 +8651,10 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 del self.ui_sessions[websocket]
             self._chat_locks.pop(id(websocket), None)
             self._registered_events.pop(id(websocket), None)
-            # Feature 006: clear per-WebSocket LLM credentials (in-memory only;
-            # never persisted server-side per FR-002).
-            self._session_llm_creds.clear(id(websocket))
+            # Feature 054: persisted LLM config SURVIVES disconnect by design;
+            # only the per-socket gate marker is dropped.
+            from orchestrator import llm_gate as _llm_gate
+            _llm_gate.clear_socket(self, websocket)
             self.rote.cleanup(websocket)
             logger.info(f"UI client session cleaned up (total: {len(self.ui_clients)})")
 
@@ -8952,8 +9092,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         auth or when no authority is configured.
         """
         from shared import jwks_cache
-        authority = (os.getenv("VITE_KEYCLOAK_AUTHORITY") or "").strip()
-        if not authority or os.getenv("VITE_USE_MOCK_AUTH", "").lower() == "true":
+        authority = (os.getenv("KEYCLOAK_AUTHORITY") or "").strip()
+        if not authority or os.getenv("USE_MOCK_AUTH", "").lower() == "true":
             logger.info("jwks warm: skipped (mock auth or no authority configured)")
             return
         jwks_url = f"{authority.rstrip('/')}/protocol/openid-connect/certs"
@@ -9034,7 +9174,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         feature = "chat_title"
         actor_user_id, auth_principal = self._llm_audit_principals(websocket)
         try:
-            client, source, resolved = self._resolve_llm_client_for(websocket)
+            client, source, resolved = await self._resolve_llm_client_for(websocket)
         except self._LLMUnavailable:
             await self._record_llm_unconfigured(
                 self.audit_recorder,
@@ -9107,7 +9247,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
     async def validate_token(self, token: str) -> Optional[Dict]:
         """Validate JWT token against KeyCloak."""
-        if os.getenv("VITE_USE_MOCK_AUTH", "").lower() == "true":
+        if os.getenv("USE_MOCK_AUTH", "").lower() == "true":
             if token == "dev-token":
                 logger.info("Mock Auth: Validated dev-token as test_user")
                 return {
@@ -9137,11 +9277,11 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             }
 
         try:
-            authority = os.getenv("VITE_KEYCLOAK_AUTHORITY")
-            expected_client = os.getenv("VITE_KEYCLOAK_CLIENT_ID")
+            authority = os.getenv("KEYCLOAK_AUTHORITY")
+            expected_client = os.getenv("KEYCLOAK_CLIENT_ID")
             
             if not authority or not expected_client:
-                logger.warning("Auth not configured (VITE_KEYCLOAK_AUTHORITY/CLIENT_ID missing)")
+                logger.warning("Auth not configured (KEYCLOAK_AUTHORITY/CLIENT_ID missing)")
                 return None
 
             # Fetch JWKS (feature 028 D8: cached with kid-miss refetch — the
@@ -9184,7 +9324,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 return None
 
             # Extract Roles
-            client_id = os.getenv("VITE_KEYCLOAK_CLIENT_ID", "astral-frontend")
+            client_id = os.getenv("KEYCLOAK_CLIENT_ID", "astral-frontend")
             roles = payload.get("realm_access", {}).get("roles", [])
             if "resource_access" in payload:
                 if client_id in payload["resource_access"]:
@@ -9223,7 +9363,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             roles = list(set(
                 user_data.get("realm_access", {}).get("roles", []) +
                 user_data.get("resource_access", {}).get(
-                    os.getenv("VITE_KEYCLOAK_CLIENT_ID", "astral-frontend"), {}
+                    os.getenv("KEYCLOAK_CLIENT_ID", "astral-frontend"), {}
                 ).get("roles", [])
             ))
             self.history.db.upsert_user(

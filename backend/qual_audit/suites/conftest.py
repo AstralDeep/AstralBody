@@ -12,7 +12,7 @@ if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
 
 # Force mock auth for all tests
-os.environ["VITE_USE_MOCK_AUTH"] = "true"
+os.environ["USE_MOCK_AUTH"] = "true"
 
 
 @pytest.fixture

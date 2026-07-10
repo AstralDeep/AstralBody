@@ -64,11 +64,32 @@ def make_fake_openai(contents):
 
 @pytest.fixture
 def fake_openai(monkeypatch):
-    """Install a fake OpenAI class on the tools module; returns the class."""
+    """Install a fake OpenAI class on the tools module; returns the class.
+
+    Feature 054: the OPENAI_* env fallback is gone — LLM credentials reach a
+    tool ONLY via the orchestrator-forwarded ``_session_llm_credentials``
+    kwarg (or the agent's decrypted ``_credentials`` bundle). Mimic the
+    orchestrator here: when a test passes neither kwarg, resolution sees the
+    turn's session credentials, exactly as a configured user's call would.
+    Tests that pass their own credential kwargs are left untouched.
+    """
     def _install(*contents):
         fake_cls = make_fake_openai(list(contents))
         monkeypatch.setattr(mcp_tools, "OpenAI", fake_cls)
-        monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+        real_resolve = mcp_tools._resolve_llm_client
+
+        def _with_session_creds(kwargs):
+            has_session = bool((kwargs.get("_session_llm_credentials") or {}).get("OPENAI_API_KEY"))
+            bundle = kwargs.get("_credentials") or {}
+            has_bundle_key = bool(bundle.get("OPENAI_API_KEY"))
+            # An encrypted bundle key is opaque here (the real resolver
+            # ignores it); do NOT paper over that case with session creds.
+            if not has_session and not has_bundle_key and not kwargs.get("_credentials_encrypted"):
+                kwargs = dict(kwargs)
+                kwargs["_session_llm_credentials"] = {"OPENAI_API_KEY": "test-key"}
+            return real_resolve(kwargs)
+
+        monkeypatch.setattr(mcp_tools, "_resolve_llm_client", _with_session_creds)
         return fake_cls
     return _install
 

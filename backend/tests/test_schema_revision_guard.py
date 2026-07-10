@@ -20,9 +20,9 @@ except Exception:  # pragma: no cover - import guard
     Database = None  # type: ignore
     SCHEMA_REVISION = None  # type: ignore
 
-EXPECTED_SCHEMA_REVISION = "052.001"
+EXPECTED_SCHEMA_REVISION = "054.001"
 EXPECTED_SOURCE_SHA256 = (
-    "710cb7c25effe0640ab86ad7f260e67f45ecacece5690711730c3262dcb5643a"
+    "ee117328d774dc6396a55c623d386370588ebff6af3b3511418fd4e704724d72"
 )
 
 _BUMP_INSTRUCTIONS = (

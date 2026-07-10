@@ -77,7 +77,7 @@ def test_logout_refuses_the_confidential_web_client(monkeypatch):
     """Security: the native endpoint must NOT accept the web client id — that
     would apply the server's confidential secret to a caller-supplied token
     (a revocation oracle). The web app uses the cookie-bound /auth/logout."""
-    monkeypatch.setenv("VITE_KEYCLOAK_CLIENT_ID", "astral-frontend")
+    monkeypatch.setenv("KEYCLOAK_CLIENT_ID", "astral-frontend")
 
     called = {"revoke": False}
 
@@ -96,8 +96,8 @@ def test_logout_refuses_the_confidential_web_client(monkeypatch):
 def test_revocation_post_omits_secret_for_native_public_clients(monkeypatch):
     """Keycloak public clients (astral-desktop/mobile) must not receive the web
     client's secret; the web client keeps sending it."""
-    monkeypatch.setenv("VITE_KEYCLOAK_AUTHORITY", "https://kc.example/realms/Astral")
-    monkeypatch.setenv("VITE_KEYCLOAK_CLIENT_ID", "astral-frontend")
+    monkeypatch.setenv("KEYCLOAK_AUTHORITY", "https://kc.example/realms/Astral")
+    monkeypatch.setenv("KEYCLOAK_CLIENT_ID", "astral-frontend")
     monkeypatch.setenv("KEYCLOAK_CLIENT_SECRET", "s3cr3t")
 
     posts = []

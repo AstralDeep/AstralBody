@@ -64,6 +64,7 @@ wheels/
 *.egg
 .pytest_cache/
 .coverage
+coverage.xml
 htmlcov/
 .venv
 venv/

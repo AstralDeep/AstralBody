@@ -51,7 +51,7 @@ def assert_production_posture() -> None:
 
     Development mode (``ASTRAL_ENV=development``) skips everything except the
     advisory warnings — local dev stays friction-free (spec A13)."""
-    mock_on = os.getenv("VITE_USE_MOCK_AUTH", "").strip().lower() in ("1", "true", "yes")
+    mock_on = os.getenv("USE_MOCK_AUTH", "").strip().lower() in ("1", "true", "yes")
     if is_dev_mode():
         return
     problems = []
@@ -82,8 +82,8 @@ def assert_production_posture() -> None:
         )
     if not mock_on:
         for var, aliases in (
-            ("KEYCLOAK_AUTHORITY", ("VITE_KEYCLOAK_AUTHORITY",)),
-            ("KEYCLOAK_CLIENT_ID", ("VITE_KEYCLOAK_CLIENT_ID",)),
+            ("KEYCLOAK_AUTHORITY", ("KEYCLOAK_AUTHORITY",)),
+            ("KEYCLOAK_CLIENT_ID", ("KEYCLOAK_CLIENT_ID",)),
             ("KEYCLOAK_CLIENT_SECRET", ()),
         ):
             if not any(os.getenv(name, "").strip() for name in (var, *aliases)):

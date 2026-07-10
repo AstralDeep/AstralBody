@@ -1,7 +1,9 @@
-"""T017 — log scrubber unit tests.
+"""T017 (006) + 054 — log scrubber unit tests.
 
 Verifies the redactor catches API keys in dicts, lists, JSON strings,
-free text, and logging records.
+free text, and logging records. Feature 054 deltas: AIza (Google/Gemini)
+tokens are redacted, and sk-ant-... (Anthropic) keys are caught by the
+sk- pattern — both providers are now in the setup-dialog catalog.
 """
 from __future__ import annotations
 
@@ -55,6 +57,19 @@ class TestRedactLLMConfig:
         assert "gsk_groq567890abcdef1234567" not in out
         assert "xai-x567890abcdef1234567" not in out
         assert "or-router567890abcdef1234567" not in out
+
+    def test_redacts_google_aiza_tokens(self):
+        # Feature 054: the Gemini catalog preset means AIza... keys pass
+        # through the dialog/test flows — the scrubber must catch them.
+        out = redact_llm_config("google key: AIzaSyA1234567890abcdefghijk-xyz")
+        assert "AIzaSyA1234567890abcdefghijk-xyz" not in out
+        assert "<redacted>" in out
+
+    def test_redacts_anthropic_sk_ant_keys(self):
+        # sk-ant-... keys match the generic sk- pattern.
+        out = redact_llm_config("anthropic: sk-ant-api03-abcdef1234567890abcdef")
+        assert "sk-ant-api03-abcdef1234567890abcdef" not in out
+        assert "<redacted>" in out
 
     def test_passes_through_short_strings(self):
         # "sk-test" is too short to match the {20,} guard — this avoids

@@ -1,112 +1,239 @@
-"""T034 — orchestrator._call_llm credential resolution test.
+"""Feature 054 — orchestrator credential-resolution tests.
 
-Bypasses the full Orchestrator construction (which would pull in DB,
-agents, etc.) and tests the credential-resolution helpers directly
-against a stub-mode minimal orchestrator. Covers:
+Like the pre-054 version of this file, this bypasses full Orchestrator
+construction (DB, agents, sockets) and exercises the REAL resolution
+methods — ``Orchestrator._llm_context_user_id``,
+``Orchestrator._resolve_llm_client_for`` and
+``Orchestrator._drain_llm_discard_notes`` — bound onto a minimal stub via
+``types.MethodType``, backed by a real ``UserLLMConfigStore`` over the
+fake DB. Covers:
 
-* User session creds present → factory returns USER client.
-* User session creds absent + operator default complete → OPERATOR_DEFAULT.
-* Both absent → LLMUnavailable raised by factory; caller emits
-  llm_unconfigured audit.
-* websocket=None (background-job path) → OPERATOR_DEFAULT, never USER,
-  even if some other socket has session creds.
+* user socket → the caller's OWN persisted record (source USER).
+* ``websocket=None`` (background) → the SYSTEM record.
+* scheduled-turn ``VirtualWebSocket`` → the SYSTEM record.
+* no cross-fallback in either direction (gate / honest skip).
+* credential_source audit values "user" / "system".
+* the undecryptable-row drain emits the discarded_undecryptable audit.
 """
 from __future__ import annotations
 
+import types
 
 import pytest
 
-from llm_config.client_factory import build_llm_client
-from llm_config.operator_creds import OperatorDefaultCreds
-from llm_config.session_creds import SessionCredentialStore
-from llm_config.types import CredentialSource, LLMUnavailable
+from orchestrator.async_tasks import BackgroundTask, VirtualWebSocket
+from orchestrator.orchestrator import Orchestrator
+
+from llm_config import CredentialSource, LLMUnavailable, build_llm_client
+from llm_config.audit_events import record_llm_call
+
+ALICE = "alice-sub"
+ALICE_KEY = "sk-alice-1234567890abcdefgh"
+SYSTEM_KEY = "sk-system-1234567890abcdefg"
 
 
-def _full_default():
-    return OperatorDefaultCreds(
-        api_key="sk-operator1234567890abcdef",
-        base_url="https://operator.example/v1",
-        model="op-model",
-    )
+class _FakeWS:
+    """Stands in for a live user WebSocket (hashable, identity-keyed)."""
 
 
-def _no_default():
-    return OperatorDefaultCreds(api_key=None, base_url=None, model=None)
+def _make_stub(store, recorder):
+    """Minimal orchestrator stub carrying exactly the state the real
+    resolution methods touch, with the REAL unbound methods attached."""
+    stub = types.SimpleNamespace()
+    stub.ui_sessions = {}
+    stub._llm_store = store
+    stub._build_llm_client = build_llm_client
+    stub._CredentialSource = CredentialSource
+    stub.audit_recorder = recorder
+    stub._llm_context_user_id = types.MethodType(
+        Orchestrator._llm_context_user_id, stub)
+    stub._resolve_llm_client_for = types.MethodType(
+        Orchestrator._resolve_llm_client_for, stub)
+    stub._drain_llm_discard_notes = types.MethodType(
+        Orchestrator._drain_llm_discard_notes, stub)
+    return stub
 
 
-class TestResolveLLMClientFor:
-    """End-to-end behaviour the orchestrator's _resolve_llm_client_for
-    delegates to."""
+def _register(stub, ws, sub):
+    stub.ui_sessions[ws] = {"sub": sub, "preferred_username": sub}
 
-    def test_user_creds_present_returns_user_source(self):
-        store = SessionCredentialStore()
-        ws = object()
-        store.set(id(ws), "sk-user1234567890abcdefgh", "https://user/v1", "user-model")
-        client, source, resolved = build_llm_client(store.get(id(ws)), _full_default())
-        assert source == CredentialSource.USER
-        assert resolved.base_url == "https://user/v1"
-        assert resolved.model == "user-model"
 
-    def test_user_absent_default_present_returns_operator_default(self):
-        store = SessionCredentialStore()
-        client, source, resolved = build_llm_client(store.get(0), _full_default())
-        assert source == CredentialSource.OPERATOR_DEFAULT
-        assert resolved.model == "op-model"
+def _virtual_ws():
+    return VirtualWebSocket(
+        BackgroundTask(task_id="t1", chat_id="c1", user_id=ALICE))
 
-    def test_both_absent_raises_llmunavailable(self):
+
+def _seed_alice(store):
+    store.set_sync(ALICE, provider="custom",
+                   base_url="https://alice.example/v1",
+                   model="alice-model", api_key=ALICE_KEY)
+
+
+def _seed_system(store):
+    store.set_system_sync(provider="openai",
+                          base_url="https://api.openai.com/v1",
+                          model="gpt-4o", api_key=SYSTEM_KEY,
+                          updated_by="admin")
+
+
+# ============================================================================
+# _llm_context_user_id — which context owns the call
+# ============================================================================
+
+
+class TestLLMContextUserId:
+    def test_none_websocket_is_system_context(self, store, fake_recorder):
+        stub = _make_stub(store, fake_recorder)
+        assert stub._llm_context_user_id(None) is None
+
+    def test_virtual_websocket_is_system_context(self, store, fake_recorder):
+        stub = _make_stub(store, fake_recorder)
+        assert stub._llm_context_user_id(_virtual_ws()) is None
+
+    def test_user_socket_maps_to_its_sub_claim(self, store, fake_recorder):
+        stub = _make_stub(store, fake_recorder)
+        ws = _FakeWS()
+        _register(stub, ws, ALICE)
+        assert stub._llm_context_user_id(ws) == ALICE
+
+
+# ============================================================================
+# _resolve_llm_client_for — the four contexts
+# ============================================================================
+
+
+class TestUserSocketResolution:
+    async def test_user_socket_resolves_own_record(self, store, fake_recorder):
+        stub = _make_stub(store, fake_recorder)
+        _seed_alice(store)
+        _seed_system(store)  # present but must NOT be used
+        ws = _FakeWS()
+        _register(stub, ws, ALICE)
+        client, source, resolved = await stub._resolve_llm_client_for(ws)
+        assert source is CredentialSource.USER
+        assert source.value == "user"
+        assert client.api_key == ALICE_KEY
+        assert resolved.base_url == "https://alice.example/v1"
+        assert resolved.model == "alice-model"
+
+    async def test_unconfigured_user_is_gated_no_system_fallback(
+            self, store, fake_recorder):
+        """FR-019: user calls NEVER fall back to the system credential."""
+        stub = _make_stub(store, fake_recorder)
+        _seed_system(store)  # the system record exists...
+        ws = _FakeWS()
+        _register(stub, ws, "bob-sub")  # ...but bob has no personal record
+        with pytest.raises(LLMUnavailable, match="provider setup"):
+            await stub._resolve_llm_client_for(ws)
+
+    async def test_user_never_resolves_another_users_record(
+            self, store, fake_recorder):
+        stub = _make_stub(store, fake_recorder)
+        _seed_alice(store)
+        ws_bob = _FakeWS()
+        _register(stub, ws_bob, "bob-sub")
         with pytest.raises(LLMUnavailable):
-            build_llm_client(None, _no_default())
-
-    def test_websocket_none_uses_operator_default_even_when_other_user_has_creds(self):
-        """Background-job invariant (FR-011 + Edge case test for SC-006).
-
-        If user A has session creds set, and a background job calls
-        with websocket=None, the factory must NOT borrow user A's
-        creds — it must use the operator default. The mechanism that
-        enforces this: ``_resolve_llm_client_for(None)`` looks up
-        ``id(None)``, which is never in the credential store (sets
-        always use ``id(real_websocket)``).
-        """
-        store = SessionCredentialStore()
-        user_a_ws = object()
-        store.set(id(user_a_ws), "sk-userA1234567890abcdefg", "https://userA/v1", "a-model")
-
-        # Simulate the orchestrator's resolver with websocket=None
-        ws_id = id(None)  # id(None) is a constant that won't collide with real sockets
-        session_creds = store.get(ws_id)
-        assert session_creds is None  # never matches a real socket
-
-        client, source, resolved = build_llm_client(session_creds, _full_default())
-        assert source == CredentialSource.OPERATOR_DEFAULT
-        # Crucially: user A's base_url is NOT what was resolved
-        assert resolved.base_url != "https://userA/v1"
-        assert resolved.base_url == "https://operator.example/v1"
+            await stub._resolve_llm_client_for(ws_bob)
 
 
-class TestNoRuntimeFallback:
-    """FR-009: when source=USER and the call fails, the system MUST NOT
-    silently retry against the operator default. The factory's contract
-    enforces this by binding (client, source) at the START of a call;
-    nothing in the factory re-resolves on error."""
+class TestSystemContextResolution:
+    async def test_websocket_none_resolves_system_record(
+            self, store, fake_recorder):
+        stub = _make_stub(store, fake_recorder)
+        _seed_alice(store)  # a configured user must NOT be borrowed
+        _seed_system(store)
+        client, source, resolved = await stub._resolve_llm_client_for(None)
+        assert source is CredentialSource.SYSTEM
+        assert source.value == "system"
+        assert client.api_key == SYSTEM_KEY
+        assert resolved.base_url == "https://api.openai.com/v1"
+        assert resolved.base_url != "https://alice.example/v1"
 
-    def test_factory_returns_user_source_consistent_for_one_call(self):
-        store = SessionCredentialStore()
-        ws = object()
-        store.set(id(ws), "sk-user", "https://user/v1", "user-model")
-        # Resolve once. The returned tuple is now bound — even if the
-        # caller mutates the store, this resolution does not change.
-        client, source, resolved = build_llm_client(store.get(id(ws)), _full_default())
-        assert source == CredentialSource.USER
+    async def test_virtual_websocket_resolves_system_record(
+            self, store, fake_recorder):
+        """Scheduled turns run a user's chat but bill the system
+        credential by explicit owner decision (FR-019)."""
+        stub = _make_stub(store, fake_recorder)
+        _seed_alice(store)
+        _seed_system(store)
+        client, source, resolved = await stub._resolve_llm_client_for(
+            _virtual_ws())
+        assert source is CredentialSource.SYSTEM
+        assert client.api_key == SYSTEM_KEY
 
-        # Caller clears store mid-flight (simulating a real
-        # llm_config_clear coming in over WS during an in-flight call):
-        store.clear(id(ws))
+    async def test_no_system_record_degrades_honestly_no_user_fallback(
+            self, store, fake_recorder):
+        stub = _make_stub(store, fake_recorder)
+        _seed_alice(store)  # users configured, system absent
+        with pytest.raises(LLMUnavailable, match="system credential"):
+            await stub._resolve_llm_client_for(None)
+        with pytest.raises(LLMUnavailable):
+            await stub._resolve_llm_client_for(_virtual_ws())
 
-        # The (client, source, resolved) tuple from the resolution is
-        # unchanged — already bound. The next factory call would
-        # fall back to operator default, but THIS call's source/client
-        # remain USER. The orchestrator's _call_llm uses the bound
-        # tuple for the entire call (and its retry loop), guaranteeing
-        # FR-009.
-        assert source == CredentialSource.USER
-        assert resolved.base_url == "https://user/v1"
+
+# ============================================================================
+# credential_source audit values
+# ============================================================================
+
+
+class TestCredentialSourceAudit:
+    async def test_user_and_system_resolutions_audit_as_user_and_system(
+            self, store, fake_recorder):
+        stub = _make_stub(store, fake_recorder)
+        _seed_alice(store)
+        _seed_system(store)
+        ws = _FakeWS()
+        _register(stub, ws, ALICE)
+
+        for websocket, expected in ((ws, "user"), (None, "system")):
+            _, source, resolved = await stub._resolve_llm_client_for(websocket)
+            await record_llm_call(
+                fake_recorder,
+                actor_user_id=ALICE if expected == "user" else "system",
+                auth_principal=ALICE if expected == "user" else "system",
+                feature="tool_dispatch",
+                credential_source=source,
+                resolved=resolved,
+                total_tokens=1,
+                outcome="success",
+            )
+        sources = [
+            c.args[0].inputs_meta["credential_source"]
+            for c in fake_recorder.record.await_args_list
+        ]
+        assert sources == ["user", "system"]
+
+
+# ============================================================================
+# Undecryptable-record drain (FR-010)
+# ============================================================================
+
+
+class TestUndecryptableDrain:
+    async def test_resolution_discards_audits_and_regates(
+            self, store, fake_db, fake_recorder):
+        from cryptography.fernet import Fernet
+        stub = _make_stub(store, fake_recorder)
+        wrong = Fernet(Fernet.generate_key())
+        fake_db.users[ALICE] = {
+            "provider": "openai",
+            "base_url": "https://api.openai.com/v1",
+            "model": "gpt-4o-mini",
+            "api_key_enc": wrong.encrypt(b"sk-rotated-away").decode(),
+            "updated_at": 1.0,
+        }
+        ws = _FakeWS()
+        _register(stub, ws, ALICE)
+
+        with pytest.raises(LLMUnavailable):
+            await stub._resolve_llm_client_for(ws)
+
+        # The unusable row was deleted (re-gate, FR-010)...
+        assert ALICE not in fake_db.users
+        # ...and the drain emitted the discarded_undecryptable audit.
+        events = [c.args[0] for c in fake_recorder.record.await_args_list]
+        assert len(events) == 1
+        assert events[0].event_class == "llm_config_change"
+        assert events[0].inputs_meta["action"] == "discarded_undecryptable"
+        assert events[0].inputs_meta["scope"] == "user"
+        assert events[0].actor_user_id == ALICE

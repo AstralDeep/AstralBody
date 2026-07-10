@@ -227,8 +227,9 @@ def test_brief_zero_fetched_pages_is_error_without_llm_call(
     """Search succeeds but every page 404s -> error Alert, LLM never touched."""
     rmock.add("GET", DDG_HTML_URL, status=200, body=DDG_HTML.encode("utf-8"))
     monkeypatch.setattr(mcp_tools, "OpenAI", ExplodingOpenAI)
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    result = research_brief(topic="pythons")
+    result = research_brief(
+        topic="pythons",
+        _session_llm_credentials={"OPENAI_API_KEY": "test-key"})
     alert = result["_ui_components"][0]
     assert alert["variant"] == "error"
     assert "never cites" in alert["message"]

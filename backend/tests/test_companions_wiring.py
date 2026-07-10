@@ -80,9 +80,6 @@ def test_mint_action_token_round_trip(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_model_router_ondevice_surfaced(monkeypatch):
-    os.environ["OPENAI_API_KEY"] = "test-key"
-    os.environ["OPENAI_BASE_URL"] = "http://fake.api"
-    os.environ["LLM_MODEL"] = "test-model"
     monkeypatch.setenv("FF_MODEL_ROUTER", "true")
     from orchestrator.orchestrator import Orchestrator
     from orchestrator import model_router
@@ -90,6 +87,15 @@ async def test_model_router_ondevice_surfaced(monkeypatch):
     o = Orchestrator()
     o._record_llm_call = AsyncMock()
     o._record_llm_unconfigured = AsyncMock()
+    # Feature 054: _call_llm resolves the socket user's PERSISTED config
+    # (env vars are inert). Seed via the ASYNC set() — it offloads the DB
+    # write to a thread (loop-guard safe under LOOP_GUARD_ENFORCE) and primes
+    # the store's in-process cache, so the resolution below hits the cache
+    # and never touches the to_thread patched to boom further down. Runs
+    # BEFORE that patch is installed.
+    await o._llm_store.set("companions-user", provider="custom",
+                           base_url="http://test.invalid/v1",
+                           model="test-model", api_key="test-key")
 
     def fake_route(feature, *, default_model, device_type=None, device_caps=None):
         return model_router.RouteDecision(model=default_model, tier=1, ondevice=True)
@@ -102,6 +108,8 @@ async def test_model_router_ondevice_surfaced(monkeypatch):
     monkeypatch.setattr("orchestrator.orchestrator.asyncio.to_thread", boom)
 
     ws = MagicMock()
+    o.ui_sessions[ws] = {"sub": "companions-user",
+                         "preferred_username": "companions-user"}
     try:
         await o._call_llm(ws, [{"role": "user", "content": "hi"}])
     except Exception:

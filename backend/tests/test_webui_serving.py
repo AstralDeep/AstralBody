@@ -22,7 +22,7 @@ SHELL = os.path.join(WEBRENDER, "templates", "shell.html")
 
 @pytest.fixture
 def client(monkeypatch):
-    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "true")  # so the shell gets 'dev-token'
+    monkeypatch.setenv("USE_MOCK_AUTH", "true")  # so the shell gets 'dev-token'
     from orchestrator.orchestrator import _apply_asset_versions
     from orchestrator.web_auth import session_token
 

@@ -91,7 +91,13 @@ def _bare_orch(completions):
     resolved = types.SimpleNamespace(model="m1", base_url="https://ep/v1")
     client = types.SimpleNamespace(chat=types.SimpleNamespace(completions=completions))
     orch._llm_audit_principals = lambda ws: ("u", "p")
-    orch._resolve_llm_client_for = lambda ws: (client, CredentialSource.OPERATOR_DEFAULT, resolved)
+
+    async def _resolve(ws):
+        # Feature 054: _resolve_llm_client_for is async; SYSTEM is the
+        # system-context source (OPERATOR_DEFAULT is retired).
+        return (client, CredentialSource.SYSTEM, resolved)
+
+    orch._resolve_llm_client_for = _resolve
 
     async def _noop(*a, **k):
         return None

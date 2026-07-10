@@ -892,7 +892,18 @@
       modalReturnFocus = null;
     }
   }
-  function closeModal() { if (modalRoot && modalRoot.innerHTML) { setModal(""); action("chrome_close", {}); } }
+  /** Feature 054: a modal whose card carries data-mandatory (the first-run
+   *  provider-setup gate) refuses every dismissal affordance — ✕/backdrop/
+   *  Escape all funnel here. The server closes it after a successful save;
+   *  the dialog's "Sign out" link is the one escape hatch. */
+  function modalIsMandatory() {
+    return !!(modalRoot && modalRoot.querySelector && modalRoot.querySelector(".astral-modal-card[data-mandatory]"));
+  }
+  function closeModal() {
+    if (!modalRoot || !modalRoot.innerHTML) return;
+    if (modalIsMandatory()) return;
+    setModal(""); action("chrome_close", {});
+  }
 
   // ---- settings menu (static, server-rendered; WAI-ARIA menu pattern) ----
   function menuEl() { return document.getElementById("astral-settings-menu"); }

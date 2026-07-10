@@ -153,7 +153,9 @@ def test_guide_components_lead_with_section_content_not_toc():
 
 def test_llm_components_form_multi_action():
     from webrender.chrome.surfaces import llm
-    orch = types.SimpleNamespace(_session_llm_creds=None, ui_sessions={})
+    # Feature 054: the surface reads the persisted store (orch._llm_store);
+    # None renders the not-configured state.
+    orch = types.SimpleNamespace(_llm_store=None, ui_sessions={})
     comps = run(llm.components(orch, "u1", ["user"], {}))
     assert set(_types(comps)) <= ALLOWED
     forms = [c for c in _flat(comps) if c.get("type") == "param_picker"]

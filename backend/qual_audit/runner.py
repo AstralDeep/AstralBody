@@ -51,7 +51,7 @@ def _capture_system_state() -> Dict:
     state["python_version"] = sys.version
 
     # Environment
-    state["mock_auth"] = os.environ.get("VITE_USE_MOCK_AUTH", "false")
+    state["mock_auth"] = os.environ.get("USE_MOCK_AUTH", "false")
 
     return state
 
@@ -109,7 +109,7 @@ def run_backend_tests(
             args.extend(["-k", keyword_expr])
 
     # Run pytest
-    env = {**os.environ, "VITE_USE_MOCK_AUTH": "true"}
+    env = {**os.environ, "USE_MOCK_AUTH": "true"}
     try:
         subprocess.run(args, env=env, timeout=1800)  # 30 min timeout
     except subprocess.TimeoutExpired:
@@ -190,7 +190,7 @@ def run_frontend_tests(
     npx = "npx.cmd" if sys.platform == "win32" else "npx"
     args = [npx, "vitest", "run", "--reporter=json", f"--outputFile={json_file}"]
 
-    env = {**os.environ, "VITE_USE_MOCK_AUTH": "true"}
+    env = {**os.environ, "USE_MOCK_AUTH": "true"}
     try:
         subprocess.run(args, cwd=frontend_dir, env=env, timeout=300)
     except (subprocess.TimeoutExpired, FileNotFoundError):

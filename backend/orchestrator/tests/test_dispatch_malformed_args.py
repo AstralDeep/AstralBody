@@ -63,7 +63,11 @@ def _build_orch() -> Orchestrator:
     orch.history.get_file_mappings = MagicMock(return_value={})
 
     orch._map_file_paths = MagicMock(side_effect=lambda cid, args, user_id=None: args)
-    orch._session_llm_creds = {}
+    # Feature 054: dispatch resolves the call context's persisted LLM
+    # config via orch._llm_store (async get/get_system); none here.
+    orch._llm_store = MagicMock()
+    orch._llm_store.get = AsyncMock(return_value=None)
+    orch._llm_store.get_system = AsyncMock(return_value=None)
 
     # Capture rendered UI components.
     orch._rendered_ui = []

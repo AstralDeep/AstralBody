@@ -26,9 +26,9 @@ class A2ASecurityValidator:
     """
 
     def __init__(self):
-        self.mock_auth = os.getenv("VITE_USE_MOCK_AUTH", "false").lower() == "true"
-        self.authority = os.getenv("VITE_KEYCLOAK_AUTHORITY", "")
-        self.client_id = os.getenv("VITE_KEYCLOAK_CLIENT_ID", "")
+        self.mock_auth = os.getenv("USE_MOCK_AUTH", "false").lower() == "true"
+        self.authority = os.getenv("KEYCLOAK_AUTHORITY", "")
+        self.client_id = os.getenv("KEYCLOAK_CLIENT_ID", "")
         self._jwks_cache: Optional[dict] = None
 
     async def validate_token(self, token: str) -> Optional[Dict[str, Any]]:

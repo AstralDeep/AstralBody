@@ -65,6 +65,15 @@ public struct InboundFrame: Sendable, Equatable {
         payload["reason"]?.stringValue ?? "expired"
     }
 
+    /// chrome_surface — presentation mode (054 first-run gate). "mandatory"
+    /// means: accept the surface even though unsolicited and suppress every
+    /// dismissal affordance until the server replaces or closes it. Additive
+    /// field on an EXISTING frame type (no manifest change); absent on
+    /// pre-054 servers ⇒ "replace".
+    public var surfaceMode: String {
+        payload["mode"]?.stringValue ?? "replace"
+    }
+
     /// chat_status / chat_step progress text. The wire `status` is a MACHINE
     /// code ("thinking"/"executing"/"done"/…) and `message` carries the human
     /// text; `step` is an object on chat_step. Terminal codes resolve to nil

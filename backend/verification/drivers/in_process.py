@@ -108,13 +108,6 @@ class InProcessDriver:
 
     # ------------------------------------------------------------------ setup
     async def setup(self) -> None:
-        # Operator-default LLM creds must be *complete* so the availability
-        # pre-flight in handle_chat_message passes; the actual calls go through
-        # our injected scripted _call_llm, so the values are never used to reach
-        # a real model.
-        os.environ.setdefault("OPENAI_API_KEY", "verif-scripted-key")
-        os.environ.setdefault("OPENAI_BASE_URL", "http://verif.invalid/v1")
-        os.environ.setdefault("LLM_MODEL", "verif-scripted-model")
         # Determinism: the adaptive UI designer must not rewrite tool output.
         os.environ["FF_UI_DESIGNER"] = "false"
 
@@ -122,6 +115,28 @@ class InProcessDriver:
 
         self.orch = Orchestrator()
         self._register_general_agent()
+
+    def _seed_llm_config(self, user_id: str) -> None:
+        """Feature 054: the operator-default env path is gone — seed the
+        harness principal's ``user_llm_config`` row so the first-run gate /
+        availability pre-flight passes (in-process ephemeral DB only;
+        external mode must NEVER write the singleton system row). Actual
+        calls go through the injected scripted ``_call_llm``, so these
+        values never reach a real model; teardown removes the row with the
+        other namespaced principal rows."""
+        store = getattr(self.orch, "_llm_store", None)
+        if store is None:  # pragma: no cover — orchestrator predates 054
+            return
+        try:
+            store.set_sync(
+                user_id,
+                provider="custom",
+                base_url="http://verif.invalid/v1",
+                model="verif-scripted-model",
+                api_key="verif-scripted-key",
+            )
+        except Exception:
+            logger.warning("verification: llm config seeding failed", exc_info=True)
 
         # Keep delegated dispatch offline + deterministic: no real token
         # exchange in-process (dev posture treats a missing token as fail-open,
@@ -217,6 +232,7 @@ class InProcessDriver:
         ws = CaptureSocket(label=principal.user_id)
         self.orch.ui_sessions[ws] = principal.claims()
         self.orch.ui_clients.append(ws)
+        self._seed_llm_config(principal.user_id)  # 054: pass the first-run gate
         if chat_id is not None:
             self.orch._ws_active_chat[id(ws)] = chat_id
         return ws

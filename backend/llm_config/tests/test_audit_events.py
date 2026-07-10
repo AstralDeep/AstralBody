@@ -1,8 +1,11 @@
-"""T016 — audit-event helper unit tests.
+"""T016 (006) + 054 — audit-event helper unit tests.
 
 Verifies that the helpers reject any payload that contains an API key,
 either as a literal ``api_key`` field or as a key-shaped substring in a
 free-form value, and that they emit the right shape via the recorder.
+Feature 054 deltas: the ``scope`` field ("user"|"system"), the
+``discarded_undecryptable`` action, the AIza (Gemini) key pattern, and
+the SYSTEM credential-source label on ``llm_call``.
 """
 from __future__ import annotations
 
@@ -43,6 +46,19 @@ class TestAssertNoApiKey:
         # over-zealous matches on benign words like "sk-test".
         _assert_no_api_key({"note": "sk-test"})
 
+    def test_raises_on_google_aiza_key(self):
+        # Feature 054: the Gemini preset means AIza... keys flow through
+        # the dialog — the guard's pattern set includes them.
+        with pytest.raises(ValueError, match="API key"):
+            _assert_no_api_key(
+                {"description": "key AIzaSyA1234567890abcdefghijk-xyz here"})
+
+    def test_raises_on_anthropic_sk_ant_key(self):
+        # sk-ant-... keys match the sk- pattern.
+        with pytest.raises(ValueError, match="API key"):
+            _assert_no_api_key(
+                {"description": "sk-ant-api03-abcdef1234567890abcdef"})
+
 
 @pytest.fixture
 def fake_recorder():
@@ -74,6 +90,7 @@ class TestRecordLLMConfigChange:
         assert ev.inputs_meta == {
             "action": "created",
             "transport": "ws",
+            "scope": "user",  # feature 054: scope defaults to "user"
             "base_url": "https://x.example/v1",
             "model": "model-a",
         }
@@ -138,6 +155,57 @@ class TestRecordLLMConfigChange:
                 result=None,
             )
 
+    @pytest.mark.asyncio
+    async def test_explicit_system_scope_is_recorded(self, fake_recorder):
+        await record_llm_config_change(
+            fake_recorder,
+            actor_user_id="admin-1",
+            auth_principal="admin-1",
+            action="updated",
+            base_url="https://api.openai.com/v1",
+            model="gpt-4o",
+            transport="ws",
+            scope="system",
+        )
+        ev = _captured_events(fake_recorder)[0]
+        assert ev.inputs_meta["scope"] == "system"
+
+    @pytest.mark.asyncio
+    async def test_unknown_scope_raises(self, fake_recorder):
+        with pytest.raises(ValueError, match="scope"):
+            await record_llm_config_change(
+                fake_recorder,
+                actor_user_id="u",
+                auth_principal="u",
+                action="created",
+                base_url="x",
+                model="m",
+                transport="ws",
+                scope="global",  # not in {"user", "system"}
+            )
+        assert _captured_events(fake_recorder) == []
+
+    @pytest.mark.asyncio
+    async def test_discarded_undecryptable_action_allowed(self, fake_recorder):
+        """Feature 054 FR-010: key rotation/corruption ⇒ discard + audit."""
+        await record_llm_config_change(
+            fake_recorder,
+            actor_user_id="u1",
+            auth_principal="system",
+            action="discarded_undecryptable",
+            base_url=None,
+            model=None,
+            transport="ws",
+            scope="user",
+        )
+        ev = _captured_events(fake_recorder)[0]
+        assert ev.action_type == "llm_config.discarded_undecryptable"
+        assert ev.inputs_meta["action"] == "discarded_undecryptable"
+        assert ev.inputs_meta["scope"] == "user"
+        assert "could not be decrypted" in ev.description
+        assert "discarded" in ev.description
+        assert "base_url" not in ev.inputs_meta
+
 
 class TestRecordLLMUnconfigured:
     @pytest.mark.asyncio
@@ -178,13 +246,15 @@ class TestRecordLLMCall:
         assert ev.outcome == "success"
 
     @pytest.mark.asyncio
-    async def test_operator_default_failure_records_error_class(self, fake_recorder):
+    async def test_system_source_failure_records_error_class(self, fake_recorder):
+        # Feature 054: SYSTEM replaces the retired OPERATOR_DEFAULT for
+        # all new events.
         await record_llm_call(
             fake_recorder,
-            actor_user_id="u1",
-            auth_principal="u1",
+            actor_user_id="system",
+            auth_principal="system",
             feature="tool_summary",
-            credential_source=CredentialSource.OPERATOR_DEFAULT,
+            credential_source=CredentialSource.SYSTEM,
             resolved=ResolvedConfig(base_url="https://x", model="m"),
             total_tokens=None,
             outcome="failure",
@@ -192,8 +262,26 @@ class TestRecordLLMCall:
         )
         ev = _captured_events(fake_recorder)[0]
         assert ev.outcome == "failure"
+        assert ev.inputs_meta["credential_source"] == "system"
         assert ev.outputs_meta == {"upstream_error_class": "rate_limit"}
         assert "total_tokens" not in ev.outputs_meta
+
+    @pytest.mark.asyncio
+    async def test_system_source_description_label(self, fake_recorder):
+        """The src label vocabulary handles SYSTEM (feature 054)."""
+        await record_llm_call(
+            fake_recorder,
+            actor_user_id="system",
+            auth_principal="system",
+            feature="knowledge_synthesis",
+            credential_source=CredentialSource.SYSTEM,
+            resolved=ResolvedConfig(base_url="https://x", model="m"),
+            total_tokens=42,
+            outcome="success",
+        )
+        ev = _captured_events(fake_recorder)[0]
+        assert "system credential" in ev.description
+        assert "operator default" not in ev.description
 
     @pytest.mark.asyncio
     async def test_unknown_outcome_raises(self, fake_recorder):

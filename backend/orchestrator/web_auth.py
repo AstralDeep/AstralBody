@@ -73,7 +73,7 @@ _STORE_FAILED = False
 
 
 def _is_mock() -> bool:
-    return os.getenv("VITE_USE_MOCK_AUTH", "").strip().lower() in ("1", "true", "yes")
+    return os.getenv("USE_MOCK_AUTH", "").strip().lower() in ("1", "true", "yes")
 
 
 def _secret() -> bytes:
@@ -149,8 +149,8 @@ def _keycloak_config():
         return _get_keycloak_config()
     except Exception:
         return (
-            os.getenv("VITE_KEYCLOAK_AUTHORITY", ""),
-            os.getenv("VITE_KEYCLOAK_CLIENT_ID", "astral-frontend"),
+            os.getenv("KEYCLOAK_AUTHORITY", ""),
+            os.getenv("KEYCLOAK_CLIENT_ID", "astral-frontend"),
             os.getenv("KEYCLOAK_CLIENT_SECRET", ""),
         )
 

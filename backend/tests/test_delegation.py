@@ -17,7 +17,7 @@ import pytest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # Force mock auth for testing
-os.environ["VITE_USE_MOCK_AUTH"] = "true"
+os.environ["USE_MOCK_AUTH"] = "true"
 
 from orchestrator.delegation import DelegationService
 

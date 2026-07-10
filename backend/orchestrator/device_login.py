@@ -121,7 +121,7 @@ def flag_on() -> bool:
 
 def _authority() -> str:
     authority = (
-        os.getenv("VITE_KEYCLOAK_AUTHORITY", "") or os.getenv("KEYCLOAK_AUTHORITY", "")
+        os.getenv("KEYCLOAK_AUTHORITY", "") or os.getenv("KEYCLOAK_AUTHORITY", "")
     ).rstrip("/")
     if not authority:
         raise DeviceLoginUnavailable(

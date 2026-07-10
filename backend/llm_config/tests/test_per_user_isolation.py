@@ -1,85 +1,87 @@
-"""G2 — per-user credential isolation regression test.
+"""Feature 054 — per-user credential isolation (spec FR-007, US3-AS5).
 
-Spec edge case: 'A user attempts to manipulate the request path to call
-the LLM proxy with somebody else's stored credentials — the system
-rejects the request because credentials are sourced exclusively from
-the caller's own session, never from a stored, server-side, per-user
-record.'
-
-The system enforces this by construction: ``SessionCredentialStore``
-keys on ``id(websocket)``, and the orchestrator only ever passes
-``id(caller_websocket)``. There is no API surface that accepts a
-``user_id`` argument when looking up session credentials. This test
-demonstrates that a 'cross-user' lookup attempt MUST miss the store
-and therefore fall through to the operator default (or raise
-``LLMUnavailable``).
+The persisted store keys strictly on the caller's own ``user_id``; there
+is no lookup path that can hand user B a record belonging to user A, and
+user rows never serve the system context (or vice versa).
 """
 from __future__ import annotations
 
 from llm_config.client_factory import build_llm_client
-from llm_config.operator_creds import OperatorDefaultCreds
-from llm_config.session_creds import SessionCredentialStore
-from llm_config.types import CredentialSource
+from llm_config.types import CredentialSource, LLMUnavailable
+
+import pytest
 
 
-def test_user_a_cannot_be_billed_for_user_b_call():
-    """User A is connected on socket SA with personal creds. User B is
-    connected on socket SB without personal creds. A request arriving
-    on SB MUST resolve via the operator default (or LLMUnavailable),
-    never via user A's creds.
-    """
-    store = SessionCredentialStore()
-    socket_a = object()
-    socket_b = object()
-    store.set(id(socket_a), "sk-userA-1234567890abcdef", "https://userA/v1", "userA-model")
-    # socket_b deliberately has no entry.
-
-    operator_default = OperatorDefaultCreds(
-        api_key="sk-operator-1234567890abcdef",
-        base_url="https://operator/v1",
-        model="op-model",
-    )
-
-    # The orchestrator's resolution path uses id(caller_websocket).
-    # When caller is socket_b, the lookup misses (correctly).
-    creds_for_b = store.get(id(socket_b))
-    assert creds_for_b is None
-
-    _, source, resolved = build_llm_client(creds_for_b, operator_default)
-    # User A's keys are NOT borrowed.
-    assert source is CredentialSource.OPERATOR_DEFAULT
-    assert resolved.base_url == "https://operator/v1"
-    assert resolved.base_url != "https://userA/v1"
+ALICE_KEY = "sk-userA-1234567890abcdef"
+BOB_KEY = "sk-userB-1234567890abcdef"
 
 
-def test_no_api_surface_accepts_external_user_id_for_cred_lookup():
-    """SessionCredentialStore exposes only get(ws_id) / set(ws_id, ...) /
-    clear(ws_id) / __contains__. There is NO method that takes a
-    user_id parameter — by design — so an attacker cannot craft a
-    request that asks for someone else's creds by ID."""
-    store = SessionCredentialStore()
-    # Public API surface — by construction, no user_id-keyed lookup
-    public_methods = [
-        m for m in dir(store)
-        if not m.startswith("_")
-    ]
-    # Verify the public surface is exactly what we documented.
-    assert set(public_methods) == {"get", "set", "clear"}
-    # And the get/set/clear all take ws_id ints (or any int), never a
-    # user_id string. We can't introspect the type signature at runtime
-    # without inspect, but the test_session_creds.py tests cover the
-    # signature shape; this test documents the design intent.
+def _seed_alice(store):
+    store.set_sync("alice", provider="custom",
+                   base_url="https://userA.example/v1",
+                   model="userA-model", api_key=ALICE_KEY)
 
 
-def test_session_credential_store_lookups_use_int_keys_only():
-    """``id(websocket)`` is an integer. Strings (which user_ids are) cannot
-    accidentally collide with id() values in the store."""
-    store = SessionCredentialStore()
-    socket = object()
-    ws_id = id(socket)
-    store.set(ws_id, "sk-x-1234567890abcdefgh", "https://x/v1", "m")
-    # Looking up by user_id-shaped string just misses
-    assert store.get("attacker_user_id") is None  # type: ignore[arg-type]
-    assert "attacker_user_id" not in store  # type: ignore[operator]
-    # The legitimate lookup still works
-    assert store.get(ws_id) is not None
+def test_two_users_rows_are_independent(store, fake_db):
+    _seed_alice(store)
+    store.set_sync("bob", provider="custom",
+                   base_url="https://userB.example/v1",
+                   model="userB-model", api_key=BOB_KEY)
+    assert len(fake_db.users) == 2
+    a = store.get_sync("alice")
+    b = store.get_sync("bob")
+    assert a.api_key == ALICE_KEY and a.base_url == "https://userA.example/v1"
+    assert b.api_key == BOB_KEY and b.base_url == "https://userB.example/v1"
+    # Clearing one leaves the other untouched.
+    assert store.clear_sync("alice") is True
+    assert store.get_sync("alice") is None
+    assert store.get_sync("bob").api_key == BOB_KEY
+
+
+def test_user_b_lookup_never_returns_user_a_record(store):
+    _seed_alice(store)
+    # Bob has no record: the lookup misses — it can never fall through to
+    # Alice's row.
+    assert store.get_sync("bob") is None
+    # And the resulting factory call is the gate, not a borrowed client.
+    with pytest.raises(LLMUnavailable):
+        build_llm_client(store.get_sync("bob"), CredentialSource.USER)
+
+
+def test_unknown_user_returns_none(store):
+    assert store.get_sync("never-seen-user") is None
+
+
+def test_user_rows_do_not_serve_the_system_context(store):
+    """FR-007: system/background work must not use any user's personal
+    credentials — a configured user does not make get_system() non-empty."""
+    _seed_alice(store)
+    assert store.get_system_sync() is None
+    with pytest.raises(LLMUnavailable):
+        build_llm_client(store.get_system_sync(), CredentialSource.SYSTEM)
+
+
+def test_system_row_does_not_serve_user_lookups(store):
+    """The system credential is never used for user-context calls
+    (US4-AS4): an unconfigured user stays gated even when the admin
+    record exists."""
+    store.set_system_sync(provider="openai",
+                          base_url="https://api.openai.com/v1",
+                          model="gpt-4o", api_key="sk-system-1234567890abcd",
+                          updated_by="admin")
+    assert store.get_sync("alice") is None
+    with pytest.raises(LLMUnavailable):
+        build_llm_client(store.get_sync("alice"), CredentialSource.USER)
+
+
+def test_resolved_config_for_a_matches_a_never_b(store):
+    _seed_alice(store)
+    store.set_sync("bob", provider="custom",
+                   base_url="https://userB.example/v1",
+                   model="userB-model", api_key=BOB_KEY)
+    client, source, resolved = build_llm_client(
+        store.get_sync("bob"), CredentialSource.USER)
+    assert source is CredentialSource.USER
+    assert resolved.base_url == "https://userB.example/v1"
+    assert resolved.base_url != "https://userA.example/v1"
+    assert client.api_key == BOB_KEY

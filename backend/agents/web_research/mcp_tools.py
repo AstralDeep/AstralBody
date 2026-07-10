@@ -413,25 +413,25 @@ def _looks_like_html(resp) -> bool:
 def _resolve_llm_client(kwargs: Dict[str, Any]) -> Tuple[Optional[OpenAI], str]:
     """Resolve the OpenAI-compatible client exactly like the general agent.
 
-    Feature 006: prefer the user's personal LLM credentials when the
-    orchestrator forwarded them; fall back to the agent's credential bundle
-    and finally to operator-default env vars.
+    Feature 054: the per-turn credentials the orchestrator injects
+    (``_session_llm_credentials`` — the caller's persisted record, or the
+    admin system record on system-context turns) are preferred, then the
+    agent's own credential bundle. There is NO env fallback — the
+    operator-default path was removed.
     """
     session_llm = kwargs.get("_session_llm_credentials") or {}
     creds = kwargs.get("_credentials", {}) or {}
     api_key = (
         session_llm.get("OPENAI_API_KEY")
         or (creds.get("OPENAI_API_KEY") if not kwargs.get("_credentials_encrypted") else None)
-        or os.getenv("OPENAI_API_KEY")
     )
     base_url = (
         session_llm.get("OPENAI_BASE_URL")
         or (creds.get("OPENAI_BASE_URL") if not kwargs.get("_credentials_encrypted") else None)
-        or os.getenv("OPENAI_BASE_URL")
     )
     model = (
         session_llm.get("LLM_MODEL")
-        or os.getenv("LLM_MODEL", "gpt-4o")
+        or "gpt-4o"
     )
     if not api_key:
         return None, model

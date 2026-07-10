@@ -50,6 +50,27 @@ Generate the Fernet keys:
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
+## LLM credentials (feature 054 — bring your own)
+
+The product ships with **no LLM credential** and no way to supply a
+deployment-wide default for user traffic:
+
+- **Users** connect their own provider through the mandatory first-run
+  dialog (or Settings → LLM settings later). The configuration persists
+  per-user (`user_llm_config`; API key Fernet-encrypted under
+  `CREDENTIAL_ENCRYPTION_KEY`) and applies to all of the user's devices.
+- **Admins** configure the deployment-wide **System LLM** (Settings →
+  System LLM, admin-only, web) used exclusively for background work —
+  scheduled jobs, attachment-parser codegen, knowledge synthesis,
+  conversation compaction, workspace combine/condense, job summaries.
+  Without it those features skip/fail honestly; user chat is unaffected.
+- **Migration from pre-054 deployments**: the legacy env vars
+  (`OPENAI_API_KEY`, `OPENAI_BASE_URL`, `LLM_MODEL`, `KNOWLEDGE_LLM_MODEL`)
+  are **inert** — remove them from the host `.env`. They are never
+  migrated into any store: each user configures fresh at next sign-in,
+  and an admin sets the System LLM in-app if background features are
+  wanted. Boot does not require any LLM configuration.
+
 ## TLS / reverse proxy
 
 The service speaks plain HTTP on `:8001` and expects a TLS-terminating

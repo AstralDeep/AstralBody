@@ -208,6 +208,35 @@ jobs:
           path: /tmp
       - name: Load built image
         run: docker load -i /tmp/astraldeep.tar
+      # Feature 054 (FR-004): the shipped-artifact credential check. The
+      # image filesystem must carry NO .env and NO LLM credential material —
+      # the product ships with zero LLM access (native binaries are built
+      # from this same scanned tree and contain no credential inputs).
+      - name: Shipped-artifact check — image carries no LLM credential
+        run: |
+          set -e
+          docker run --rm --entrypoint sh astraldeep:ci -c '
+            fail=0
+            # (1) The real deployment risk: no .env baked into an image layer.
+            if [ -f /app/.env ] || [ -f /app/backend/.env ]; then
+              echo "::error::.env file baked into the image"; fail=1
+            fi
+            # (2) Key-shaped strings in RUNTIME code only (sk-/gsk_/xai-/AIza +
+            #     20 chars). Test fixtures, the eval benchmark corpus, and docs
+            #     legitimately carry fake example keys, so they are excluded;
+            #     gitleaks scans the full repo/history separately. Offenders
+            #     are printed so a real hit is actionable.
+            hits=$(grep -rInE "\b(sk-|gsk_|xai-|AIza)[A-Za-z0-9_-]{20,}\b" /app \
+                     --include="*.py" --include="*.json" \
+                     --exclude-dir=tests --exclude-dir=security_benchmark \
+                     --exclude-dir=__pycache__ --exclude-dir=knowledge_packs \
+                     --exclude="test_*.py" --exclude="conftest.py" 2>/dev/null || true)
+            if [ -n "$hits" ]; then
+              echo "::error::key-shaped strings found in runtime code:"; echo "$hits"; fail=1
+            fi
+            exit $fail
+          '
+          echo "image is credential-free (FR-004 shipped-artifact check)"
       # Default CMD = start-docker.sh: waits for Postgres (the service is up),
       # then exec start.py which boots the orchestrator on :8001.
       - name: Dev-posture boot answers /healthz and /readyz

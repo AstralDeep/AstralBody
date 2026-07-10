@@ -78,10 +78,17 @@ def _make_fake(*, validate=None):
     async def send_dashboard(ws):
         dashboards.append(ws)
 
+    async def llm_configured_for(user_id):
+        # Feature 054: the register-time first-run gate predicate. These
+        # tests cover the auth branch, so report "configured" and let the
+        # success path deliver the welcome as before.
+        return True
+
     fake = types.SimpleNamespace(
         ui_sessions={},
         _registered_events={},
-        _session_llm_creds={},
+        _ff_llm_first_run=False,
+        llm_configured_for=llm_configured_for,
         audit_recorder=None,
         rote=ROTE(),
         history=types.SimpleNamespace(db=types.SimpleNamespace(
@@ -154,7 +161,7 @@ def test_garbage_token_emits_single_auth_required_invalid(auth_audit, monkeypatc
     """A register_ui carrying a garbage (non-JWT) token yields EXACTLY one
     sent payload: type=auth_required with reason 'invalid' — and no ui_render
     error Alert, no session, no dashboard. Waiting tasks are ungated."""
-    monkeypatch.delenv("VITE_USE_MOCK_AUTH", raising=False)
+    monkeypatch.delenv("USE_MOCK_AUTH", raising=False)
     fake = _make_fake(validate=_reject_token)
     ws = _FakeWS("garbage")
     evt = asyncio.Event()
@@ -181,7 +188,7 @@ def test_garbage_token_emits_single_auth_required_invalid(auth_audit, monkeypatc
 
 def test_missing_token_emits_auth_required_invalid(auth_audit, monkeypatch):
     """A register_ui with NO token at all is the same recoverable signal."""
-    monkeypatch.delenv("VITE_USE_MOCK_AUTH", raising=False)
+    monkeypatch.delenv("USE_MOCK_AUTH", raising=False)
     fake = _make_fake(validate=_reject_token)
     ws = _FakeWS()
 
@@ -197,7 +204,7 @@ def test_missing_token_emits_auth_required_invalid(auth_audit, monkeypatch):
 def test_expired_jwt_yields_reason_expired(auth_audit, monkeypatch):
     """A well-formed JWT whose exp is in the past is classified 'expired' so
     the client can silently refresh instead of forcing a full re-login."""
-    monkeypatch.delenv("VITE_USE_MOCK_AUTH", raising=False)
+    monkeypatch.delenv("USE_MOCK_AUTH", raising=False)
     fake = _make_fake(validate=_reject_token)
     ws = _FakeWS("expired")
     token = _fake_jwt({"sub": "someone", "exp": time.time() - 3600})
@@ -215,7 +222,7 @@ def test_expired_jwt_yields_reason_expired(auth_audit, monkeypatch):
 def test_unexpired_but_rejected_jwt_yields_reason_invalid(auth_audit, monkeypatch):
     """A well-formed JWT with a FUTURE exp that the validator still rejects
     (bad signature, wrong issuer, …) reports 'invalid', not 'expired'."""
-    monkeypatch.delenv("VITE_USE_MOCK_AUTH", raising=False)
+    monkeypatch.delenv("USE_MOCK_AUTH", raising=False)
     fake = _make_fake(validate=_reject_token)
     token = _fake_jwt({"sub": "someone", "exp": time.time() + 3600})
 
@@ -235,7 +242,7 @@ def test_mock_auth_mode_registers_normally(auth_audit, monkeypatch):
     """With USE_MOCK_AUTH on, the real validate_token accepts dev-token and
     the success branch runs: session established, rote_config sent, dashboard
     pushed — and NO auth_required anywhere."""
-    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "true")
+    monkeypatch.setenv("USE_MOCK_AUTH", "true")
     fake = _make_fake()  # binds the REAL Orchestrator.validate_token
     ws = _FakeWS("mock")
     evt = asyncio.Event()

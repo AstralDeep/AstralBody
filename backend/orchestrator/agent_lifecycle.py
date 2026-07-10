@@ -52,12 +52,13 @@ class AgentLifecycleManager:
         """
         self.db = db
         self.orchestrator = orchestrator
-        # Agent-generation is a heavy server-side flow that runs against the
-        # operator's default credentials regardless of which user kicked it
-        # off (server-initiated jobs use operator defaults).
+        # Feature 054: agent codegen is a system-context flow — it resolves
+        # the admin-managed system LLM credential per generation call (no
+        # env fallback exists anymore), so an admin save takes effect
+        # without a restart.
+        _llm_store = getattr(orchestrator, '_llm_store', None)
         self.generator = AgentCodeGenerator(
-            llm_client=getattr(orchestrator, 'llm_client', None),
-            llm_model=getattr(orchestrator, 'llm_model', None),
+            config_resolver=(_llm_store.get_system_sync if _llm_store is not None else None),
         )
         self.security = CodeSecurityAnalyzer()
         self.validator = AgentSpecValidator()

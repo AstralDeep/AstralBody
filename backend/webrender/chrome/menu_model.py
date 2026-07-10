@@ -154,6 +154,10 @@ _HELP_ITEMS: Tuple[MenuItem, ...] = (
 _ADMIN_ITEMS: Tuple[MenuItem, ...] = (
     MenuItem("tool-quality", "Tool quality", "admin_tools", {"tab": "quality"}, admin_only=True),
     MenuItem("tutorial-admin", "Tutorial admin", "admin_tools", {"tab": "tutorial"}, admin_only=True),
+    # Feature 054: the deployment-wide System LLM credential for background
+    # work — a declared web-only admin carve-out (Constitution XII), like the
+    # other admin tools: natives never receive the admin group.
+    MenuItem("system-llm", "System LLM", "llm_system", admin_only=True),
 )
 
 

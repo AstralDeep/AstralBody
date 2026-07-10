@@ -47,9 +47,9 @@ def db():
 @pytest.fixture()
 def real_auth_env(monkeypatch):
     """Mock auth OFF so the real session/refresh decision layer runs."""
-    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "false")
-    monkeypatch.setenv("VITE_KEYCLOAK_AUTHORITY", "http://keycloak.test/realms/astral")
-    monkeypatch.setenv("VITE_KEYCLOAK_CLIENT_ID", "astral-frontend")
+    monkeypatch.setenv("USE_MOCK_AUTH", "false")
+    monkeypatch.setenv("KEYCLOAK_AUTHORITY", "http://keycloak.test/realms/astral")
+    monkeypatch.setenv("KEYCLOAK_CLIENT_ID", "astral-frontend")
     monkeypatch.delenv("KEYCLOAK_CLIENT_SECRET", raising=False)
 
 

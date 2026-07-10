@@ -27,6 +27,7 @@ _DELETABLE_USER_TABLES: tuple[str, ...] = (
     "chats",
     "user_attachments",
     "draft_agents",
+    "user_llm_config",  # 054: harness-seeded BYO-LLM rows (never the system row)
 )
 
 

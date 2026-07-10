@@ -1,97 +1,94 @@
-"""Pure factory that resolves a per-call LLM client from the available
-credential sources (feature 006-user-llm-config).
+"""Pure factory that builds a per-call LLM client from a resolved
+credential record (feature 054-byo-llm-setup; supersedes the feature-006
+two-tier user→operator-default rule).
 
-Decision rule (research.md §R2 + spec FR-003 / FR-004 / FR-010):
+Decision rule (spec FR-019 / research.md R3):
 
-1. If the user's :class:`SessionCreds` are present (i.e. all three fields
-   non-empty), build the OpenAI client from them and tag the resolution
-   as :attr:`CredentialSource.USER`.
-2. Otherwise, if the operator's ``.env`` defaults are complete, build
-   from those and tag as :attr:`CredentialSource.OPERATOR_DEFAULT`.
-3. Otherwise, raise :class:`LLMUnavailable`. Callers handle this by
-   emitting an ``llm_unconfigured`` audit event and surfacing the
-   "LLM unavailable" UI prompt (FR-004a).
+* A **user-context** call (a live user WebSocket) resolves the caller's
+  persisted :class:`~llm_config.user_store.PersistedLLMConfig`; absent ⇒
+  :class:`LLMUnavailable` (the mandatory first-run gate).
+* A **system-context** call (``websocket is None`` or a scheduled-turn
+  ``VirtualWebSocket``) resolves the admin-managed system record; absent ⇒
+  :class:`LLMUnavailable` (background features degrade honestly).
 
-The factory is a pure function; it does not cache clients, so
-:func:`backend.llm_config.session_creds.SessionCredentialStore.clear`
-is observed on the very next call (FR-012).
+There is NO fallback in either direction — a user call never consumes the
+system credential, a system call never consumes any user's credentials, and
+no call may consume another user's record. The resolver
+(``Orchestrator._resolve_llm_client_for``) picks the record + source; this
+factory only materializes the client, so the no-fallback invariant is
+structural rather than conditional.
 
-NEVER falls back to the operator default WHEN the user had session
-credentials present — even if the upstream call later fails. The
-"upstream failed → bill operator" path is explicitly forbidden by
-FR-009 and is enforced by the caller, not here.
+The factory is pure and uncached, so a ``clear`` (which re-gates the user)
+is observed on the very next call.
 """
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Optional, Protocol, Tuple
 
 from openai import OpenAI
 
-from .operator_creds import OperatorDefaultCreds
-from .session_creds import SessionCreds
 from .types import CredentialSource, LLMUnavailable, ResolvedConfig
 
 
+class LLMConfigLike(Protocol):
+    """Duck-type of a resolved credential record: the decrypted
+    ``PersistedLLMConfig`` (or any test double with the same fields)."""
+    api_key: str
+    base_url: str
+    model: str
+
+
 def build_llm_client(
-    session_creds: Optional[SessionCreds],
-    default_creds: OperatorDefaultCreds,
+    config: Optional[LLMConfigLike],
+    source: CredentialSource,
     *,
     timeout: Optional[float] = None,
 ) -> Tuple[OpenAI, CredentialSource, ResolvedConfig]:
-    """Build an :class:`OpenAI` client from the appropriate credential set.
+    """Build an :class:`OpenAI` client from the resolved credential record.
 
     Args:
-        session_creds: The user's per-WebSocket credentials, or ``None``
-            if the user has not configured personal credentials. A
-            partially-filled ``SessionCreds`` cannot reach this function
-            — :class:`SessionCredentialStore.set` rejects partials.
-        default_creds: The operator's ``.env``-supplied default credentials.
-            Always passed (never ``None``); use ``OperatorDefaultCreds(None, None, None)``
-            to represent an absent default.
-        timeout: Optional per-request timeout in seconds (passed to
-            ``OpenAI(timeout=…)``).
+        config: The decrypted record for this call's context — the caller's
+            own persisted configuration (``source=USER``) or the deployment
+            system record (``source=SYSTEM``). ``None`` means the context has
+            no configuration.
+        source: Which context the record belongs to; recorded as
+            ``credential_source`` on the ``llm_call`` audit event.
+        timeout: Optional per-request timeout in seconds.
 
     Returns:
-        A 3-tuple ``(client, source, resolved)`` where:
-
-        * ``client`` is the configured :class:`OpenAI` client to use for
-          this call.
-        * ``source`` indicates which credential set was used (audited as
-          ``credential_source`` on the ``llm_call`` event).
-        * ``resolved`` carries the non-sensitive ``base_url`` and ``model``
-          for inclusion in audit-event payloads.
+        ``(client, source, resolved)`` — ``resolved`` carries the
+        non-sensitive ``base_url`` / ``model`` for audit payloads.
 
     Raises:
-        LLMUnavailable: When neither the user's session credentials nor
-            the operator default are complete.
+        LLMUnavailable: When ``config`` is ``None`` — the documented
+            fail-closed branch (first-run gate for users; honest skip for
+            system work).
+        ValueError: When ``source`` is the retired ``OPERATOR_DEFAULT``
+            (no new call may carry it).
     """
-    if session_creds is not None:
-        # SessionCredentialStore.set has already enforced that all three
-        # fields are non-empty, so this branch is always usable.
-        kwargs = {"api_key": session_creds.api_key, "base_url": session_creds.base_url}
-        if timeout is not None:
-            kwargs["timeout"] = timeout
-        client = OpenAI(**kwargs)
-        return (
-            client,
-            CredentialSource.USER,
-            ResolvedConfig(base_url=session_creds.base_url, model=session_creds.model),
+    if source == CredentialSource.OPERATOR_DEFAULT:
+        raise ValueError(
+            "CredentialSource.OPERATOR_DEFAULT is retired (feature 054): "
+            "the operator-default credential path no longer exists."
         )
-
-    if default_creds.is_complete:
-        kwargs = {"api_key": default_creds.api_key, "base_url": default_creds.base_url}
-        if timeout is not None:
-            kwargs["timeout"] = timeout
-        client = OpenAI(**kwargs)
-        # type-narrowed by is_complete check above
-        assert default_creds.base_url is not None and default_creds.model is not None
-        return (
-            client,
-            CredentialSource.OPERATOR_DEFAULT,
-            ResolvedConfig(base_url=default_creds.base_url, model=default_creds.model),
+    if config is None:
+        raise LLMUnavailable(
+            "No LLM configuration for this context: "
+            + (
+                "the user has not completed provider setup."
+                if source == CredentialSource.USER
+                else "no system credential has been configured by an admin."
+            )
         )
-
-    raise LLMUnavailable(
-        "No LLM credentials available: the user has not configured personal "
-        "credentials and the operator's .env default credentials are not set."
+    kwargs = {"base_url": config.base_url}
+    # Keyless local-runtime presets store an empty key; the OpenAI SDK
+    # requires SOME api_key value, so send a harmless placeholder.
+    kwargs["api_key"] = config.api_key or "not-needed"
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    client = OpenAI(**kwargs)
+    return (
+        client,
+        source,
+        ResolvedConfig(base_url=config.base_url, model=config.model),
     )

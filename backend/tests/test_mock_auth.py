@@ -1,5 +1,5 @@
 """
-Tests for VITE_USE_MOCK_AUTH — verifies the mock auth path resolves to
+Tests for USE_MOCK_AUTH — verifies the mock auth path resolves to
 user `test_user` with roles [admin, user] across all three validators:
 
 1. Orchestrator.validate_token (WebSocket auth)
@@ -29,15 +29,15 @@ FRONTEND_MOCK_JWT = (
 
 @pytest.fixture
 def mock_auth_env(monkeypatch):
-    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "true")
+    monkeypatch.setenv("USE_MOCK_AUTH", "true")
     yield
 
 
 @pytest.fixture
 def no_mock_auth_env(monkeypatch):
-    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "false")
-    monkeypatch.delenv("VITE_KEYCLOAK_AUTHORITY", raising=False)
-    monkeypatch.delenv("VITE_KEYCLOAK_CLIENT_ID", raising=False)
+    monkeypatch.setenv("USE_MOCK_AUTH", "false")
+    monkeypatch.delenv("KEYCLOAK_AUTHORITY", raising=False)
+    monkeypatch.delenv("KEYCLOAK_CLIENT_ID", raising=False)
     yield
 
 

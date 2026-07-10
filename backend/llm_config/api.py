@@ -19,9 +19,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
+from collections import defaultdict, deque
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Deque, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from openai import OpenAI
@@ -30,12 +32,32 @@ from pydantic import BaseModel, Field, field_validator
 from orchestrator.auth import get_current_user_payload, require_user_id
 
 from .audit_events import record_llm_config_change
+from .probe import PROBE_TIMEOUT_SECONDS, classify_probe_error as _classify_probe_error
 
 logger = logging.getLogger("LLMConfig.API")
 
 llm_router = APIRouter(prefix="/api/llm", tags=["LLM"])
 
-PROBE_TIMEOUT_SECONDS: float = 15.0
+# Feature 054: per-user rate cap on the probe endpoints — the recorded
+# mitigation for the widened internal-reachability oracle (probes are
+# server-originated against user-supplied endpoints and reachable while the
+# first-run gate is active). Pattern mirrors DEVICE_LOGIN_START_RATE.
+_PROBE_RATE_PER_MINUTE = int(os.getenv("LLM_PROBE_RATE_PER_MINUTE", "20") or "20")
+_probe_hits: Dict[str, Deque[float]] = defaultdict(deque)
+
+
+def _check_probe_rate(user_id: str) -> None:
+    """Raise HTTP 429 when the caller exceeds the per-minute probe budget."""
+    now = time.monotonic()
+    hits = _probe_hits[user_id]
+    while hits and now - hits[0] > 60.0:
+        hits.popleft()
+    if len(hits) >= _PROBE_RATE_PER_MINUTE:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many connection probes — wait a minute and retry.",
+        )
+    hits.append(now)
 
 
 class TestConnectionRequest(BaseModel):
@@ -108,22 +130,6 @@ class ListModelsResponse(BaseModel):
     upstream_message: Optional[str] = None
 
 
-def _classify_probe_error(exc: BaseException) -> str:
-    """Map an OpenAI-SDK exception to a Test-Connection ``error_class``
-    per contracts/rest-llm-test.md.
-    """
-    s = str(exc).lower()
-    if "401" in s or "auth" in s or "api key" in s or "unauthor" in s:
-        return "auth_failed"
-    if "404" in s or ("model" in s and ("not" in s or "exist" in s)):
-        return "model_not_found"
-    if any(k in s for k in ("connection", "timeout", "network", "dns", "resolve")):
-        return "transport_error"
-    if "choices" in s or "schema" in s or "json" in s:
-        return "contract_violation"
-    return "other"
-
-
 def _get_orchestrator(request: Request):
     orch = getattr(request.app.state, "orchestrator", None)
     if orch is None:
@@ -157,6 +163,7 @@ async def test_connection(
     ``base_url``, ``model``, ``result``, and ``error_class``-on-failure.
     """
     orch = _get_orchestrator(request)
+    _check_probe_rate(user_id)
     auth_principal = (
         (user_payload or {}).get("preferred_username")
         or (user_payload or {}).get("sub")
@@ -251,8 +258,8 @@ async def list_models(
     that actually matters (save).
     """
     _ = request  # orchestrator not needed here — kept in signature for parity with /test
-    _ = user_id
     _ = user_payload
+    _check_probe_rate(user_id)
 
     probed_at = datetime.now(timezone.utc).isoformat()
     started = time.monotonic()

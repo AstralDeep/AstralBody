@@ -36,12 +36,12 @@ def test_hard_cap_is_365_days():
 
 
 def test_mock_mode_returns_dev_token(monkeypatch):
-    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "true")
+    monkeypatch.setenv("USE_MOCK_AUTH", "true")
     assert web_auth.session_token(_FakeRequest()) == "dev-token"
 
 
 def test_session_lookup_and_365_day_cap(monkeypatch):
-    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "false")
+    monkeypatch.setenv("USE_MOCK_AUTH", "false")
     # establish a session manually
     sid = "sess-1"
     web_auth._SESSIONS[sid] = {"access_token": "tok-123", "refresh_token": "r", "sub": "u1", "created_at": time.time()}
@@ -59,7 +59,7 @@ def test_session_lookup_and_365_day_cap(monkeypatch):
 
 
 def test_no_cookie_no_session(monkeypatch):
-    monkeypatch.setenv("VITE_USE_MOCK_AUTH", "false")
+    monkeypatch.setenv("USE_MOCK_AUTH", "false")
     assert web_auth.get_session(_FakeRequest()) is None
     assert web_auth.session_token(_FakeRequest()) == ""
 

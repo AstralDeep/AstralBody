@@ -32,11 +32,12 @@ _REDACTED = "<redacted>"
 
 # API-key-shaped tokens we redact wherever they appear in free-form text.
 _KEY_TOKEN_PATTERNS = (
-    re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}\b"),
+    re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}\b"),  # OpenAI (also sk-ant-/sk-or-/sk-proj-)
     re.compile(r"\bgsk_[A-Za-z0-9_\-]{20,}\b"),
     re.compile(r"\bxai-[A-Za-z0-9_\-]{20,}\b"),
     re.compile(r"\bor-[A-Za-z0-9_\-]{20,}\b"),
     re.compile(r"\bsk_live_[A-Za-z0-9_\-]{20,}\b"),
+    re.compile(r"\bAIza[A-Za-z0-9_\-]{20,}\b"),  # Google API keys (Gemini)
 )
 
 

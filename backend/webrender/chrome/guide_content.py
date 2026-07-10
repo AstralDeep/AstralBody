@@ -451,9 +451,11 @@ _AUDIT = "".join([
 _TUTORIAL = "".join([
     _h1("Getting-started tour"),
     _p(
-        "The first time you sign in, AstralDeep walks you through the core workflow as a "
+        "Open Settings → “Take the tour” any time to walk through the core workflow as a "
         "guided overlay: starting a chat, opening agents, reviewing the audit log, and giving "
-        "feedback. The overlay highlights the relevant control on the dashboard for each step.",
+        "feedback. The overlay highlights the relevant control on the dashboard for each step. "
+        "(On your very first sign-in, AstralDeep first asks you to connect your own AI "
+        "provider; the tour is available right after that.)",
     ),
     _h2("Controls"),
     _ul(
