@@ -1,5 +1,6 @@
 package com.personalailabs.astraldeep.app.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -61,10 +62,17 @@ fun RootScaffold(
     onSignOut: () -> Unit,
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
+    // A mandatory surface (the 054 first-run LLM-setup gate) swallows system Back
+    // — the dialog cannot be dismissed until the server closes it; sign-out is
+    // the guaranteed escape (spec FR-013).
+    BackHandler(enabled = state.mandatorySurface) {}
     Scaffold(
         topBar = {
             AstralTopBar(
                 model = state.chromeMenu,
+                // Top-bar navigation is suppressed while a mandatory surface is
+                // pinned — everything EXCEPT sign-out (spec FR-013).
+                navigationLocked = state.mandatorySurface,
                 onNewChat = {
                     vm.newChat()
                     vm.goTo(Screen.Chat)
@@ -157,6 +165,7 @@ private fun BannerBar(
 @Composable
 private fun AstralTopBar(
     model: ChromeMenuModel?,
+    navigationLocked: Boolean,
     onNewChat: () -> Unit,
     onRecentChats: () -> Unit,
     onOpenItem: (MenuItem) -> Unit,
@@ -185,8 +194,8 @@ private fun AstralTopBar(
             // chats uses a speech-bubble glyph, NOT the clock — the clock belongs
             // to the server "Workspace timeline" control below, and two clocks
             // side by side read as a duplicate (feature 044 top-bar polish).
-            NewChatButton(onClick = onNewChat)
-            IconButton(onClick = onRecentChats) {
+            NewChatButton(enabled = !navigationLocked, onClick = onNewChat)
+            IconButton(enabled = !navigationLocked, onClick = onRecentChats) {
                 Icon(
                     painter = painterResource(R.drawable.ic_chat),
                     contentDescription = "Recent chats",
@@ -199,7 +208,7 @@ private fun AstralTopBar(
             // — no client hard-coding. Each opens its surface via chrome_open.
             model?.topbarActions?.forEach { control ->
                 topBarActionView(control)?.let { view ->
-                    IconButton(onClick = { onOpenSurface(view.surface, view.params) }) {
+                    IconButton(enabled = !navigationLocked, onClick = { onOpenSurface(view.surface, view.params) }) {
                         Icon(
                             painter = painterResource(topBarActionIcon(view.icon)),
                             contentDescription = view.label,
@@ -210,7 +219,12 @@ private fun AstralTopBar(
                 }
             }
             // Settings gear → dropdown with ALL settings (from the server model).
-            SettingsMenu(model = model, onOpenItem = onOpenItem, onSignOut = onSignOut)
+            SettingsMenu(
+                model = model,
+                navigationLocked = navigationLocked,
+                onOpenItem = onOpenItem,
+                onSignOut = onSignOut,
+            )
         }
     }
 }
@@ -226,12 +240,15 @@ private fun topBarActionIcon(icon: TopBarIcon): Int =
 /**
  * The Settings gear + its dropdown, rendered from the server-owned model.
  * `internal` so the instrumented UI test can drive it without real auth.
+ * While [navigationLocked] (a mandatory surface is pinned, feature 054) every
+ * menu item is disabled — only Sign out stays enabled (spec FR-013).
  */
 @Composable
 internal fun SettingsMenu(
     model: ChromeMenuModel?,
     onOpenItem: (MenuItem) -> Unit,
     onSignOut: () -> Unit,
+    navigationLocked: Boolean = false,
 ) {
     var open by remember { mutableStateOf(false) }
     Box {
@@ -248,6 +265,7 @@ internal fun SettingsMenu(
                 SectionHeader(group.label)
                 group.items.forEach { item ->
                     DropdownMenuItem(
+                        enabled = !navigationLocked,
                         text = { Text(item.label, color = MaterialTheme.colorScheme.onSurface) },
                         onClick = {
                             open = false
@@ -287,13 +305,16 @@ private fun SectionHeader(label: String) {
 }
 
 @Composable
-private fun NewChatButton(onClick: () -> Unit) {
+private fun NewChatButton(
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
     Row(
         modifier =
             Modifier
                 .clip(RoundedCornerShape(14.dp))
                 .background(AstralColors.AccentBrush)
-                .clickable(onClick = onClick)
+                .clickable(enabled = enabled, onClick = onClick)
                 .padding(horizontal = 11.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp),

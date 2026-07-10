@@ -504,14 +504,22 @@ class SurfaceDialog(QDialog):
     #: How long to wait for a `chrome_surface` before showing the retry error.
     LOAD_TIMEOUT_MS = 10000
 
-    def __init__(self, parent, emit, download=None, on_retry=None, apply_theme=None):
+    def __init__(self, parent, emit, download=None, on_retry=None, apply_theme=None,
+                 on_sign_out=None):
         super().__init__(parent)
         self.setModal(False)
         self.resize(600, 560)
         self._raw_emit = emit
         self._on_retry = on_retry
+        self._on_sign_out = on_sign_out
         self._surface = ""
         self._params: dict = {}
+        # Feature 054 (T019): first-run gate pin. While the server pushes
+        # mode:"mandatory" the dialog is application-modal with every dismissal
+        # affordance suppressed; only the server's blank close frame (or Sign
+        # out) releases it. _flags_before restores the stock flags on unpin.
+        self._mandatory = False
+        self._flags_before = self.windowFlags()
         # Feature 044 (T040): actions submitted from inside the surface show an
         # in-flight state and re-arm the load bound (the server replies with a
         # chrome_surface re-render that cancels it). `apply_theme` routes the
@@ -537,11 +545,65 @@ class SurfaceDialog(QDialog):
         self._lay.addStretch(1)
         scroll.setWidget(self._inner)
         outer.addWidget(scroll, 1)
+        # Feature 054 (T019): the mandatory gate blocks the main window (and
+        # its gear menu) behind an application-modal dialog, so the FR-013
+        # sign-out escape hatch must live IN the dialog — same routine as the
+        # gear menu's Sign out. Hidden unless mandatory.
+        self._signout_btn = QPushButton("Sign out")
+        self._signout_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._signout_btn.clicked.connect(self._request_sign_out)
+        self._signout_btn.setVisible(False)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        btn_row.addWidget(self._signout_btn)
+        outer.addLayout(btn_row)
         # Load-timeout bound (T040): armed on open/submit, cancelled on arrival.
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(self.LOAD_TIMEOUT_MS)
         self._timer.timeout.connect(self._on_timeout)
+
+    def set_mandatory(self, on: bool) -> None:
+        """Feature 054 (T019): pin/unpin the first-run gate. Pinned = the
+        dialog is application-modal and undismissable: the titlebar ✕ is
+        removed (CustomizeWindowHint — clearing the close hint alone leaves
+        the platform defaults in force) and Esc/close are refused by the
+        reject/closeEvent overrides until the server's blank close frame."""
+        on = bool(on)
+        if on == self._mandatory:
+            return
+        self._mandatory = on
+        # Modality and window flags only apply on the next show(); a flag
+        # change also re-creates the native window — hide first, re-show after.
+        was_visible = self.isVisible()
+        if was_visible:
+            self.hide()
+        if on:
+            self.setWindowFlags(Qt.WindowType.Dialog
+                                | Qt.WindowType.CustomizeWindowHint
+                                | Qt.WindowType.WindowTitleHint)
+        else:
+            self.setWindowFlags(self._flags_before)
+        self.setModal(on)
+        self._signout_btn.setVisible(on)
+        if was_visible:
+            self.show()
+
+    def _request_sign_out(self) -> None:
+        if callable(self._on_sign_out):
+            self._on_sign_out()
+
+    def reject(self) -> None:
+        # Esc / programmatic dismissal: refused while the gate is pinned (054).
+        if self._mandatory:
+            return
+        super().reject()
+
+    def closeEvent(self, event) -> None:
+        if self._mandatory:
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def _clear_body(self) -> None:
         while self._lay.count() > 1:
@@ -1509,7 +1571,7 @@ class MainWindow(QMainWindow):
             if self._surface_dialog is None:
                 self._surface_dialog = SurfaceDialog(
                     self, self._emit, self._download, on_retry=self._retry_surface,
-                    apply_theme=self._apply_theme_pref)
+                    apply_theme=self._apply_theme_pref, on_sign_out=self._sign_out)
             self._surface_dialog.begin_load(s, {}, title=label or s)
             self._surface_dialog.show()
             self._surface_dialog.raise_()
@@ -1543,16 +1605,23 @@ class MainWindow(QMainWindow):
         instruction (shared/protocol.py: "Empty components clears/closes the
         modal", sent after workspace-timeline view/live and chrome_close) —
         close the dialog if one is open; never lazily create one just to show
-        a blank "Settings" page."""
+        a blank "Settings" page.
+
+        Feature 054 (T019): ``mode:"mandatory"`` (reserved field, previously
+        always "replace") pins the dialog as the undismissable first-run gate;
+        the blank close frame clears the pin before closing."""
         components = msg.get("components") or []
+        mode = str(msg.get("mode") or "replace")
         if not msg.get("surface_key") and not components:
             if self._surface_dialog is not None:
+                self._surface_dialog.set_mandatory(False)
                 self._surface_dialog.close()
             return
         if self._surface_dialog is None:
             self._surface_dialog = SurfaceDialog(
                 self, self._emit, self._download, on_retry=self._retry_surface,
-                apply_theme=self._apply_theme_pref)
+                apply_theme=self._apply_theme_pref, on_sign_out=self._sign_out)
+        self._surface_dialog.set_mandatory(mode == "mandatory")
         self._surface_dialog.set_surface(
             msg.get("title") or "Settings", components)
         self._surface_dialog.show()

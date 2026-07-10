@@ -110,11 +110,18 @@ sealed interface Inbound {
     /** Feature 042 — the server-owned chrome model (top bar + settings menu). */
     data class ChromeMenu(val model: ChromeMenuModel) : Inbound
 
-    /** Feature 043 — a settings surface delivered as SDUI components (native). */
+    /**
+     * Feature 043 — a settings surface delivered as SDUI components (native).
+     * [mode] is the reserved delivery field (feature 054): `"replace"` (the
+     * default, and the value when absent) is today's behavior; `"mandatory"`
+     * marks the first-run LLM-setup gate — render even though unsolicited and
+     * suppress every dismissal until the server closes the surface.
+     */
     data class ChromeSurface(
         val surfaceKey: String,
         val title: String,
         val components: List<Component>,
+        val mode: String = "replace",
     ) : Inbound
 
     data class AuthRequired(val reason: String?) : Inbound

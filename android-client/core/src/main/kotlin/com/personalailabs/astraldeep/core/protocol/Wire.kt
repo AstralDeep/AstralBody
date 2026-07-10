@@ -91,6 +91,9 @@ object Wire {
                     surfaceKey = root.str("surface_key").orEmpty(),
                     title = root.str("title").orEmpty(),
                     components = Component.listFromJson(root.arr("components")),
+                    // Reserved delivery field (054): absent == "replace" (today's
+                    // behavior); "mandatory" == the first-run LLM-setup gate.
+                    mode = root.str("mode") ?: "replace",
                 )
             "auth_required" -> Inbound.AuthRequired(root.str("reason"))
             // Server error replies arrive in three shapes: {code,message},

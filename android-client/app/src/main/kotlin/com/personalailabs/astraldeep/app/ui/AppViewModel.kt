@@ -122,6 +122,12 @@ data class UiState(
     val themePalette: ThemePalette? = null,
     /** Feature 028/044 — the read-only workspace timeline is being viewed (mutations paused). */
     val timelineReadOnly: Boolean = false,
+    /**
+     * Feature 054 — a `mode:"mandatory"` chrome surface (the first-run LLM-setup
+     * gate) is pinned: navigation and system Back are suppressed until the
+     * server's blank-key close frame clears it. Sign-out stays enabled (FR-013).
+     */
+    val mandatorySurface: Boolean = false,
 ) {
     /** What the canvas area actually renders (a history entry, or the live canvas). */
     val visibleCanvas: List<Component>
@@ -681,9 +687,10 @@ class AppViewModel(
             is Inbound.ChromeSurface ->
                 when {
                     // The documented CLOSE instruction (chrome_close, workspace-
-                    // timeline view/live): a blank key with no components pops the
-                    // surface screen back to the chat it was opened over, so the
-                    // user is never stuck on a stale surface hiding the canvas.
+                    // timeline view/live, the 054 gate unlock): a blank key with no
+                    // components pops the surface screen back to the chat it was
+                    // opened over, so the user is never stuck on a stale surface
+                    // hiding the canvas — and always releases the mandatory pin.
                     msg.surfaceKey.isBlank() && msg.components.isEmpty() ->
                         if (s.screen == Screen.Surface) {
                             s.copy(
@@ -691,10 +698,23 @@ class AppViewModel(
                                 pendingSurface = null,
                                 pendingSurfaceKey = "",
                                 pendingSurfaceParams = JsonObject(emptyMap()),
+                                mandatorySurface = false,
                             )
                         } else {
-                            s
+                            s.copy(mandatorySurface = false)
                         }
+                    // A mandatory surface (the 054 first-run LLM-setup gate) is
+                    // ACCEPTED even though unsolicited: show it and pin it — the
+                    // scaffold suppresses navigation/Back until the server's blank
+                    // close frame (above) clears the pin. Sign-out stays enabled.
+                    msg.mode == "mandatory" ->
+                        s.copy(
+                            screen = Screen.Surface,
+                            pendingSurface = msg,
+                            pendingSurfaceKey = msg.surfaceKey,
+                            pendingSurfaceParams = JsonObject(emptyMap()),
+                            mandatorySurface = true,
+                        )
                     // The surface the user is currently awaiting.
                     s.screen == Screen.Surface && s.pendingSurfaceKey == msg.surfaceKey ->
                         s.copy(pendingSurface = msg)

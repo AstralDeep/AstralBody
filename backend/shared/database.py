@@ -11,7 +11,8 @@ from typing import List, Dict, Optional, Tuple
 
 logger = logging.getLogger('Database')
 
-SCHEMA_REVISION = '052.001'
+# 054.001: + user_llm_config, + system_llm_config (bring-your-own-LLM stores)
+SCHEMA_REVISION = '054.001'
 
 _POOLS: Dict[str, dict] = {}
 _POOLS_LOCK = threading.Lock()

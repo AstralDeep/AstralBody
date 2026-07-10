@@ -355,6 +355,89 @@ def test_chrome_surface_close_frame_does_not_create_dialog(win):
     assert win._surface_dialog is None
 
 
+# --- 054 (T019): mandatory first-run gate on chrome_surface ------------------
+
+_MANDATORY_FRAME = {
+    "type": "chrome_surface", "surface_key": "llm",
+    "title": "Set up your AI provider",
+    "components": [{"type": "text", "content": "provider form"}],
+    "mode": "mandatory",
+}
+
+_CLOSE_FRAME = {"type": "chrome_surface", "surface_key": "", "title": "",
+                "components": [], "mode": "replace"}
+
+
+def test_chrome_surface_mode_absent_is_replace(win):
+    """Regression: a frame without `mode` (or mode:"replace") behaves exactly
+    as today — non-modal dialog, ✕ intact, no sign-out affordance."""
+    win._on_message({"type": "chrome_surface", "surface_key": "theme",
+                     "title": "Theme",
+                     "components": [{"type": "text", "content": "PRESETS"}]})
+    dlg = win._surface_dialog
+    assert dlg is not None and not dlg.isHidden()
+    assert dlg._mandatory is False
+    assert dlg.isModal() is False
+    assert dlg._signout_btn.isHidden()
+    assert dlg.close() is True                     # dismissable as before
+    assert dlg.isHidden()
+
+
+def test_chrome_surface_mandatory_pins_modal_and_suppresses_dismissal(win):
+    from PySide6.QtCore import Qt
+
+    win._on_message(dict(_MANDATORY_FRAME))
+    dlg = win._surface_dialog
+    assert dlg is not None and not dlg.isHidden()
+    assert dlg._mandatory is True
+    # Application-modal — the main window is not interactable behind it.
+    assert dlg.windowModality() == Qt.WindowModality.ApplicationModal
+    # Titlebar ✕ removed (CustomizeWindowHint set, close hint absent).
+    assert dlg.windowFlags() & Qt.WindowType.CustomizeWindowHint
+    assert not (dlg.windowFlags() & Qt.WindowType.WindowCloseButtonHint)
+    # Sign-out escape hatch (FR-013) present only while mandatory.
+    assert not dlg._signout_btn.isHidden()
+    # Esc (reject) and close are both refused while pinned.
+    dlg.reject()
+    assert not dlg.isHidden()
+    assert dlg.close() is False
+    assert not dlg.isHidden()
+
+
+def test_mandatory_signout_button_invokes_sign_out_routine(qapp):
+    from astral_client.app import SurfaceDialog
+
+    signed_out = []
+    dlg = SurfaceDialog(None, emit=lambda a, p: None,
+                        on_sign_out=lambda: signed_out.append(True))
+    assert dlg._signout_btn.isHidden()             # hidden while not mandatory
+    dlg.set_mandatory(True)
+    assert not dlg._signout_btn.isHidden()
+    dlg._signout_btn.click()
+    assert signed_out == [True]
+    dlg.set_mandatory(False)
+    assert dlg._signout_btn.isHidden()
+    dlg.close()
+
+
+def test_blank_close_clears_mandatory_pin_then_plain_surfaces_unchanged(win):
+    win._on_message(dict(_MANDATORY_FRAME))
+    dlg = win._surface_dialog
+    assert dlg._mandatory is True
+    # The server's existing blank close instruction releases the pin + closes.
+    win._on_message(dict(_CLOSE_FRAME))
+    assert dlg._mandatory is False
+    assert dlg.isHidden()
+    # A subsequent plain surface reuses the dialog with today's behavior.
+    win._on_message({"type": "chrome_surface", "surface_key": "theme",
+                     "title": "Theme",
+                     "components": [{"type": "text", "content": "PRESETS"}]})
+    assert not dlg.isHidden()
+    assert dlg.isModal() is False
+    assert dlg._signout_btn.isHidden()
+    assert dlg.close() is True
+
+
 # --- W4: workspace_timeline opens the SDUI timeline surface ------------------
 
 def test_workspace_timeline_routes_to_sdui_surface(win):
