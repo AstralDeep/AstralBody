@@ -227,6 +227,17 @@ body {
   background: rgb(var(--astral-surface));
   color: var(--text-primary);
 }
+/* Native <select> popups render in the platform color scheme unless told
+   otherwise — force dark so chrome-modal dropdowns (e.g. the LLM provider
+   picker) are legible instead of light-on-light. color-scheme fixes the
+   native popup on Chromium/WebKit; the option rules are the fallback for
+   engines that still honor them. */
+.astral-modal-card select,
+select.astral-field { color-scheme: dark; }
+.astral-modal-card select option {
+  background: rgb(var(--astral-surface));
+  color: var(--text-primary);
+}
 .astral-field::placeholder { color: rgb(var(--astral-muted) / 0.7); }
 
 .astral-btn { letter-spacing: 0.01em; }

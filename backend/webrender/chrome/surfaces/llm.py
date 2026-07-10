@@ -218,20 +218,64 @@ def _model_field(model: str, models: Optional[list]) -> str:
         for m in listed:
             sel = " selected" if m == model else ""
             opts.append(f'<option value="{esc(m)}"{sel}>{esc(m)}</option>')
-        return f'<select name="model" class="{_INPUT_CLS}">{"".join(opts)}</select>'
+        return (f'<select name="model" class="{_INPUT_CLS} astral-field">'
+                f'{"".join(opts)}</select>')
     return (
         f'<input type="text" name="model" value="{esc(model)}" '
-        f'placeholder="e.g. gpt-4o-mini" autocomplete="off" class="{_INPUT_CLS}">'
+        f'placeholder="e.g. gpt-4o-mini" autocomplete="off" class="{_INPUT_CLS} astral-field">'
     )
 
 
 def _provider_field(provider: str) -> str:
-    """The provider ``<select>`` from the server-owned catalog."""
+    """The provider ``<select>`` from the server-owned catalog.
+
+    Carries ``astral-field`` (dark option styling + color-scheme) and
+    ``astral-llm-provider`` (the client-side change hook in client.js that
+    toggles the endpoint field between the preset caption and the custom
+    input without a server round-trip).
+    """
     opts = []
     for p in all_presets():
         sel = " selected" if p.key == provider else ""
         opts.append(f'<option value="{esc(p.key)}"{sel}>{esc(p.label)}</option>')
-    return f'<select name="provider" class="{_INPUT_CLS}">{"".join(opts)}</select>'
+    return (f'<select name="provider" class="{_INPUT_CLS} astral-field astral-llm-provider">'
+            f'{"".join(opts)}</select>')
+
+
+def _endpoint_block(provider: str, base_url: str) -> str:
+    """Render BOTH the preset-endpoint caption and the custom base-URL input,
+    showing the one that matches ``provider`` and hiding the other.
+
+    The chrome modal is static HTML with no reactive re-render, so the
+    client-side ``astral-llm-provider`` change handler flips which half is
+    visible when the dropdown changes. Both halves are always in the DOM:
+    for a preset the (hidden) ``base_url`` input submits empty and the
+    server derives the URL; for custom the input is the source of truth.
+    """
+    is_custom = provider == CUSTOM_PROVIDER_KEY
+    preset = get_preset(provider)
+    preset_url = "" if is_custom else (getattr(preset, "base_url", "") or "")
+    caption_style = ' style="display:none"' if is_custom else ""
+    input_style = "" if is_custom else ' style="display:none"'
+    return (
+        '<div class="astral-llm-endpoint">'
+        f'<p class="astral-llm-endpoint-preset text-xs text-astral-muted"{caption_style}>'
+        'Endpoint: <span class="astral-llm-endpoint-url font-mono">'
+        f'{esc(preset_url)}</span> (set automatically for this provider)</p>'
+        f'<label class="astral-llm-endpoint-custom {_LABEL_CLS}"{input_style}>'
+        f'<span class="{_LABEL_TEXT_CLS}">Endpoint (Base URL)</span>'
+        f'<input type="text" name="base_url" value="{esc(base_url if is_custom else "")}" '
+        f'placeholder="https://api.openai.com/v1" autocomplete="off" '
+        f'class="{_INPUT_CLS} astral-field"></label>'
+        "</div>"
+    )
+
+
+def _provider_endpoints_json() -> str:
+    """JSON map ``{provider_key: base_url}`` embedded on the form for the
+    client-side endpoint toggle (custom maps to "")."""
+    import json as _json
+    return esc(_json.dumps({p.key: (p.base_url or "") for p in all_presets()}))
 
 
 def _button(action: str, label: str, primary: bool = False, collect: bool = True) -> str:
@@ -271,19 +315,7 @@ async def render(orch: Any, user_id: str, roles: Any, params: Any) -> str:
     model = str(params.get("model") or (getattr(saved, "model", "") if saved else "") or "")
     models = params.get("models") if isinstance(params.get("models"), list) else None
 
-    if provider == CUSTOM_PROVIDER_KEY:
-        endpoint_block = (
-            f'<label class="{_LABEL_CLS}"><span class="{_LABEL_TEXT_CLS}">Endpoint (Base URL)</span>'
-            f'<input type="text" name="base_url" value="{esc(base_url)}" '
-            f'placeholder="https://api.openai.com/v1" autocomplete="off" class="{_INPUT_CLS}">'
-            "</label>"
-        )
-    else:
-        endpoint_block = (
-            f'<p class="text-xs text-astral-muted">Endpoint: '
-            f'<span class="font-mono">{esc(preset.base_url or "")}</span> '
-            "(set automatically for this provider)</p>"
-        )
+    endpoint_block = _endpoint_block(provider, base_url)
 
     key_optional = preset is not None and not preset.key_required
     key_label = "API key" + (" (optional for local runtimes)" if key_optional else "")
@@ -327,7 +359,7 @@ async def render(orch: Any, user_id: str, roles: Any, params: Any) -> str:
 
     return (
         f"{intro}"
-        '<div data-ui-form class="space-y-4">'
+        f"<div data-ui-form data-llm-endpoints='{_provider_endpoints_json()}' class=\"space-y-4\">"
         '<div class="bg-white/5 border border-white/10 rounded-lg p-4 space-y-3">'
         f'<div class="flex items-center justify-between">'
         f'<span class="{_LABEL_TEXT_CLS}">AI provider</span>{saved_badge}</div>'
@@ -353,9 +385,13 @@ async def render(orch: Any, user_id: str, roles: Any, params: Any) -> str:
 async def components(orch: Any, user_id: str, roles: Any, params: Any):
     """Feature 043 — the surface as native SDUI components.
 
-    Same server-derived-endpoint model as the web render: the ``base_url``
-    field exists only for ``custom``; a caption names the preset endpoint
-    otherwise. All actions submit to the same ``chrome_llm_*`` handlers.
+    Native forms can't re-render when the provider dropdown changes (no
+    client round-trip), so the ``base_url`` field is ALWAYS present and
+    editable, prefilled with the selected provider's endpoint. For a preset
+    the server derives the URL and ignores the submitted value; for
+    ``custom`` the field is the source of truth — so picking "Custom" always
+    yields a usable endpoint input. All actions submit to the same
+    ``chrome_llm_*`` handlers.
     """
     from webrender.chrome.surfaces import _sdui
     params = params if isinstance(params, dict) else {}
@@ -378,11 +414,17 @@ async def components(orch: Any, user_id: str, roles: Any, params: Any):
         help="; ".join(f"{p.key} = {p.label}" for p in all_presets()
                        if p.key != provider)[:200] or None,
     )
-    form_fields = [provider_field]
-    if provider == CUSTOM_PROVIDER_KEY:
-        form_fields.append(_sdui.field(
-            "base_url", "Endpoint (Base URL)", "text", default=base_url,
-            help="https://api.openai.com/v1"))
+    # base_url: prefill custom with the saved/submitted URL; presets prefill
+    # with the catalog endpoint (server ignores it for presets).
+    endpoint_default = base_url if provider == CUSTOM_PROVIDER_KEY else (
+        getattr(preset, "base_url", "") or "")
+    form_fields = [
+        provider_field,
+        _sdui.field("base_url", "Endpoint (Base URL)", "text",
+                    default=endpoint_default,
+                    help="Auto-set for hosted providers; required for Custom "
+                         "(e.g. https://api.openai.com/v1)."),
+    ]
     key_optional = preset is not None and not preset.key_required
     if saved is not None and saved.has_key:
         key_help = "A key is saved for your account; leave blank to keep it."

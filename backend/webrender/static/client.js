@@ -1012,6 +1012,35 @@
     if (body) body.classList.toggle("opacity-50", !on);
   });
 
+  // LLM provider picker (feature 054): the chrome modal is static HTML with no
+  // reactive re-render, so toggle the endpoint field client-side when the
+  // provider dropdown changes — show the free-form base_url input only for
+  // "custom", otherwise show the (auto-set) preset endpoint caption. The
+  // server still derives the URL for presets, so the hidden input is inert.
+  document.addEventListener("change", function (e) {
+    var t = e.target;
+    if (!(t.classList && t.classList.contains("astral-llm-provider"))) return;
+    var form = t.closest && t.closest("[data-ui-form]");
+    var wrap = form && form.querySelector(".astral-llm-endpoint");
+    if (!wrap) return;
+    var map = {};
+    try { map = JSON.parse(form.getAttribute("data-llm-endpoints") || "{}"); } catch (err) {}
+    var preset = wrap.querySelector(".astral-llm-endpoint-preset");
+    var custom = wrap.querySelector(".astral-llm-endpoint-custom");
+    var urlEl = wrap.querySelector(".astral-llm-endpoint-url");
+    var input = wrap.querySelector('input[name="base_url"]');
+    if (t.value === "custom") {
+      if (preset) preset.style.display = "none";
+      if (custom) custom.style.display = "";
+      if (input) { input.value = ""; input.focus(); }
+    } else {
+      if (custom) custom.style.display = "none";
+      if (preset) preset.style.display = "";
+      if (urlEl) urlEl.textContent = map[t.value] || "";
+      if (input) input.value = "";  // preset URL is derived server-side
+    }
+  });
+
   // ---- tour runner (steps server-rendered into [data-tour-steps]; A10 skips) ----
   var tourState = null;
   function maybeStartTour() {

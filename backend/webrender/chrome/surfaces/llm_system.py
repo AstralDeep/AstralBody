@@ -36,9 +36,11 @@ from webrender.chrome.surfaces.llm import (
     _actor,
     _button,
     _claims,
+    _endpoint_block,
     _failure_notice,
     _fields,
     _model_field,
+    _provider_endpoints_json,
     _provider_field,
     _provider_key,
     _request_shim,
@@ -108,19 +110,7 @@ async def render(orch: Any, user_id: str, roles: Any, params: Any) -> str:
     model = str(params.get("model") or (getattr(saved, "model", "") if saved else "") or "")
     models = params.get("models") if isinstance(params.get("models"), list) else None
 
-    if provider == "custom":
-        endpoint_block = (
-            f'<label class="{_LABEL_CLS}"><span class="{_LABEL_TEXT_CLS}">Endpoint (Base URL)</span>'
-            f'<input type="text" name="base_url" value="{esc(base_url)}" '
-            f'placeholder="https://api.openai.com/v1" autocomplete="off" class="{_INPUT_CLS}">'
-            "</label>"
-        )
-    else:
-        endpoint_block = (
-            f'<p class="text-xs text-astral-muted">Endpoint: '
-            f'<span class="font-mono">{esc(preset.base_url or "")}</span> '
-            "(set automatically for this provider)</p>"
-        )
+    endpoint_block = _endpoint_block(provider, base_url)
     if saved is not None:
         badge = ('<span class="text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 '
                  'rounded-full bg-green-500/10 text-green-400 border border-green-500/20">'
@@ -136,7 +126,7 @@ async def render(orch: Any, user_id: str, roles: Any, params: Any) -> str:
 
     return (
         f'<p class="text-xs text-astral-muted">{esc(_CONSUMERS_NOTE)}</p>'
-        '<div data-ui-form class="space-y-4">'
+        f"<div data-ui-form data-llm-endpoints='{_provider_endpoints_json()}' class=\"space-y-4\">"
         '<div class="bg-white/5 border border-white/10 rounded-lg p-4 space-y-3">'
         f'<div class="flex items-center justify-between">'
         f'<span class="{_LABEL_TEXT_CLS}">System credential</span>{badge}</div>'

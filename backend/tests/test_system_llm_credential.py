@@ -453,18 +453,21 @@ async def test_system_context_never_resolves_a_user_record(
 async def test_render_unconfigured_custom_vs_preset(orch, clean_system_row):
     from webrender.chrome.surfaces import llm_system
 
-    # Preset provider: endpoint is display-only (set automatically).
+    # Preset provider: endpoint caption shown; the (always-present) custom
+    # base_url input is hidden and toggled client-side.
     html = await llm_system.render(orch, "admin1", ["admin"], {"provider": "openai"})
     assert "set automatically" in html.lower()
-    assert 'name="base_url"' not in html
+    assert "astral-llm-provider" in html and "data-llm-endpoints" in html
+    assert 'astral-llm-endpoint-custom' in html and 'style="display:none"' in html
     assert "not configured" in html
     assert "chrome_llm_sys_save" in html
     assert "Clear system credential" not in html
 
-    # Custom provider: free-form endpoint field renders.
+    # Custom provider: free-form endpoint field visible with its value.
     html = await llm_system.render(orch, "admin1", ["admin"],
                                    {"provider": "custom", "base_url": "https://x.example/v1"})
     assert 'name="base_url"' in html and "https://x.example/v1" in html
+    assert 'astral-llm-endpoint-preset text-xs text-astral-muted" style="display:none"' in html
 
 
 async def test_render_configured_shows_badge_and_never_the_key(
