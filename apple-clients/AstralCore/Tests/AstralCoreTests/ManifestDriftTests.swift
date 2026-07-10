@@ -44,7 +44,8 @@ final class ManifestDriftTests: XCTestCase {
                        "component_types drift — update Dispositions.swift + parity matrix")
         XCTAssertEqual(manifest.push_types.count, 47)
         XCTAssertEqual(manifest.component_types.count, 35)
-        XCTAssertEqual(manifest.accept_actions.count, 67)
+        // 71 = 67 + the four feature-054 chrome_llm_sys_* admin actions.
+        XCTAssertEqual(manifest.accept_actions.count, 71)
     }
 
     func testEveryClientDispositionsEveryFrameAndComponent() throws {

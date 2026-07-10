@@ -217,15 +217,22 @@ jobs:
           set -e
           docker run --rm --entrypoint sh astraldeep:ci -c '
             fail=0
+            # (1) The real deployment risk: no .env baked into an image layer.
             if [ -f /app/.env ] || [ -f /app/backend/.env ]; then
               echo "::error::.env file baked into the image"; fail=1
             fi
-            # Key-shaped strings in the app tree (sk-/gsk_/xai-/AIza + 20 chars).
+            # (2) Key-shaped strings in RUNTIME code only (sk-/gsk_/xai-/AIza +
+            #     20 chars). Test fixtures, the eval benchmark corpus, and docs
+            #     legitimately carry fake example keys, so they are excluded;
+            #     gitleaks scans the full repo/history separately. Offenders
+            #     are printed so a real hit is actionable.
             hits=$(grep -rInE "\b(sk-|gsk_|xai-|AIza)[A-Za-z0-9_-]{20,}\b" /app \
-                     --include="*.py" --include="*.json" --include="*.env" \
-                     --include="*.txt" --include="*.md" 2>/dev/null | wc -l)
-            if [ "$hits" -ne 0 ]; then
-              echo "::error::key-shaped strings found in the image app tree"; fail=1
+                     --include="*.py" --include="*.json" \
+                     --exclude-dir=tests --exclude-dir=security_benchmark \
+                     --exclude-dir=__pycache__ --exclude-dir=knowledge_packs \
+                     --exclude="test_*.py" --exclude="conftest.py" 2>/dev/null || true)
+            if [ -n "$hits" ]; then
+              echo "::error::key-shaped strings found in runtime code:"; echo "$hits"; fail=1
             fi
             exit $fail
           '

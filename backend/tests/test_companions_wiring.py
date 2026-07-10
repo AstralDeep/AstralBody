@@ -88,11 +88,14 @@ async def test_model_router_ondevice_surfaced(monkeypatch):
     o._record_llm_call = AsyncMock()
     o._record_llm_unconfigured = AsyncMock()
     # Feature 054: _call_llm resolves the socket user's PERSISTED config
-    # (env vars are inert). set_sync primes the store's in-process cache,
-    # so resolution below never touches asyncio.to_thread (patched to boom).
-    o._llm_store.set_sync("companions-user", provider="custom",
-                          base_url="http://test.invalid/v1",
-                          model="test-model", api_key="test-key")
+    # (env vars are inert). Seed via the ASYNC set() — it offloads the DB
+    # write to a thread (loop-guard safe under LOOP_GUARD_ENFORCE) and primes
+    # the store's in-process cache, so the resolution below hits the cache
+    # and never touches the to_thread patched to boom further down. Runs
+    # BEFORE that patch is installed.
+    await o._llm_store.set("companions-user", provider="custom",
+                           base_url="http://test.invalid/v1",
+                           model="test-model", api_key="test-key")
 
     def fake_route(feature, *, default_model, device_type=None, device_caps=None):
         return model_router.RouteDecision(model=default_model, tier=1, ondevice=True)
