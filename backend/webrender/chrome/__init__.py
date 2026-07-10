@@ -17,24 +17,42 @@ from webrender import esc, render_one, safe_url  # noqa: F401  (re-exported for 
 from .topbar import render_topbar  # noqa: F401
 
 
-def render_modal_shell(title: str, body_html: str, surface: str = "") -> str:
+def render_modal_shell(title: str, body_html: str, surface: str = "",
+                       mandatory: bool = False) -> str:
     """Wrap a surface body in the standard chrome modal (backdrop + card).
 
     ``body_html`` is trusted, already-escaped chrome output from a surface
     renderer; ``title`` and ``surface`` are escaped here.
+
+    ``mandatory=True`` (feature 054 first-run gate): the ✕ button is
+    omitted, ``data-mandatory="1"`` is stamped on the card so
+    ``client.js closeModal()`` refuses every dismissal affordance, and a
+    "Sign out" link is included — the one guaranteed escape hatch
+    (spec FR-013).
     """
+    if mandatory:
+        close_btn = (
+            '<a href="/auth/logout" class="text-xs text-astral-muted '
+            'hover:text-astral-text underline underline-offset-2">Sign out</a>'
+        )
+        mandatory_attr = ' data-mandatory="1"'
+    else:
+        close_btn = (
+            '<button type="button" class="astral-modal-close text-astral-muted hover:text-astral-text '
+            'rounded-lg p-1.5 hover:bg-white/5" aria-label="Close">'
+            '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+            'stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg></button>'
+        )
+        mandatory_attr = ""
     return (
         f'<div class="astral-modal-backdrop fixed inset-0 z-50 bg-black/60 backdrop-blur-sm '
         f'flex items-start justify-center overflow-y-auto py-10" data-surface="{esc(surface)}">'
         f'<div class="astral-modal-card relative bg-astral-surface border border-white/10 rounded-xl '
-        f'shadow-2xl w-full max-w-3xl mx-4 my-auto" role="dialog" aria-modal="true" '
+        f'shadow-2xl w-full max-w-3xl mx-4 my-auto"{mandatory_attr} role="dialog" aria-modal="true" '
         f'aria-label="{esc(title)}" tabindex="-1">'
         f'<div class="flex items-center justify-between px-5 py-4 border-b border-white/5">'
         f'<h2 class="text-base font-semibold text-astral-text">{esc(title)}</h2>'
-        f'<button type="button" class="astral-modal-close text-astral-muted hover:text-astral-text '
-        f'rounded-lg p-1.5 hover:bg-white/5" aria-label="Close">'
-        f'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
-        f'stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg></button></div>'
+        f'{close_btn}</div>'
         f'<div class="px-5 py-4 max-h-[70vh] overflow-y-auto space-y-4">{body_html}</div>'
         f'</div></div>'
     )

@@ -41,10 +41,11 @@ logger = logging.getLogger("LLMConfig.AuditEvents")
 # defence-in-depth on top of the application-layer rule "never put
 # api_key in a payload field."
 _KEY_PREFIX_PATTERNS = (
-    re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}\b"),  # OpenAI-style
+    re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}\b"),  # OpenAI-style (also sk-ant-/sk-or-/sk-proj-)
     re.compile(r"\bgsk_[A-Za-z0-9_\-]{20,}\b"),  # Groq-style
     re.compile(r"\bxai-[A-Za-z0-9_\-]{20,}\b"),  # xAI-style
     re.compile(r"\bor-[A-Za-z0-9_\-]{20,}\b"),  # OpenRouter-style
+    re.compile(r"\bAIza[A-Za-z0-9_\-]{20,}\b"),  # Google API-key-style (Gemini)
 )
 
 
@@ -90,24 +91,34 @@ async def record_llm_config_change(
     result: Optional[str] = None,
     error_class: Optional[str] = None,
     correlation_id: Optional[str] = None,
+    scope: str = "user",
 ) -> None:
     """Emit an ``llm_config_change`` audit event.
 
     Args:
-        action: One of ``"created"``, ``"updated"``, ``"cleared"``, ``"tested"``.
+        action: One of ``"created"``, ``"updated"``, ``"cleared"``,
+            ``"tested"``, or ``"discarded_undecryptable"`` (feature 054:
+            an at-rest record could not be decrypted — key rotation or
+            corruption — and was deleted, re-gating the user).
         base_url / model: Non-sensitive descriptors. ``None`` permitted
             for ``cleared`` (the caller may not have the prior values).
         transport: ``"ws"`` or ``"rest"`` — which channel the change came in on.
         result: ``"success"`` or ``"failure"`` — only for ``action="tested"``.
         error_class: Only set when ``result == "failure"``; one of the
             taxonomy values from contracts/rest-llm-test.md.
+        scope: ``"user"`` (a user's own record) or ``"system"`` (the
+            admin-managed deployment credential — feature 054).
     """
-    if action not in ("created", "updated", "cleared", "tested"):
+    if action not in ("created", "updated", "cleared", "tested",
+                      "discarded_undecryptable"):
         raise ValueError(f"unknown action: {action!r}")
+    if scope not in ("user", "system"):
+        raise ValueError(f"unknown scope: {scope!r}")
 
     inputs_meta: Dict[str, Any] = {
         "action": action,
         "transport": transport,
+        "scope": scope,
     }
     if base_url is not None:
         inputs_meta["base_url"] = base_url
@@ -151,6 +162,9 @@ def _describe_config_change(
 ) -> str:
     if action == "cleared":
         return "User cleared their personal LLM configuration"
+    if action == "discarded_undecryptable":
+        return ("Stored LLM configuration could not be decrypted and was "
+                "discarded (treated as unconfigured)")
     model_str = f" ({model})" if model else ""
     if action == "tested":
         if result == "success":
@@ -237,7 +251,10 @@ async def record_llm_call(
     _assert_no_api_key(outputs_meta)
 
     started = _now()
-    src_label = "user credentials" if credential_source == CredentialSource.USER else "operator default"
+    src_label = {
+        CredentialSource.USER: "user credentials",
+        CredentialSource.SYSTEM: "system credential",
+    }.get(credential_source, "operator default")
     event = AuditEventCreate(
         actor_user_id=actor_user_id,
         auth_principal=auth_principal,

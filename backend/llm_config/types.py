@@ -8,13 +8,19 @@ from enum import Enum
 class CredentialSource(str, Enum):
     """Which credential set served a given LLM-dependent call.
 
-    Recorded on every ``llm_call`` audit event so operators can answer
-    "for which users did the operator's account pay?" with a single
-    audit-log query (SC-006). Inheriting from ``str`` makes the enum
-    JSON-serializable in audit payloads without an explicit converter.
+    Recorded on every ``llm_call`` audit event. Inheriting from ``str``
+    makes the enum JSON-serializable in audit payloads without an explicit
+    converter.
+
+    Feature 054: ``SYSTEM`` (the admin-managed deployment credential for
+    system-context calls) replaces the retired ``OPERATOR_DEFAULT`` for
+    all NEW events. The ``OPERATOR_DEFAULT`` member is retained solely so
+    historical audit rows keep a meaningful decode; no new event may carry
+    it.
     """
     USER = "user"
-    OPERATOR_DEFAULT = "operator_default"
+    SYSTEM = "system"
+    OPERATOR_DEFAULT = "operator_default"  # retired — historical rows only
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,14 +38,13 @@ class ResolvedConfig:
 
 
 class LLMUnavailable(Exception):
-    """Raised by :func:`build_llm_client` when neither the user's session
-    credentials nor the operator's ``.env`` default credentials are
-    complete.
+    """Raised by :func:`build_llm_client` when the resolved credential
+    record is absent.
 
-    Callers in the orchestrator catch this and emit an
-    ``llm_unconfigured`` audit event (FR-007), then surface the
-    "LLM unavailable — set your own provider in settings" UI prompt
-    to the originating user (FR-004a). NOT a programmer error: this
-    is the documented fail-closed branch when both credential sources
-    are missing.
+    Feature 054: for a user-context call this means the user has not
+    completed provider setup — callers emit ``llm_unconfigured`` and the
+    mandatory first-run gate applies. For a system-context call it means
+    the admin has not configured the deployment's system credential —
+    background features degrade gracefully with honest failure reporting.
+    NOT a programmer error: this is the documented fail-closed branch.
     """

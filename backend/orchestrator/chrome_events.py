@@ -253,12 +253,63 @@ async def _audit_admin_rejection(orch, websocket, user_id: str, what: str):
         logger.debug("chrome: admin-rejection audit failed", exc_info=True)
 
 
+# Feature 054: the only chrome actions an unconfigured user may perform —
+# the setup surface's own actions. Everything else (surface navigation,
+# close, other surfaces' handlers) is refused server-side while gated
+# (FR-014); sign-out is NOT a chrome action and stays reachable.
+_LLM_GATE_ALLOWED_ACTIONS = frozenset({
+    "chrome_llm_models", "chrome_llm_test", "chrome_llm_save", "chrome_llm_clear",
+})
+
+
+async def _llm_gate_refusal(orch, websocket, action: str, user_id: str) -> bool:
+    """Server-authoritative first-run gate (feature 054, FR-014).
+
+    Returns True when the action was refused: the refusal is audited
+    (``llm_unconfigured``) and the mandatory setup dialog is (re)pushed so
+    the client lands back on the only actionable surface."""
+    try:
+        claims = orch.ui_sessions.get(websocket) or {}
+        uid = claims.get("sub") or user_id or ""
+        if not uid or await orch.llm_configured_for(uid):
+            return False
+    except Exception:
+        # Predicate failure: fail open here — the chat pre-flight and the
+        # per-call resolver still fail closed on actual LLM use.
+        logger.exception("chrome: llm gate predicate failed (failing open)")
+        return False
+    if action in _LLM_GATE_ALLOWED_ACTIONS:
+        return False
+    try:
+        actor_user_id, auth_principal = orch._llm_audit_principals(websocket)
+        await orch._record_llm_unconfigured(
+            orch.audit_recorder,
+            actor_user_id=actor_user_id,
+            auth_principal=auth_principal,
+            feature=f"chrome:{action}",
+        )
+    except Exception:
+        logger.debug("chrome: llm gate refusal audit failed", exc_info=True)
+    try:
+        from orchestrator import llm_gate
+        await llm_gate.push_setup_dialog(orch, websocket, user_id)
+    except Exception:
+        logger.debug("chrome: llm gate re-push failed", exc_info=True)
+    return True
+
+
 async def handle_chrome_event(orch, websocket, action: str, payload: dict,
                               user_id: str) -> bool:
     """Dispatch one chrome/creation ui_event. Returns True if handled."""
     if not _is_chrome_action(action):
         return False
     payload = payload or {}
+    # Feature 054: while the caller has no LLM configuration, every chrome
+    # action except the setup surface's own handlers is answered with the
+    # mandatory setup dialog (chrome_open of ANY surface — including "llm"
+    # itself — lands on the mandatory variant; chrome_close is refused).
+    if await _llm_gate_refusal(orch, websocket, action, user_id):
+        return True
     roles = _roles(orch, websocket)
     # Resolved before the handler runs so an exception's error notice carries
     # the acting surface key (feature 044 — native key-matched reducers).

@@ -1195,6 +1195,42 @@ class Database:
             )
         ''')
 
+        # ── Feature 054: bring-your-own-LLM credential stores ───────────────
+        # user_llm_config: one row per user who has completed provider setup;
+        # api_key_enc is Fernet ciphertext under CREDENTIAL_ENCRYPTION_KEY
+        # (NULL for keyless local-runtime presets). Absence of a decryptable
+        # row IS the "unconfigured" state that triggers the mandatory
+        # first-run provider-setup gate. Additive, no FKs.
+        # Rollback: DROP TABLE IF EXISTS user_llm_config;
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_llm_config (
+                user_id TEXT PRIMARY KEY,
+                provider TEXT NOT NULL,
+                base_url TEXT NOT NULL,
+                model TEXT NOT NULL,
+                api_key_enc TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        ''')
+        # system_llm_config: zero-or-one admin-managed deployment credential,
+        # used EXCLUSIVELY for system-context LLM calls (scheduled jobs,
+        # codegen, knowledge synthesis, compaction, combine/condense,
+        # narration). Never serves user chat and vice versa (FR-019).
+        # Rollback: DROP TABLE IF EXISTS system_llm_config;
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS system_llm_config (
+                id SMALLINT PRIMARY KEY CHECK (id = 1),
+                provider TEXT NOT NULL,
+                base_url TEXT NOT NULL,
+                model TEXT NOT NULL,
+                api_key_enc TEXT,
+                updated_by TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        ''')
+
         # ── Feature 029: agent catalog migrations (data-model.md) ───────────
         self._migrate_agent_catalog_029(cursor)
 
