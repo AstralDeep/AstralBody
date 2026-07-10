@@ -1,20 +1,27 @@
-"""Feature 027 — T013: LLM settings surface (key ``llm``).
+"""Features 027/043/054 — LLM settings surface (key ``llm``).
 
-Structural/behavioral tests on a minimal fake orchestrator — no Postgres,
-no network. The per-session credential store is the REAL
-``SessionCredentialStore`` (pure in-memory); the list-models / test
-probes are monkeypatched at their ``llm_config.api`` definitions (the
-surface lazy-imports them per call, matching the orchestrator pattern).
+Feature 054 rebuilt this surface around the PERSISTED per-user store
+(``user_llm_config``) and the server-owned provider catalog
+(:mod:`llm_config.providers`). These tests run structurally on a minimal
+fake orchestrator — no Postgres, no network: the store is an in-memory fake
+implementing exactly the async surface the handlers use; the save-path
+connection probe is monkeypatched at ``llm_config.ws_handlers`` (spec FR-008)
+and the list-models / test probes at their ``llm_config.api`` definitions.
 """
 import asyncio
+import json
+import time
 from types import SimpleNamespace
 
 from llm_config.api import ListModelsResponse, TestConnectionResponse
-from llm_config.session_creds import SessionCredentialStore
+from llm_config.providers import CUSTOM_PROVIDER_KEY, all_presets
+from llm_config.user_store import PersistedLLMConfig
 from webrender.chrome.surfaces import get_surface
 from webrender.chrome.surfaces import llm as llm_surface
 
 SECRET = "sk-supersecret-test-key-123456789012345"
+
+PRESET_KEYS = [p.key for p in all_presets()]
 
 
 class FakeRecorder:
@@ -28,7 +35,44 @@ class FakeRecorder:
 
 
 class FakeWS:
-    """Identity-only websocket stand-in (the store keys by ``id(ws)``)."""
+    """Identity-only websocket stand-in."""
+
+
+class FakeStore:
+    """In-memory twin of ``UserLLMConfigStore``'s per-user async surface."""
+
+    def __init__(self):
+        self._users = {}
+
+    async def get(self, user_id):
+        return self._users.get(user_id)
+
+    async def set(self, user_id, *, provider, base_url, model, api_key):
+        provider = (provider or "").strip() or "custom"
+        base_url = (base_url or "").strip().rstrip("/")
+        model = (model or "").strip()
+        api_key = (api_key or "").strip()
+        if not base_url or not model:
+            raise ValueError("base_url and model must be non-empty")
+        cfg = PersistedLLMConfig(provider=provider, base_url=base_url,
+                                 model=model, api_key=api_key,
+                                 updated_at=time.time())
+        self._users[user_id] = cfg
+        return cfg
+
+    async def clear(self, user_id):
+        return self._users.pop(user_id, None) is not None
+
+    # test conveniences
+    def seed(self, user_id, *, provider="custom",
+             base_url="https://api.example.com/v1", model="gpt-x",
+             api_key=SECRET):
+        self._users[user_id] = PersistedLLMConfig(
+            provider=provider, base_url=base_url, model=model,
+            api_key=api_key, updated_at=time.time())
+
+    def get_sync(self, user_id):
+        return self._users.get(user_id)
 
 
 def make_orch():
@@ -40,7 +84,8 @@ def make_orch():
 
     orch = SimpleNamespace(
         ui_sessions={},
-        _session_llm_creds=SessionCredentialStore(),
+        _llm_store=FakeStore(),
+        _ws_llm_gated={},
         audit_recorder=FakeRecorder(),
         _safe_send=safe_send,
     )
@@ -60,6 +105,19 @@ def render(orch, user_id="u1", roles=None, params=None):
     return run(llm_surface.render(orch, user_id, roles or ["user"], params or {}))
 
 
+def components(orch, user_id="u1", roles=None, params=None):
+    return run(llm_surface.components(orch, user_id, roles or ["user"], params or {}))
+
+
+def _probe_ok(monkeypatch, calls=None):
+    async def fake_probe(*, api_key, base_url, model, **kw):
+        if calls is not None:
+            calls.update(api_key=api_key, base_url=base_url, model=model)
+        return True, None, None
+
+    monkeypatch.setattr("llm_config.ws_handlers.probe_chat_completion", fake_probe)
+
+
 # ---------------------------------------------------------------------------
 # Registry / module contract
 # ---------------------------------------------------------------------------
@@ -68,6 +126,7 @@ def test_registry_resolves_llm_surface():
     mod = get_surface("llm")
     assert mod is llm_surface
     assert mod.TITLE == "LLM settings"
+    assert mod.FIRST_RUN_TITLE == "Set up your AI provider"
     assert not getattr(mod, "ADMIN_ONLY", False)
 
 
@@ -80,44 +139,80 @@ def test_handlers_cover_contract_actions():
 
 
 # ---------------------------------------------------------------------------
-# Render
+# Render (web HTML)
 # ---------------------------------------------------------------------------
 
 def test_render_empty_state_form_structure():
     html = render(make_orch())
     assert "data-ui-form" in html
-    assert 'name="base_url"' in html
+    assert '<select name="provider"' in html
     assert 'type="password"' in html and 'name="api_key"' in html
-    assert 'name="model"' in html and "<select" not in html
+    assert 'name="model"' in html and '<select name="model"' not in html
     for action in ("chrome_llm_models", "chrome_llm_test", "chrome_llm_save"):
         assert f'data-ui-action="{action}"' in html
         assert 'data-ui-collect="true"' in html
-    # No saved creds -> no clear affordance, generic key placeholder.
+    # No saved config -> no clear affordance, generic key placeholder.
     assert "chrome_llm_clear" not in html
     assert "sk-..." in html
+    assert "not configured" in html
+
+
+def test_render_provider_dropdown_offers_all_presets():
+    html = render(make_orch())
+    assert len(PRESET_KEYS) == 11  # FR-011: ten presets + custom
+    for key in PRESET_KEYS:
+        assert f'<option value="{key}"' in html
+    # Custom is the last option (escape hatch ordering).
+    assert html.rindex('<option value="custom"') > html.rindex('<option value="openai"')
+
+
+def test_render_preset_has_no_editable_base_url():
+    """Server-derived endpoints: catalog presets render display-only copy;
+    ONLY custom renders the free-form base_url input."""
+    html = render(make_orch(), params={"provider": "openai"})
+    assert 'name="base_url"' not in html
+    assert "https://api.openai.com/v1" in html
+    assert "set automatically" in html
+
+    html_custom = render(make_orch(), params={"provider": CUSTOM_PROVIDER_KEY})
+    assert 'name="base_url"' in html_custom
+    assert "set automatically" not in html_custom
+
+
+def test_render_keyless_preset_marks_key_optional():
+    html = render(make_orch(), params={"provider": "ollama"})
+    assert "optional for local runtimes" in html
+    assert "http://localhost:11434/v1" in html
+    # Key-required presets never carry the optional copy.
+    assert "optional for local runtimes" not in render(
+        make_orch(), params={"provider": "openai"})
+
+
+def test_render_first_run_copy_and_local_runtime_note():
+    html = render(make_orch(), params={"first_run": True})
+    assert "nothing is built in" in html
+    assert "reachable FROM THE SERVER" in html
 
 
 def test_render_saved_state_shows_placeholder_never_echoes_key():
     orch = make_orch()
-    ws = FakeWS()
-    register(orch, ws, sub="u1")
-    orch._session_llm_creds.set(id(ws), SECRET, "https://api.example.com/v1", "gpt-x")
+    orch._llm_store.seed("u1")  # provider=custom, base_url, model, SECRET key
     html = render(orch, user_id="u1")
     assert "leave blank to keep" in html
     assert SECRET not in html  # write-only display — the key is NEVER echoed
-    assert 'value="https://api.example.com/v1"' in html
+    assert 'value="https://api.example.com/v1"' in html  # custom → editable field
     assert 'value="gpt-x"' in html
     assert 'data-ui-action="chrome_llm_clear"' in html
+    assert ">configured<" in html
 
 
 def test_render_saved_state_is_per_user():
     orch = make_orch()
-    ws = FakeWS()
-    register(orch, ws, sub="someone-else")
-    orch._session_llm_creds.set(id(ws), SECRET, "https://api.example.com/v1", "gpt-x")
+    orch._llm_store.seed("someone-else")
     html = render(orch, user_id="u1")
     assert "chrome_llm_clear" not in html
     assert "https://api.example.com/v1" not in html
+    assert "not configured" in html
 
 
 def test_render_models_param_builds_escaped_select():
@@ -128,35 +223,103 @@ def test_render_models_param_builds_escaped_select():
 
 
 def test_render_preserves_submitted_values_from_params():
-    html = render(make_orch(), params={"base_url": "https://x.test/v1", "model": "my-model"})
+    html = render(make_orch(), params={"provider": "custom",
+                                       "base_url": "https://x.test/v1",
+                                       "model": "my-model"})
     assert 'value="https://x.test/v1"' in html
     assert 'value="my-model"' in html
 
 
 # ---------------------------------------------------------------------------
-# chrome_llm_save / chrome_llm_clear (session store + audit, ws-handler reuse)
+# SDUI components() (feature 043 twin of the web render)
+# ---------------------------------------------------------------------------
+
+def _param_picker(comps):
+    pickers = [c for c in comps if isinstance(c, dict) and c.get("type") == "param_picker"]
+    assert len(pickers) == 1, f"expected one form, got {pickers!r}"
+    return pickers[0]
+
+
+def _field(picker, name):
+    for f in picker["fields"]:
+        if f.get("name") == name:
+            return f
+    return None
+
+
+def test_components_include_provider_select_with_full_catalog():
+    comps = components(make_orch())
+    picker = _param_picker(comps)
+    provider = _field(picker, "provider")
+    assert provider is not None
+    assert provider["kind"] == "select"
+    assert provider["options"] == PRESET_KEYS
+    # Same multi-action wiring as the web buttons.
+    actions = {a["action"] for a in picker["actions"]}
+    assert {"chrome_llm_models", "chrome_llm_test", "chrome_llm_save"} <= actions
+
+
+def test_components_first_run_carries_local_runtime_note():
+    comps = components(make_orch(), params={"first_run": True})
+    texts = [c.get("content", "") for c in comps
+             if isinstance(c, dict) and c.get("type") == "text"]
+    assert any("reachable FROM THE SERVER" in t for t in texts)
+    assert any("nothing is built in" in t for t in texts)
+
+
+def test_components_base_url_field_only_for_custom():
+    picker = _param_picker(components(make_orch(), params={"provider": "openai"}))
+    assert _field(picker, "base_url") is None
+
+    picker = _param_picker(components(make_orch(), params={"provider": "custom"}))
+    assert _field(picker, "base_url") is not None
+
+
+def test_components_never_echo_saved_key():
+    orch = make_orch()
+    orch._llm_store.seed("u1")
+    comps = components(orch, user_id="u1")
+    assert SECRET not in json.dumps(comps)
+    picker = _param_picker(comps)
+    key_field = _field(picker, "api_key")
+    assert key_field["kind"] == "password"
+    assert "leave blank" in key_field["help"]
+    badges = [c for c in comps if isinstance(c, dict) and c.get("type") == "badge"]
+    assert badges and badges[0]["label"] == "configured"
+
+
+# ---------------------------------------------------------------------------
+# chrome_llm_save / chrome_llm_clear (persisted store + probe gate + audit)
 # ---------------------------------------------------------------------------
 
 def _payload(**fields):
     return {"fields": fields}
 
 
-def test_save_persists_audits_and_acks():
+def test_save_probes_persists_audits_and_acks(monkeypatch):
+    calls = {}
+    _probe_ok(monkeypatch, calls)
     orch = make_orch()
     ws = FakeWS()
     register(orch, ws)
     result = run(llm_surface.HANDLERS["chrome_llm_save"](
         orch, ws, "u1", ["user"],
-        _payload(base_url="https://api.example.com/v1/", api_key=SECRET, model="gpt-x"),
+        _payload(provider="custom", base_url="https://api.example.com/v1/",
+                 api_key=SECRET, model="gpt-x"),
     ))
     surface, params, notice = result
     assert surface == "llm"
-    creds = orch._session_llm_creds.get(id(ws))
-    assert creds is not None and creds.api_key == SECRET
-    assert creds.base_url == "https://api.example.com/v1"  # store rstrips '/'
-    # Audit preserved (same path as WS llm_config_set).
-    assert [e.action_type for e in orch.audit_recorder.events] == ["llm_config.created"]
-    assert orch.audit_recorder.events[0].auth_principal == "u1@example"
+    # The probe ran against the exact triple being saved (FR-008).
+    assert calls == {"api_key": SECRET,
+                     "base_url": "https://api.example.com/v1",
+                     "model": "gpt-x"}
+    cfg = orch._llm_store.get_sync("u1")
+    assert cfg is not None and cfg.api_key == SECRET
+    assert cfg.base_url == "https://api.example.com/v1"  # store rstrips '/'
+    # Audit preserved (same path as WS llm_config_set): probe then persist.
+    assert [e.action_type for e in orch.audit_recorder.events] == [
+        "llm_config.tested", "llm_config.created"]
+    assert orch.audit_recorder.events[-1].auth_principal == "u1@example"
     # llm_config_ack still sent over the live websocket.
     assert any("llm_config_ack" in text for sock, text in orch.sent if sock is ws)
     # Key never leaks into the re-render inputs.
@@ -164,48 +327,102 @@ def test_save_persists_audits_and_acks():
     assert "saved" in notice
 
 
-def test_save_missing_fields_is_error_without_mutation():
+def test_save_preset_derives_base_url_server_side(monkeypatch):
+    calls = {}
+    _probe_ok(monkeypatch, calls)
+    orch = make_orch()
+    ws = FakeWS()
+    register(orch, ws)
+    run(llm_surface.HANDLERS["chrome_llm_save"](
+        orch, ws, "u1", ["user"],
+        # Submitted base_url is IGNORED for presets — server derives it.
+        _payload(provider="groq", base_url="https://evil.example.com/v1",
+                 api_key=SECRET, model="llama-3.1-8b-instant"),
+    ))
+    assert calls["base_url"] == "https://api.groq.com/openai/v1"
+    assert orch._llm_store.get_sync("u1").base_url == "https://api.groq.com/openai/v1"
+
+
+def test_save_missing_fields_is_error_without_mutation(monkeypatch):
+    async def probe_must_not_run(**kwargs):
+        raise AssertionError("probe must not run on an invalid submission")
+
+    monkeypatch.setattr(
+        "llm_config.ws_handlers.probe_chat_completion", probe_must_not_run)
     orch = make_orch()
     ws = FakeWS()
     register(orch, ws)
     surface, params, notice = run(llm_surface.HANDLERS["chrome_llm_save"](
-        orch, ws, "u1", ["user"], _payload(base_url="https://x.test/v1", api_key="", model=""),
+        orch, ws, "u1", ["user"],
+        _payload(provider="custom", base_url="https://x.test/v1",
+                 api_key="", model=""),
     ))
     assert surface == "llm"
-    assert id(ws) not in orch._session_llm_creds
+    assert orch._llm_store.get_sync("u1") is None
     assert orch.audit_recorder.events == []
-    assert "astral-chrome-notice" in notice and "missing" in notice
+    assert "astral-chrome-notice" in notice and "Save rejected" in notice
     assert params["base_url"] == "https://x.test/v1"  # submitted values preserved
 
 
-def test_save_blank_key_keeps_saved_key():
+def test_save_failed_probe_refuses_and_stores_nothing(monkeypatch):
+    async def failing_probe(*, api_key, base_url, model, **kw):
+        return False, "auth_failed", "401 unauthorized"
+
+    monkeypatch.setattr(
+        "llm_config.ws_handlers.probe_chat_completion", failing_probe)
     orch = make_orch()
     ws = FakeWS()
     register(orch, ws)
-    orch._session_llm_creds.set(id(ws), SECRET, "https://old.test/v1", "old-model")
+    _surface, _params, notice = run(llm_surface.HANDLERS["chrome_llm_save"](
+        orch, ws, "u1", ["user"],
+        _payload(provider="custom", base_url="https://x.test/v1",
+                 api_key=SECRET, model="gpt-x"),
+    ))
+    assert orch._llm_store.get_sync("u1") is None  # nothing persisted
+    assert "Save rejected" in notice
+    # The failed probe itself is audited; no created/updated follows.
+    assert [e.action_type for e in orch.audit_recorder.events] == ["llm_config.tested"]
+    assert orch.audit_recorder.events[0].outcome == "failure"
+
+
+def test_save_blank_key_keeps_saved_key(monkeypatch):
+    calls = {}
+    _probe_ok(monkeypatch, calls)
+    orch = make_orch()
+    ws = FakeWS()
+    register(orch, ws)
+    orch._llm_store.seed("u1", base_url="https://old.test/v1", model="old-model")
     surface, _params, notice = run(llm_surface.HANDLERS["chrome_llm_save"](
         orch, ws, "u1", ["user"],
-        _payload(base_url="https://new.test/v1", api_key="", model="new-model"),
+        _payload(provider="custom", base_url="https://new.test/v1",
+                 api_key="", model="new-model"),
     ))
     assert surface == "llm"
-    creds = orch._session_llm_creds.get(id(ws))
-    assert creds.api_key == SECRET and creds.model == "new-model"
-    assert [e.action_type for e in orch.audit_recorder.events] == ["llm_config.updated"]
+    cfg = orch._llm_store.get_sync("u1")
+    assert cfg.api_key == SECRET and cfg.model == "new-model"
+    assert calls["api_key"] == SECRET  # the kept key was probed too
+    assert [e.action_type for e in orch.audit_recorder.events] == [
+        "llm_config.tested", "llm_config.updated"]
     assert "kept" in notice
 
 
-def test_clear_drops_creds_and_audits():
+def test_clear_drops_record_audits_and_regates():
     orch = make_orch()
     ws = FakeWS()
     register(orch, ws)
-    orch._session_llm_creds.set(id(ws), SECRET, "https://x.test/v1", "m")
-    surface, params, notice = run(llm_surface.HANDLERS["chrome_llm_clear"](
+    orch._llm_store.seed("u1", base_url="https://x.test/v1", model="m")
+    result = run(llm_surface.HANDLERS["chrome_llm_clear"](
         orch, ws, "u1", ["user"], {},
     ))
-    assert surface == "llm" and params == {}
-    assert id(ws) not in orch._session_llm_creds
+    # The re-gate replaced the modal on every socket — no tuple re-render.
+    assert result is None
+    assert orch._llm_store.get_sync("u1") is None
     assert [e.action_type for e in orch.audit_recorder.events] == ["llm_config.cleared"]
-    assert "cleared" in notice
+    # The mandatory setup dialog was pushed to the user's socket (FR-009).
+    mandatory = [json.loads(text) for sock, text in orch.sent
+                 if sock is ws and '"chrome_render"' in text]
+    assert mandatory and 'data-mandatory="1"' in mandatory[-1]["html"]
+    assert orch._ws_llm_gated.get(id(ws)) is True
 
 
 def test_clear_when_empty_is_quiet_noop():
@@ -216,7 +433,7 @@ def test_clear_when_empty_is_quiet_noop():
         orch, ws, "u1", ["user"], {},
     ))
     assert orch.audit_recorder.events == []  # no audit noise on empty clear
-    assert "No session LLM credentials" in notice
+    assert "No stored AI provider configuration" in notice
 
 
 # ---------------------------------------------------------------------------
@@ -291,7 +508,7 @@ def test_models_requires_key_when_none_saved():
     assert "required" in notice
 
 
-def test_models_blank_key_uses_saved_session_key(monkeypatch):
+def test_models_blank_key_uses_saved_persisted_key(monkeypatch):
     seen = {}
 
     async def fake_list_models(*, body, request, user_id, user_payload):
@@ -302,7 +519,7 @@ def test_models_blank_key_uses_saved_session_key(monkeypatch):
     orch = make_orch()
     ws = FakeWS()
     register(orch, ws)
-    orch._session_llm_creds.set(id(ws), SECRET, "https://x.test/v1", "m")
+    orch._llm_store.seed("u1", base_url="https://x.test/v1", model="m")
     run(llm_surface.HANDLERS["chrome_llm_models"](
         orch, ws, "u1", ["user"], _payload(base_url="https://x.test/v1", api_key=""),
     ))
@@ -343,7 +560,8 @@ def test_test_failure_renders_error_class_and_message(monkeypatch):
     assert "auth_failed" in notice
     assert "rejected the API key" in notice  # actionable hint, not a raw dump
     assert "401" in notice and "<unauthorized>" not in notice  # sanitized snippet
-    assert params == {"base_url": "https://x.test/v1", "model": "gpt-x"}
+    assert params == {"provider": "custom", "base_url": "https://x.test/v1",
+                      "model": "gpt-x"}
 
 
 def test_test_failure_html_error_page_is_never_dumped(monkeypatch):
@@ -369,7 +587,8 @@ def test_test_failure_html_error_page_is_never_dumped(monkeypatch):
         _payload(base_url="http://example.com", api_key=SECRET, model="ddddd"),
     ))
     assert "doctype" not in notice.lower() and "Example Domain" not in notice
-    assert "Base URL" in notice  # the actionable guidance survived
+    # The actionable what-to-do guidance survived (054 catalog-aware copy).
+    assert "Double-check the provider" in notice
 
 
 def test_clean_upstream_sanitizes_and_bounds():
