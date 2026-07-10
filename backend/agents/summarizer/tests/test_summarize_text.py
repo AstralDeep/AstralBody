@@ -186,15 +186,24 @@ def test_summarize_text_prefers_session_credentials(fake_openai) -> None:
 
 
 def test_encrypted_agent_credentials_are_ignored(fake_openai, monkeypatch) -> None:
-    """With _credentials_encrypted, the bundle must not be read for LLM creds."""
+    """With _credentials_encrypted, the bundle must not be read for LLM creds.
+
+    Feature 054 removed the env fallback that used to catch this case, so an
+    encrypted bundle with no session credentials now lands on the honest
+    'LLM not configured' error path — and no client is ever built from the
+    still-encrypted bundle key (or from the now-inert env var).
+    """
     fake_cls = fake_openai(GOOD_JSON)
-    monkeypatch.setenv("OPENAI_API_KEY", "env-key")
-    summarize_text(
+    monkeypatch.setenv("OPENAI_API_KEY", "env-key")  # must stay inert (054)
+    result = summarize_text(
         text="Snakes.",
         _credentials={"OPENAI_API_KEY": "bundle-key"},
         _credentials_encrypted=True,
     )
-    assert fake_cls.last_init["api_key"] == "env-key"
+    alert = result["_ui_components"][0]
+    assert alert["variant"] == "error"
+    assert "LLM" in alert["message"]
+    assert fake_cls.last_init == {}, "no client may be built from the encrypted bundle or env"
 
 
 def test_no_session_key_leaked_in_output(fake_openai) -> None:

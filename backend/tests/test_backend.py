@@ -439,12 +439,10 @@ class TestOrchestratorRetry:
     @pytest.fixture
     def orchestrator(self):
         """Create a minimal orchestrator for retry testing."""
-        os.environ["OPENAI_API_KEY"] = "test-key"
-        os.environ["OPENAI_BASE_URL"] = "http://fake.api"
-        os.environ["LLM_MODEL"] = "test-model"
+        # Feature 054: env vars are inert and there is no orchestrator-held
+        # llm_client — these tests never reach an LLM call.
         from orchestrator.orchestrator import Orchestrator
         orch = Orchestrator()
-        orch.llm_client = MagicMock()
         return orch
 
     @pytest.mark.asyncio
@@ -597,12 +595,10 @@ class TestLLMRouting:
     @pytest.fixture
     def orchestrator(self):
         """Create an orchestrator with mocked LLM client."""
-        os.environ["OPENAI_API_KEY"] = "test-key"
-        os.environ["OPENAI_BASE_URL"] = "http://fake.api"
-        os.environ["LLM_MODEL"] = "test-model"
+        # Feature 054: env vars are inert and there is no orchestrator-held
+        # llm_client — these tests never reach an LLM call.
         from orchestrator.orchestrator import Orchestrator
         orch = Orchestrator()
-        orch.llm_client = MagicMock()
 
         # Register a fake agent with capabilities
         from shared.protocol import AgentCard, AgentSkill

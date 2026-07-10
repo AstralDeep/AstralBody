@@ -59,7 +59,11 @@ def _build_orch() -> Orchestrator:
     orch.tool_permissions.is_tool_allowed = MagicMock(return_value=True)
     orch.credential_manager = MagicMock()
     orch.credential_manager.get_agent_credentials_encrypted = MagicMock(return_value={})
-    orch._session_llm_creds = {}
+    # Feature 054: dispatch resolves the call context's persisted LLM
+    # config via orch._llm_store (async get/get_system); none here.
+    orch._llm_store = MagicMock()
+    orch._llm_store.get = AsyncMock(return_value=None)
+    orch._llm_store.get_system = AsyncMock(return_value=None)
     orch.hooks = MagicMock()
     orch.hooks.emit = AsyncMock(return_value=SimpleNamespace(action=None, modified_args=None, reason=None))
 

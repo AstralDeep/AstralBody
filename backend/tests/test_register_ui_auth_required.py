@@ -78,10 +78,17 @@ def _make_fake(*, validate=None):
     async def send_dashboard(ws):
         dashboards.append(ws)
 
+    async def llm_configured_for(user_id):
+        # Feature 054: the register-time first-run gate predicate. These
+        # tests cover the auth branch, so report "configured" and let the
+        # success path deliver the welcome as before.
+        return True
+
     fake = types.SimpleNamespace(
         ui_sessions={},
         _registered_events={},
-        _session_llm_creds={},
+        _ff_llm_first_run=False,
+        llm_configured_for=llm_configured_for,
         audit_recorder=None,
         rote=ROTE(),
         history=types.SimpleNamespace(db=types.SimpleNamespace(

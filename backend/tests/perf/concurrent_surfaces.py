@@ -29,10 +29,6 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-os.environ.setdefault("OPENAI_API_KEY", "test-key")
-os.environ.setdefault("OPENAI_BASE_URL", "http://fake.api")
-os.environ.setdefault("LLM_MODEL", "test-model")
-
 pytestmark = [
     pytest.mark.perf,
     pytest.mark.skipif(os.getenv("ASTRAL_SKIP_PERF") == "1",
@@ -66,6 +62,12 @@ def _seed(orch, user_id: str, email: str, agent_ids: list[str]) -> None:
     db = orch.history.db
     db.upsert_user(user_id, email=email, username="perf-probe",
                    display_name="Perf Probe", roles=["user"])
+    # Feature 054: an unconfigured user's chrome_open is refused server-side
+    # (first-run gate) — seed the probe user's persisted LLM config so the
+    # probe measures the agents surface, not the setup dialog.
+    orch._llm_store.set_sync(user_id, provider="custom",
+                             base_url="http://test.invalid/v1",
+                             model="test-model", api_key="test-key")
     for i, agent_id in enumerate(agent_ids):
         orch.agent_cards[agent_id] = AgentCard(
             name=f"Perf Probe Agent {i}",
@@ -89,6 +91,10 @@ def _cleanup(orch, user_id: str, agent_ids: list[str]) -> None:
             pass
     try:
         db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    except Exception:
+        pass
+    try:
+        orch._llm_store.clear_sync(user_id)
     except Exception:
         pass
 

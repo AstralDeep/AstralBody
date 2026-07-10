@@ -74,9 +74,11 @@ class LlmUnavailableError(Exception):
 def _resolve_llm_client(kwargs: Dict[str, Any]) -> Tuple[Optional[OpenAI], str]:
     """Resolve the OpenAI-compatible client exactly like the general agent.
 
-    Feature 006: prefer the user's personal LLM credentials when the
-    orchestrator forwarded them; fall back to the agent's credential bundle
-    and finally to operator-default env vars.
+    Feature 054: the per-turn credentials the orchestrator injects
+    (``_session_llm_credentials`` — the caller's persisted record, or the
+    admin system record on system-context turns) are preferred, then the
+    agent's own credential bundle. There is NO env fallback — the
+    operator-default path was removed.
     """
     session_llm = kwargs.get("_session_llm_credentials") or {}
     creds = kwargs.get("_credentials", {}) or {}

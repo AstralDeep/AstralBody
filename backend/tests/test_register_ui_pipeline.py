@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import sys
 import uuid
 from pathlib import Path
@@ -21,10 +20,6 @@ import pytest
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
-
-os.environ.setdefault("OPENAI_API_KEY", "test-key")
-os.environ.setdefault("OPENAI_BASE_URL", "http://fake.api")
-os.environ.setdefault("LLM_MODEL", "test-model")
 
 pytestmark = pytest.mark.asyncio
 
@@ -48,9 +43,17 @@ def orch(monkeypatch):
     monkeypatch.setenv("VITE_USE_MOCK_AUTH", "true")
     from orchestrator.orchestrator import Orchestrator
     try:
-        return Orchestrator()
+        o = Orchestrator()
     except Exception as exc:
         pytest.skip(f"orchestrator/database unavailable: {exc}")
+    # Feature 054: an UNCONFIGURED user's register pushes the mandatory
+    # provider-setup dialog and SUPPRESSES the welcome canvas. These tests
+    # cover the configured-user handshake, so seed the mock-auth user's
+    # persisted LLM config up-front.
+    o._llm_store.set_sync("test_user", provider="custom",
+                          base_url="http://test.invalid/v1",
+                          model="test-model", api_key="test-key")
+    return o
 
 
 async def test_register_ui_delivers_welcome_and_dashboard(orch):

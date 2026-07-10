@@ -880,9 +880,9 @@ def search_wikipedia(query: str, language: str = "en", session_id: str = "defaul
 def extract_search_terms(query: str, **kwargs) -> str:
     """Extract relevant search terms from a natural language query using LLM."""
     logger.debug(f"Extracting search terms for: {query}")
-    # Feature 006: prefer the user's personal LLM credentials when the
-    # orchestrator forwarded them; fall back to the agent's encrypted
-    # credential bundle and finally to operator-default env vars.
+    # Feature 054: the per-turn credentials the orchestrator injects
+    # (_session_llm_credentials) are preferred, then the agent's own
+    # credential bundle. No env fallback — the operator-default path is gone.
     session_llm = kwargs.get("_session_llm_credentials") or {}
     creds = kwargs.get("_credentials", {}) or {}
     api_key = (

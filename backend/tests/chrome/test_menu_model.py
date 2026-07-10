@@ -82,6 +82,8 @@ def test_admin_group_present_for_admin_absent_otherwise():
     assert [(i.key, i.label, i.surface, i.params) for i in grp.items] == [
         ("tool-quality", "Tool quality", "admin_tools", {"tab": "quality"}),
         ("tutorial-admin", "Tutorial admin", "admin_tools", {"tab": "tutorial"}),
+        # Feature 054: admin-managed deployment System LLM credential.
+        ("system-llm", "System LLM", "llm_system", {}),
     ]
     for roles in (["user"], [], None):
         assert all(g.key != "admin" for g in build_menu_model(roles, pulse_enabled=False).menu)
@@ -136,7 +138,8 @@ def test_to_dict_non_admin_has_no_admin_anything():
     d = menu_model_dict(["user"], pulse_enabled=False)
     assert all(g["key"] != "admin" for g in d["menu"])
     flat = str(d)
-    for marker in ("admin_tools", "Tool quality", "Tutorial admin"):
+    for marker in ("admin_tools", "Tool quality", "Tutorial admin",
+                   "System LLM", "llm_system"):
         assert marker not in flat
 
 

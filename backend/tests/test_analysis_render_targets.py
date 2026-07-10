@@ -30,12 +30,14 @@ USER = "target-user"
 
 @pytest.fixture
 def orch():
-    os.environ["OPENAI_API_KEY"] = "test-key"
-    os.environ["OPENAI_BASE_URL"] = "http://fake.api"
-    os.environ["LLM_MODEL"] = "test-model"
     from orchestrator.orchestrator import Orchestrator
 
     o = Orchestrator()
+    # Feature 054: chat turns pre-flight the acting user's PERSISTED LLM
+    # config (env vars are inert) — seed the fixture user so turns proceed.
+    o._llm_store.set_sync(USER, provider="custom",
+                          base_url="http://test.invalid/v1",
+                          model="test-model", api_key="test-key")
     o.audit_recorder = MagicMock()
     o.audit_recorder.record = AsyncMock()
     o._record_llm_call = AsyncMock()

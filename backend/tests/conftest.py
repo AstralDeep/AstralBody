@@ -24,6 +24,22 @@ _AMBIENT_FLAGS = (
 
 
 def _strip_ambient_flags() -> None:
+    # Host runs load the repo ``.env`` lazily: ``orchestrator/orchestrator.py``
+    # calls ``load_dotenv(override=False)`` on FIRST import, which happens
+    # inside a test module — i.e. AFTER this strip. Worse, ``override=False``
+    # only protects keys that still EXIST, so a stripped flag would be
+    # re-injected by that later load. Load ``.env`` once NOW (so host runs
+    # keep their DB coordinates etc.), strip, then disarm later loads —
+    # exactly matching CI, where no ``.env`` file exists at all.
+    # (In-container runs already have the flags as ambient process env, so
+    # the early load is a no-op there and the strip behaves as before.)
+    try:
+        import dotenv
+        dotenv.load_dotenv(override=False)
+        dotenv.load_dotenv = lambda *a, **k: False
+        dotenv.main.load_dotenv = dotenv.load_dotenv
+    except Exception:
+        pass
     for name in list(os.environ):
         if name.startswith(_AMBIENT_FLAG_PREFIXES) or name in _AMBIENT_FLAGS:
             del os.environ[name]

@@ -34,17 +34,20 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 @pytest.fixture
 def orchestrator():
-    """Real Orchestrator instance with a working operator-default LLM
-    config (so the pre-flight resolver succeeds), but every outbound
-    side effect (LLM call, websocket send, audit recorder) replaced with
-    a MagicMock/AsyncMock so we can introspect what was attempted.
+    """Real Orchestrator instance with the fixture user's PERSISTED LLM
+    config seeded (so the 054 pre-flight resolver succeeds), but every
+    outbound side effect (LLM call, websocket send, audit recorder)
+    replaced with a MagicMock/AsyncMock so we can introspect what was
+    attempted.
     """
-    os.environ["OPENAI_API_KEY"] = "test-key"
-    os.environ["OPENAI_BASE_URL"] = "http://fake.api"
-    os.environ["LLM_MODEL"] = "test-model"
     from orchestrator.orchestrator import Orchestrator
 
     orch = Orchestrator()
+    # Feature 054: chat turns pre-flight the acting user's persisted
+    # record (env vars are inert) — seed the fixture user.
+    orch._llm_store.set_sync("text-only-test-user", provider="custom",
+                             base_url="http://test.invalid/v1",
+                             model="test-model", api_key="test-key")
     # Replace audit recorder with an AsyncMock so .record() is awaitable.
     orch.audit_recorder = MagicMock()
     orch.audit_recorder.record = AsyncMock()

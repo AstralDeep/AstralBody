@@ -76,9 +76,14 @@ def _bare_orch(completions, *, default_effort=None):
     resolved = types.SimpleNamespace(model="m1", base_url="https://ep/v1")
 
     orch._llm_audit_principals = lambda ws: ("u", "p")
-    orch._resolve_llm_client_for = lambda ws: (_FakeClient(completions),
-                                               CredentialSource.OPERATOR_DEFAULT,
-                                               resolved)
+
+    async def _resolve(ws):
+        # Feature 054: _resolve_llm_client_for is async and resolves either
+        # the caller's persisted record (USER) or the admin system record
+        # (SYSTEM) — websocket=None here is a system-context call.
+        return (_FakeClient(completions), CredentialSource.SYSTEM, resolved)
+
+    orch._resolve_llm_client_for = _resolve
 
     async def _noop(*a, **k):
         return None

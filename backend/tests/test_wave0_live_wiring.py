@@ -34,12 +34,14 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 @pytest.fixture
 def orchestrator():
-    os.environ["OPENAI_API_KEY"] = "test-key"
-    os.environ["OPENAI_BASE_URL"] = "http://fake.api"
-    os.environ["LLM_MODEL"] = "test-model"
     from orchestrator.orchestrator import Orchestrator
 
     orch = Orchestrator()
+    # Feature 054: chat turns pre-flight the acting user's PERSISTED LLM
+    # config (env vars are inert) — seed the fixture user so turns proceed.
+    orch._llm_store.set_sync("wave0-user", provider="custom",
+                             base_url="http://test.invalid/v1",
+                             model="test-model", api_key="test-key")
     orch.audit_recorder = MagicMock()
     orch.audit_recorder.record = AsyncMock()
     orch._record_llm_call = AsyncMock()
