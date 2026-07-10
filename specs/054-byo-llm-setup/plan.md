@@ -79,12 +79,12 @@ per user + one system row; the gate predicate is read-through cached.
 | IV | Code quality | PASS | ruff from repo root; ES5 constraints respected in `client.js`. |
 | V | Dependencies | PASS | Zero new third-party runtime deps. |
 | VI | Documentation | PASS | Docstrings on new modules; deployment-doc migration note; 006 conformance note. |
-| VII | Security | PASS | Keycloak auth unchanged; admin surface server-side role-gated; Fernet at rest under boot-gated key; key-hygiene invariants preserved + `install_redaction_filter` finally wired; gate enforced server-side; audited refusals. |
+| VII | Security | PASS (1 recorded risk) | Keycloak auth unchanged; admin surface server-side role-gated; Fernet at rest under boot-gated key; key-hygiene invariants preserved + `install_redaction_filter` finally wired; gate enforced server-side; audited refusals. **Conscious decision**: the server-originated connection probe (inherited from 006) becomes mandatory-on-save and reachable while gated, and the catalog suggests server-local runtime addresses — an internal-reachability oracle accepted with mitigations (authenticated, audited, per-user rate-limited probes); not routed through `shared.external_http` to avoid breaking legitimate private/self-hosted endpoints, matching 006's posture. |
 | VIII | UX via astralprims | PASS | Surface composed from existing primitives (ParamPicker action-submit, password kind — feature 043 vocabulary). |
 | IX | Migrations | PASS | Two new tables via idempotent `_init_db` deltas; rollback path documented. |
 | X | Production readiness | PASS (planned) | Every affected client exercised live (web browser, Windows client, Android emulator, iOS/macOS sim, watch sim); honest-failure paths tested; observability: audited gate refusals + structured logs on background skip. |
-| XI | CI | PASS | No pipeline changes needed (LLM vars never in CI); all gates apply. |
-| XII | Cross-client consistency | PASS | One server-owned surface/catalog; mandatory marker on the shared frame's reserved field lands on all in-scope clients in this feature; watch divergence is a declared capability difference (chrome-free by design) with an explicit UX (spoken guidance); admin `llm_system` surface follows the existing admin web-only/menu-gating pattern via the server-owned menu model. |
+| XI | CI | PASS (1 additive step) | LLM vars were never in CI, so existing gates are unaffected; **one additive step** implements FR-004's release validation: a built-image filesystem credential scan in the smoke job (T048). |
+| XII | Cross-client consistency | PASS | One server-owned surface/catalog; mandatory marker on the shared frame's reserved field lands on all in-scope clients in this feature; watch divergence is a declared capability difference (chrome-free by design) with an explicit UX (spoken guidance); admin `llm_system` surface is a **declared web-only carve-out** (spec FR-018) exactly like the existing Tool quality / Tutorial admin surfaces — server-enforced (natives never receive admin menu groups; `include_admin=False` on every native channel), uniform across non-web clients. |
 | XIII | Docs/research integrity | N/A | Runtime feature. |
 
 **Post-Phase-1 re-check**: PASS — design introduces no violations; no
@@ -128,8 +128,8 @@ backend/
 │   ├── compaction.py           # unchanged call shape (websocket=None ⇒ system)
 │   ├── agent_generator.py      # env reads → system store
 │   ├── knowledge_synthesis.py  # env reads → system store, per-cycle re-check
-│   ├── scheduler/runner.py     # LLM-unavailable ⇒ run FAILED (honest reporting)
 │   └── credential_manager.py   # unchanged (precedent only)
+├── scheduler/runner.py         # LLM-unavailable ⇒ outcome="failure" (honest reporting)
 ├── webrender/
 │   ├── chrome/__init__.py      # render_modal_shell mandatory variant (no ✕, data-mandatory)
 │   ├── chrome/surfaces/llm.py  # provider dropdown (web + SDUI components()); first-run copy
@@ -178,8 +178,13 @@ each client's existing frame-reduction path. No new top-level modules.
    `FF_LLM_FIRST_RUN` (default on) covers only the register-time push.
 4. **Catalog** (`llm_config/providers.py`): ordered presets (R7 table) with
    `key_required` flags; composed into the surface for web and native SDUI
-   from the one definition; "Custom" = free-form base URL. Validation:
-   preset key requirements enforced server-side at save.
+   from the one definition; "Custom" = free-form base URL. **Preset base
+   URLs are server-derived**: for non-custom presets the editable base_url
+   field is omitted (display-only copy shows the endpoint) and the save
+   handler derives `base_url` from the provider key — so prefill/lock
+   behavior needs zero client logic and cannot diverge between web and
+   native SDUI. Validation: preset key requirements and per-field
+   missing-value messages enforced server-side at save.
 5. **Save flow** (dialog and settings surface identical): fields → optional
    "Load models" (`POST /api/llm/list-models`) → mandatory successful
    "Test" (`POST /api/llm/test`, real chat-completion `max_tokens:1`) →
@@ -188,8 +193,13 @@ each client's existing frame-reduction path. No new top-level modules.
    refused server-side) so the client-side test button is UX, not the gate.
 6. **Admin system surface** (`llm_system`): same field set + probe, admin
    role-gated server-side (`session_roles`/JWT per handler, existing
-   pattern); menu item from the server-owned menu model; audited
-   `llm_config_change{scope:"system"}`.
+   pattern); **web-only** per the declared Constitution XII carve-out (spec
+   FR-018) — web `render()` only, no native `components()`, and the menu
+   item lives in the admin group the server already omits from native menu
+   channels; audited `llm_config_change{scope:"system"}`. Gate escape:
+   sign-out stays reachable while gated (spec FR-013) — the mandatory
+   dialog variant carries a sign-out affordance and the server gate exempts
+   logout routes/actions.
 7. **Honest degradation** (FR-020): scheduler records
    `outcome="failed", error="llm_unavailable"` and the notification says the
    AI was unavailable; knowledge synthesis logs+skips per cycle; autoparse

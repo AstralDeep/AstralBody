@@ -227,8 +227,9 @@ user-initiated (Settings → "Take the tour"; `maybeStartTour` fires only when a
 modal containing `[data-tour-steps]` renders; natives get `include_tour=False`)
 and nothing auto-launches at login. The gate simply precedes the whole UI;
 after save, the welcome render proceeds and the tour remains reachable exactly
-as today. One stale docstring in `guide_content.py` (~454) claims the tour
-auto-launches on first sign-in — fix the copy alongside this feature.
+as today. One stale copy block in `backend/webrender/chrome/guide_content.py`
+(~454) claims the tour auto-launches on first sign-in — fix the copy alongside
+this feature.
 
 ## R10. Dev/test/CI posture
 

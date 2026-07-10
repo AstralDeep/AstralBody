@@ -56,9 +56,18 @@ Wire shape unchanged. Semantics change server-side only:
 
 - On save success: web sockets receive the modal-close `chrome_render`
   (existing empty/close instruction) followed by the welcome `ui_render`;
-  native sockets receive `chrome_surface {surface_key:"llm", mode:"replace",
-  components:[]}` (existing close instruction) followed by welcome.
+  native sockets receive `chrome_surface {surface_key:"", mode:"replace",
+  components:[]}` — a **blank** `surface_key` with empty components, which is
+  the close instruction today's native reducers already honor (a keyed close
+  would fall through to the mismatch branch on pre-054 clients) — followed by
+  welcome. The T019–T021 client edits must additionally clear the mandatory
+  pin when this close arrives.
 - On clear: the reverse — mandatory dialog pushed everywhere.
+- **Sign-out exemption (spec FR-013)**: the server gate never blocks
+  `/auth/logout`, `/api/auth/logout`, or the sign-out menu action; the
+  mandatory dialog variant carries an explicit sign-out affordance on every
+  client (web: link in the modal footer → `/auth/logout`; natives: the
+  sign-out control stays enabled while all other navigation is suppressed).
 
 ## 2. Chrome actions (`ui_event` → `chrome_events` dispatch)
 
@@ -67,7 +76,7 @@ Wire shape unchanged. Semantics change server-side only:
 | `chrome_open` | While unconfigured: any `surface != "llm"` is rewritten to `"llm"` (audited `llm_unconfigured{feature:"chrome_open"}`) |
 | `chrome_close` | While unconfigured: refused (no-op + audit) |
 | `chrome_llm_models` / `chrome_llm_test` / `chrome_llm_save` / `chrome_llm_clear` | Unchanged action names; save/clear now persist via the store; the surface composition adds the provider dropdown (existing ParamPicker option vocabulary — no new manifest `accept_actions`) |
-| `chrome_llm_sys_models` / `chrome_llm_sys_test` / `chrome_llm_sys_save` / `chrome_llm_sys_clear` | NEW handlers on the NEW `llm_system` surface (admin role enforced server-side per handler). Surface handlers are registered the existing way (`HANDLERS` dict); native menus receive the item only for admins via the server-owned menu model |
+| `chrome_llm_sys_models` / `chrome_llm_sys_test` / `chrome_llm_sys_save` / `chrome_llm_sys_clear` | NEW handlers on the NEW `llm_system` surface (admin role enforced server-side per handler). Surface handlers are registered the existing way (`HANDLERS` dict). The surface is a **declared web-only admin carve-out** (spec FR-018): its menu item lives in the admin group that the server already omits from every native menu channel (`include_admin=False`), so natives never see it — the same posture as Tool quality / Tutorial admin |
 
 ## 3. REST
 
@@ -75,11 +84,15 @@ Wire shape unchanged. Semantics change server-side only:
 |---|---|
 | `POST /api/llm/test` | Unchanged contract (creds in body, never persisted, always 200 with `{ok, error_class, ...}`). Used by the dialog on all clients. |
 | `POST /api/llm/list-models` | Unchanged. |
-| `GET /api/chrome/menu` | Unchanged shape; admins additionally see the `llm_system` item (server-owned model). |
+| `GET /api/chrome/menu` | Unchanged shape and unchanged for natives (admin groups remain omitted from native channels); the web menu model shows admins the `llm_system` item (server-owned model, web-only carve-out). |
 
 Both `/api/llm/*` endpoints remain reachable while gated (they are the setup
-path); every other LLM-dependent verb refuses with the audited
-`llm_unconfigured` condition while the caller is unconfigured.
+path) and gain a modest per-user rate limit (pattern:
+`DEVICE_LOGIN_START_RATE`) as the recorded mitigation for the widened
+probe-oracle exposure (plan Constitution row VII); every other LLM-dependent
+verb refuses with the audited `llm_unconfigured` condition while the caller is
+unconfigured. Auth routes (`/auth/logout`, `/api/auth/logout`) are never
+gated.
 
 ## 4. Server-side resolution contract
 
@@ -96,8 +109,14 @@ audit:  credential_source ∈ {"user", "system"}   (operator_default retired for
 `GET`-less: the catalog is embedded in the surface composition (web `<select>`
 options / SDUI picker options) from `llm_config/providers.py`. Preset keys:
 `openai, anthropic, gemini, xai, openrouter, groq, together, mistral, ollama,
-lmstudio, custom`. Selecting a preset prefills `base_url` (editable only for
-`custom`); `key_required=False` presets (ollama, lmstudio) permit empty key.
+lmstudio, custom`. **Base URLs are server-derived for presets**: when
+`provider != "custom"` the editable `base_url` field is omitted from the
+composition (display-only copy names the endpoint) and `chrome_llm_save` /
+`llm_config_set` derive `base_url` from the provider key server-side — no
+client-side prefill/lock logic exists, so web and native SDUI cannot diverge.
+Only `custom` renders the free-form `base_url` field. `key_required=False`
+presets (ollama, lmstudio) permit empty key; all other missing fields are
+rejected with per-field messages.
 
 ## 6. Audit events
 
