@@ -8,6 +8,16 @@
 
 **Input**: User description: "Remove the shipped operator-default LLM credentials (.env and others) so the product never ships with a working LLM. When a user logs into any client and no LLM is configured for them, a mandatory setup dialog — the absolute first thing after login, before the tutorial — collects their own LLM provider: a dropdown of popular providers plus a custom OpenAI-compatible endpoint option. Server-persisted per-user credentials (encrypted); admin-configured system credential for background work; the operator-default code path is deleted entirely."
 
+## Clarifications
+
+### Session 2026-07-10
+
+- Q: Where should a user's LLM credentials live once configured? → A: Server-side, encrypted per-user record (API key encrypted at rest under the deployment's existing credential-encryption posture); configure once on any client, applies everywhere.
+- Q: How completely should the operator-default env credentials be removed? → A: Delete the code path entirely — no deployment can supply a default LLM credential for user traffic; legacy env vars become inert.
+- Q: What should server-initiated LLM work use without an operator default? → A: One admin-configured, deployment-wide system credential (encrypted, admin-only surface); absent ⇒ degrade gracefully with honest failure reporting.
+- Q: Which providers should the dropdown offer? → A: OpenAI, Anthropic, Google Gemini, xAI Grok, OpenRouter, Groq, Together AI, Mistral, Ollama, LM Studio, plus Custom OpenAI-compatible endpoint.
+- Q: Which credential powers in-session AI helpers — conversation compaction and workspace combine/condense? → A: The system credential (accepted tradeoff: these helpers route content through the admin-designated provider and bill the deployment; direct chat/answer generation always uses the user's own credentials).
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - First login triggers mandatory provider setup (Priority: P1)
@@ -145,7 +155,7 @@ A user signs in on the watch (which by design has no settings surfaces or keyboa
 #### Admin system credential for background work
 
 - **FR-018**: Administrators MUST be able to store, test, update, and clear exactly one deployment-wide system LLM credential via a new admin-only settings surface, with the same encryption, write-only, and hygiene rules as user credentials (FR-006). Non-admin access MUST be refused server-side.
-- **FR-019**: Server-initiated background LLM work (scheduled/recurring job turns, automatic file-parser generation, knowledge synthesis, conversation compaction, workspace combine/condense, job narration, draft-agent self-tests and similar system flows) MUST use exclusively the system credential. User-context calls MUST never fall back to the system credential.
+- **FR-019**: System-credential LLM work comprises: server-initiated flows (scheduled/recurring job turns, automatic file-parser generation, knowledge synthesis, job narration, draft-agent self-tests and similar system flows) AND — by explicit decision (Clarifications, Session 2026-07-10) — the in-session helpers conversation compaction and workspace combine/condense. All of these MUST use exclusively the system credential. Direct user-context calls (chat turns, tool summaries, chat titles, adaptive layout, and all other per-user AI work) MUST use the user's own stored credentials and MUST never fall back to the system credential.
 - **FR-020**: When the system credential is absent or failing, background features MUST degrade gracefully and honestly: log and skip without data loss, and any user-visible outcome MUST reflect failure — a scheduled run that could not run its AI turn MUST be recorded and reported as failed, never as success.
 - **FR-021**: Every LLM call MUST be attributable in the audit trail to its credential source — `user` or `system` — without recording key material; the audit vocabulary MUST reflect the removal of the operator-default source for new events.
 
@@ -184,6 +194,7 @@ A user signs in on the watch (which by design has no settings surfaces or keyboa
 - **Existing wire vocabulary suffices.** The mandatory dialog is delivered with the existing server-driven UI machinery (settings-surface composition and existing frame vocabulary, including reserved fields); native clients gain handling for the mandatory marker in a client release; no new third-party runtime dependencies anywhere (Constitution V).
 - **Token-usage counters (006 FR-014..017) continue unchanged** in their current per-session form; making them durable is out of scope here.
 - **Concurrency**: the per-user configuration is last-write-wins across a user's simultaneous sessions; no locking UI is needed.
+- **Accepted privacy/billing tradeoff for helpers**: conversation compaction and workspace combine/condense route the affected content through the admin-designated system provider and bill the deployment (explicit owner decision, Clarifications Session 2026-07-10). When no system credential is configured, these helpers follow FR-020 (compaction skips with its existing non-AI fallback note; combine/condense report an honest error).
 
 ## Out of Scope
 
