@@ -72,7 +72,7 @@ def test_body_html_escapes_text_literals():
 
 def test_default_render_selects_first_section_and_lists_full_toc():
     html = _render()
-    assert "Welcome to AstralBody" in html  # first section article
+    assert "Welcome to AstralDeep" in html  # first section article
     assert 'aria-label="User guide sections"' in html
     assert 'data-ui-action="chrome_open"' in html
     for slug in EXPECTED_SLUGS[:-1]:  # admin entry gated for plain users
@@ -84,7 +84,7 @@ def test_section_param_selects_article_and_marks_toc_active():
     html = _render(params={"section": "audit"})
     assert "Your audit log" in html
     assert "append-only and signed" in html
-    assert "Welcome to AstralBody" not in html  # only the selected article renders
+    assert "Welcome to AstralDeep" not in html  # only the selected article renders
     assert 'aria-current="true"' in html
     # exactly one active TOC entry
     assert html.count('aria-current="true"') == 1
@@ -92,12 +92,12 @@ def test_section_param_selects_article_and_marks_toc_active():
 
 def test_unknown_section_falls_back_to_first():
     html = _render(params={"section": "definitely-not-a-section"})
-    assert "Welcome to AstralBody" in html
+    assert "Welcome to AstralDeep" in html
 
 
 def test_none_params_tolerated():
     html = asyncio.run(guide.render(None, "user-1", ["user"], None))
-    assert "Welcome to AstralBody" in html
+    assert "Welcome to AstralDeep" in html
 
 
 def test_every_visible_section_renders_when_requested():
@@ -117,7 +117,7 @@ def test_admin_section_absent_for_non_admin():
 def test_admin_section_request_by_non_admin_falls_back():
     html = _render(roles=("user",), params={"section": "admin"})
     assert "operator-only operations" not in html  # admin body marker
-    assert "Welcome to AstralBody" in html
+    assert "Welcome to AstralDeep" in html
 
 
 def test_admin_section_present_for_admin():

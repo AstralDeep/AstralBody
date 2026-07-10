@@ -1,5 +1,5 @@
 """
-Pydantic models for the AstralBody REST API.
+Pydantic models for the AstralDeep REST API.
 
 These models define the request/response shapes for all REST endpoints,
 powering the auto-generated OpenAPI documentation at /docs.

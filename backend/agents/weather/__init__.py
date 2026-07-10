@@ -1,5 +1,5 @@
 """
-Weather Agent package for AstralBody system.
+Weather Agent package for AstralDeep system.
 
 Provides weather data and forecast tools using Open-Meteo API.
 """

@@ -16,7 +16,7 @@ Lift the three OpenAI-compatible LLM env vars (`OPENAI_API_KEY`, `OPENAI_BASE_UR
 - **PostgreSQL** — *no new tables*. Three new audit `event_class` identifiers (`llm.config_change`, `llm.unconfigured`, `llm.call`) are added by extending the existing `audit_events` schema's enum check. The existing per-user isolation, hash-chain, and retention guarantees from feature 003 apply unchanged.
 - **Per-WebSocket in-memory map** `_session_llm_creds: Dict[id(websocket), {api_key, base_url, model}]` on the orchestrator. Cleared on disconnect; never written to disk; never logged.
 **Testing**: pytest (backend, `backend/llm_config/tests/`); Vitest + Testing Library (frontend, alongside existing component tests). 90% coverage on changed code per Constitution Principle III.
-**Target Platform**: Existing AstralBody runtime — orchestrator container on port 8001, browser frontend over `ws://localhost:8001/ws`, PostgreSQL co-located.
+**Target Platform**: Existing AstralDeep runtime — orchestrator container on port 8001, browser frontend over `ws://localhost:8001/ws`, PostgreSQL co-located.
 **Project Type**: Web application (existing `backend/` + `frontend/` split).
 **Performance Goals**: Per-call overhead introduced by the credential-resolution path MUST be ≤ 1 ms (cred lookup + audit-event prep are pure in-memory operations). Test Connection probe MUST complete within the existing orchestrator LLM timeout (no new timeout). Token-usage counter updates MUST be O(1) on the browser side.
 **Constraints**:
@@ -124,7 +124,7 @@ frontend/
         └── TokenUsageDialog.test.tsx
 ```
 
-**Structure Decision**: AstralBody is a web application with the existing `backend/` + `frontend/` split. The new backend module is `backend/llm_config/`, sibling of `backend/audit/` and `backend/feedback/`, mirroring the convention established by features 003 and 004 (a self-contained module with `schemas.py`, `repository.py`-equivalent, `api.py`, `ws_handlers.py`, and a `tests/` subdir). On the frontend, settings UI lives under `src/components/llm/` and hooks under `src/hooks/`, matching how feature 003's audit panel was organized.
+**Structure Decision**: AstralDeep is a web application with the existing `backend/` + `frontend/` split. The new backend module is `backend/llm_config/`, sibling of `backend/audit/` and `backend/feedback/`, mirroring the convention established by features 003 and 004 (a self-contained module with `schemas.py`, `repository.py`-equivalent, `api.py`, `ws_handlers.py`, and a `tests/` subdir). On the frontend, settings UI lives under `src/components/llm/` and hooks under `src/hooks/`, matching how feature 003's audit panel was organized.
 
 ## Complexity Tracking
 

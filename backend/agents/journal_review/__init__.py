@@ -1,5 +1,5 @@
 """
-Journal Review Agent package for AstralBody system.
+Journal Review Agent package for AstralDeep system.
 
 Evaluates scientific journals to recommend optimal publication venues
 for research papers based on impact, topical fit, review timelines,

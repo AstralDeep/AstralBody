@@ -7,7 +7,7 @@
 
 ## Overview
 
-Move AstralBody's memory/"soul" from store-and-summarize to **store, link, reconcile, and anticipate**. All capabilities are designed for the existing **PostgreSQL + the existing LLM client — no vector DB, no new dependency** — and are flag-gated and fail-open.
+Move AstralDeep's memory/"soul" from store-and-summarize to **store, link, reconcile, and anticipate**. All capabilities are designed for the existing **PostgreSQL + the existing LLM client — no vector DB, no new dependency** — and are flag-gated and fail-open.
 
 ## Capabilities & status
 

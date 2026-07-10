@@ -16,7 +16,7 @@ from verification.verdict import Outcome, Verdict, reconcile
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(prog="verification", description="AstralBody SDUI & "
+    p = argparse.ArgumentParser(prog="verification", description="AstralDeep SDUI & "
                                 "delegated-authority verification harness")
     p.add_argument("--mode", default="in-process",
                    help="in-process (scripted LLM, CI gate) or external (live + Keycloak)")

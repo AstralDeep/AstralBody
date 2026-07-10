@@ -3,7 +3,7 @@
 **Feature Branch**: `002-file-uploads`
 **Created**: 2026-04-13
 **Status**: Draft
-**Input**: User description: "I want to add common file type uploads to this dynamic UI interface. I want to expand the paperclip icon in the chat window to take in a variety of common file types. Reference claude-code/ to see how this project does file uploads and the file types it accepts. In the AstralBody general agent there should be tools to handle the upload of the variety of file types."
+**Input**: User description: "I want to add common file type uploads to this dynamic UI interface. I want to expand the paperclip icon in the chat window to take in a variety of common file types. Reference claude-code/ to see how this project does file uploads and the file types it accepts. In the AstralDeep general agent there should be tools to handle the upload of the variety of file types."
 
 ## Clarifications
 
@@ -19,7 +19,7 @@
 
 ### User Story 1 - Attach a document for the agent to analyze (Priority: P1)
 
-A clinician or analyst is chatting with the AstralBody general agent and wants to ground the conversation in a real artifact (a PDF report, a spreadsheet of patient cohorts, a Markdown protocol, a Word memo). They click the paperclip icon next to the chat input, pick a file from their computer, and send a message asking the agent to summarize, extract, or reason over the file's contents.
+A clinician or analyst is chatting with the AstralDeep general agent and wants to ground the conversation in a real artifact (a PDF report, a spreadsheet of patient cohorts, a Markdown protocol, a Word memo). They click the paperclip icon next to the chat input, pick a file from their computer, and send a message asking the agent to summarize, extract, or reason over the file's contents.
 
 **Why this priority**: This is the core value of the feature. Today the paperclip only supports four plain-text formats (`.csv`, `.txt`, `.json`, `.md`), which forces users to convert documents externally before they can talk to the agent about them. Removing that friction is the whole point of the work.
 
@@ -107,7 +107,7 @@ The user attaches a file that is too large, of an unsupported type, or otherwise
 - **FR-004**: The user MUST be able to attach more than one file to a single message and remove individual attachments before sending.
 - **FR-005**: The UI MUST render a recognizable preview or chip for each attachment (filename, type icon or thumbnail for images, size) before the message is sent.
 - **FR-006**: When an attachment is rejected (unsupported type, oversize, upload failure), the system MUST display a message that names the file, states the reason, and preserves any other in-progress composer state (typed text, other valid attachments).
-- **FR-007**: The AstralBody general agent MUST expose tools that can read and reason over each supported file category, producing structured content suitable for the agent's response (e.g., extracted text for documents, tabular data for spreadsheets, parsed structure for code/markup, visual description for images).
+- **FR-007**: The AstralDeep general agent MUST expose tools that can read and reason over each supported file category, producing structured content suitable for the agent's response (e.g., extracted text for documents, tabular data for spreadsheets, parsed structure for code/markup, visual description for images).
 - **FR-008**: The agent's tool surface MUST handle a file by its actual content type, not solely by extension, so that a mislabeled or corrupt file produces a meaningful error rather than silent garbage in the conversation.
 - **FR-009**: Attached files MUST be scoped to the uploading user. They MUST be accessible to that same user across any of their chats and MUST appear inline in any of that user's chat interfaces, but MUST NOT be accessible to any other user.
 - **FR-010**: The system MUST deliver image attachments to a vision-capable model in a form it can visually interpret (not just a filename or path). Selecting, hosting, or configuring the vision model itself is out of scope for this feature; this feature is responsible only for routing the image bytes to it.

@@ -7,12 +7,12 @@ it is the *backend* that needs 3.11, which lives in the container).
 ## 1. Backend (dev posture)
 
 ```bash
-docker compose up -d                    # postgres + astralbody on :8001
+docker compose up -d                    # postgres + astraldeep on :8001
 # Canonical suite run — unset the local research FF_* flags first (the local
 # .env enables ~58 experimental flags CI never sets; see defect D-031):
-docker exec astralbody bash -c "cd /app/backend && for v in \$(env | grep -E '^FF_' | cut -d= -f1); do unset \$v; done && python -m pytest -q -m 'not integration'"
+docker exec astraldeep bash -c "cd /app/backend && for v in \$(env | grep -E '^FF_' | cut -d= -f1); do unset \$v; done && python -m pytest -q -m 'not integration'"
 # sync an edit (source is baked; agents/ + knowledge/ are bind mounts):
-docker cp backend/<path> astralbody:/app/backend/<path>   # then restart if orchestrator code
+docker cp backend/<path> astraldeep:/app/backend/<path>   # then restart if orchestrator code
 ```
 
 `.env` must have `ASTRAL_ENV=development`. For headless E2E flip `USE_MOCK_AUTH=true`
@@ -48,7 +48,7 @@ adb exec-out screencap -p > specs/044-native-client-parity/verification/android/
 
 ```bash
 # backend: manifest ↔ code equality + send-site sweep
-docker exec astralbody bash -c "cd /app/backend && python -m pytest tests/test_ui_protocol_manifest.py -q"
+docker exec astraldeep bash -c "cd /app/backend && python -m pytest tests/test_ui_protocol_manifest.py -q"
 # windows: frame classification + vocabulary vs manifest
 cd windows-client && python -m pytest tests/test_protocol_manifest.py tests/test_renderer.py -q
 # android: classification + vocabulary vs manifest
@@ -59,7 +59,7 @@ cd android-client && .\gradlew :core:test :app:testDebugUnitTest
 
 1. Backend up (dev posture), all three clients connected as above.
 2. Push the canonical 35-type gallery through the real WS path:
-   `docker exec astralbody bash -c "cd /app/backend && python -m verification.gallery_driver --user <id>"`
+   `docker exec astraldeep bash -c "cd /app/backend && python -m verification.gallery_driver --user <id>"`
    (delivers every component type + interactive variants to each connected client per its
    declared vocabulary).
 3. Walk the scripted scenarios in `verification/results.md` (US1–US6: error injection, socket

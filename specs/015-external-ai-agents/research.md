@@ -169,7 +169,7 @@ Out of scope for v1: admin / observability routes (`/api/servers` add/remove bac
 
 ## R-009 File upload integration (FR-018)
 
-**Decision**: For tools that need a CSV input (CLASSify `train_classifier` + `retest_model`; Forecaster `train_forecaster` + `generate_forecast`), the input schema accepts an opaque `file_handle` string. AstralBody's existing file-upload mechanism (feature 002) already deposits uploaded files in a known location and gives the orchestrator a handle the agent can resolve via the existing `attachments` flow used by the medical, journal-review, and grants agents (see [backend/agents/general/file_tools/list_attachments.py](backend/agents/general/file_tools/list_attachments.py)). The agent reads the file off disk and forwards it as `multipart/form-data` to the upstream `/upload_testset` (CLASSify) or `/parse_retrain_file` (Forecaster) endpoint.
+**Decision**: For tools that need a CSV input (CLASSify `train_classifier` + `retest_model`; Forecaster `train_forecaster` + `generate_forecast`), the input schema accepts an opaque `file_handle` string. AstralDeep's existing file-upload mechanism (feature 002) already deposits uploaded files in a known location and gives the orchestrator a handle the agent can resolve via the existing `attachments` flow used by the medical, journal-review, and grants agents (see [backend/agents/general/file_tools/list_attachments.py](backend/agents/general/file_tools/list_attachments.py)). The agent reads the file off disk and forwards it as `multipart/form-data` to the upstream `/upload_testset` (CLASSify) or `/parse_retrain_file` (Forecaster) endpoint.
 
 **Rationale**: Reuse, no new upload UI; consistent with how existing agents work with files.
 

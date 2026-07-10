@@ -33,7 +33,7 @@ PR #83 (`300a1b4`, branch `066-windows-client-production-auth`, merged to `main`
 ### A.1 Verification procedure (executed this session)
 
 1. **Client unit tests** — `python -m pytest -q` in `windows-client/` (offscreen Qt): `test_auth.py`, `test_renderer.py`, `test_win_agent.py`.
-2. **Backend azp tests** — `python -m pytest backend/tests/test_azp_allowlist.py -q` inside the `astralbody` container.
+2. **Backend azp tests** — `python -m pytest backend/tests/test_azp_allowlist.py -q` inside the `astraldeep` container.
 3. **Repo lint** — `ruff check .` from repo root (host).
 4. **Static review** — security/correctness pass over the diff: the azp gate, the desktop OIDC flow, the WS teardown fix, the empty-state fix, the `win_agent` tool surfaces.
 5. **Smoke** — boot the orchestrator with `ASTRAL_ENV=development` and confirm `/healthz` + `/readyz`.
@@ -62,7 +62,7 @@ Findings + fixes are recorded in **§A.2** and shipped as a PR off `main` (branc
 
 ### B.0 What the user gets
 
-1. **In the browser**, a user asks Astral to generate code (e.g. "write me a Python script that sorts my downloads folder"). Astral generates the code **and** emits a **download card** — a primitive that links to the latest GitHub-released `AstralBody.exe` (downloaded directly from GitHub, integrity-checked). The card explains: install the desktop app, sign in, approve the coding agent's per-tool permissions, then have it write/run the generated code on your machine.
+1. **In the browser**, a user asks Astral to generate code (e.g. "write me a Python script that sorts my downloads folder"). Astral generates the code **and** emits a **download card** — a primitive that links to the latest GitHub-released `AstralDeep.exe` (downloaded directly from GitHub, integrity-checked). The card explains: install the desktop app, sign in, approve the coding agent's per-tool permissions, then have it write/run the generated code on your machine.
 2. **The desktop `.exe`** ships a **coding agent** (`windows-tools-1`, extended) that can read/write/edit files and run commands **inside a user-approved workspace directory**, with **per-tool permissions** the user enables one-by-one (read / write / edit / execute …) exactly like the existing Agents & permissions model. A clearly-marked **"dangerous bypass"** toggle grants **full shell access** system-wide (off by default; requires an explicit, audited confirmation).
 3. **Hard safety rails, always on:**
    - **No PHI / protected data ingest or egress.** Every file read and every command's stdout is run through the existing Presidio PHI gate (`backend/personalization/phi_gate.py`) **on the client** before it is returned to the orchestrator / model. PHI-bearing content is refused (fail-closed), never silently redacted-and-forwarded.
@@ -84,13 +84,13 @@ ui_render (download card renders on web + ROTE-adapts to every device)
    └── user clicks download → GitHub Releases (windows-latest GH Action built + cosign-signed)
             │
             ▼
-        AstralBody.exe (PySide6 native client)
+        AstralDeep.exe (PySide6 native client)
             │  on first launch / version check: integrity verifier
             │     1. download exe + SHA256SUMS + cosign bundle from GH Release
             │     2. verify SHA256(exe) == manifest entry
             │     3. verify cosign bundle signature against Fulcio OIDC identity
             │        (issuer: https://token.actions.githubusercontent.com, SAN matches
-            │         the AstralDeep/AstralBody workflow repo/ref)
+            │         the AstralDeep/AstralDeep workflow repo/ref)
             │     4. only then: launch / update
             ▼
         win_agent (coding agent, in-process aiohttp A2A)
@@ -108,14 +108,14 @@ ui_render (download card renders on web + ROTE-adapts to every device)
 - **Tool: `offer_desktop_codegen`** — the LLM calls it when the user asks Astral to generate code that should run on their machine. It takes the generated code (already produced by the model) and returns two components:
   1. A `code` primitive (the generated code, language-tagged).
   2. A new **`download_card` primitive** — astralprims class in the client's allowed vocabulary, rendered by `backend/webrender/renderer.py` and ROTE-adapted. Fields: `title`, `description`, `version`, `download_url` (direct GitHub Release asset URL), `sha256` (of the released exe), `sigstore_bundle_url`, `integrity_doc_url`, `platform` ("windows-x64"), `min_windows_build`. The web renderer turns this into a real download button + a "Verify integrity" affordance; ROTE adapts (mobile/watch collapse to a link + version; voice speaks "Download the Astral desktop app, version …, from GitHub").
-- **Release metadata source of truth:** the orchestrator does **not** bake the exe. It reads the "latest release" pointer from **GitHub Releases** at request time (server-side egress-gated HTTP via `shared.external_http`) — `GET https://api.github.com/repos/AstralDeep/AstralBody/releases/latest` — and extracts the asset's `browser_download_url`, its `digest`/`sha256` (GitHub provides `sha256` in the release assets metadata for uploaded assets; we **also** publish our own `SHA256SUMS` + cosign bundle as release assets, which are the canonical integrity source). The orchestrator caches this for a bounded TTL (env `DESKTOP_RELEASE_TTL_SECONDS`, default 300 s) to avoid hammering the API. **Fail-open:** if GitHub is unreachable, the tool returns the card with the *last known good* cached values (never invents a URL/hash); if none cached, it returns an honest "download temporarily unavailable" alert — **never a fabricated or unsigned link**.
+- **Release metadata source of truth:** the orchestrator does **not** bake the exe. It reads the "latest release" pointer from **GitHub Releases** at request time (server-side egress-gated HTTP via `shared.external_http`) — `GET https://api.github.com/repos/AstralDeep/AstralDeep/releases/latest` — and extracts the asset's `browser_download_url`, its `digest`/`sha256` (GitHub provides `sha256` in the release assets metadata for uploaded assets; we **also** publish our own `SHA256SUMS` + cosign bundle as release assets, which are the canonical integrity source). The orchestrator caches this for a bounded TTL (env `DESKTOP_RELEASE_TTL_SECONDS`, default 300 s) to avoid hammering the API. **Fail-open:** if GitHub is unreachable, the tool returns the card with the *last known good* cached values (never invents a URL/hash); if none cached, it returns an honest "download temporarily unavailable" alert — **never a fabricated or unsigned link**.
 - **Why a dedicated tool, not intent detection:** deterministic, testable, no fuzzy phrase-matching (matches the project's preference for deterministic pre-LLM/meta-tool paths, e.g. `onboarding_submit`). The LLM decides *when* the user wants on-machine codegen and calls the tool; the tool deterministically builds the verified card.
 - **No new tables.** No schema change. The tool is stateless except the bounded in-memory release cache.
 
 ### B.3 Backend: the `download_card` primitive (rendered + ROTE-adapted)
 
 - **astralprims:** a `DownloadCard` class (or, to avoid waiting on an astralprims wheel bump, a dict-based renderer entry — agents may emit primitives as plain dicts until the wheel is in the image, per the 029 dashboard-primitive precedent). The renderer is registered in `PRIMITIVE_RENDERERS` so it auto-joins `allowed_primitive_types()`.
-- **Web renderer** (`backend/webrender/renderer.py` `render_download_card`): a card with title/description, a primary "Download for Windows" button (`<a download>` to the GitHub asset), a monospace integrity block (`version`, `sha256`, `platform`), and a collapsible "How integrity is verified" note (SHA256 + sigstore). All strings escaped via `esc()`; the `download_url` is validated to be a `https://github.com/AstralDeep/AstralBody/releases/...` URL before rendering (defense-in-depth — never render an arbitrary URL as a download link).
+- **Web renderer** (`backend/webrender/renderer.py` `render_download_card`): a card with title/description, a primary "Download for Windows" button (`<a download>` to the GitHub asset), a monospace integrity block (`version`, `sha256`, `platform`), and a collapsible "How integrity is verified" note (SHA256 + sigstore). All strings escaped via `esc()`; the `download_url` is validated to be a `https://github.com/AstralDeep/AstralDeep/releases/...` URL before rendering (defense-in-depth — never render an arbitrary URL as a download link).
 - **ROTE** (`backend/rote/adapter.py` `_adapt_download_card`): browser/tablet/TV full card; mobile a compact card (button + version); watch a single "Download Astral desktop v…" text+link; voice extracts "Download the Astral desktop app, version <v>, from GitHub. Integrity is verified with a SHA-256 hash and a sigstore signature."
 - **CSS** in `backend/webrender/static/astral.css`.
 - **Tests:** `backend/tests/test_download_card.py` — renderer structure/escaping/URL-validation, ROTE adaptation per device, builder, registry membership.
@@ -142,20 +142,20 @@ Extends `windows-client/win_agent/tools.py` + `agent.py`. New tools, all returni
 
 **PHI gate (client-side, fail-closed):** a small, dependency-light port of the `backend/personalization/phi_gate.py` *pure-Python pre-filter* ships in the client (`windows-client/astral_client/phi_gate.py`) — the same regex set (SSN, email, phone, ISO/US dates, MRN context, long digit runs). It runs on (a) every `read_file`/`list_directory` result and (b) every `run_command`/`run_shell` stdout/stderr **before** the result is returned to the orchestrator. A hit ⇒ the result is refused with an `alert` (variant `error`) explaining PHI was detected and **not** sent. The heavier Presidio analyzer is not bundled (it would bloat the exe and pull spaCy); the pre-filter is the client's defense-in-depth, and the orchestrator's full Presidio gate remains the authoritative PHI boundary for anything that reaches the backend. **Fail-closed:** if the pre-filter raises, treat as PHI and refuse.
 
-**Audit (every action):** the win_agent does not have the orchestrator's DB-backed recorder, so it emits a **local structured audit log** (`windows-client/astral_client/audit_log.py`) — an append-only JSONL file at `%APPDATA%/AstralBody/audit.log` (rotated, hash-chained with an HMAC key derived from the machine + user sid, mirroring the backend's per-user hash-chain posture). Every tool call logs: `ts`, `actor` (user from token), `tool`, `args` (paths redacted to workspace-relative; command text kept for `run_command`/`run_shell`), `outcome` (success/refused/phi_blocked/error), `correlation_id` (threaded from the MCP request). The dangerous bypass emits `event_class: "dangerous_bypass"` with the full command. The orchestrator *also* records its standard `tool` audit event for every dispatch (it already does), so actions are double-audited: once at the orchestrator (who called what, permission verdict) and once on the client (what the tool actually did on disk). A future enhancement can upload the client audit log on sign-out; v1 keeps it local + viewable via a native "View audit log" dialog.
+**Audit (every action):** the win_agent does not have the orchestrator's DB-backed recorder, so it emits a **local structured audit log** (`windows-client/astral_client/audit_log.py`) — an append-only JSONL file at `%APPDATA%/AstralDeep/audit.log` (rotated, hash-chained with an HMAC key derived from the machine + user sid, mirroring the backend's per-user hash-chain posture). Every tool call logs: `ts`, `actor` (user from token), `tool`, `args` (paths redacted to workspace-relative; command text kept for `run_command`/`run_shell`), `outcome` (success/refused/phi_blocked/error), `correlation_id` (threaded from the MCP request). The dangerous bypass emits `event_class: "dangerous_bypass"` with the full command. The orchestrator *also* records its standard `tool` audit event for every dispatch (it already does), so actions are double-audited: once at the orchestrator (who called what, permission verdict) and once on the client (what the tool actually did on disk). A future enhancement can upload the client audit log on sign-out; v1 keeps it local + viewable via a native "View audit log" dialog.
 
 ### B.5 Desktop client: integrity verifier (download + verify before run)
 
 `windows-client/astral_client/integrity.py` + a first-launch / update flow wired into `app.py`:
 
-1. **Resolve latest release:** `GET https://api.github.com/repos/AstralDeep/AstralBody/releases/latest` (egress-gated, timeout-bounded). Extract the `AstralBody.exe` asset `browser_download_url`, plus the `SHA256SUMS` and `cosign.bundle` asset URLs. Fail-closed if the release lacks any of the three.
+1. **Resolve latest release:** `GET https://api.github.com/repos/AstralDeep/AstralDeep/releases/latest` (egress-gated, timeout-bounded). Extract the `AstralDeep.exe` asset `browser_download_url`, plus the `SHA256SUMS` and `cosign.bundle` asset URLs. Fail-closed if the release lacks any of the three.
 2. **Download** the exe + `SHA256SUMS` + `cosign.bundle` to a temp dir (streamed, size-bounded).
-3. **Verify SHA256:** `sha256(AstralBody.exe) ==` the line in `SHA256SUMS` for `AstralBody.exe`. Mismatch ⇒ refuse, delete, alert.
-4. **Verify cosign/sigstore:** use `sigstore` (client-only dep) to verify `cosign.bundle` against the exe. Assert the signing certificate's OIDC identity: **issuer `https://token.actions.githubusercontent.com`** and the **SAN** matches the AstralDeep/AstralBody workflow (repo + ref, e.g. `repo: AstralDeep/AstralBody`). Mismatch/unverifiable ⇒ refuse.
+3. **Verify SHA256:** `sha256(AstralDeep.exe) ==` the line in `SHA256SUMS` for `AstralDeep.exe`. Mismatch ⇒ refuse, delete, alert.
+4. **Verify cosign/sigstore:** use `sigstore` (client-only dep) to verify `cosign.bundle` against the exe. Assert the signing certificate's OIDC identity: **issuer `https://token.actions.githubusercontent.com`** and the **SAN** matches the AstralDeep/AstralDeep workflow (repo + ref, e.g. `repo: AstralDeep/AstralDeep`). Mismatch/unverifiable ⇒ refuse.
 5. **Only then:** replace the running binary (on update) / launch (on first install). A failed verification never executes the downloaded binary.
 6. **Offline tolerance:** if GitHub is unreachable on an *update check*, keep running the current (already-verified) binary; never fall back to an unverified download. Integrity is checked **before every run** of a freshly downloaded binary, not just on first install.
 
-`sigstore` is the **only** new client dependency; it is frozen into the PyInstaller bundle (`requirements.txt` + `AstralBody.spec` `hiddenimports`) and is a client-only build-time dep — it never enters the backend image (Constitution V preserved). Documented in the PR.
+`sigstore` is the **only** new client dependency; it is frozen into the PyInstaller bundle (`requirements.txt` + `AstralDeep.spec` `hiddenimports`) and is a client-only build-time dep — it never enters the backend image (Constitution V preserved). Documented in the PR.
 
 ### B.6 GitHub Actions: build + sign + release
 
@@ -165,10 +165,10 @@ New workflow `.github/workflows/release-windows.yml`:
 - **Job `build-sign-release`** on `windows-latest`:
   1. Checkout, set up Python 3.11.
   2. `pip install -r windows-client/requirements.txt pyinstaller sigstore`.
-  3. `pyinstaller --noconfirm windows-client/AstralBody.spec` → `windows-client/dist/AstralBody.exe`.
-  4. `sha256sum AstralBody.exe > SHA256SUMS`.
-  5. **Keyless cosign sign** with sigstore's GitHub OIDC: `sigstore sign --bundle cosign.bundle AstralBody.exe` (uses `ACTIONS_ID_TOKEN_REQUEST_URL` — no signing key secret to manage).
-  6. Create/Update a GitHub Release (via `softprops/action-gh-release` or `gh release create`) for the tag, uploading `AstralBody.exe`, `SHA256SUMS`, `cosign.bundle`.
+  3. `pyinstaller --noconfirm windows-client/AstralDeep.spec` → `windows-client/dist/AstralDeep.exe`.
+  4. `sha256sum AstralDeep.exe > SHA256SUMS`.
+  5. **Keyless cosign sign** with sigstore's GitHub OIDC: `sigstore sign --bundle cosign.bundle AstralDeep.exe` (uses `ACTIONS_ID_TOKEN_REQUEST_URL` — no signing key secret to manage).
+  6. Create/Update a GitHub Release (via `softprops/action-gh-release` or `gh release create`) for the tag, uploading `AstralDeep.exe`, `SHA256SUMS`, `cosign.bundle`.
 - **Permissions:** `id-token: write` (for sigstore OIDC), `contents: write` (to create the release). No long-lived signing secrets.
 - This is a **separate** workflow from the existing `ci.yml` (which gates PRs/push-to-main) — it only fires on tags, so it does not slow CI. It reuses the same `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` posture.
 
@@ -178,7 +178,7 @@ New workflow `.github/workflows/release-windows.yml`:
 |-----|---------|-------|---------|
 | `FF_DESKTOP_CODEGEN` | on | orchestrator | Inject `offer_desktop_codegen` meta-tool |
 | `DESKTOP_RELEASE_TTL_SECONDS` | 300 | orchestrator | Release-metadata cache TTL |
-| `DESKTOP_RELEASE_REPO` | `AstralDeep/AstralBody` | orchestrator | GitHub repo for release lookup |
+| `DESKTOP_RELEASE_REPO` | `AstralDeep/AstralDeep` | orchestrator | GitHub repo for release lookup |
 | `ASTRAL_WORKSPACE_DIR` | `~/AstralWorkspace` | desktop client | Workspace confinement root |
 | `WIN_CMD_TIMEOUT` | 60 | desktop client | `run_command` timeout (s) |
 | `WIN_CMD_MAX_BYTES` | 1048576 | desktop client | `run_command` output cap |
@@ -227,7 +227,7 @@ All new in `.env.example` with safe defaults; flags are additive and default to 
   → `ruff check .` = **All checks passed!** All four files byte-compile.
 - azp gate, desktop OIDC, WS-teardown, empty-state fixes: reviewed, **no defect**
   (Findings A-2 / A-3).
-- **Fix PR: [#84](https://github.com/AstralDeep/AstralBody/pull/84)** (branch `039-pr83-fixes`).
+- **Fix PR: [#84](https://github.com/AstralDeep/AstralDeep/pull/84)** (branch `039-pr83-fixes`).
 
 ### Part B — implementation log  ✅
 
@@ -241,7 +241,7 @@ All new in `.env.example` with safe defaults; flags are additive and default to 
 | `download_card` primitive (renderer + ROTE) | `webrender/renderer.py`, `rote/adapter.py` | **18 pass** |
 | Integrity verifier (SHA256 + sigstore) | `astral_client/integrity.py` | **10 pass** |
 | GH Actions build+sign+release | `.github/workflows/release-windows.yml` | YAML valid; cosign keyless |
-| PyInstaller spec + requirements (sigstore) | `AstralBody.spec`, `requirements.txt` | — |
+| PyInstaller spec + requirements (sigstore) | `AstralDeep.spec`, `requirements.txt` | — |
 
 - Full windows-client suite: **49 passed, 3 skipped** (skips are PySide6-only
   renderer/auth tests; skip cleanly via `importorskip` when PySide6 absent —
@@ -268,7 +268,7 @@ green).
 - **Backend live download card (Part 1.3).** In-container `get_release_info()` →
   real `v0.2.0` exe URL + 64-hex `sha256` + bundle URL; `build_download_card` →
   `variant=available`; `webrender.render_download_card` → a real
-  `<a href="…/releases/download/v0.2.0/AstralBody.exe">⬇ Download for Windows</a>`
+  `<a href="…/releases/download/v0.2.0/AstralDeep.exe">⬇ Download for Windows</a>`
   with the sha shown (B-1 render half, B-2).
 - **Integrity verifier vs the REAL releases (B-8).** A probe ran the *actual*
   client code (`integrity.verify_running_exe` / `verify_latest`) with the frozen
@@ -325,7 +325,7 @@ chat model to `zai-org/GLM-5.2-FP8`, the full user journey ran clean:
 1. **Browser → download card (B-1/B-2).** "Write me a Python script that creates a
    greeting file on my computer" → glm-5.2 called `offer_desktop_codegen` → a real
    **⬇ Download for Windows** button rendered, `href` =
-   `…/releases/download/v0.2.1/AstralBody.exe` + the generated code.
+   `…/releases/download/v0.2.1/AstralDeep.exe` + the generated code.
 2. **Download + run the signed exe → integrity on launch (B-8 LIVE).** The v0.2.1
    exe's top bar showed **"✓ Integrity verified — v0.2.1 (SHA-256 + sigstore)"**.
 3. **First-launch workspace picker (C-1 fix, LIVE).** The picker appeared (no hang)

@@ -2,7 +2,7 @@
 
 ## Reference environment (binding, per clarification 2026-07-08)
 
-- Dev machine, `docker compose up -d` (postgres + astralbody), browser/clients on the
+- Dev machine, `docker compose up -d` (postgres + astraldeep), browser/clients on the
   same host. `.env` has `ASTRAL_ENV=development`.
 - P95 = 95th percentile over **≥20 trials**, cold trial discarded unless the metric is
   itself a cold-start metric. Record machine load conditions with each capture.
@@ -16,8 +16,8 @@
 Grep the orchestrator log for the `perf` lines (`shared/perf.py` spans):
 
 ```bash
-docker logs astralbody 2>&1 | grep '^perf ' | sort | awk '{...}'   # or the helper below
-docker exec astralbody bash -c "cd /app/backend && python scripts/perf_report.py"  # summarizes P50/P95 per span
+docker logs astraldeep 2>&1 | grep '^perf ' | sort | awk '{...}'   # or the helper below
+docker exec astraldeep bash -c "cd /app/backend && python scripts/perf_report.py"  # summarizes P50/P95 per span
 ```
 
 Spans of record: `surface.render.<key>` (SC-001 server budget ≤150ms),
@@ -46,7 +46,7 @@ overhead), `boot.init_db` (SC-010 ≤250ms fast path), `boot.jwks_warm`, `boot.p
 ## Automated gates (run in CI, runnable locally)
 
 ```bash
-docker exec astralbody bash -c "cd /app/backend && python -m pytest -q"      # full suite incl.:
+docker exec astraldeep bash -c "cd /app/backend && python -m pytest -q"      # full suite incl.:
 #   - event-loop detector (BlockingDBOnEventLoop on any sync DB call on the loop)
 #   - query-count assertions (history==1, agent detail<=3, agents list<=2, attachments bulk==1)
 #   - schema fast-path test + SCHEMA_REVISION source-hash guard

@@ -639,7 +639,7 @@ def _no_access_page() -> HTMLResponse:
     """FR-005: explicit, bounded no-access outcome for a signed-in account
     holding neither the 'user' nor the 'admin' role. Ungated, no loop."""
     body = """<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>AstralBody — no access</title>
+<html lang="en"><head><meta charset="utf-8"><title>AstralDeep — no access</title>
 <meta name="viewport" content="width=device-width, initial-scale=1"></head>
 <body style="margin:0;display:grid;place-items:center;min-height:100vh;background:#0F1221;color:#F3F4F6;font-family:system-ui,sans-serif">
 <div style="max-width:440px;padding:2rem;border:1px solid rgba(255,255,255,.1);border-radius:12px;background:#1A1E2E;text-align:center">
@@ -656,7 +656,7 @@ def _error_page(nxt: str, reason: str, status: int = 200) -> HTMLResponse:
     from urllib.parse import quote
     retry = f"/auth/login?next={quote(_validate_next(nxt), safe='')}"
     body = f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>AstralBody — sign-in</title>
+<html lang="en"><head><meta charset="utf-8"><title>AstralDeep — sign-in</title>
 <meta name="viewport" content="width=device-width, initial-scale=1"></head>
 <body style="margin:0;display:grid;place-items:center;min-height:100vh;background:#0F1221;color:#F3F4F6;font-family:system-ui,sans-serif">
 <div style="max-width:420px;padding:2rem;border:1px solid rgba(255,255,255,.1);border-radius:12px;background:#1A1E2E;text-align:center">

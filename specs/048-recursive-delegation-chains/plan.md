@@ -9,7 +9,7 @@ Extend the single-hop RFC 8693 exchange in `orchestrator/delegation.py` to mint 
 
 ## Technical Context
 
-**Language/Version**: Python 3.11 (backend image; verified in the `astralbody` container).
+**Language/Version**: Python 3.11 (backend image; verified in the `astraldeep` container).
 **Primary Dependencies**: existing only — `cryptography` (EC/DPoP), stdlib `hmac`/`hashlib`/`json`/`base64` already used by `delegation.py`; the hash-chained audit (`audit/pii.py::chain_hmac`, `repository.py::verify_chain`); `shared/feature_flags.py`. Property generation uses stdlib `random` — **no `hypothesis` dependency added**.
 **Storage**: no schema change anticipated. Delegation-chain records ride the existing `audit_events` chain; if a column is ever needed it ships as an idempotent `_init_db` delta (Constitution IX). None required for this build.
 **Testing**: `backend/tests/test_recursive_delegation.py` — property-based (generated scope sets + chain shapes), runs without a DB/Keycloak (mock-mode tokens).
@@ -57,7 +57,7 @@ exceptions `RecursiveDelegationError`/`DelegationDepthExceeded`.
 
 **Phase 6 — Verify (real container).** Red→green; no regression.
 
-## Evidence (verified in the `astralbody` container, Python 3.11)
+## Evidence (verified in the `astraldeep` container, Python 3.11)
 
 - **Test-first**: first run of `test_recursive_delegation.py` → **10 failed** (`AttributeError: … has no attribute 'mint_child_delegation'`). After implementation → **10 passed**, then **14 passed** with the US3 enforcement tests.
 - **Combined**: `test_recursive_delegation.py` + `test_delegation.py` → **25 passed**.

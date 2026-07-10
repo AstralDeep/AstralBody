@@ -52,7 +52,7 @@ Existing table `tutorial_step` (created in feature 005). One new row added via t
 | `target_kind` | `static` |
 | `target_key` | `sidebar.agents` (same anchor as `open-agents-panel`; sequential steps can share a target) |
 | `title` | `Turn an agent on` |
-| `body` | `Open the Agents panel and switch on at least one agent. Until you do, AstralBody talks to the language model in text-only mode — it can chat, but it can't take actions on your behalf.` |
+| `body` | `Open the Agents panel and switch on at least one agent. Until you do, AstralDeep talks to the language model in text-only mode — it can chat, but it can't take actions on your behalf.` |
 
 Insertion clause: `ON CONFLICT (slug) DO NOTHING` — preserves admin overrides of the same slug across re-runs.
 

@@ -31,7 +31,7 @@ Fernet-encrypted poll handle; RFC 8628 state lives at Keycloak. (Constitution IX
 is wrong about this, any persistence ships as a guarded idempotent `_init_db` delta.)
 
 **Testing**: pytest (backend; DB-free units for QR/profiles/broker logic + suite-integrated
-tests run in the `astralbody` container); XCTest via `swift test` for AstralCore (manifest
+tests run in the `astraldeep` container); XCTest via `swift test` for AstralCore (manifest
 drift guard, PKCE, queue/backoff, device-login state machine); Xcode for app targets.
 
 **Target Platform**: iPhone/iPad, Mac, Apple Watch (independent watch app) against the

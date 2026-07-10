@@ -1,5 +1,5 @@
 """
-Code Security Analyzer for AstralBody Agent Creation.
+Code Security Analyzer for AstralDeep Agent Creation.
 
 Performs AST-based static analysis on generated Python code to detect
 dangerous patterns before code is written to disk or executed.

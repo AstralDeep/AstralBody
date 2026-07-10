@@ -5,7 +5,7 @@ Goal: confirm the web, Windows, and Android clients render the **same** top bar 
 ## 0. Backend up
 
 ```bash
-docker compose up -d                 # postgres + astralbody on :8001 (ASTRAL_ENV=development ⇒ mock auth ⇒ roles [admin,user])
+docker compose up -d                 # postgres + astraldeep on :8001 (ASTRAL_ENV=development ⇒ mock auth ⇒ roles [admin,user])
 curl -fsS localhost:8001/healthz && curl -fsS localhost:8001/readyz
 curl -fsS localhost:8001/api/chrome/menu | python -m json.tool   # the served model (admin, since dev mock auth)
 ```
@@ -13,7 +13,7 @@ curl -fsS localhost:8001/api/chrome/menu | python -m json.tool   # the served mo
 ## 1. Menu-model contract (fast, no client)
 
 ```bash
-docker exec astralbody bash -c "cd /app/backend && python -m pytest webrender/tests/test_menu_model.py orchestrator/tests/test_chrome_menu.py -q"
+docker exec astraldeep bash -c "cd /app/backend && python -m pytest webrender/tests/test_menu_model.py orchestrator/tests/test_chrome_menu.py -q"
 ```
 Asserts: builder order/labels match the source of truth; admin vs non-admin filtering; REST body == WS frame; every item surface resolves; Pulse present only when `FF_PULSE_DIGEST`.
 
@@ -50,7 +50,7 @@ Place the three screenshots side by side. Same groups, same items, same order, z
 
 ```bash
 # Backend gates (run the same invocations CI runs):
-docker exec astralbody bash -c "cd /app/backend && python -m ruff check . && python -m pytest -q -m 'not integration'"
+docker exec astraldeep bash -c "cd /app/backend && python -m ruff check . && python -m pytest -q -m 'not integration'"
 # Android gates:
 cd android-client && ./gradlew ktlintCheck :app:lintDebug :core:test :app:testDebugUnitTest :core:koverVerify :app:assembleDebug
 ```

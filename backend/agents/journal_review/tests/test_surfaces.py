@@ -218,7 +218,7 @@ def test_openalex_calls_carry_polite_headers_and_bounds(rmock: HttpMock) -> None
     find_matching_journals(query="cardiology")
     assert rmock.calls, "expected calls intercepted at requests.request (external_http)"
     for call in rmock.calls:
-        assert call["headers"]["User-Agent"].startswith("AstralBody/1.0")
+        assert call["headers"]["User-Agent"].startswith("AstralDeep/1.0")
         assert call["allow_redirects"] is False
         assert call["timeout"] == 15
 

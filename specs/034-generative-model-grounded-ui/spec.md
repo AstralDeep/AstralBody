@@ -7,7 +7,7 @@
 
 ## Overview
 
-Move AstralBody's UI generation from "arrange finished components" toward **"model the task, then render and adapt the UI"** — the single largest novelty+UX delta in the 033 corpus, and the project's signature SDUI thesis pushed to the frontier. All work respects the constraint envelope (Python-only · no new third-party runtime libraries · SDUI mandate · idempotent migrations · fail-closed) and is **flag-gated and fail-open** to today's behavior so adoption never reduces reliability.
+Move AstralDeep's UI generation from "arrange finished components" toward **"model the task, then render and adapt the UI"** — the single largest novelty+UX delta in the 033 corpus, and the project's signature SDUI thesis pushed to the frontier. All work respects the constraint envelope (Python-only · no new third-party runtime libraries · SDUI mandate · idempotent migrations · fail-closed) and is **flag-gated and fail-open** to today's behavior so adoption never reduces reliability.
 
 This branch delivers the capabilities incrementally; each is independently testable and ships green against the constitution's ≥90% changed-code coverage gate.
 

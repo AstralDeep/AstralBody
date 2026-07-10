@@ -9,7 +9,7 @@ description: "Task list for 051-apple-native-clients"
 
 **Tests**: INCLUDED — Constitution III (test-first for backend logic; ≥90% changed-line
 coverage) and FR-038 (Swift drift guards). Backend unit tests are DB-free where the logic is
-pure; suite-integrated tests run in the `astralbody` container.
+pure; suite-integrated tests run in the `astraldeep` container.
 
 **Organization**: Setup → Foundational (blocking) → US1..US6 → Polish. Paths per plan.md.
 

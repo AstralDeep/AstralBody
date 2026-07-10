@@ -17,8 +17,8 @@ up: ## Build images and start all containers in the background
 down: ## Stop containers (volumes preserved)
 	docker compose down
 
-restart: ## Restart the astralbody app container
-	docker compose restart astralbody
+restart: ## Restart the astraldeep app container
+	docker compose restart astraldeep
 
 build: ## Build images without starting containers
 	docker compose build
@@ -28,35 +28,35 @@ ps: ## Show container status
 
 ## ---------- Observability ----------
 
-logs: ## Follow logs for the astralbody container
-	docker compose logs -f astralbody
+logs: ## Follow logs for the astraldeep container
+	docker compose logs -f astraldeep
 
 logs-db: ## Follow logs for the postgres container
 	docker compose logs -f postgres
 
 ## ---------- Shells ----------
 
-shell: ## Open a bash shell inside the astralbody container
-	docker exec -it astralbody bash
+shell: ## Open a bash shell inside the astraldeep container
+	docker exec -it astraldeep bash
 
 psql: ## Open psql against the postgres container (uses DB_USER/DB_NAME from .env)
-	docker exec -it astralbody-postgres psql -U $$DB_USER -d $$DB_NAME
+	docker exec -it astraldeep-postgres psql -U $$DB_USER -d $$DB_NAME
 
 ## ---------- Sync (no host toolchain; everything runs in containers) ----------
 
-sync-backend: ## Tar backend source via an alpine container, copy into astralbody, restart
+sync-backend: ## Tar backend source via an alpine container, copy into astraldeep, restart
 	docker run --rm -v "$(HOST_PWD)/backend:/src:ro" alpine:3 tar \
 	  --exclude='.venv' --exclude='__pycache__' --exclude='data' --exclude='tmp' \
 	  --exclude='*.pyc' -C /src -cf - . \
-	  | docker cp - astralbody:/app/backend/
-	docker compose restart astralbody
+	  | docker cp - astraldeep:/app/backend/
+	docker compose restart astraldeep
 
 sync: sync-backend ## Sync backend source into the running container
 
 ## ---------- Tests ----------
 
-test-backend: ## Run pytest inside the astralbody container
-	docker exec astralbody bash -c "cd /app/backend && python -m pytest -q"
+test-backend: ## Run pytest inside the astraldeep container
+	docker exec astraldeep bash -c "cd /app/backend && python -m pytest -q"
 
 test: test-backend ## Run all tests
 

@@ -1,7 +1,7 @@
 """Feature 032 — Agentic File-Upload SDUI & Delegated-Authority Verification.
 
 An autonomous, closed-loop verification *harness* that drives the existing
-AstralBody upload -> parse -> server-driven-UI -> delegated-authority -> audit
+AstralDeep upload -> parse -> server-driven-UI -> delegated-authority -> audit
 pipeline and proves three differentiating properties across four personas:
 
 1. **Tangible UI** — file-upload queries yield interactive, file-derived,

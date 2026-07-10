@@ -1,5 +1,5 @@
 """
-BaseA2AAgent — Base class for all AstralBody agents with WebSocket + A2A dual transport.
+BaseA2AAgent — Base class for all AstralDeep agents with WebSocket + A2A dual transport.
 
 Provides:
 - WebSocket endpoint (/agent) for orchestrator communication (default internal transport)
@@ -72,7 +72,7 @@ def find_available_port(start_port: int = BASE_PORT, max_offset: int = MAX_PORT_
 
 
 class BaseA2AAgent:
-    """Base class for all AstralBody agents with WebSocket + A2A dual transport.
+    """Base class for all AstralDeep agents with WebSocket + A2A dual transport.
 
     Subclasses must provide:
         - agent_id: Unique identifier (e.g. "general-1")

@@ -1,7 +1,7 @@
 # Tasks: Security-Benchmark Harness
 
 **Feature**: 047-security-benchmark-harness | **Plan**: [plan.md](plan.md) | **Spec**: [spec.md](spec.md)
-Verified in the `astralbody` container (Python 3.11): 14/14 tests green.
+Verified in the `astraldeep` container (Python 3.11): 14/14 tests green.
 
 ## Phase 0 — Setup
 
@@ -42,7 +42,7 @@ Verified in the `astralbody` container (Python 3.11): 14/14 tests green.
 - [X] T017 `tests/test_adjudicator.py` — 4 outcomes + determinism + attempt-vs-effect (7 tests).
 - [X] T018 `tests/test_ablation.py` — baseline/full ASR, per-layer attribution, marginal-sum, LLM-judge-unimplemented, reproducibility (SC-001/002/006).
 - [X] T019 `tests/test_isolation_check.py` — isolation holds + multi-benchmark same schema (SC-003/004).
-- [X] T020 **Verify:** `docker exec astralbody python -m pytest security_benchmark/tests -q` → **14 passed**. CLI reproduces the ASR ablation; isolation guard green; regression gate trips on threshold breach.
+- [X] T020 **Verify:** `docker exec astraldeep python -m pytest security_benchmark/tests -q` → **14 passed**. CLI reproduces the ASR ablation; isolation guard green; regression gate trips on threshold breach.
 
 ## Deferred (documented, not blocking)
 

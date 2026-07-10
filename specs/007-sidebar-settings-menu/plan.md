@@ -21,7 +21,7 @@ The popover conforms to the full WAI-ARIA menu pattern (FR-012): arrow-key navig
 
 **Testing**: Vitest + Testing Library, alongside existing `frontend/src/__tests__/`. Coverage target 90% on changed code per Constitution Principle III. Tests cover: rendering with/without admin, item omission when callback unavailable, click activation, click-outside dismissal, Escape dismissal, full keyboard navigation (Tab/Enter/Arrow/Home/End/Escape), focus trap, focus return, tutorial auto-open/auto-close.
 
-**Target Platform**: Existing AstralBody frontend running in modern evergreen browsers (Chrome, Firefox, Safari, Edge). Three viewport modes already supported by `DashboardLayout`: expanded sidebar (desktop), collapsed icon rail (desktop), mobile drawer.
+**Target Platform**: Existing AstralDeep frontend running in modern evergreen browsers (Chrome, Firefox, Safari, Edge). Three viewport modes already supported by `DashboardLayout`: expanded sidebar (desktop), collapsed icon rail (desktop), mobile drawer.
 
 **Project Type**: Web application (existing `backend/` + `frontend/` split). This feature touches only `frontend/`.
 
@@ -111,7 +111,7 @@ frontend/
 # UNCHANGED: backend/, .specify/, all docs outside specs/007-…
 ```
 
-**Structure Decision**: AstralBody is a web application with the existing `backend/` + `frontend/` split. Frontend-only changes live under `frontend/src/components/settings/`, a new sibling of `feedback/`, `audit/`, `llm/`, `onboarding/`. This matches the per-feature folder convention established by features 003–006 (each feature got its own component subdir under `components/`). No backend module is created.
+**Structure Decision**: AstralDeep is a web application with the existing `backend/` + `frontend/` split. Frontend-only changes live under `frontend/src/components/settings/`, a new sibling of `feedback/`, `audit/`, `llm/`, `onboarding/`. This matches the per-feature folder convention established by features 003–006 (each feature got its own component subdir under `components/`). No backend module is created.
 
 The new `SettingsMenu.tsx` lives in its own folder so colocated tests (`__tests__/SettingsMenu.test.tsx`) follow the same pattern as `frontend/src/components/onboarding/__tests__/`.
 

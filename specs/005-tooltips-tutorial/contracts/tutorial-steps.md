@@ -24,7 +24,7 @@ Return the ordered list of tutorial steps applicable to the calling user. The se
       "display_order": 10,
       "target_kind": "none",
       "target_key": null,
-      "title": "Welcome to AstralBody",
+      "title": "Welcome to AstralDeep",
       "body": "Let's take a quick tour."
     },
     {

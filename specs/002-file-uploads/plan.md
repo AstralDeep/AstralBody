@@ -5,7 +5,7 @@
 
 ## Summary
 
-Expand the chat composer's paperclip control from the four current text formats (`.csv`, `.txt`, `.json`, `.md`) to ~30 common formats spanning documents (PDF/DOCX/RTF/ODT), spreadsheets (XLSX/XLS/ODS/TSV), presentations (PPTX/PPT/ODP), structured text/code, and images. On the backend, extend the existing Keycloak-protected `/api/upload` endpoint to accept the new types under a unified 30 MB cap, store files under a **user-scoped** location (not session-scoped) so they appear inline across all the user's chats, and add a new tool surface on the AstralBody general agent that reads each file category into a representation the agent can reason over (text, structured data, image bytes for the connected vision model). PDFs and image-only documents try OCR first and fall back to the vision model when text extraction yields nothing.
+Expand the chat composer's paperclip control from the four current text formats (`.csv`, `.txt`, `.json`, `.md`) to ~30 common formats spanning documents (PDF/DOCX/RTF/ODT), spreadsheets (XLSX/XLS/ODS/TSV), presentations (PPTX/PPT/ODP), structured text/code, and images. On the backend, extend the existing Keycloak-protected `/api/upload` endpoint to accept the new types under a unified 30 MB cap, store files under a **user-scoped** location (not session-scoped) so they appear inline across all the user's chats, and add a new tool surface on the AstralDeep general agent that reads each file category into a representation the agent can reason over (text, structured data, image bytes for the connected vision model). PDFs and image-only documents try OCR first and fall back to the vision model when text extraction yields nothing.
 
 ## Technical Context
 

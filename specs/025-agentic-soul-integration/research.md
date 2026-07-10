@@ -1,6 +1,6 @@
 # Phase 0 Research: Agentic Soul Integration
 
-This document resolves the open technical decisions implied by the spec, grounded in the actual AstralBody codebase. Each item follows Decision / Rationale / Alternatives.
+This document resolves the open technical decisions implied by the spec, grounded in the actual AstralDeep codebase. Each item follows Decision / Rationale / Alternatives.
 
 ---
 
@@ -77,7 +77,7 @@ This document resolves the open technical decisions implied by the spec, grounde
 - Skills as one-line guidance keeps the enabled-tool set authoritative (the actual tool list is still computed by the existing scope/permission gate in Phase A/B/C of tool assembly), so disabled skills cannot leak (FR-012).
 
 **Alternatives considered**:
-- *Per-agent system-prompt override files (openclaw SOUL.md)* — rejected: openclaw uses per-agent workspace files; AstralBody's clarified model is **one personality per user** (Q3), and a DB-backed per-user fragment is simpler, auditable, and editable through primitives.
+- *Per-agent system-prompt override files (openclaw SOUL.md)* — rejected: openclaw uses per-agent workspace files; AstralDeep's clarified model is **one personality per user** (Q3), and a DB-backed per-user fragment is simpler, auditable, and editable through primitives.
 
 ---
 

@@ -39,7 +39,7 @@ class LoginCancelled(RuntimeError):
 
 _DEFAULT_SCOPES = "openid profile email offline_access"
 _DONE_HTML = (b"<html><body style='font-family:sans-serif;background:#0F1221;color:#F3F4F6;"
-              b"text-align:center;padding-top:80px'><h2>AstralBody</h2>"
+              b"text-align:center;padding-top:80px'><h2>AstralDeep</h2>"
               b"<p>Login complete - you can close this window.</p></body></html>")
 
 
@@ -139,7 +139,7 @@ def oidc_login(authority: str, *, client_id: str = "astral-desktop",
     url = f"{auth_ep}?{params}"
     logger.info("opening browser for OIDC login (client=%s)", client_id)
     try:  # guarded: a windowed (no-console) PyInstaller build may have no stdout
-        print("\n[AstralBody] Opening your browser to sign in…\n"
+        print("\n[AstralDeep] Opening your browser to sign in…\n"
               "If it doesn't open automatically, paste this URL into your browser:\n"
               f"  {url}\n", flush=True)
     except Exception:

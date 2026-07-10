@@ -1,6 +1,6 @@
 @echo off
 REM ============================================================================
-REM  AstralBody — native Windows client launcher
+REM  AstralDeep — native Windows client launcher
 REM  Double-click this file to start the desktop app against your deployment.
 REM  It sets the orchestrator URL + Keycloak realm so the app runs the real
 REM  OIDC sign-in (dedicated public client "astral-desktop") on launch.
@@ -17,4 +17,4 @@ REM     tools agent (system info, clipboard, notify, open, ls) can register.
 REM     Leave unset if the orchestrator runs keyless (ASTRAL_ENV=development).
 REM set "AGENT_API_KEY=<paste the orchestrator's AGENT_API_KEY here>"
 
-"%~dp0dist\AstralBody.exe" %*
+"%~dp0dist\AstralDeep.exe" %*

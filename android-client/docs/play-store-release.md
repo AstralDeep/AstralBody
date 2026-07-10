@@ -1,6 +1,6 @@
 # Play Store Release Runbook
 
-How to build, sign, and publish the AstralBody Android client to Google Play.
+How to build, sign, and publish the AstralDeep Android client to Google Play.
 First written for the v0.1.0 (`versionCode 1`) initial upload.
 
 ## Signing model
@@ -96,7 +96,7 @@ versionName = "0.2.0"    // human-readable, shown on the store listing
 3. **Play App Signing** — accepted by default on first `.aab` upload; the
    keystore above becomes the registered upload key.
 
-### Dashboard "Set up your app" checklist (AstralBody answers)
+### Dashboard "Set up your app" checklist (AstralDeep answers)
 
 | Item | Answer |
 |---|---|
@@ -118,7 +118,7 @@ Declares what the app collects/shares. Truthful answers for this client:
 
 - **Collected**: Personal info → *User IDs* and *Email address* (Keycloak OIDC
   sign-in); Messages → *Other in-app messages* (chat content sent to the
-  AstralBody backend); Files and docs (chat attachments, if the user attaches
+  AstralDeep backend); Files and docs (chat attachments, if the user attaches
   them).
 - **Shared with third parties**: No (data goes only to the first-party backend).
 - **Encrypted in transit**: Yes (WSS/HTTPS in release; tokens stored via

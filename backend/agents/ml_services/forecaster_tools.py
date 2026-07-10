@@ -174,7 +174,7 @@ def forecaster_submit_dataset(file_handle: Optional[str] = None,
     are past/future/static covariates before calling ``set_column_roles``.
 
     Args:
-        file_handle: Attachment handle of a CSV uploaded via AstralBody.
+        file_handle: Attachment handle of a CSV uploaded via AstralDeep.
         inline_data: Raw CSV text the user pasted in chat. Used only when
             ``file_handle`` is absent: materialized into a real attachment
             owned by the authenticated user (the orchestrator-injected
@@ -588,7 +588,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
             "columns to ask the user which column is the time component, which is the "
             "target, and which (if any) are past/future/static covariates before "
             "calling set_column_roles. file_handle should be the attachment_id from "
-            "the AstralBody upload mechanism, NOT the display filename. "
+            "the AstralDeep upload mechanism, NOT the display filename. "
             "If the user pasted data in chat, pass it via inline_data — NEVER invent "
             "a file_handle. "
             "DO NOT call read_spreadsheet/read_csv before this — "
@@ -600,7 +600,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "file_handle": {
                     "type": "string",
-                    "description": "Handle of a CSV uploaded via AstralBody's file mechanism.",
+                    "description": "Handle of a CSV uploaded via AstralDeep's file mechanism.",
                 },
                 "inline_data": {
                     "type": "string",

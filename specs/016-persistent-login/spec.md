@@ -3,7 +3,7 @@
 **Feature Branch**: `016-persistent-login`
 **Created**: 2026-05-15
 **Status**: Draft
-**Input**: User description: "I serve the AstralBody system through a flutter project for various devices. basically it just renders the html to an app (iphone/android/whatever) called flutter-passthrough. What I want to add is credential storage on device (or browser) that allow the user to stay logged in for a year, so they do not have to log in every time they open the app. can you add this to the AstralBody system"
+**Input**: User description: "I serve the AstralDeep system through a flutter project for various devices. basically it just renders the html to an app (iphone/android/whatever) called flutter-passthrough. What I want to add is credential storage on device (or browser) that allow the user to stay logged in for a year, so they do not have to log in every time they open the app. can you add this to the AstralDeep system"
 
 ## Clarifications
 
@@ -29,7 +29,7 @@
 
 ### User Story 1 — Returning Web User Stays Signed In (Priority: P1)
 
-A user signs in to AstralBody in a desktop or laptop browser, closes the browser tab (or the entire browser), and reopens the application later — from minutes to many months later. On reopening, they land directly in the dashboard without seeing the login screen and without typing a password, exactly as if they had never left. This holds for the full retention window the system promises (target: up to 1 year).
+A user signs in to AstralDeep in a desktop or laptop browser, closes the browser tab (or the entire browser), and reopens the application later — from minutes to many months later. On reopening, they land directly in the dashboard without seeing the login screen and without typing a password, exactly as if they had never left. This holds for the full retention window the system promises (target: up to 1 year).
 
 **Why this priority**: This is the foundational capability and the highest-impact slice. Today every browser session that ends forces a fresh interactive login, which is the main friction point the user is asking us to remove. If we ship only this slice, web users — the largest share of traffic — already get the promised "stay logged in for a year" experience.
 
@@ -46,7 +46,7 @@ A user signs in to AstralBody in a desktop or laptop browser, closes the browser
 
 ### User Story 2 — Returning Mobile App User Stays Signed In (Priority: P1)
 
-A user installs the Flutter-wrapped AstralBody app on iPhone or Android, signs in inside the app's web view, and then backgrounds, force-quits, or reboots the device. The next time they tap the app icon — minutes, days, or months later — the app opens directly into the dashboard with no login prompt, for the full retention window (target: up to 1 year).
+A user installs the Flutter-wrapped AstralDeep app on iPhone or Android, signs in inside the app's web view, and then backgrounds, force-quits, or reboots the device. The next time they tap the app icon — minutes, days, or months later — the app opens directly into the dashboard with no login prompt, for the full retention window (target: up to 1 year).
 
 **Why this priority**: Mobile is the primary delivery vehicle for the flutter-passthrough product, and re-typing a password on a phone keyboard every session is exactly the friction the user is asking us to eliminate. Without this slice, the feature does not meaningfully change the mobile experience even if web persistence works.
 

@@ -70,7 +70,7 @@
 
 ## R5. How does the frontend store the API key safely?
 
-**Decision**: `localStorage` under the key `astralbody.llm.config.v1`, holding the full JSON object `{ apiKey, baseUrl, model, connectedAt, usage: { session, today, todayDate, lifetime, perModel } }`. A privacy notice in the settings panel calls out that the key resides on the user's device. No encryption-at-rest in this iteration (the threat model is "this device is the user's"; if XSS can read localStorage, it can also intercept the key in memory, so encryption-at-rest is theater).
+**Decision**: `localStorage` under the key `astraldeep.llm.config.v1`, holding the full JSON object `{ apiKey, baseUrl, model, connectedAt, usage: { session, today, todayDate, lifetime, perModel } }`. A privacy notice in the settings panel calls out that the key resides on the user's device. No encryption-at-rest in this iteration (the threat model is "this device is the user's"; if XSS can read localStorage, it can also intercept the key in memory, so encryption-at-rest is theater).
 
 **Rationale**:
 - localStorage is the standard "I want this to survive a refresh and a sign-out" web storage. sessionStorage would clear on tab close (user's spec answer says sign-out persists, so sessionStorage is wrong). IndexedDB is overkill for ~200 bytes of config.

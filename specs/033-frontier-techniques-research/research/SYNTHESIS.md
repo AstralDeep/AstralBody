@@ -16,7 +16,7 @@
 Eight parallel analysts surveyed the mid-2026 commercial frontier (OpenAI, Google/DeepMind,
 Anthropic, Microsoft, Meta, Amazon, Vercel, and agent startups) and the recent scholarly
 literature (arXiv / CHI / UIST / IUI / NeurIPS / ICML / ICLR / ACL / IEEE S&P / USENIX / CCS /
-NDSS / IETF / OWASP, 2023–2026), each against the same AstralBody baseline and the same
+NDSS / IETF / OWASP, 2023–2026), each against the same AstralDeep baseline and the same
 hard constraints: **Python backend only, no new third-party runtime libraries, the SDUI mandate
 (astralprims defines → orchestrator renders → ROTE adapts), idempotent startup migrations,
 fail-closed.** Every consolidated capability below is achievable inside those constraints unless
@@ -32,31 +32,31 @@ S/M/L, **Consensus** = number of independent streams that surfaced it (a proxy f
 
 1. **Enforce, don't hope: constrained-decoding structured output.** OpenAI (CFG token-masking,
    100% schema conformance), Google (`responseSchema`), and the reliability needs implicit in the
-   agentic-frameworks/UI streams all converge. AstralBody runs several best-effort-JSON LLM loops
+   agentic-frameworks/UI streams all converge. AstralDeep runs several best-effort-JSON LLM loops
    (UI-designer layout tree, codegen, tool args) with retry/repair workarounds. **The single
    lowest-effort, highest-leverage change in the corpus.** → C-N14.
 2. **Generate a *model*, render the UI.** The UI literature (task-driven data model, IRs, FSM
    interface representations) and Google's Dynamic View converge on separating a typed task/data
-   representation from rendering. AstralBody arranges *finished* components and never models the
+   representation from rendering. AstralDeep arranges *finished* components and never models the
    task — the biggest structural UX/novelty gap. → C-N1.
 3. **Move judgment from the LLM to a deterministic, learnable scorer.** Draco/optimization,
    adaptive-reward generative interfaces, AUIT/SituationAdapt, and Apple UICoder/designer-feedback
-   all say: LLM *proposes*, code *scores/decides*. AstralBody's "keep-best" has no objective
+   all say: LLM *proposes*, code *scores/decides*. AstralDeep's "keep-best" has no objective
    function. → C-U1.
 4. **Deterministic interception / pre-action policy pipeline.** Anthropic Hooks, Semantic Kernel
    Filters, Llama Stack Shields, AgentSpec, GuardAgent, "Before the Tool Call", Google's Layer-1
-   all converge on one ordered, fail-closed enforcement surface before every tool call. AstralBody's
+   all converge on one ordered, fail-closed enforcement surface before every tool call. AstralDeep's
    gates (PHI, scopes) are hand-coded one-offs. → C-S3.
 5. **Security by construction, not detection.** The Design-Patterns paper, CaMeL, f-secure,
    IPIGuard, and "restrict data types" converge: once untrusted input is ingested, structurally bar
-   consequential actions (plan-then-execute, dual-LLM, taint/provenance, typed values). AstralBody's
+   consequential actions (plan-then-execute, dual-LLM, taint/provenance, typed values). AstralDeep's
    fetch/summarize/parse flows have none of these. → C-S1/C-S2.
 6. **Reconcile, don't just append (memory).** Mem0, A-MEM, Zep, Memory Bank (Vertex) converge on an
    LLM-mediated write path that links/supersedes/decays instead of monotonic store+summarize.
-   AstralBody's "dreaming" only condenses. → C-M1/C-M2.
+   AstralDeep's "dreaming" only condenses. → C-M1/C-M2.
 7. **Context engineering as the economic lever.** Manus (KV-cache stability), Anthropic
    (tool-search/`defer_loading`, context editing), Google (prompt caching) converge at ~100:1
-   input:output token ratios. AstralBody "builds tool lists per chat" and injects volatile prefix
+   input:output token ratios. AstralDeep "builds tool lists per chat" and injects volatile prefix
    content. → C-N16.
 8. **Capability negotiation + declarative host-config for device adaptation.** Airbnb/Netflix/Lyft
    SDUI and Microsoft Adaptive Cards converge: client declares its renderer vocabulary; server
@@ -64,14 +64,14 @@ S/M/L, **Consensus** = number of independent streams that surfaced it (a proxy f
    ROTE is a one-shot per-type code transform. → C-D1/C-D2.
 9. **Trajectory-level evaluation + reliability metrics.** Google ADK trajectory metrics,
    Agent-as-a-Judge, τ-bench `pass^k`, debiased-judge studies converge: judge the *steps* and
-   *consistency*, not the final answer. AstralBody self-tests are single-shot `pass^1`. → C-N5.
+   *consistency*, not the final answer. AstralDeep self-tests are single-shot `pass^1`. → C-N5.
 10. **Async / parallel / long-horizon agents are the new default**, with **fresh-context fan-out**
     to beat the documented >8-item context-degradation ("fabrication mode"). Google (Mariner/Spark,
     Jules), Manus (Wide Research), Cognition (managed Devins), Anthropic (multi-agent research)
-    converge. AstralBody runs one synchronous turn. → C-N8.
+    converge. AstralDeep runs one synchronous turn. → C-N8.
 11. **Runtime supervision + spotlighting are the cheap injection floor.** OpenAI monitor model,
     Sierra/Decagon supervisors, Meta LlamaFirewall AlignmentCheck, Microsoft spotlighting/datamarking
-    converge on parallel review + string-level boundary marking (ASR ~50%→<3%). AstralBody has no
+    converge on parallel review + string-level boundary marking (ASR ~50%→<3%). AstralDeep has no
     runtime output supervision. → C-S4/C-S5.
 
 ## 3. Prioritized capability backlog (deduplicated)
@@ -215,11 +215,11 @@ own approval-gated follow-on feature; none begins until the user opens its spec.
 - **Wave 5 — Ecosystem & advanced surfaces.** C-N13 (A2A/MCP-server interop), C-U8 (proactive
   digest), C-U15 (build-an-agent-for-users), C-D8 (cross-surface distribution), C-D11 (new targets).
 
-## 5. AstralBody is already at/above the frontier here — do NOT regress
+## 5. AstralDeep is already at/above the frontier here — do NOT regress
 
 These were flagged repeatedly across streams as *strengths* to protect, not gaps:
 
-- **SDUI layout intelligence.** AstralBody's adaptive UI designer *arranges a layout tree*; OpenAI's
+- **SDUI layout intelligence.** AstralDeep's adaptive UI designer *arranges a layout tree*; OpenAI's
   Apps SDK model only picks the *tool* while devs pre-declare the layout. The gaps are in the
   *contract* (digest/render split, live device signals), not layout smarts.
 - **In-process driving + self-test.** The `VirtualWebSocket` server→client capture and in-process
@@ -243,7 +243,7 @@ the no-new-runtime-libs / Python-only constraints, tracked as future negotiation
   and the VOICE *output* renderer (C-D4, which IS in scope).
 - **Computer-use / browser pixel automation** (OAI-F10, GOO-F9) — needs a headless-browser dependency.
   *Portable now:* the `pending_safety_checks → acknowledged_safety_checks` typed must-ack gate (→ C-S11).
-- **True on-device LLM decoding / speculative decoding** (DEV-F9) — AstralBody consumes an
+- **True on-device LLM decoding / speculative decoding** (DEV-F9) — AstralDeep consumes an
   OpenAI-compatible endpoint. *Portable now:* the draft-verify *orchestration* analogue and the
   device-aware *router* (C-D6).
 - **Graph-diffusion topology generation (GTD), full EvoMAC textual-backprop** (AF-HM) — heavy
@@ -253,7 +253,7 @@ the no-new-runtime-libs / Python-only constraints, tracked as future negotiation
 
 ## 7. Hype / caveats logged (so the roadmap isn't built on marketing)
 
-- "The model designs the layout" (OpenAI Apps SDK) is mostly marketing — AstralBody is *ahead* here.
+- "The model designs the layout" (OpenAI Apps SDK) is mostly marketing — AstralDeep is *ahead* here.
 - Vendor-internal benchmarks (Sierra 90%→99%, Anthropic multi-agent +90.2%, Ramp "hours") are
   illustrative, not independently verified — the *mechanisms* are the value, not the numbers.
 - Several 2026-dated arXiv UI papers (AlignUI, Google Generative UI, Deception-at-Scale) are very

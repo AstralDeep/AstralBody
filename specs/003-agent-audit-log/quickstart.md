@@ -20,7 +20,7 @@ backend/.venv/Scripts/python.exe -m alembic upgrade head
 Verify role grants:
 
 ```
-psql -d astralbody -c "\dp audit_events"
+psql -d astraldeep -c "\dp audit_events"
 ```
 
 You should see `INSERT, SELECT` for `app_audit_role`, `DELETE` for `audit_retention_role`, and **no UPDATE** for any role.

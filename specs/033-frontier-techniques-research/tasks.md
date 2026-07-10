@@ -41,7 +41,7 @@ All deliverables live under `specs/033-frontier-techniques-research/`. No `backe
 
 - [x] T004 Define the Finding + Consolidated-Capability **record contract** (Source / What / Evidence / Gap / Priority / in-constraint Impl-note / Novelty·Impact·Effort) in `specs/033-frontier-techniques-research/contracts/capability-record.md`
 - [x] T005 [P] Define **source-quality rules** (scholarly = primary venues only, zero Medium/listicles; commercial = official sources + preview-vs-GA) in `contracts/capability-record.md`
-- [x] T006 [P] Capture the **AstralBody baseline + do-not-regress** brief (existing differentiators) shared to all streams, recorded in `research/SYNTHESIS.md` §5
+- [x] T006 [P] Capture the **AstralDeep baseline + do-not-regress** brief (existing differentiators) shared to all streams, recorded in `research/SYNTHESIS.md` §5
 
 **Checkpoint**: Contract + rules ready — stream research can proceed.
 
@@ -49,7 +49,7 @@ All deliverables live under `specs/033-frontier-techniques-research/`. No `backe
 
 ## Phase 3: User Story 1 — Vetted, prioritized corpus (Priority: P1) 🎯 MVP
 
-**Goal**: A primary-sourced, deduplicated, prioritized corpus comparing the commercial + scholarly frontier to AstralBody, ranked by the four priority dimensions, with a recommended wave sequence.
+**Goal**: A primary-sourced, deduplicated, prioritized corpus comparing the commercial + scholarly frontier to AstralDeep, ranked by the four priority dimensions, with a recommended wave sequence.
 
 **Independent Test**: Open `research/SYNTHESIS.md` + one stream file; confirm every consolidated capability has a `C-*` id, ≥1 primary-source citation, Novelty/Impact/Effort, a consensus indicator, an in-constraint implementation note, and that do-not-regress + deferred lists exist. (Maps SC-001…SC-007 via `contracts/capability-record.md`.) **Status: complete.**
 
@@ -72,7 +72,7 @@ All deliverables live under `specs/033-frontier-techniques-research/`. No `backe
 - [x] T015 [US1] Deduplicate ~164 findings → **71 consolidated capabilities** with stable `C-*` ids, rolled-up scores, and cross-references → `research/SYNTHESIS.md` §3 (depends on T007–T014)
 - [x] T016 [US1] Identify **convergent** (≥3-stream) themes as highest-confidence signals → `research/SYNTHESIS.md` §2
 - [x] T017 [US1] Rank capabilities by priority dimension + **recommended wave sequencing** with rationale + locked decisions → `research/SYNTHESIS.md` §4
-- [x] T018 [US1] Compile **do-not-regress** list (AstralBody strengths) → `research/SYNTHESIS.md` §5
+- [x] T018 [US1] Compile **do-not-regress** list (AstralDeep strengths) → `research/SYNTHESIS.md` §5
 - [x] T019 [US1] Compile **deferred / out-of-constraint** list with portable-now sub-ideas → `research/SYNTHESIS.md` §6
 - [x] T020 [US1] Compile **hype / caveats** log → `research/SYNTHESIS.md` §7
 - [ ] T021 [US1] Final QA pass: verify the corpus against the acceptance-check table in `specs/033-frontier-techniques-research/contracts/capability-record.md` (SC-001…SC-007) and fix any gap

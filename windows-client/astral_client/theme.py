@@ -1,4 +1,4 @@
-"""Theme tokens mirroring the AstralBody web palette (backend/webrender/static/
+"""Theme tokens mirroring the AstralDeep web palette (backend/webrender/static/
 astral.css `:root`) so the native client reads as the same product:
 indigo→purple accent, #0F1221 bg with corner glows, layered translucent
 surfaces, soft white borders, Inter type.

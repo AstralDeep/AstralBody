@@ -64,7 +64,7 @@ backend/security_benchmark/            # eval-only package
 
 **Phase 6 — Verify** (done, in the real container): 14/14 tests green; ASR ablation reproduced; isolation guard green; regression gate trips on threshold breach.
 
-## Evidence (verified in the `astralbody` container, Python 3.11)
+## Evidence (verified in the `astraldeep` container, Python 3.11)
 
 - 14/14 harness tests pass.
 - AgentDojo/ASB baseline ASR 0.833 → full-implemented-envelope 0.167; InjecAgent 0.750 → 0.000; each layer's marginal reduction attributable to the attack class it implements; LLM-judge column present with +0.000 (unbuilt).

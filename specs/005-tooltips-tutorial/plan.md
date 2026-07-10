@@ -104,7 +104,7 @@ frontend/
 └── ...
 ```
 
-**Structure Decision**: Web-application split, following the established AstralBody pattern from features 003 (audit) and 004 (feedback). New backend module is `backend/onboarding/` (sibling of `backend/audit/` and `backend/feedback/`). New frontend folder is `frontend/src/components/onboarding/` (sibling of `frontend/src/components/audit/` and `.../feedback/`). Database schema additions go directly into `Database._init_db` (no SQLAlchemy / Alembic). The base `Component` primitive in `backend/shared/primitives.py` gains a single optional `tooltip` field — additive change, no breaking impact on existing consumers.
+**Structure Decision**: Web-application split, following the established AstralDeep pattern from features 003 (audit) and 004 (feedback). New backend module is `backend/onboarding/` (sibling of `backend/audit/` and `backend/feedback/`). New frontend folder is `frontend/src/components/onboarding/` (sibling of `frontend/src/components/audit/` and `.../feedback/`). Database schema additions go directly into `Database._init_db` (no SQLAlchemy / Alembic). The base `Component` primitive in `backend/shared/primitives.py` gains a single optional `tooltip` field — additive change, no breaking impact on existing consumers.
 
 ## Phase 0 — Research
 

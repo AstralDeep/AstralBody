@@ -52,16 +52,16 @@ The flag is computed by `frontend/src/auth/persistentLogin.ts`:
  */
 export function wasSilentResume(auth: AuthContextProps): boolean {
   if (!auth.isAuthenticated) return false;
-  const justInteractive = sessionStorage.getItem("astralbody.justInteractive") === "1";
+  const justInteractive = sessionStorage.getItem("astraldeep.justInteractive") === "1";
   if (justInteractive) {
-    sessionStorage.removeItem("astralbody.justInteractive");
+    sessionStorage.removeItem("astraldeep.justInteractive");
     return false;
   }
   return true;
 }
 ```
 
-`onSigninCallback` sets `astralbody.justInteractive = "1"` just before stripping the `?code=…` from the URL; the first call to `wasSilentResume()` after that read-and-clears the flag. The semantics are: any subsequent reconnects within the same page lifetime that re-call `wasSilentResume()` return `true` (the user did not re-authenticate; they're still on the silent-resumed session).
+`onSigninCallback` sets `astraldeep.justInteractive = "1"` just before stripping the `?code=…` from the URL; the first call to `wasSilentResume()` after that read-and-clears the flag. The semantics are: any subsequent reconnects within the same page lifetime that re-call `wasSilentResume()` return `true` (the user did not re-authenticate; they're still on the silent-resumed session).
 
 ## 5. Server-side handling
 

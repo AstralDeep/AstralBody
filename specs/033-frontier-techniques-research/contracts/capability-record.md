@@ -13,10 +13,10 @@ Required fields:
 - **What it is** — 2–4 concrete sentences (mechanism, not marketing).
 - **Frontier evidence** — what it achieves / how deployed, with the metric or result cited; vendor-
   internal or unverifiable numbers labelled as such. (Maps SC-006.)
-- **AstralBody gap** — what is missing and why it matters (or "already at/above frontier — do not
+- **AstralDeep gap** — what is missing and why it matters (or "already at/above frontier — do not
   regress").
 - **Priority** — one or more of {Novelty, UX, Device, Security}.
-- **How to implement in AstralBody** — concrete approach that satisfies the Constraint Envelope
+- **How to implement in AstralDeep** — concrete approach that satisfies the Constraint Envelope
   (Python-only, no new third-party runtime libs, SDUI mandate, idempotent migrations, fail-closed).
   (Maps SC-004.)
 - **Novelty** 1–5 · **Impact** 1–5 · **Effort** S/M/L. (Maps SC-002.)
@@ -36,7 +36,7 @@ Required fields:
 - **§2 Convergent themes** — the ≥3-stream consensus signals. (SC-006)
 - **§3 Prioritized backlog** — all capabilities grouped/ordered by the four Priority Dimensions. (SC-002, SC-005)
 - **§4 Recommended sequencing** — waves + rationale + the locked decisions. (SC-005)
-- **§5 Do-not-regress** — AstralBody strengths to protect. (SC-005)
+- **§5 Do-not-regress** — AstralDeep strengths to protect. (SC-005)
 - **§6 Deferred / out-of-constraint** — with portable-now sub-ideas. (SC-004)
 - **§7 Hype / caveats** — flagged claims. (SC-006)
 

@@ -107,9 +107,9 @@ def _code(text) -> _H:
 
 
 _INTRO = "".join([
-    _h1("Welcome to AstralBody"),
+    _h1("Welcome to AstralDeep"),
     _p(
-        "AstralBody is a chat-first workspace where you collaborate with intelligent agents "
+        "AstralDeep is a chat-first workspace where you collaborate with intelligent agents "
         "that can use tools, look things up, run small tasks, and render rich interactive "
         "components back to you. Everything an agent does on your behalf is recorded in your "
         "private audit log so you can verify what happened.",
@@ -140,7 +140,7 @@ _INTRO = "".join([
 _SIGNING_IN = "".join([
     _h1("Signing in"),
     _p(
-        "AstralBody uses your organisation's single sign-on (SSO) provider. When you visit the "
+        "AstralDeep uses your organisation's single sign-on (SSO) provider. When you visit the "
         "site you'll be redirected to the sign-in page; after you authenticate, you're returned "
         "to the dashboard.",
     ),
@@ -165,7 +165,7 @@ _SIGNING_IN = "".join([
     _p(
         "Open the ", _strong("Settings"), " menu in the top bar and choose ",
         _strong("Sign out"),
-        ". Your session ends both in AstralBody and at your SSO provider.",
+        ". Your session ends both in AstralDeep and at your SSO provider.",
     ),
 ])
 
@@ -179,7 +179,7 @@ _DASHBOARD = "".join([
     _ul(
         _li(
             _strong("Brand & status"),
-            " — shows the AstralBody mark and whether your connection to the orchestrator "
+            " — shows the AstralDeep mark and whether your connection to the orchestrator "
             "is live.",
         ),
         _li(
@@ -249,7 +249,7 @@ _ATTACHMENTS = "".join([
     _h1("Attachments & files"),
     _p(
         "Use the paperclip control next to the chat input to attach files to a message. "
-        "AstralBody supports common document, image, and data formats up to 30 MB per file. "
+        "AstralDeep supports common document, image, and data formats up to 30 MB per file. "
         "Files are stored privately to your account and persist across chats — you can re-use "
         "an attachment from the library without re-uploading.",
     ),
@@ -266,7 +266,7 @@ _ATTACHMENTS = "".join([
         " to save it locally. The orchestrator records the download in your audit log.",
     ),
     _tip(
-        "Don't attach files containing secrets you wouldn't want logged. AstralBody redacts "
+        "Don't attach files containing secrets you wouldn't want logged. AstralDeep redacts "
         "known PHI/PII patterns from audit-event metadata, but the safest data is data you "
         "never upload.",
     ),
@@ -451,7 +451,7 @@ _AUDIT = "".join([
 _TUTORIAL = "".join([
     _h1("Getting-started tour"),
     _p(
-        "The first time you sign in, AstralBody walks you through the core workflow as a "
+        "The first time you sign in, AstralDeep walks you through the core workflow as a "
         "guided overlay: starting a chat, opening agents, reviewing the audit log, and giving "
         "feedback. The overlay highlights the relevant control on the dashboard for each step.",
     ),
@@ -558,7 +558,7 @@ _DEVICE = "".join([
 _PRIVACY = "".join([
     _h1("Privacy & per-user data"),
     _p(
-        "AstralBody is built around strict per-user isolation. Every data store that touches "
+        "AstralDeep is built around strict per-user isolation. Every data store that touches "
         "your activity — chats, files, audit events, feedback, onboarding state — is scoped "
         "to your account at the API layer. There is no UI path through which one user can "
         "read another user's data, and even administrators cannot read your audit log through "

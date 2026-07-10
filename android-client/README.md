@@ -1,6 +1,6 @@
-# AstralBody — Native Android Client
+# AstralDeep — Native Android Client
 
-A native **Kotlin + Jetpack Compose** Android app that renders the AstralBody
+A native **Kotlin + Jetpack Compose** Android app that renders the AstralDeep
 orchestrator's **server-driven UI (SDUI)** as native Compose widgets — **no web
 view**. It is the Android twin of the native Windows client: a real
 ROTE/webrender *target* that consumes the structured `components` the

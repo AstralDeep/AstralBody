@@ -1,4 +1,4 @@
-"""Native renderer: AstralBody SDUI component dicts -> PySide6 widgets.
+"""Native renderer: AstralDeep SDUI component dicts -> PySide6 widgets.
 
 This is a real ROTE/webrender *target* — it consumes the same structured
 `components` that the orchestrator puts on every `ui_render`/`ui_upsert` (the

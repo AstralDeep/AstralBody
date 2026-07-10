@@ -1,4 +1,4 @@
-"""AstralBody native Windows client — main window.
+"""AstralDeep native Windows client — main window.
 
 A native, 100% Qt desktop app (no embedded web view): a top bar (identity,
 connection, new chat, history, agents, sign-out), a chat rail on the left and a
@@ -1221,7 +1221,7 @@ class MainWindow(QMainWindow):
     def __init__(self, url: str, token: str, session=None, login_params=None,
                  connect: bool = True):
         super().__init__()
-        self.setWindowTitle("AstralBody — Windows")
+        self.setWindowTitle("AstralDeep — Windows")
         self.resize(1280, 860)
         self.active_chat: Optional[str] = None
         self._url = url
@@ -1292,7 +1292,7 @@ class MainWindow(QMainWindow):
         split.setSizes([380, 900])
 
         self._input = QLineEdit()
-        self._input.setPlaceholderText("Message AstralBody…  (type / for commands)")
+        self._input.setPlaceholderText("Message AstralDeep…  (type / for commands)")
         self._input.returnPressed.connect(self._send)
         # Feature 040 (US5): pop up the slash-command options as the user types "/".
         self._input.setCompleter(build_slash_completer(self._input))
@@ -1466,7 +1466,7 @@ class MainWindow(QMainWindow):
         self._input.setEnabled(enabled)
         self._send_btn.setEnabled(enabled)
         self._input.setPlaceholderText(
-            "Message AstralBody…  (type / for commands)" if enabled
+            "Message AstralDeep…  (type / for commands)" if enabled
             else "Viewing workspace history — return to live to send messages"
         )
 
@@ -1786,7 +1786,7 @@ class MainWindow(QMainWindow):
 
     def _sign_out(self) -> None:
         if (
-            QMessageBox.question(self, "Sign out", "Sign out of AstralBody?")
+            QMessageBox.question(self, "Sign out", "Sign out of AstralDeep?")
             != QMessageBox.StandardButton.Yes
         ):
             return
@@ -2442,7 +2442,7 @@ class MainWindow(QMainWindow):
     # --- workspace directory (the coding agent's confinement root) --------- #
 
     def _settings(self) -> QSettings:
-        return QSettings("AstralBody", "WindowsClient")
+        return QSettings("AstralDeep", "WindowsClient")
 
     def _gui_pick_directory(self, title: str, default: str = "") -> Optional[str]:
         """Pick a folder on the GUI thread directly (C-1 fix).
@@ -2628,7 +2628,7 @@ def configure(app: QApplication) -> None:
     # extracted to sys._MEIPASS in a frozen build. Best-effort — a missing
     # asset must never block startup.
     base = getattr(sys, "_MEIPASS", os.path.join(os.path.dirname(__file__), ".."))
-    ico = os.path.join(base, "assets", "astralbody.ico")
+    ico = os.path.join(base, "assets", "astraldeep.ico")
     if os.path.exists(ico):
         app.setWindowIcon(QIcon(ico))
 
@@ -2680,14 +2680,14 @@ def _prompt_config(authority: str = "", ws_url: str = "", agent_key: str = ""):
     ``(authority, ws_url, agent_key)`` or ``None`` if skipped.
     """
     dlg = QDialog()
-    dlg.setWindowTitle("Configure AstralBody")
+    dlg.setWindowTitle("Configure AstralDeep")
     dlg.setMinimumWidth(540)
     dlg.setStyleSheet(f"QDialog {{ background:{T.BG}; }}")
     lay = QVBoxLayout(dlg)
     lay.setContentsMargins(20, 18, 20, 16)
     lay.setSpacing(8)
     intro = QLabel(
-        "Point this app at your AstralBody deployment. These are saved on this "
+        "Point this app at your AstralDeep deployment. These are saved on this "
         "PC, so you'll only be asked once."
     )
     intro.setWordWrap(True)
@@ -2766,7 +2766,7 @@ def _resolve_config(args, *, settings, prompt) -> None:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="AstralBody native Windows client")
+    ap = argparse.ArgumentParser(description="AstralDeep native Windows client")
     ap.add_argument(
         "--url", default=os.getenv("ASTRAL_WS_URL", "ws://127.0.0.1:8001/ws")
     )
@@ -2803,7 +2803,7 @@ def _launch(args, settings=None) -> "MainWindow":
     paint — auth runs on a worker thread and the token is adopted through the
     existing rebuild-with-new-token flow. An explicit --token/ASTRAL_TOKEN
     keeps the original synchronous path (it resolves instantly)."""
-    settings = settings or QSettings("AstralBody", "WindowsClient")
+    settings = settings or QSettings("AstralDeep", "WindowsClient")
     _resolve_config(args, settings=settings, prompt=None)
     login_params = {
         "authority": args.authority,

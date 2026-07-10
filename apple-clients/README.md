@@ -1,4 +1,4 @@
-# AstralBody — native Apple clients (features 051 + 053)
+# AstralDeep — native Apple clients (features 051 + 053)
 
 Three SDUI targets on one shared, zero-dependency Swift package:
 
@@ -77,9 +77,9 @@ Python `to_dict()`. When the pip package version bumps, regenerate:
 
 ```bash
 docker cp apple-clients/AstralCore/Tests/AstralCoreTests/Fixtures/generate_fixtures.py \
-  astralbody:/tmp/gen_fixtures.py
-docker exec astralbody python3 /tmp/gen_fixtures.py
-docker cp astralbody:/tmp/fixtures_out.json \
+  astraldeep:/tmp/gen_fixtures.py
+docker exec astraldeep python3 /tmp/gen_fixtures.py
+docker cp astraldeep:/tmp/fixtures_out.json \
   apple-clients/AstralCore/Tests/AstralCoreTests/Fixtures/astralprims-fixtures.json
 swift test --package-path apple-clients/AstralCore   # fails on any drift
 ```

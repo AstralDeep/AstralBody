@@ -3,7 +3,7 @@
 ## Run
 
 ```bash
-docker compose up -d --build astralbody   # single deployable on :8001
+docker compose up -d --build astraldeep   # single deployable on :8001
 # open http://localhost:8001/  → shell now has a top bar with the Settings menu
 ```
 
@@ -40,7 +40,7 @@ server-rendered modal surface; mutations are explicit-save and re-render with a 
 ## Tests
 
 ```bash
-docker exec astralbody sh -c "cd /app/backend && python -m pytest tests/chrome tests/test_chrome_events.py tests/test_agentic_creation.py tests/test_ws_chrome_protocol.py -q"
+docker exec astraldeep sh -c "cd /app/backend && python -m pytest tests/chrome tests/test_chrome_events.py tests/test_agentic_creation.py tests/test_ws_chrome_protocol.py -q"
 ruff check backend/        # py311 target (root ruff.toml)
 ```
 

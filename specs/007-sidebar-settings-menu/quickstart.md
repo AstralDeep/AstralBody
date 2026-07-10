@@ -9,9 +9,9 @@ This guide walks through a complete end-to-end verification on a fresh checkout 
 
 ## Prerequisites
 
-- Docker Desktop running (the AstralBody backend stack lives in containers).
+- Docker Desktop running (the AstralDeep backend stack lives in containers).
 - Node 20+ for the frontend dev server.
-- A working clone of `AstralBody` on branch `007-sidebar-settings-menu`.
+- A working clone of `AstralDeep` on branch `007-sidebar-settings-menu`.
 
 ## 1. Start the backend stack
 
@@ -19,7 +19,7 @@ This guide walks through a complete end-to-end verification on a fresh checkout 
 docker compose up -d
 ```
 
-This brings up Postgres, Keycloak (or the mock-auth shim, depending on `.env`), the orchestrator (`astralbody` container, port 8001), and any agents.
+This brings up Postgres, Keycloak (or the mock-auth shim, depending on `.env`), the orchestrator (`astraldeep` container, port 8001), and any agents.
 
 Verify the orchestrator is up:
 

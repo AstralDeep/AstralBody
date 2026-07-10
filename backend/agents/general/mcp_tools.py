@@ -206,7 +206,7 @@ def modify_data(
 
     Args:
         csv_data: Raw CSV string data (optional if file_path/file_handle is provided).
-        file_handle: AstralBody attachment_id for a CSV/Excel uploaded via the
+        file_handle: AstralDeep attachment_id for a CSV/Excel uploaded via the
             chat composer. Resolved to a real on-disk path server-side; preferred
             over file_path for chat-uploaded files.
         modifications: List of modifications to apply. Each modification can have:
@@ -1372,7 +1372,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
             "type": "object",
             "properties": {
                 "csv_data": {"type": "string", "description": "Raw CSV string data (use only for small/pasted data)"},
-                "file_handle": {"type": "string", "description": "AstralBody attachment_id from the chat composer (preferred for uploaded files)"},
+                "file_handle": {"type": "string", "description": "AstralDeep attachment_id from the chat composer (preferred for uploaded files)"},
                 "file_path": {"type": "string", "description": "Absolute path to the CSV/Excel file on disk (use only when no file_handle is available)"},
                 "modifications": {
                     "type": "array",

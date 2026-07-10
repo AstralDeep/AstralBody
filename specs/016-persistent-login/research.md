@@ -43,7 +43,7 @@ This document records the focused investigation behind the plan choices. No NEED
 
 ## R-4 — 365-day client-side hard cap (FR-013)
 
-**Decision**: Persist `initial_login_at: ISO8601` in our own `astralbody.persistentLogin.v1` localStorage record. On every app launch, before mounting `<AuthProvider>`, check whether `Date.now() - initial_login_at > 365 days`. If yes, clear all OIDC state (call `userManager.removeUser()` indirectly via `localStorage.removeItem` of the OIDC key) and fall through to the login screen.
+**Decision**: Persist `initial_login_at: ISO8601` in our own `astraldeep.persistentLogin.v1` localStorage record. On every app launch, before mounting `<AuthProvider>`, check whether `Date.now() - initial_login_at > 365 days`. If yes, clear all OIDC state (call `userManager.removeUser()` indirectly via `localStorage.removeItem` of the OIDC key) and fall through to the login screen.
 
 **Rationale**:
 - The OIDC library does not natively cap based on "time since interactive login" — its only expiry concept is the access-token / refresh-token expiry claim. Tracking the interactive-login anchor is therefore our responsibility.
@@ -58,7 +58,7 @@ This document records the focused investigation behind the plan choices. No NEED
 
 **Decision**: Add a small `frontend/src/auth/revocationQueue.ts` module that:
 - Exposes `enqueue(refresh_token: string, deployment_origin: string)`.
-- Persists the queue in `sessionStorage` under the key `astralbody.revocationQueue.v1` (not localStorage — see below).
+- Persists the queue in `sessionStorage` under the key `astraldeep.revocationQueue.v1` (not localStorage — see below).
 - Drains the queue on the `online` event and on app launch, calling Keycloak's revocation endpoint for each entry; removes successful entries; leaves failures for the next attempt.
 - Hard-caps queue size at 16 entries (newest wins) to bound storage use.
 
@@ -85,7 +85,7 @@ This document records the focused investigation behind the plan choices. No NEED
 
 ## R-7 — User-switch revocation on the same surface (FR-008)
 
-**Decision**: At the moment a successful `onSigninCallback` completes, compare the new user's `sub` claim against `astralbody.persistentLogin.v1.last_user_sub`. If they differ AND `last_user_sub` is not null, push the prior user's refresh token (read from the soon-to-be-overwritten OIDC localStorage record) onto the revocation queue, then proceed with the normal callback. Once the queue drains, the prior user's credential is invalidated server-side.
+**Decision**: At the moment a successful `onSigninCallback` completes, compare the new user's `sub` claim against `astraldeep.persistentLogin.v1.last_user_sub`. If they differ AND `last_user_sub` is not null, push the prior user's refresh token (read from the soon-to-be-overwritten OIDC localStorage record) onto the revocation queue, then proceed with the normal callback. Once the queue drains, the prior user's credential is invalidated server-side.
 
 **Rationale**:
 - Catching the user switch at callback time is the only deterministic point: by the time the new tokens have been written, the old ones are gone. We read the previous OIDC record one tick before `react-oidc-context` overwrites it.

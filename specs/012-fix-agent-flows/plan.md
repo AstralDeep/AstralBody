@@ -93,7 +93,7 @@ frontend/
 └── (no schema/migration changes)
 ```
 
-**Structure Decision**: This is the existing AstralBody web-application layout (backend + frontend). All changes are localized to the files listed above. No new top-level directories, no new packages, no new services.
+**Structure Decision**: This is the existing AstralDeep web-application layout (backend + frontend). All changes are localized to the files listed above. No new top-level directories, no new packages, no new services.
 
 ## Complexity Tracking
 

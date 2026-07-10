@@ -3,11 +3,11 @@
 ## Backend (dev)
 
 ```bash
-docker compose up -d                    # postgres + astralbody as usual
+docker compose up -d                    # postgres + astraldeep as usual
 # .env additions:
 #   FF_DEVICE_LOGIN=1                                  # default on; explicit for clarity
 #   KEYCLOAK_ALLOWED_AZP=astral-desktop,astral-mobile,astral-ios,astral-macos,astral-watch
-docker exec astralbody bash -c "cd /app/backend && python -m pytest -q tests/test_qr.py tests/test_apple_profiles.py tests/test_device_login.py tests/test_watch_speech.py"
+docker exec astraldeep bash -c "cd /app/backend && python -m pytest -q tests/test_qr.py tests/test_apple_profiles.py tests/test_device_login.py tests/test_watch_speech.py"
 ```
 
 ## Keycloak realm (one-time)

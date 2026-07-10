@@ -1,4 +1,4 @@
-# ProGuard/R8 rules for the AstralBody Android client.
+# ProGuard/R8 rules for the AstralDeep Android client.
 #
 # Release builds currently ship with minification OFF (see app/build.gradle.kts:
 # release { isMinifyEnabled = false }), so these rules are not applied today. They

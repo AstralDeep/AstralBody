@@ -223,7 +223,7 @@ private fun tint(
     )
 
 /**
- * Material 3 theme for the AstralBody client (dark-first, mirroring the web/Windows
+ * Material 3 theme for the AstralDeep client (dark-first, mirroring the web/Windows
  * look). When [palette] is non-null the scheme is derived from it (US5 live
  * restyle); a null palette uses the default brand dark scheme.
  */

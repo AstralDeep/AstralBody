@@ -1,6 +1,6 @@
 # Quickstart: Agentic Soul Integration
 
-How to bring up the feature locally and exercise each user story. Assumes the existing AstralBody dev stack (docker-compose: Postgres + Keycloak + backend + frontend).
+How to bring up the feature locally and exercise each user story. Assumes the existing AstralDeep dev stack (docker-compose: Postgres + Keycloak + backend + frontend).
 
 ## Prerequisites
 - Existing dev stack runs (`docker compose up` or the project Makefile target).

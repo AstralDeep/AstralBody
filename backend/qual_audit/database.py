@@ -90,7 +90,7 @@ def _build_database_url() -> str:
     """Build a PostgreSQL connection URL from individual DB_* env vars."""
     host = os.getenv("DB_HOST", "localhost")
     port = os.getenv("DB_PORT", "5432")
-    name = os.getenv("DB_NAME", "astralbody")
+    name = os.getenv("DB_NAME", "astraldeep")
     user = os.getenv("DB_USER", "astral")
     password = os.getenv("DB_PASSWORD", "astral_dev")
     return f"postgresql://{user}:{password}@{host}:{port}/{name}"

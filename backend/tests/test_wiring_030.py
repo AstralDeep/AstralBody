@@ -9,7 +9,7 @@ Covers:
 * Orchestrator._delegation_required (Constitution VII fail-closed posture)
 * Database._migrate_agent_visibility_030 (idempotent visibility backfill)
 
-Run inside the astralbody container:
+Run inside the astraldeep container:
     python -m pytest tests/test_wiring_030.py -q
 """
 import sys

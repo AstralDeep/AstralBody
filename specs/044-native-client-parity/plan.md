@@ -179,7 +179,7 @@ windows-client/
 ├── tests/                          # protocol-manifest guard; reconnect/queue; attachments;
 │   │                               #   pagination; theme; routing; screenshot font gate
 │   └── screenshot.py               # real-platform capture + font sanity gate (tofu fix)
-└── Launch-AstralBody.bat           # env guards (if not defined …)
+└── Launch-AstralDeep.bat           # env guards (if not defined …)
 
 android-client/
 ├── core/src/main/kotlin/.../protocol/

@@ -19,7 +19,7 @@
 
 ### User Story 1 - Provide feedback on a rendered component (Priority: P1)
 
-A user is interacting with the AstralBody dashboard and notices that a component the system just rendered is wrong, irrelevant, broken, or unhelpful. They want a fast way to tell the system this so the experience improves over time. Without leaving the dashboard, they tap a feedback control directly on the offending component, indicate whether the output was good or bad, optionally pick a category that captures *what* was wrong, and optionally add a sentence of detail. They get a clear acknowledgement that their feedback was received.
+A user is interacting with the AstralDeep dashboard and notices that a component the system just rendered is wrong, irrelevant, broken, or unhelpful. They want a fast way to tell the system this so the experience improves over time. Without leaving the dashboard, they tap a feedback control directly on the offending component, indicate whether the output was good or bad, optionally pick a category that captures *what* was wrong, and optionally add a sentence of detail. They get a clear acknowledgement that their feedback was received.
 
 **Why this priority**: This is the user-facing half of the feature. Without an in-product way to capture feedback, no improvement signal exists. This story can ship and deliver value (richer audit/quality data) even if the auto-improvement half (US-2) is not yet built.
 

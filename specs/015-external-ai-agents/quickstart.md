@@ -8,7 +8,7 @@ A developer walkthrough for bringing the three new agents (CLASSify, Forecaster,
 
 ## Prerequisites
 
-- Local AstralBody dev environment is running (the `astralbody` Docker container, or `cd backend && .venv/Scripts/python.exe start.py` natively).
+- Local AstralDeep dev environment is running (the `astraldeep` Docker container, or `cd backend && .venv/Scripts/python.exe start.py` natively).
 - A Keycloak login or the dev mock-auth (`dev-token` / sub `test_user`).
 - API keys for the three external services (request from your team lead if you don't have them — they are personal, not shared).
 
@@ -128,8 +128,8 @@ Expected: `credential_test: "unreachable"` with detail `"private/loopback hosts 
 ## 7. Run the test suite
 
 ```powershell
-# Inside the astralbody container if you're using Docker
-docker exec astralbody bash -c "cd /app/backend && python -m pytest agents/classify/tests/ agents/forecaster/tests/ agents/llm_factory/tests/ shared/tests/test_external_http.py orchestrator/tests/test_concurrency_cap.py -q"
+# Inside the astraldeep container if you're using Docker
+docker exec astraldeep bash -c "cd /app/backend && python -m pytest agents/classify/tests/ agents/forecaster/tests/ agents/llm_factory/tests/ shared/tests/test_external_http.py orchestrator/tests/test_concurrency_cap.py -q"
 ```
 
 Expected: all green. Coverage on changed files ≥ 90% (Constitution Principle III).

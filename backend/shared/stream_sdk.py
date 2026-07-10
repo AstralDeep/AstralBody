@@ -1,5 +1,5 @@
 """
-Streaming Tool SDK for AstralBody agents (001-tool-stream-ui).
+Streaming Tool SDK for AstralDeep agents (001-tool-stream-ui).
 
 This module is the contract between a tool author writing a streaming tool
 and the rest of the system. It is **strictly additive** — every existing

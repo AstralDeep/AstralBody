@@ -58,7 +58,7 @@ def _make_api_request(url: str, params: Dict, timeout: int = 10) -> Dict:
     """Make HTTP request to Open-Meteo API with error handling."""
     try:
         headers = {
-            "User-Agent": "AstralBody/1.0 (Weather Agent)"
+            "User-Agent": "AstralDeep/1.0 (Weather Agent)"
         }
         response = requests.get(url, params=params, headers=headers, timeout=timeout)
         response.raise_for_status()
@@ -878,7 +878,7 @@ def get_weather_alerts(
         
         # Fetch alerts from NWS API
         nws_url = f"https://api.weather.gov/alerts/active?area={state_abbr}"
-        headers = {"User-Agent": "AstralBody/1.0 (Weather Agent)"}
+        headers = {"User-Agent": "AstralDeep/1.0 (Weather Agent)"}
         response = requests.get(nws_url, headers=headers, timeout=10)
         response.raise_for_status()
         data = response.json()

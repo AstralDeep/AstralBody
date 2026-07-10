@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://astralbody.local/specs/003-agent-audit-log/audit-event.schema.json",
+  "$id": "https://astraldeep.local/specs/003-agent-audit-log/audit-event.schema.json",
   "title": "AuditEvent",
   "description": "Public-facing audit event DTO returned by REST /api/audit and WebSocket audit_append messages. Strict subset of the underlying audit_events row; internal AU-9 fields are intentionally absent.",
   "type": "object",

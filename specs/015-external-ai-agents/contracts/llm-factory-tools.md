@@ -116,7 +116,7 @@ Synchronous. Computes embedding vectors for a string or list of strings using a 
 
 ## `transcribe_audio`
 
-Synchronous. Transcribes an uploaded audio file using a chosen transcription model (e.g. `whisper-1`). The agent resolves `file_handle` to an on-disk path via the AstralBody attachment helper (per-user ownership enforced) and POSTs the file as `multipart/form-data` to `/v1/audio/transcriptions`.
+Synchronous. Transcribes an uploaded audio file using a chosen transcription model (e.g. `whisper-1`). The agent resolves `file_handle` to an on-disk path via the AstralDeep attachment helper (per-user ownership enforced) and POSTs the file as `multipart/form-data` to `/v1/audio/transcriptions`.
 
 **Input schema**:
 
@@ -125,7 +125,7 @@ Synchronous. Transcribes an uploaded audio file using a chosen transcription mod
   "type": "object",
   "properties": {
     "model_id": {"type": "string"},
-    "file_handle": {"type": "string", "description": "AstralBody attachment_id of the audio file."},
+    "file_handle": {"type": "string", "description": "AstralDeep attachment_id of the audio file."},
     "language": {"type": "string", "description": "Optional ISO-639-1 language hint, e.g. 'en' or 'fr'."}
   },
   "required": ["model_id", "file_handle"]

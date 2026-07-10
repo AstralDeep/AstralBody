@@ -8689,9 +8689,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
         # Create FastAPI app with rich OpenAPI documentation
         app = FastAPI(
-            title="AstralBody Orchestrator API",
+            title="AstralDeep Orchestrator API",
             description=(
-                "REST API and WebSocket gateway for the AstralBody multi-agent system.\n\n"
+                "REST API and WebSocket gateway for the AstralDeep multi-agent system.\n\n"
                 "## Overview\n\n"
                 "The orchestrator provides two communication channels:\n\n"
                 "1. **REST API** (documented below) — Request/response endpoints for CRUD operations\n"
@@ -8796,13 +8796,13 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     return _Redirect(gate, status_code=302)
             except Exception:
                 logger.exception("web_auth: shell gate check failed — failing closed")
-                return _HTMLResponse("<h1>AstralBody</h1><p>Sign-in unavailable.</p>", status_code=503)
+                return _HTMLResponse("<h1>AstralDeep</h1><p>Sign-in unavailable.</p>", status_code=503)
             try:
                 with open(_shell_path, "r", encoding="utf-8") as fh:
                     shell = fh.read()
             except Exception:
                 logger.exception("webrender: shell template missing")
-                return _HTMLResponse("<h1>AstralBody</h1><p>UI shell unavailable.</p>", status_code=500)
+                return _HTMLResponse("<h1>AstralDeep</h1><p>UI shell unavailable.</p>", status_code=500)
             # Inject a session token for the WS handshake. In mock-auth/dev the
             # client falls back to 'dev-token'; with server-side OIDC the auth
             # routes establish a session and supply the access token here.

@@ -8,7 +8,7 @@ Subcommands:
 
 Invoked from the orchestrator container, e.g.::
 
-    docker exec astralbody bash -c \
+    docker exec astraldeep bash -c \
         "cd /app/backend && python -m feedback.cli compute-quality"
 """
 from __future__ import annotations

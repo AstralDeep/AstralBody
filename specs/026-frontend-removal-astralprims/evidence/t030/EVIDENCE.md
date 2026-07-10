@@ -1,7 +1,7 @@
 # T030 — Real-browser end-to-end parity pass (evidence)
 
 **Date**: 2026-06-10
-**Environment**: Docker `astralbody` (Python 3.11) + `astralbody-postgres`, single port `:8001`,
+**Environment**: Docker `astraldeep` (Python 3.11) + `astraldeep-postgres`, single port `:8001`,
 mock auth (`VITE_USE_MOCK_AUTH=true`), LLM `deepseek-ai/DeepSeek-V4-Pro` at the UKY factory endpoint.
 **Method**: headless Chromium (Playwright) driving the live stack; WebSocket frames captured;
 server-side renders produced by the production `webrender` inside the running container.

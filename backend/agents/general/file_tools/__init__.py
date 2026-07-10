@@ -1,4 +1,4 @@
-"""File-handling tools for the AstralBody general agent.
+"""File-handling tools for the AstralDeep general agent.
 
 Each public reader function (``read_document``, ``read_spreadsheet``,
 ``read_presentation``, ``read_text``, ``read_image``, ``list_attachments``)

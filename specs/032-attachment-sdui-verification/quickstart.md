@@ -2,7 +2,7 @@
 
 **Feature**: 032 | Phase 1
 
-The harness lives at `backend/verification/`. Everything runs in the `astralbody` container (Python 3.11, shared Postgres). No new dependencies.
+The harness lives at `backend/verification/`. Everything runs in the `astraldeep` container (Python 3.11, shared Postgres). No new dependencies.
 
 ## 1. In-process (the deterministic CI gate)
 
@@ -10,11 +10,11 @@ Runs the whole pipeline with a scripted LLM — no network, no real LLM, no live
 
 ```bash
 # Whole in-process suite (this is what CI runs as a merge gate)
-docker exec astralbody bash -c "cd /app/backend && python -m pytest verification/tests -q"
+docker exec astraldeep bash -c "cd /app/backend && python -m pytest verification/tests -q"
 
 # A single persona / property file
-docker exec astralbody bash -c "cd /app/backend && python -m pytest verification/tests/test_inprocess_personas.py -q"
-docker exec astralbody bash -c "cd /app/backend && python -m pytest verification/tests/test_authority.py -q"
+docker exec astraldeep bash -c "cd /app/backend && python -m pytest verification/tests/test_inprocess_personas.py -q"
+docker exec astraldeep bash -c "cd /app/backend && python -m pytest verification/tests/test_authority.py -q"
 ```
 
 Because the suite is `@pytest.mark.integration`, the default fast loop (`-m 'not integration'`) skips it; CI runs it via the explicit second invocation (see §4).
@@ -22,7 +22,7 @@ Because the suite is `@pytest.mark.integration`, the default fast loop (`-m 'not
 ## 2. In-process via the CLI (writes a run record)
 
 ```bash
-docker exec astralbody bash -c "cd /app/backend && python -m verification --mode in-process --run-id __verif__local01"
+docker exec astraldeep bash -c "cd /app/backend && python -m verification --mode in-process --run-id __verif__local01"
 # → backend/verification/.runs/__verif__local01/{verdicts.json, report.md}
 ```
 

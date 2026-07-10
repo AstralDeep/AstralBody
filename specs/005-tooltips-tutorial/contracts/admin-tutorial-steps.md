@@ -27,7 +27,7 @@ Return the full step list, **including** archived steps, for admin editing. Incl
       "display_order": 10,
       "target_kind": "none",
       "target_key": null,
-      "title": "Welcome to AstralBody",
+      "title": "Welcome to AstralDeep",
       "body": "Let's take a quick tour.",
       "archived_at": null,
       "updated_at": "2026-04-28T17:14:02Z"

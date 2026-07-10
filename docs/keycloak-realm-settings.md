@@ -1,11 +1,11 @@
-# Keycloak realm settings for AstralBody (operator guide)
+# Keycloak realm settings for AstralDeep (operator guide)
 
 > Feature 028 (FR-017). This document replaces the never-committed
 > `keycloak-persistent-login-realm-settings.md` referenced by earlier docs.
 > Agent-delegation (RFC 8693) client setup lives in
 > [keycloak_agent_delegation_setup.md](keycloak_agent_delegation_setup.md).
 
-AstralBody authenticates exclusively against Keycloak (Constitution VII).
+AstralDeep authenticates exclusively against Keycloak (Constitution VII).
 The orchestrator drives a **server-side** OIDC Authorization Code + PKCE flow
 (`/auth/login` → Keycloak → `/auth/callback`); tokens never live in the
 browser beyond the short-lived access token used for the WS handshake.

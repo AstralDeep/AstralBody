@@ -8,7 +8,7 @@ This document explains how to run the system end-to-end with the feature in plac
 
 ## 1. Prerequisites
 
-- Docker desktop running (the `astralbody` container hosts Postgres + backend).
+- Docker desktop running (the `astraldeep` container hosts Postgres + backend).
 - Local frontend dev with `npm` (Vite).
 - Existing project conventions: `backend/.venv/Scripts/python.exe` for backend Python invocations on Windows.
 - Optional: Ollama running with the same model the existing `knowledge_synthesizer` uses (only required to manually exercise the loop pre-pass and proposal generation; not required for inline submit / retract / amend).
@@ -21,11 +21,11 @@ Schema additions live in `Database._init_db` — there is no Alembic in this cod
 
 1. Restart the backend container so `_init_db` runs:
    ```bash
-   docker restart astralbody
+   docker restart astraldeep
    ```
 2. Verify the four new tables exist:
    ```bash
-   docker exec astralbody psql -U postgres -d astralbody -c "\dt component_feedback tool_quality_signal knowledge_update_proposal quarantine_entry"
+   docker exec astraldeep psql -U postgres -d astraldeep -c "\dt component_feedback tool_quality_signal knowledge_update_proposal quarantine_entry"
    ```
 
 ---
@@ -33,8 +33,8 @@ Schema additions live in `Database._init_db` — there is no Alembic in this cod
 ## 3. Run the system
 
 ```bash
-# Backend (inside the astralbody container — orchestrator at ws://localhost:8001/ws)
-docker logs -f astralbody
+# Backend (inside the astraldeep container — orchestrator at ws://localhost:8001/ws)
+docker logs -f astraldeep
 
 # Frontend
 cd frontend && npm install && npm run dev
@@ -53,12 +53,12 @@ Open the dashboard at the Vite URL and sign in with the dev mock-auth identity (
 5. Observe the toast acknowledgement (target ≤ 1 s).
 6. Verify the row landed:
    ```bash
-   docker exec astralbody psql -U postgres -d astralbody -c \
+   docker exec astraldeep psql -U postgres -d astraldeep -c \
      "SELECT id, sentiment, category, comment_safety, lifecycle, created_at FROM component_feedback WHERE user_id='test_user' ORDER BY created_at DESC LIMIT 5;"
    ```
 7. Verify a corresponding audit row was written:
    ```bash
-   docker exec astralbody psql -U postgres -d astralbody -c \
+   docker exec astraldeep psql -U postgres -d astraldeep -c \
      "SELECT event_class, action_type, outcome, created_at FROM audit_events WHERE actor_user_id='test_user' AND event_class='component_feedback' ORDER BY created_at DESC LIMIT 5;"
    ```
 8. Cross-user-isolation manual check: open a second browser session (different mock-auth user via the dev environment), call `GET /api/feedback/{feedback_id_from_step_6}` — expect `404`.
@@ -72,12 +72,12 @@ Open the dashboard at the Vite URL and sign in with the dev mock-auth identity (
 2. Confirm the toast shows "feedback received — your comment is held for review" (or similar) — `comment_safety` should be `quarantined`.
 3. Verify the `quarantine_entry` row exists with `detector='inline'`:
    ```bash
-   docker exec astralbody psql -U postgres -d astralbody -c \
+   docker exec astraldeep psql -U postgres -d astraldeep -c \
      "SELECT feedback_id, reason, detector, status FROM quarantine_entry ORDER BY detected_at DESC LIMIT 5;"
    ```
 4. Verify the comment text does NOT appear in the next synthesizer cycle's input. Run the synthesizer manually:
    ```bash
-   docker exec astralbody bash -c "cd /app/backend && python -m orchestrator.knowledge_synthesis --once --debug"
+   docker exec astraldeep bash -c "cd /app/backend && python -m orchestrator.knowledge_synthesis --once --debug"
    ```
    The debug output should show the feedback id with a `[QUARANTINED]` marker and the `comment` field replaced by `<redacted: quarantined>`.
 
@@ -89,7 +89,7 @@ This requires data. Either submit ≥ 25 negative feedbacks for a single tool by
 
 ```bash
 # Replace tool/agent and timing as needed
-docker exec astralbody psql -U postgres -d astralbody -c \
+docker exec astraldeep psql -U postgres -d astraldeep -c \
   "INSERT INTO component_feedback (user_id, source_agent, source_tool, sentiment, category, comment_safety, lifecycle, created_at)
    SELECT 'test_user', 'general', 'live_system_metrics', 'negative', 'wrong-data', 'clean', 'active', now() - (random() * interval '14 days')
    FROM generate_series(1, 30);"
@@ -98,20 +98,20 @@ docker exec astralbody psql -U postgres -d astralbody -c \
 Now run the daily quality job once:
 
 ```bash
-docker exec astralbody bash -c "cd /app/backend && python -m feedback.cli compute-quality"
+docker exec astraldeep bash -c "cd /app/backend && python -m feedback.cli compute-quality"
 ```
 
 Verify a `tool_quality_signal` row was inserted with `status='underperforming'`:
 
 ```bash
-docker exec astralbody psql -U postgres -d astralbody -c \
+docker exec astraldeep psql -U postgres -d astraldeep -c \
   "SELECT agent_id, tool_name, status, dispatch_count, failure_rate, negative_feedback_rate FROM tool_quality_signal ORDER BY computed_at DESC LIMIT 5;"
 ```
 
 Switch the dashboard to an admin-role user (the project's mock-auth currently exposes `admin` role to the test user; verify in the JWT inspector). Open the new admin sidebar entry "Tool Quality" — the badge should show `1`, the panel should list the flagged tool. Click in to see the supporting evidence and any pending proposal. Run the synthesizer once to materialize a proposal:
 
 ```bash
-docker exec astralbody bash -c "cd /app/backend && python -m orchestrator.knowledge_synthesis --once"
+docker exec astraldeep bash -c "cd /app/backend && python -m orchestrator.knowledge_synthesis --once"
 ```
 
 Refresh the admin panel; the proposal appears as `pending`. Click Accept. Verify:
@@ -134,7 +134,7 @@ Refresh the admin panel; the proposal appears as `pending`. Click Accept. Verify
 
 ```bash
 # Backend (mirrors the audit-log test convention from feature 003)
-docker exec astralbody bash -c "cd /app/backend && python -m pytest feedback/tests/ -q"
+docker exec astraldeep bash -c "cd /app/backend && python -m pytest feedback/tests/ -q"
 
 # Frontend
 cd frontend && npm run test:run
@@ -147,7 +147,7 @@ Coverage must meet the 90% bar from Constitution Principle III on changed code.
 ## 9. Tear-down / reset for a clean re-test
 
 ```bash
-docker exec astralbody psql -U postgres -d astralbody -c \
+docker exec astraldeep psql -U postgres -d astraldeep -c \
   "TRUNCATE component_feedback, tool_quality_signal, knowledge_update_proposal, quarantine_entry RESTART IDENTITY CASCADE;"
 ```
 

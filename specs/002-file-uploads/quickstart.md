@@ -5,7 +5,7 @@
 
 ## Prerequisites
 
-- A working AstralBody dev environment (backend + frontend running, Keycloak reachable).
+- A working AstralDeep dev environment (backend + frontend running, Keycloak reachable).
 - Backend Docker image rebuilt to include the new system packages: `tesseract-ocr`, `poppler-utils`, `libmagic1`.
 - New Python deps installed (lead-developer approval recorded in PR per Constitution V): `pypdf`, `python-docx`, `python-pptx`, `odfpy`, `striprtf`, `xlrd`, `Pillow`, `pytesseract`, `pdf2image`, `defusedxml`, `python-magic`.
 - A vision-capable model wired into the general agent (separate, prerequisite work — this feature only delivers image bytes to it).

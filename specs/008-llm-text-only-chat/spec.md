@@ -17,9 +17,9 @@
 
 ### User Story 1 - Plain LLM conversation when no agents are available (Priority: P1)
 
-A user opens AstralBody, has a working LLM provider configured, and sends a chat message. No agents are connected, or every available agent's tools are blocked by permissions or system policy. Instead of being told to wait for agents, the user receives a normal text reply from the LLM and can continue a back-and-forth conversation that reads, summarizes, reasons, drafts, or answers questions using only the LLM's built-in knowledge — no tool calls, no file actions, no external integrations.
+A user opens AstralDeep, has a working LLM provider configured, and sends a chat message. No agents are connected, or every available agent's tools are blocked by permissions or system policy. Instead of being told to wait for agents, the user receives a normal text reply from the LLM and can continue a back-and-forth conversation that reads, summarizes, reasons, drafts, or answers questions using only the LLM's built-in knowledge — no tool calls, no file actions, no external integrations.
 
-**Why this priority**: This is the entire feature. Today the user is blocked at the door with a "No agents connected" warning even though the LLM is fully configured and reachable. Removing that blocker turns AstralBody into a usable chat surface from the very first message, well before any agent is set up. It also preserves the value of the LLM configuration the user just completed in feature 006.
+**Why this priority**: This is the entire feature. Today the user is blocked at the door with a "No agents connected" warning even though the LLM is fully configured and reachable. Removing that blocker turns AstralDeep into a usable chat surface from the very first message, well before any agent is set up. It also preserves the value of the LLM configuration the user just completed in feature 006.
 
 **Independent Test**: With a configured LLM provider and zero connected agents (or all tools filtered out), send a plain question such as "What is the capital of France?" and confirm the assistant replies with a normal text answer that is saved to chat history. No warning alert is shown for the absence of agents.
 

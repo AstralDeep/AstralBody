@@ -221,13 +221,13 @@ def transcribe_audio(model_id: str, file_handle: str,
                      language: str = None, **kwargs):
     """Transcribe an uploaded audio file using the named transcription model.
 
-    Resolves ``file_handle`` to a real on-disk path via the AstralBody
+    Resolves ``file_handle`` to a real on-disk path via the AstralDeep
     attachments helper (per-user ownership enforced) and submits the file
     as ``multipart/form-data`` to ``/v1/audio/transcriptions``.
 
     Args:
         model_id: Identifier of a transcription-capable model (e.g. whisper-1).
-        file_handle: AstralBody attachment_id of the audio file.
+        file_handle: AstralDeep attachment_id of the audio file.
         language: Optional ISO-639-1 language hint (e.g. ``'en'``).
         **kwargs: Tool kwargs (``_credentials``, ``user_id``).
 
@@ -323,7 +323,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
             "type": "object",
             "properties": {
                 "model_id": {"type": "string", "description": "Identifier of a transcription-capable model (e.g. whisper-1)."},
-                "file_handle": {"type": "string", "description": "AstralBody attachment_id of the audio file."},
+                "file_handle": {"type": "string", "description": "AstralDeep attachment_id of the audio file."},
                 "language": {"type": "string", "description": "Optional ISO-639-1 language hint (e.g. 'en')."},
             },
             "required": ["model_id", "file_handle"],

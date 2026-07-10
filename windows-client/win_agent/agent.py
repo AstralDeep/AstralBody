@@ -198,7 +198,7 @@ def start_agent_thread(host: str = "0.0.0.0", port: int = 8771):
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="AstralBody Windows tools agent")
+    ap = argparse.ArgumentParser(description="AstralDeep Windows tools agent")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=int(os.getenv("WIN_AGENT_PORT", "8771")))
     args = ap.parse_args()

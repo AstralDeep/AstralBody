@@ -282,7 +282,7 @@ def main():
     reset_sequences(pg_url)
 
     print("\n=== Migration Complete ===")
-    print("You can verify with: docker compose exec postgres psql -U astral -d astralbody -c '\\dt'")
+    print("You can verify with: docker compose exec postgres psql -U astral -d astraldeep -c '\\dt'")
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ description: "Task breakdown for 005-tooltips-tutorial"
 
 # Tasks: Tool Tips and Getting Started Tutorial
 
-**Input**: Design documents from `Y:/WORK/MCP/AstralBody/specs/005-tooltips-tutorial/`
+**Input**: Design documents from `Y:/WORK/MCP/AstralDeep/specs/005-tooltips-tutorial/`
 **Prerequisites**: [plan.md](plan.md), [spec.md](spec.md), [research.md](research.md), [data-model.md](data-model.md), [contracts/](contracts/), [quickstart.md](quickstart.md)
 
 **Tests**: Test tasks ARE included — Constitution Principle III mandates 90% coverage with both unit and integration tests, so tests are a non-optional deliverable for every change in this feature.
@@ -21,7 +21,7 @@ description: "Task breakdown for 005-tooltips-tutorial"
 
 ## Path Conventions
 
-Web app split (matches the existing AstralBody repo): `backend/` and `frontend/src/`. All paths in this file are absolute from the repo root.
+Web app split (matches the existing AstralDeep repo): `backend/` and `frontend/src/`. All paths in this file are absolute from the repo root.
 
 ---
 
@@ -169,7 +169,7 @@ Web app split (matches the existing AstralBody repo): `backend/` and `frontend/s
 **Purpose**: Accessibility validation, full-suite test runs, documentation updates, and the end-to-end quickstart sweep.
 
 - [X] T056 [P] Accessibility pass per [quickstart.md](quickstart.md) §11 — keyboard-only walkthrough of the tutorial overlay, screen-reader (NVDA or VoiceOver) announcement check on at least one user-flow step and one admin-flow step, focus-trap and focus-restore verification. File any axe-core findings as follow-up tasks.
-- [X] T057 [P] Run the full backend test suite for the new module: `docker exec astralbody bash -c "cd /app/backend && python -m pytest onboarding/tests/ -q"`. Confirm coverage on `backend/onboarding/` ≥ 90% (Constitution Principle III). If not, add the missing unit tests in `backend/onboarding/tests/`.
+- [X] T057 [P] Run the full backend test suite for the new module: `docker exec astraldeep bash -c "cd /app/backend && python -m pytest onboarding/tests/ -q"`. Confirm coverage on `backend/onboarding/` ≥ 90% (Constitution Principle III). If not, add the missing unit tests in `backend/onboarding/tests/`.
 - [X] T058 [P] Run the frontend test suite: `cd frontend && npm run test -- onboarding`. Confirm coverage on `frontend/src/components/onboarding/` ≥ 90%.
 - [X] T059 [P] Update `CLAUDE.md` "Active Technologies" / "Recent Changes" sections to reflect the shipped state of feature 005. (The `update-agent-context.ps1` script ran during planning; this task is for the implementer to confirm the entries are still correct after coding.)
 - [X] T060 Run the end-to-end quickstart sweep ([quickstart.md](quickstart.md) §1 through §11) on a freshly-reset database. Capture any deviation as a follow-up task before merge.

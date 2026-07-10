@@ -6,7 +6,7 @@ plus specs 041/042/043 status. These findings ground the spec; the plan phase sh
 line numbers before relying on them (the tree moves).
 
 Correction to project docs: the Windows client is **PySide6/Qt Widgets**, not tkinter
-(tkinter is explicitly excluded from the bundle, `windows-client/AstralBody.spec:26`);
+(tkinter is explicitly excluded from the bundle, `windows-client/AstralDeep.spec:26`);
 `CLAUDE.md` still says "PyInstaller + tkinter".
 
 ---
@@ -169,7 +169,7 @@ exchange (auth.py:79-155); token in memory only; silent refresh (auth.py:64-76).
 6. No table pagination.
 7. `ui_render target=history` dropped; `user_message_acked`, `chat_step`, `tool_progress`,
    `task_*` unhandled (async flows invisible).
-8. Hardcoded `Launch-AstralBody.bat` authority/WS URL.
+8. Hardcoded `Launch-AstralDeep.bat` authority/WS URL.
 9. No automated tests for `_on_message` routing, chrome_surface E2E, auth_required
    reconnect, attachments.
 

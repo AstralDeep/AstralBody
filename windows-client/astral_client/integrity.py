@@ -1,12 +1,12 @@
 """Integrity verifier for the Windows desktop client (feature 039).
 
-Before a freshly-downloaded ``AstralBody.exe`` is ever executed, this module:
+Before a freshly-downloaded ``AstralDeep.exe`` is ever executed, this module:
 
   1. resolves the latest GitHub Release (api.github.com/repos/<repo>/releases/latest),
   2. downloads the exe + ``SHA256SUMS`` + ``cosign.bundle`` assets,
   3. verifies ``sha256(exe) ==`` the manifest entry for the exe,
   4. verifies the sigstore ``cosign.bundle`` against the exe — asserting the
-     signing certificate's OIDC identity is the AstralDeep/AstralBody GitHub
+     signing certificate's OIDC identity is the AstralDeep/AstralDeep GitHub
      Actions workflow (issuer https://token.actions.githubusercontent.com),
   5. only then returns the verified exe path for the caller to launch/replace.
 
@@ -34,8 +34,8 @@ from typing import Optional
 
 logger = logging.getLogger("astral.integrity")
 
-_REPO = os.getenv("DESKTOP_RELEASE_REPO", "AstralDeep/AstralBody")
-_EXE_NAME = "AstralBody.exe"
+_REPO = os.getenv("DESKTOP_RELEASE_REPO", "AstralDeep/AstralDeep")
+_EXE_NAME = "AstralDeep.exe"
 _SHA_NAME = "SHA256SUMS"
 _BUNDLE_NAME = "cosign.bundle"
 # The OIDC identity the signing workflow MUST present (keyless sigstore).
@@ -47,7 +47,7 @@ _EXPECTED_ISSUER = "https://token.actions.githubusercontent.com"
 # workflow path means only THIS repo's release workflow can sign a binary the
 # client will accept.
 _SIGNING_WORKFLOW = (
-    "https://github.com/AstralDeep/AstralBody/.github/workflows/release-windows.yml"
+    "https://github.com/AstralDeep/AstralDeep/.github/workflows/release-windows.yml"
 )
 _MAX_BYTES = 200 * 1024 * 1024  # 200 MB cap on the exe download
 
@@ -218,7 +218,7 @@ def verify_latest(workdir: str) -> VerifyResult:
     bundle_path = os.path.join(workdir, _BUNDLE_NAME)
 
     if not _download(rel.exe_url, exe_path):
-        return VerifyResult(ok=False, reason="Download of AstralBody.exe failed.")
+        return VerifyResult(ok=False, reason="Download of AstralDeep.exe failed.")
     sha_text = _download_text(rel.sha_url)
     if not sha_text:
         _cleanup(exe_path)
@@ -232,7 +232,7 @@ def verify_latest(workdir: str) -> VerifyResult:
     if not expected:
         _cleanup(exe_path, bundle_path)
         return VerifyResult(
-            ok=False, reason="SHA256SUMS has no hash for AstralBody.exe."
+            ok=False, reason="SHA256SUMS has no hash for AstralDeep.exe."
         )
     actual = _sha256_file(exe_path)
     if actual != expected:
@@ -277,7 +277,7 @@ def verify_running_exe(exe_path: str, *, workdir: str, _release=None) -> VerifyR
         expected = _extract_sha_for_exe(sha_text)
         if not expected:
             return VerifyResult(
-                ok=False, reason="SHA256SUMS has no hash for AstralBody.exe."
+                ok=False, reason="SHA256SUMS has no hash for AstralDeep.exe."
             )
         actual = _sha256_file(exe_path)
         if actual != expected:

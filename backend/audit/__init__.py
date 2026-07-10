@@ -2,7 +2,7 @@
 Audit log module — feature 003-agent-audit-log.
 
 HIPAA + NIST SP 800-53 AU compliant per-user audit log covering every
-user-attributable action in AstralBody (direct user actions and agent
+user-attributable action in AstralDeep (direct user actions and agent
 actions taken on the user's behalf).
 
 Core invariants enforced by this package:

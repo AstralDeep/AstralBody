@@ -5,7 +5,7 @@ Goal: confirm each of the four ported surfaces (User guide, Theme, LLM settings,
 ## 0. Backend up
 
 ```bash
-docker compose up -d                 # postgres + astralbody on :8001 (ASTRAL_ENV=development ⇒ mock auth ⇒ roles [admin,user])
+docker compose up -d                 # postgres + astraldeep on :8001 (ASTRAL_ENV=development ⇒ mock auth ⇒ roles [admin,user])
 curl -fsS localhost:8001/healthz && curl -fsS localhost:8001/readyz
 curl -fsS localhost:8001/api/chrome/menu | python -m json.tool   # the 042 menu (the five items live under ACCOUNT/HELP)
 ```
@@ -13,7 +13,7 @@ curl -fsS localhost:8001/api/chrome/menu | python -m json.tool   # the 042 menu 
 ## 1. Surface contract (fast, no client)
 
 ```bash
-docker exec astralbody bash -c "cd /app/backend && python -m pytest webrender/chrome/tests/ orchestrator/tests/test_chrome_surface.py -q"
+docker exec astraldeep bash -c "cd /app/backend && python -m pytest webrender/chrome/tests/ orchestrator/tests/test_chrome_surface.py -q"
 ```
 Asserts: `chrome_open` on a `windows`/`android` session returns a `chrome_surface` with valid `astralprims` components; a `browser` session still returns `chrome_render` HTML; every emitted `chrome_*` action resolves in `collect_handlers()`; a `ParamPicker` action-submit yields the `payload.fields` shape each form handler accepts; admin surfaces stay refused+audited; the four in-scope surfaces render for a `user`; the native menu omits `tour`.
 
@@ -57,7 +57,7 @@ Place the three screenshots of a surface side by side — same content + control
 
 ```bash
 # Backend gates (same invocations CI runs):
-docker exec astralbody bash -c "cd /app/backend && python -m ruff check . && python -m pytest -q -m 'not integration'"
+docker exec astraldeep bash -c "cd /app/backend && python -m ruff check . && python -m pytest -q -m 'not integration'"
 # Android gates:
 cd android-client && ./gradlew ktlintCheck :app:lintDebug :core:test :app:testDebugUnitTest :core:koverVerify :app:assembleDebug
 ```

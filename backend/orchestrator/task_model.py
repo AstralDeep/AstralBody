@@ -20,7 +20,7 @@ import json
 import os
 from typing import Any, Dict, List, Optional
 
-#: Typed attributes the task model can carry, mapped onto AstralBody's needs.
+#: Typed attributes the task model can carry, mapped onto AstralDeep's needs.
 ATTR_TYPES = ("SVAL", "DICT", "ARRY", "PNTR", "TEMPORAL")
 
 #: Roles that refine how a scalar (SVAL) or array (ARRY) is rendered.

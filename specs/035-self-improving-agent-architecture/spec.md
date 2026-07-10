@@ -7,7 +7,7 @@
 
 ## Overview
 
-Upgrade AstralBody's most distinctive feature — agentic creation — from one-shot to **self-improving**, and give the orchestration layer the frontier's measurement + control machinery. Every self-improving loop is graded by a new **trajectory-evaluation backbone**, so improvement is measurable rather than asserted. All work respects the constraint envelope (Python-only · no new third-party runtime libraries · idempotent migrations · fail-closed) and is flag-gated and fail-open.
+Upgrade AstralDeep's most distinctive feature — agentic creation — from one-shot to **self-improving**, and give the orchestration layer the frontier's measurement + control machinery. Every self-improving loop is graded by a new **trajectory-evaluation backbone**, so improvement is measurable rather than asserted. All work respects the constraint envelope (Python-only · no new third-party runtime libraries · idempotent migrations · fail-closed) and is flag-gated and fail-open.
 
 ## Capabilities & status
 
@@ -25,7 +25,7 @@ Full acceptance scenarios for the initiative are in `specs/033-frontier-techniqu
 
 ## What C-N5 delivers (this increment)
 
-AstralBody's self-test checks *that* a new agent runs, and component-feedback is user-facing — there is **no automated measure of an agent run's quality** beyond a single pass/fail, and self-tests are single-shot (`pass^1`), which masks flakiness (τ-bench shows SOTA agents with `pass^1`≈50% drop below `pass^8`≈25%). C-N5 ships the deterministic backbone: pure functions that score a **tool-call trajectory** against a reference (the six named ADK/Vertex metrics), a weighted aggregate (the single number a loop optimises), and the τ-bench `pass^k` estimator (`C(c,k)/C(n,k)`) for reliability. It is dependency-free and requires no LLM — an LLM judge may layer on top, but the deterministic gate never depends on model availability. Intended consumers: the evolutionary auto-create loop (C-N4), a `pass^k`-gated self-test, and a regression harness over the existing hash-chained audit/tool-dispatch trace.
+AstralDeep's self-test checks *that* a new agent runs, and component-feedback is user-facing — there is **no automated measure of an agent run's quality** beyond a single pass/fail, and self-tests are single-shot (`pass^1`), which masks flakiness (τ-bench shows SOTA agents with `pass^1`≈50% drop below `pass^8`≈25%). C-N5 ships the deterministic backbone: pure functions that score a **tool-call trajectory** against a reference (the six named ADK/Vertex metrics), a weighted aggregate (the single number a loop optimises), and the τ-bench `pass^k` estimator (`C(c,k)/C(n,k)`) for reliability. It is dependency-free and requires no LLM — an LLM judge may layer on top, but the deterministic gate never depends on model availability. Intended consumers: the evolutionary auto-create loop (C-N4), a `pass^k`-gated self-test, and a regression harness over the existing hash-chained audit/tool-dispatch trace.
 
 ### Acceptance (this increment)
 

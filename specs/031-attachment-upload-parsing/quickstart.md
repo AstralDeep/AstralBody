@@ -1,17 +1,17 @@
 # Quickstart: Chat Attachment Upload & Universal Parsing
 
-How to run, exercise, and verify feature 031 locally. Everything runs in the `astralbody` container (backend needs py3.11); `.env` must have `ASTRAL_ENV=development`.
+How to run, exercise, and verify feature 031 locally. Everything runs in the `astraldeep` container (backend needs py3.11); `.env` must have `ASTRAL_ENV=development`.
 
 ## Boot
 
 ```bash
-docker compose up -d                       # postgres + astralbody (idempotent _init_db runs the new tables/column)
+docker compose up -d                       # postgres + astraldeep (idempotent _init_db runs the new tables/column)
 # open the web client (orchestrator shell) on :8001 and log in via Keycloak
 ```
 
 Confirm migrations applied (guarded, safe to re-run):
 ```bash
-docker exec astralbody bash -c "cd /app/backend && python -c \"from shared.database import Database; d=Database(); cur=d.conn.cursor(); \
+docker exec astraldeep bash -c "cd /app/backend && python -c \"from shared.database import Database; d=Database(); cur=d.conn.cursor(); \
 cur.execute(\\\"select to_regclass('message_attachment'), to_regclass('attachment_parser')\\\"); print(cur.fetchone())\""
 # → ('message_attachment', 'attachment_parser')
 ```
@@ -41,9 +41,9 @@ cur.execute(\\\"select to_regclass('message_attachment'), to_regclass('attachmen
 ## Tests
 
 ```bash
-docker exec astralbody bash -c "cd /app/backend && python -m pytest -q tests/attachments tests/chrome agents/general/tests/file_tools orchestrator/tests"
-docker exec astralbody bash -c "cd /app/backend && python -m pytest -q"     # full suite
-docker exec astralbody bash -c "cd /app/backend && python -m ruff check ."  # lint
+docker exec astraldeep bash -c "cd /app/backend && python -m pytest -q tests/attachments tests/chrome agents/general/tests/file_tools orchestrator/tests"
+docker exec astraldeep bash -c "cd /app/backend && python -m pytest -q"     # full suite
+docker exec astraldeep bash -c "cd /app/backend && python -m ruff check ."  # lint
 ```
 
 Key cases to look for (added by this feature):

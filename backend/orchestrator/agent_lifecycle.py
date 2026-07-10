@@ -1,5 +1,5 @@
 """
-Agent Lifecycle Manager for AstralBody.
+Agent Lifecycle Manager for AstralDeep.
 
 Manages the full lifecycle of user-created agents:
   pending → generating → generated → testing → analyzing →

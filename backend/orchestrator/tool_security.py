@@ -1,5 +1,5 @@
 """
-Proactive Tool Security Analyzer for the AstralBody Orchestrator.
+Proactive Tool Security Analyzer for the AstralDeep Orchestrator.
 
 Analyzes agent tool declarations (name, description, input_schema) for
 patterns that indicate nefarious behavior. Runs automatically when agents

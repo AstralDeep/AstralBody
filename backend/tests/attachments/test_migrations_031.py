@@ -2,7 +2,7 @@
 
 Asserts the new tables/column exist after _init_db and that re-running _init_db
 is safe (idempotent). Requires a real Postgres (the suite runs inside the
-astralbody container against the postgres service); skipped where unreachable.
+astraldeep container against the postgres service); skipped where unreachable.
 """
 
 from __future__ import annotations

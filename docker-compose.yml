@@ -1,7 +1,7 @@
 services:
   postgres:
     image: postgres:17-alpine
-    container_name: astralbody-postgres
+    container_name: astraldeep-postgres
     environment:
       POSTGRES_USER: ${DB_USER}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
@@ -17,12 +17,12 @@ services:
       retries: 5
     restart: unless-stopped
 
-  astralbody:
+  astraldeep:
     build:
       context: .
       dockerfile: Dockerfile
-    image: astralbody:latest
-    container_name: astralbody
+    image: astraldeep:latest
+    container_name: astraldeep
     ports:
       - "127.0.0.1:8001:8001"
     env_file:

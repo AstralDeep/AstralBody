@@ -5,7 +5,7 @@
 
 ## Summary
 
-Make AstralBody users stay signed in across full browser/app restarts for up to 365 days from their most recent interactive login, on both the React web frontend and the Flutter WebView wrapper, **without changing the login flow itself**. The user explicitly asked to "respect the current login method, just extend the credential storing" — the entire feature reduces to (a) switching `react-oidc-context`'s token store from `sessionStorage` to `localStorage` (which the Flutter WebView already persists across launches), (b) enforcing a client-side 365-day hard-max ceiling, (c) wiring three new audit `action_type` values into the existing `event_class="auth"` bucket, and (d) configuring Keycloak's offline-session lifespan to match.
+Make AstralDeep users stay signed in across full browser/app restarts for up to 365 days from their most recent interactive login, on both the React web frontend and the Flutter WebView wrapper, **without changing the login flow itself**. The user explicitly asked to "respect the current login method, just extend the credential storing" — the entire feature reduces to (a) switching `react-oidc-context`'s token store from `sessionStorage` to `localStorage` (which the Flutter WebView already persists across launches), (b) enforcing a client-side 365-day hard-max ceiling, (c) wiring three new audit `action_type` values into the existing `event_class="auth"` bucket, and (d) configuring Keycloak's offline-session lifespan to match.
 
 No new third-party libraries. No new database tables. No new UI primitives. No backend route changes outside one audit-recording site. Flutter side requires zero Dart code change — its WebView already preserves localStorage across cold launches by default on both iOS and Android.
 
@@ -96,7 +96,7 @@ flutter-passthrough/        # NO CHANGES this feature
 # - Client Access Token Lifespan: 5–15 min (unchanged from current, drives FR-004 propagation cadence)
 ```
 
-**Structure Decision**: Web application (backend + frontend); reuse existing modules. The only new top-level directory is `frontend/src/auth/` for the small persistence helper. Flutter is untouched. The feature is intentionally *thin* — most of the heavy lifting is delegated to `oidc-client-ts`'s built-in `WebStorageStateStore` + `automaticSilentRenew`, which AstralBody already uses in `sessionStorage` mode today.
+**Structure Decision**: Web application (backend + frontend); reuse existing modules. The only new top-level directory is `frontend/src/auth/` for the small persistence helper. Flutter is untouched. The feature is intentionally *thin* — most of the heavy lifting is delegated to `oidc-client-ts`'s built-in `WebStorageStateStore` + `automaticSilentRenew`, which AstralDeep already uses in `sessionStorage` mode today.
 
 ## Complexity Tracking
 
@@ -130,7 +130,7 @@ See **[data-model.md](data-model.md)**. Key changes:
 
 - **Stored Credential** entity gains a concrete shape in browser `localStorage` under two namespaces:
   - The `oidc-client-ts` user record at key `oidc.user:<authority>:<client_id>` (created and managed by the OIDC library; we do not write to it directly).
-  - A small AstralBody-owned record at key `astralbody.persistentLogin.v1` holding `{ initial_login_at: ISO8601, last_user_sub: string, deployment_origin: string }`. This is the **365-day clock anchor** (FR-013) and the **user-switch detection key** (FR-008).
+  - A small AstralDeep-owned record at key `astraldeep.persistentLogin.v1` holding `{ initial_login_at: ISO8601, last_user_sub: string, deployment_origin: string }`. This is the **365-day clock anchor** (FR-013) and the **user-switch detection key** (FR-008).
 - No database schema change. No new table. No new column.
 
 ### Contracts

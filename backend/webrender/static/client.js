@@ -10,7 +10,7 @@
 
   var WS_URL = (location.protocol === "https:" ? "wss:" : "ws:") + "//" + location.host + "/ws";
   var API_URL = location.origin;
-  var TOKEN_KEY = "astralbody.token";
+  var TOKEN_KEY = "astraldeep.token";
   // The shell-injected token bootstraps the first connect; every reconnect
   // re-fetches /auth/session (which silently refreshes server-side) instead of
   // reusing a stale token. Mock-auth dev works because /auth/session answers

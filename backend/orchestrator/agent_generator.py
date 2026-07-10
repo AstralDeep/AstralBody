@@ -1,5 +1,5 @@
 """
-Agent Code Generator for AstralBody.
+Agent Code Generator for AstralDeep.
 
 Generates the 3 files needed for a new agent:
 - {slug}_agent.py  — from template (not LLM)

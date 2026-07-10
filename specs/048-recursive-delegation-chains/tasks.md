@@ -1,7 +1,7 @@
 # Tasks: Recursive, Provenance-Bearing Delegation Chains
 
 **Feature**: 048-recursive-delegation-chains | **Plan**: [plan.md](plan.md) | **Spec**: [spec.md](spec.md)
-Verified in the `astralbody` container (Python 3.11). **Test-first**: red before impl, green after.
+Verified in the `astraldeep` container (Python 3.11). **Test-first**: red before impl, green after.
 
 ## Phase 1 — Enforcement property tests, FIRST and failing (US1, P1)
 

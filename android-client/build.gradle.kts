@@ -1,4 +1,4 @@
-// Root build for the AstralBody Android client. Plugins are declared here
+// Root build for the AstralDeep Android client. Plugins are declared here
 // (apply false) and applied per-module; see core/ and app/.
 plugins {
     alias(libs.plugins.android.application) apply false

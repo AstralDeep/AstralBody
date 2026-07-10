@@ -176,7 +176,7 @@ private fun AstralTopBar(
             // Small brand logo only — no wordmark, no status text.
             Image(
                 painter = painterResource(R.drawable.app_icon),
-                contentDescription = "AstralBody",
+                contentDescription = "AstralDeep",
                 modifier = Modifier.size(30.dp).clip(RoundedCornerShape(8.dp)),
             )
             Box(modifier = Modifier.weight(1f))

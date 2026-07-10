@@ -28,7 +28,7 @@ Backed by `POST /dataset/submit` with a multipart `file` part.
 {
   "type": "object",
   "properties": {
-    "file_handle": {"type": "string", "description": "Handle to a CSV uploaded via AstralBody's file mechanism."}
+    "file_handle": {"type": "string", "description": "Handle to a CSV uploaded via AstralDeep's file mechanism."}
   },
   "required": ["file_handle"]
 }

@@ -7,7 +7,7 @@ description: "Task list for 001-tool-stream-ui — Real-Time Tool Streaming to U
 **Input**: Design documents from `/specs/001-tool-stream-ui/`
 **Prerequisites**: [plan.md](plan.md), [spec.md](spec.md), [research.md](research.md), [data-model.md](data-model.md), [contracts/](contracts/), [quickstart.md](quickstart.md)
 
-**Tests**: Required throughout. AstralBody Constitution Principle III mandates ≥90% coverage on changed code with unit AND integration tests. Test tasks are not optional — they appear in every story phase and the polish phase enforces coverage.
+**Tests**: Required throughout. AstralDeep Constitution Principle III mandates ≥90% coverage on changed code with unit AND integration tests. Test tasks are not optional — they appear in every story phase and the polish phase enforces coverage.
 
 **Organization**: Tasks are grouped by user story to enable independent implementation and testing. Phase 2 (Foundational) installs the full data model and protocol surface so no story has to refactor a previous story's data structures.
 
@@ -15,7 +15,7 @@ description: "Task list for 001-tool-stream-ui — Real-Time Tool Streaming to U
 
 - **[P]**: Can run in parallel — different file, no dependency on incomplete tasks in this phase
 - **[Story]**: Maps a task to spec.md user story (US1–US5). Setup, Foundational, and Polish phases have no story label.
-- All paths are absolute relative to the repo root `y:/WORK/MCP/AstralBody/`.
+- All paths are absolute relative to the repo root `y:/WORK/MCP/AstralDeep/`.
 
 ## Path Conventions
 

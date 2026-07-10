@@ -211,7 +211,7 @@ def build_orchestrator_a2a_card(orchestrator) -> A2AAgentCard:
         }))
 
     return A2AAgentCard(
-        name="AstralBody Orchestrator",
+        name="AstralDeep Orchestrator",
         description="Multi-agent orchestrator with LLM-powered tool routing. Routes requests to specialized agents.",
         version="1.0.0",
         capabilities=AgentCapabilities(streaming=True),
@@ -226,7 +226,7 @@ def build_orchestrator_a2a_card(orchestrator) -> A2AAgentCard:
             AgentInterface(protocol_binding="JSONRPC", url=f"http://{host}:{port}/a2a"),
         ],
         provider=AgentProvider(
-            organization="AstralBody",
+            organization="AstralDeep",
             url=os.getenv("PUBLIC_BASE_URL", "http://localhost:5173"),
         ),
         security_schemes=security_schemes or None,

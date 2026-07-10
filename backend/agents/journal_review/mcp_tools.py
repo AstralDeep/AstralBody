@@ -31,8 +31,8 @@ OPENALEX_SOURCES_URL = "https://api.openalex.org/sources"
 OPENALEX_WORKS_URL = "https://api.openalex.org/works"
 CROSSREF_JOURNALS_URL = "https://api.crossref.org/journals"
 
-OPENALEX_MAILTO = "astralbody@example.com"  # polite pool access
-HEADERS = {"User-Agent": f"AstralBody/1.0 (mailto:{OPENALEX_MAILTO})"}
+OPENALEX_MAILTO = "astraldeep@example.com"  # polite pool access
+HEADERS = {"User-Agent": f"AstralDeep/1.0 (mailto:{OPENALEX_MAILTO})"}
 
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024  # 5 MB cap per API response
 

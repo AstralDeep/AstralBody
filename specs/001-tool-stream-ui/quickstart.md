@@ -1,4 +1,4 @@
-# Quickstart: Add a Streaming Tool to AstralBody
+# Quickstart: Add a Streaming Tool to AstralDeep
 
 **Feature**: 001-tool-stream-ui
 **Audience**: A developer who wants to make a tool produce real-time updates that show up in a UI component without the user re-asking.
@@ -9,7 +9,7 @@ This is the fast path. It assumes the implementation from this feature has alrea
 
 ## Prerequisites
 
-- A working AstralBody dev environment: `cd backend && .venv/Scripts/python.exe start.py` brings up the orchestrator on `ws://localhost:8001/ws` and at least the agents you care about on 8003+.
+- A working AstralDeep dev environment: `cd backend && .venv/Scripts/python.exe start.py` brings up the orchestrator on `ws://localhost:8001/ws` and at least the agents you care about on 8003+.
 - The frontend running via Vite (`cd frontend && npm run dev`).
 - An existing agent in `backend/agents/<your_agent>/` with at least one non-streaming tool already working. If you don't have one, copy `backend/agents/weather/` as a template.
 

@@ -11,13 +11,13 @@ This is the minimal end-to-end smoke test for the persistent-login feature once 
 
 ## Smoke test — Web
 
-1. **Fresh install state**. In DevTools, clear localStorage for the AstralBody origin. Reload the page.
+1. **Fresh install state**. In DevTools, clear localStorage for the AstralDeep origin. Reload the page.
 2. **Interactive login**. Click "Sign in", complete the Keycloak login flow. Land on the dashboard.
 3. **Verify storage**. In DevTools, confirm both of these keys exist in localStorage:
    - `oidc.user:<authority>:<client_id>` — populated by `oidc-client-ts`
-   - `astralbody.persistentLogin.v1` — JSON with `initial_login_at` set to ~now, `last_user_sub` set to your OIDC sub, `deployment_origin` set to the page origin
+   - `astraldeep.persistentLogin.v1` — JSON with `initial_login_at` set to ~now, `last_user_sub` set to your OIDC sub, `deployment_origin` set to the page origin
 4. **Full close**. Quit the browser entirely (not just close the tab).
-5. **Reopen**. Launch the browser and navigate to the AstralBody URL.
+5. **Reopen**. Launch the browser and navigate to the AstralDeep URL.
 6. **Expected**: the dashboard renders directly. No Keycloak login screen. No password prompt.
 7. **Verify audit**. Open the Audit Log panel in the UI; the most recent `event_class="auth"` row MUST have `action_type="auth.session_resumed"`. The login from step 2 is recorded as `action_type="auth.login_interactive"` (earlier in the log).
 
@@ -33,8 +33,8 @@ This is the minimal end-to-end smoke test for the persistent-login feature once 
 ## Smoke test — Sign-out flow (FR-009)
 
 1. From the authenticated dashboard, click the existing sign-out control.
-2. **Verify**: localStorage `oidc.user:*` and `astralbody.persistentLogin.v1` are both removed within ~1 second of the click.
-3. **Verify**: the page redirects to the Keycloak end-session endpoint, then back to the AstralBody login screen.
+2. **Verify**: localStorage `oidc.user:*` and `astraldeep.persistentLogin.v1` are both removed within ~1 second of the click.
+3. **Verify**: the page redirects to the Keycloak end-session endpoint, then back to the AstralDeep login screen.
 4. **Verify**: reload the page — the login screen MUST appear, not the dashboard.
 5. **Replay attempt** (optional): copy the prior refresh token before signing out; after signing out, attempt to exchange it directly at `${authority}/protocol/openid-connect/token`. Expected: HTTP 400 `invalid_grant`.
 
@@ -44,9 +44,9 @@ This is artificial because we can't fast-forward real time. Use the test hook:
 
 1. In DevTools, run:
    ```js
-   const anchor = JSON.parse(localStorage.getItem('astralbody.persistentLogin.v1'));
+   const anchor = JSON.parse(localStorage.getItem('astraldeep.persistentLogin.v1'));
    anchor.initial_login_at = new Date(Date.now() - 366 * 24 * 60 * 60 * 1000).toISOString();
-   localStorage.setItem('astralbody.persistentLogin.v1', JSON.stringify(anchor));
+   localStorage.setItem('astraldeep.persistentLogin.v1', JSON.stringify(anchor));
    ```
 2. Reload the page.
 3. **Expected**: the login screen appears (not the dashboard) with the "session expired" message. localStorage records have been cleared by the on-launch check.
@@ -57,7 +57,7 @@ This is artificial because we can't fast-forward real time. Use the test hook:
 1. Sign in normally.
 2. Disable network (DevTools → Network → Offline).
 3. Force-reload the page.
-4. **Expected**: the UI shows the offline-state retry control (the same one used elsewhere in AstralBody when the WS can't connect). The user is NOT bounced to the login screen, NOT left on an unauthenticated dashboard, NOT stuck on a perpetual spinner.
+4. **Expected**: the UI shows the offline-state retry control (the same one used elsewhere in AstralDeep when the WS can't connect). The user is NOT bounced to the login screen, NOT left on an unauthenticated dashboard, NOT stuck on a perpetual spinner.
 5. Re-enable network and click retry. Expected: dashboard renders.
 
 ## Smoke test — Storage-write rejection (FR-006)

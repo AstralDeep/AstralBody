@@ -1,6 +1,6 @@
 # Production deployment (operator guide)
 
-AstralBody is a **server-driven UI (SDUI) backend service**: one Python
+AstralDeep is a **server-driven UI (SDUI) backend service**: one Python
 process serves the web shell, static assets, REST API, WebSocket channel, and
 the rendered UI itself on port **8001**. There is no frontend build step, no
 Node toolchain, and no separate static server — `astralprims` defines the
@@ -294,7 +294,7 @@ on the host that swaps the local build for the registry image:
 ```yaml
 # docker-compose.override.yml (sandbox host)
 services:
-  astralbody:
+  astraldeep:
     image: ghcr.io/<owner>/<repo>:sha-<commit>
     build: !reset null   # drop the build: block (compose >= 2.24)
 ```
@@ -344,7 +344,7 @@ FORWARDED_ALLOW_IPS=<proxy ip>
 # Database stays compose-internal (service `postgres`)
 DB_USER=astral
 DB_PASSWORD=<strong password>
-DB_NAME=astralbody
+DB_NAME=astraldeep
 DB_PORT=5432
 ```
 
@@ -364,14 +364,14 @@ DB_PORT=5432
 
 The exit-78 boot gate is the final guard: if the host `.env` is incomplete,
 the pulled image refuses to serve and prints one consolidated checklist in
-`docker compose logs astralbody` — fix and `docker compose up -d` again.
+`docker compose logs astraldeep` — fix and `docker compose up -d` again.
 
 ## Deployment checklist
 
 ```text
 [ ] Image pulled from GHCR by its immutable sha-<commit> tag (not :latest,
     not a local build)
-[ ] docker-compose.override.yml points services.astralbody.image at that tag
+[ ] docker-compose.override.yml points services.astraldeep.image at that tag
     (build: dropped or compose started with --no-build)
 [ ] ASTRAL_ENV unset (or =production) on the host — NOT development
 [ ] USE_MOCK_AUTH=false

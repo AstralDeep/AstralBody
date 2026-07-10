@@ -7,7 +7,7 @@
 
 ## Overview
 
-AstralBody now ships three user-facing clients: the server-rendered web shell, a native Windows
+AstralDeep now ships three user-facing clients: the server-rendered web shell, a native Windows
 desktop client, and a native Android client. All three consume the same server-driven UI
 contract — the server owns *what* is shown; each client owns *how* it is shown for its device.
 Features 041–043 brought the native clients up quickly, and a baseline audit (see
@@ -47,7 +47,7 @@ that a user on any client gets a dependable, equivalent experience.
 
 ### User Story 1 - The daily chat loop is dependable on every client (Priority: P1)
 
-A researcher uses AstralBody interchangeably from the browser, their Windows desktop, and their
+A researcher uses AstralDeep interchangeably from the browser, their Windows desktop, and their
 Android phone. On any client, they send a message, watch progress while agents work, see the
 answer and rich components arrive, and trust the client to tell them when something goes wrong —
 a failed request, a dropped connection, an expired session. Signing out actually signs them out

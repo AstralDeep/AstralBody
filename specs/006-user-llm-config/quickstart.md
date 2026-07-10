@@ -1,12 +1,12 @@
 # Quickstart — User-Configurable LLM Subscription
 
-**Audience**: a developer who has just merged this branch and wants to verify the feature end-to-end on a local AstralBody instance. Uses the existing dev runtime (mock auth + Docker Compose).
+**Audience**: a developer who has just merged this branch and wants to verify the feature end-to-end on a local AstralDeep instance. Uses the existing dev runtime (mock auth + Docker Compose).
 
 ---
 
 ## 0. Prereqs
 
-- AstralBody repo checked out at branch `006-user-llm-config`.
+- AstralDeep repo checked out at branch `006-user-llm-config`.
 - `docker compose up` style runtime as today (PostgreSQL + orchestrator + frontend dev server).
 - An OpenAI-compatible endpoint and API key for *you* (the test user). Easiest options for verification:
   - A local Ollama with `ollama pull qwen2.5:0.5b` and serving on `http://localhost:11434/v1` — `api_key` can be the literal string `ollama`.
@@ -31,7 +31,7 @@
 3. Click "Test Connection."
 4. ✅ Expected: a green check, latency under 5 s. The probe makes a real `chat.completions.create` request with `max_tokens: 1`. `audit_events` shows one `llm.config_change` row with `action='tested', result='success'`.
 5. Click "Save."
-6. ✅ Expected: a second `llm.config_change` row with `action='created'`. The settings panel header now reads "Connected — using your own provider." `localStorage['astralbody.llm.config.v1']` is populated.
+6. ✅ Expected: a second `llm.config_change` row with `action='created'`. The settings panel header now reads "Connected — using your own provider." `localStorage['astraldeep.llm.config.v1']` is populated.
 
 ---
 
@@ -65,7 +65,7 @@
 2. Sign out (whatever the existing dev sign-out path is — the JWT-clear mechanism).
 3. Sign back in as the same user.
 4. Open the LLM Settings panel.
-5. ✅ Expected: the configuration is still there; the panel header still reads "Connected — using your own provider." `localStorage['astralbody.llm.config.v1']` was untouched. No re-prompt.
+5. ✅ Expected: the configuration is still there; the panel header still reads "Connected — using your own provider." `localStorage['astraldeep.llm.config.v1']` was untouched. No re-prompt.
 
 ---
 
@@ -118,7 +118,7 @@ GROUP BY actor_user_id;
 ## 9. Run the test suites
 
 ```bash
-docker exec astralbody bash -c "cd /app/backend && python -m pytest llm_config/tests/ audit/tests/ feedback/tests/ -q"
+docker exec astraldeep bash -c "cd /app/backend && python -m pytest llm_config/tests/ audit/tests/ feedback/tests/ -q"
 cd frontend && npx vitest run src/components/llm/ src/hooks/useLlmConfig.test.ts src/hooks/useTokenUsage.test.ts
 ```
 

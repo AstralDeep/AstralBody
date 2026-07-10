@@ -1,7 +1,7 @@
 # T033 — Real-browser gate (evidence)
 
 **Date**: 2026-06-10 | **Verdict**: PASSED-WITH-NOTES (critic)
-**Environment**: rebuilt `astralbody` container (py3.11) on `:8001`, mock auth (admin),
+**Environment**: rebuilt `astraldeep` container (py3.11) on `:8001`, mock auth (admin),
 LLM `deepseek-ai/DeepSeek-V4-Pro`. Headless Chromium (Playwright); WS frames captured.
 Scripts: `backend/tmp/e2e/t033_*.py`; screenshots in this directory.
 

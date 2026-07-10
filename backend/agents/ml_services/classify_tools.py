@@ -253,7 +253,7 @@ def classify_submit_dataset(file_handle: Optional[str] = None,
     handle missing values, before calling ``set_column_types``.
 
     Args:
-        file_handle: Attachment handle of a CSV uploaded via AstralBody.
+        file_handle: Attachment handle of a CSV uploaded via AstralDeep.
         inline_data: Raw CSV text the user pasted in chat. Used only when
             ``file_handle`` is absent: materialized into a real attachment
             owned by the authenticated user (the orchestrator-injected
@@ -1065,7 +1065,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "file_handle": {
                     "type": "string",
-                    "description": "Handle of a CSV uploaded via AstralBody's file mechanism.",
+                    "description": "Handle of a CSV uploaded via AstralDeep's file mechanism.",
                 },
                 "inline_data": {
                     "type": "string",

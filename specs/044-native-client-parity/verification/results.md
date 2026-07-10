@@ -1,6 +1,6 @@
 # Verification Results — 044 (live, 2026-07-01)
 
-Environment: `astralbody` container (dev posture, mock auth, 9 in-process agents) on
+Environment: `astraldeep` container (dev posture, mock auth, 9 in-process agents) on
 `ws://localhost:8001`; web via Puppeteer-driven Chromium; Windows app launched on the dev
 machine (native Qt platform, Segoe UI); Android debug APK on `emulator-5554` (Pixel 7 Pro
 API 36). Result vocabulary: ✅ pass · ⚠️ partial/limited · ➖ n/a · 🔒 blocked (needs a

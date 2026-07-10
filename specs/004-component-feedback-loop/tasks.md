@@ -57,7 +57,7 @@ This is a web app (Constitution II: Vite + React + TS frontend; Constitution I: 
 
 **Goal**: A logged-in user can hover any rendered component, click 👍/👎, optionally pick a category and add a comment, and see a ≤ 1-second acknowledgement. The submission is durably stored, audit-logged, and per-user-isolated.
 
-**Independent Test**: Submit feedback on a rendered component as a regular user; assert the row exists in `component_feedback` keyed to the user, conversation, and originating tool dispatch; assert a `component_feedback / feedback.submit` audit row was written; assert another user cannot read or mutate the record (404 indistinguishable from "not found"). Run inside the `astralbody` container per [quickstart.md §4](./quickstart.md).
+**Independent Test**: Submit feedback on a rendered component as a regular user; assert the row exists in `component_feedback` keyed to the user, conversation, and originating tool dispatch; assert a `component_feedback / feedback.submit` audit row was written; assert another user cannot read or mutate the record (404 indistinguishable from "not found"). Run inside the `astraldeep` container per [quickstart.md §4](./quickstart.md).
 
 ### Tests for User Story 1 ⚠️ (write first; should FAIL before implementation)
 
@@ -179,12 +179,12 @@ This is a web app (Constitution II: Vite + React + TS frontend; Constitution I: 
 **Purpose**: Finalize documentation, verify integrity guarantees survive the new event classes, and confirm coverage / quickstart pass.
 
 - [X] T068 [P] Add Google-style docstrings to all new public Python functions in `backend/feedback/*.py` (Constitution Principle VI). Add JSDoc to all new TypeScript exports in `frontend/src/components/feedback/*` and `frontend/src/hooks/useFeedback.ts`.
-- [X] T069 [P] Verify the audit-log hash-chain integrity check from feature 003 still passes after the new `EVENT_CLASSES` additions. Inside the container: `docker exec astralbody bash -c "cd /app/backend && python -m audit.cli verify-chain --user-id test_user"` — must report success on at least one user with mixed-class events.
+- [X] T069 [P] Verify the audit-log hash-chain integrity check from feature 003 still passes after the new `EVENT_CLASSES` additions. Inside the container: `docker exec astraldeep bash -c "cd /app/backend && python -m audit.cli verify-chain --user-id test_user"` — must report success on at least one user with mixed-class events.
 - [X] T070 [P] Run lint passes: `ruff check backend/feedback backend/audit backend/orchestrator backend/shared` and `cd frontend && npm run lint` — Constitution Principle IV: zero warnings on changed files.
-- [X] T071 [P] Run coverage: `docker exec astralbody bash -c "cd /app/backend && python -m pytest feedback/tests/ --cov=feedback --cov-report=term-missing"` and `cd frontend && npm run test:run -- --coverage`. Assert ≥ 90% on changed files (Constitution Principle III).
+- [X] T071 [P] Run coverage: `docker exec astraldeep bash -c "cd /app/backend && python -m pytest feedback/tests/ --cov=feedback --cov-report=term-missing"` and `cd frontend && npm run test:run -- --coverage`. Assert ≥ 90% on changed files (Constitution Principle III).
 - [X] T072 [P] Walk the full [quickstart.md](./quickstart.md) end-to-end against a freshly migrated DB. Confirm every section passes. Capture any deviations as follow-up issues.
 - [X] T073 Smoke test inside the running container: submit feedback, hit each admin endpoint, run the daily quality job once, run the synthesizer once, accept a proposal, release a quarantined item. Confirm all audit events landed and `audit_events.outcome` distribution matches expectations.
-- [X] T074 Update the project memory file `C:\Users\Sam\.claude\projects\y--WORK-MCP-AstralBody\memory\MEMORY.md` with a new section under "Recent additions" summarizing the feedback module entrypoints (`backend/feedback/`, REST `/api/feedback*`, WS `component_feedback`, daily quality job in `orchestrator.py`). Keep it ≤ 8 lines per the project's existing style.
+- [X] T074 Update the project memory file `C:\Users\Sam\.claude\projects\y--WORK-MCP-AstralDeep\memory\MEMORY.md` with a new section under "Recent additions" summarizing the feedback module entrypoints (`backend/feedback/`, REST `/api/feedback*`, WS `component_feedback`, daily quality job in `orchestrator.py`). Keep it ≤ 8 lines per the project's existing style.
 
 ---
 

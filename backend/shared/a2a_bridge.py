@@ -117,7 +117,7 @@ def custom_card_to_a2a(card: CustomAgentCard, base_url: str) -> A2AAgentCard:
             AgentInterface(protocol_binding="JSONRPC", url=base_url),
         ],
         provider=AgentProvider(
-            organization="AstralBody",
+            organization="AstralDeep",
             url=os.getenv("PUBLIC_BASE_URL", "http://localhost:5173"),
         ),
         security_schemes=security_schemes or None,

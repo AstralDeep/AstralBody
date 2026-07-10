@@ -164,7 +164,7 @@ Single server-driven backend under `backend/`. Tests under `backend/tests/`.
 - [X] T039 [P] FR-032: bring `execute_parallel_tools` under `ToolDispatchAudit` so parallel batches emit tool audit events, with a test, in `backend/orchestrator/orchestrator.py` + `backend/tests/test_inprocess_audit.py`.
 - [X] T040 [P] Observability: structured fail-open markers on each soft path (`skill_packs.fallback{reason}`, in-process→WS fallback, slash-parse fallback).
 - [X] T041 [P] Add Google/NumPy docstrings to all new modules/functions (`local_agents.py`, `local_transport.py`, `agent_trust.py`, `skill_packs.py`, `slash_commands.py`).
-- [X] T042 Run `ruff check .` (repo-root clean) and the full `pytest` suite inside the `astralbody` container; fix to green.
+- [X] T042 Run `ruff check .` (repo-root clean) and the full `pytest` suite inside the `astraldeep` container; fix to green.
 - [X] T043 Run quickstart.md validation against the running container (no-port check, audit verify, credential confidentiality, real-browser command menu, flag on/off parity).
 - [X] T044 [P] Add a feature-040 summary paragraph to CLAUDE.md's manual notes section (mirroring prior features).
 

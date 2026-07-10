@@ -52,7 +52,7 @@ def assert_fonts_legible() -> str:
             "the offscreen platform for evidence). See feature 044 T052."
         )
     fm = QFontMetrics(QFont())
-    if fm.horizontalAdvance("AstralBody 0123") <= 0:
+    if fm.horizontalAdvance("AstralDeep 0123") <= 0:
         raise SystemExit("FONT GATE: default font reports zero text advance — illegible.")
     return QFont().family() or families[0]
 

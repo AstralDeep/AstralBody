@@ -9,7 +9,7 @@
 
 ## Path Conventions
 
-Single SDUI backend: `backend/` at repo root; feature tests in `backend/tests/` and per-module `tests/` dirs; CI at `.github/workflows/`. Everything executes inside the `astralbody` container (sync via `make sync-backend`).
+Single SDUI backend: `backend/` at repo root; feature tests in `backend/tests/` and per-module `tests/` dirs; CI at `.github/workflows/`. Everything executes inside the `astraldeep` container (sync via `make sync-backend`).
 
 ---
 

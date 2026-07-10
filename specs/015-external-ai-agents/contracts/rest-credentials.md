@@ -25,7 +25,7 @@ Defined in [backend/orchestrator/api.py](backend/orchestrator/api.py) (function 
 
 ## Authentication
 
-Standard AstralBody Keycloak JWT in `Authorization: Bearer <jwt>`. The `sub` claim becomes the `user_id` against which credentials are stored.
+Standard AstralDeep Keycloak JWT in `Authorization: Bearer <jwt>`. The `sub` claim becomes the `user_id` against which credentials are stored.
 
 ---
 

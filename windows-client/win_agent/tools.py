@@ -703,9 +703,9 @@ def _clip_set(text: str) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def notify(title: str = "AstralBody", message: str = "", **kwargs) -> Dict[str, Any]:
+def notify(title: str = "AstralDeep", message: str = "", **kwargs) -> Dict[str, Any]:
     """Show a native Windows toast notification."""
-    t = (title or "AstralBody").replace("'", "")
+    t = (title or "AstralDeep").replace("'", "")
     m = (message or "").replace("'", "")
     ps = (
         "$ErrorActionPreference='SilentlyContinue';"
@@ -716,7 +716,7 @@ def notify(title: str = "AstralBody", message: str = "", **kwargs) -> Dict[str, 
         f"$tx.Item(0).AppendChild($tpl.CreateTextNode('{t}'))|Out-Null;"
         f"$tx.Item(1).AppendChild($tpl.CreateTextNode('{m}'))|Out-Null;"
         "$toast=[Windows.UI.Notifications.ToastNotification]::new($tpl);"
-        "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('AstralBody').Show($toast);"
+        "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('AstralDeep').Show($toast);"
     )
     try:
         subprocess.run(

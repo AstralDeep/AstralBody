@@ -7,8 +7,8 @@ This contract defines the localStorage and sessionStorage layout used by the per
 | Record | Backend | Key | Owner |
 |--------|---------|-----|-------|
 | OIDC user (tokens + profile) | `window.localStorage` | `oidc.user:<authority>:<client_id>` | `oidc-client-ts` |
-| Persistent-login anchor | `window.localStorage` | `astralbody.persistentLogin.v1` | this feature |
-| Revocation retry queue | `window.sessionStorage` | `astralbody.revocationQueue.v1` | this feature |
+| Persistent-login anchor | `window.localStorage` | `astraldeep.persistentLogin.v1` | this feature |
+| Revocation retry queue | `window.sessionStorage` | `astraldeep.revocationQueue.v1` | this feature |
 
 > **Why two backends?** localStorage survives full browser/app restart, which is what we want for the tokens and the anchor. sessionStorage clears on tab/app close, which is what we want for the retry queue (see [research.md](../research.md) §R-5).
 
@@ -18,14 +18,14 @@ This contract defines the localStorage and sessionStorage layout used by the per
 
 - `<authority>` MUST be the exact string passed as `authority` in the `oidcConfig` (no trailing slash).
 - `<client_id>` MUST be the exact OIDC `client_id`.
-- Example: `oidc.user:https://keycloak.ai.uky.edu/realms/astralbody:astral-frontend`
+- Example: `oidc.user:https://keycloak.ai.uky.edu/realms/astraldeep:astral-frontend`
 
-### `astralbody.persistentLogin.v1`
+### `astraldeep.persistentLogin.v1`
 
 - The literal trailing `.v1` is the schema-version marker. Future versions MUST bump this to `.v2` etc. and MUST NOT modify the v1 record in place.
 - Older readers encountering an unrecognized version key MUST ignore it. Newer readers encountering only an older version MUST clear it and force a single re-login (matches the spec's "force a single re-login on migration — never a corrupt/stuck state" edge case).
 
-### `astralbody.revocationQueue.v1`
+### `astraldeep.revocationQueue.v1`
 
 - Same versioning rule as the anchor record above.
 
@@ -57,7 +57,7 @@ This contract defines the localStorage and sessionStorage layout used by the per
 [
   {
     "refresh_token": "eyJhbGciOi…",
-    "authority": "https://keycloak.ai.uky.edu/realms/astralbody",
+    "authority": "https://keycloak.ai.uky.edu/realms/astraldeep",
     "client_id": "astral-frontend",
     "queued_at": "2026-05-15T14:42:11.123Z",
     "attempts": 0

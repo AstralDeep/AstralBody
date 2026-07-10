@@ -300,7 +300,7 @@ affordances on natives (R7's `workspace_timeline_mode` handling).
 
 **Decision**: The code evidence points to a **capture-environment font failure**, not a client
 defect: `tests/screenshot.py` forces `QT_QPA_PLATFORM=offscreen` and `QWidget.grab()`; nothing
-bundles or registers a font (`AstralBody.spec` `datas=[]`); in a font-less offscreen
+bundles or registers a font (`AstralDeep.spec` `datas=[]`); in a font-less offscreen
 environment `QFontDatabase` resolves no usable family and every glyph paints as tofu. Per the
 clarification we still verify **both** hypotheses live: (1) run the real app windowed on the
 dev machine (fonts must render — client exonerated), (2) reproduce the offscreen capture and
@@ -320,7 +320,7 @@ already running on the dev machine — live verification is unblocked.
 
 **Decision** (reconciliation list, all verified):
 - `CLAUDE.md`: Windows client is **PySide6/Qt Widgets** (tkinter excluded in
-  `AstralBody.spec:26`) — fix the Project Structure line.
+  `AstralDeep.spec:26`) — fix the Project Structure line.
 - 041 spec header `Status: Draft` → shipped; 042 `tasks.md` all-unchecked → reconcile to
   shipped reality (evidence links); 043 open tasks (T015, T025/T026, US2 T027–T033, US3
   T034–T038, polish) → completed by this feature's work or explicitly re-homed to 044 tasks
@@ -331,7 +331,7 @@ already running on the dev machine — live verification is unblocked.
   `Screen.SurfacePlaceholder` + `SurfacePlaceholderScreen` + `pendingSurfaceLabel`
   (unreachable), unused `navigation-compose` dependency (a removal, not an addition), dangling
   `proguard-rules.pro` reference resolved (add the file or drop the reference); Windows
-  `Launch-AstralBody.bat` hardcodes → `if not defined` env guards so operator overrides win.
+  `Launch-AstralDeep.bat` hardcodes → `if not defined` env guards so operator overrides win.
 - `connectionLabel()` is *revived* by R6 rather than deleted.
 
 ## R17. CI additions (FR-023, SC-009)

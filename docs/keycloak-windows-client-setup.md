@@ -42,7 +42,7 @@ Sign in to the Keycloak Admin Console as a realm admin and select your realm
 |---|---|
 | Client type | **OpenID Connect** |
 | Client ID | **`astral-desktop`** |
-| Name | `AstralBody Desktop (Windows)` *(optional, display only)* |
+| Name | `AstralDeep Desktop (Windows)` *(optional, display only)* |
 
 Click **Next**.
 

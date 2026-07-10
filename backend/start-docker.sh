@@ -3,7 +3,7 @@ set -e
 
 # Feature 026: no separate frontend static server. The orchestrator serves the
 # server-driven web UI (shell + static assets) directly on port 8001.
-echo "Starting AstralBody Backend Services on port 8001..."
+echo "Starting AstralDeep Backend Services on port 8001..."
 # Orchestrator consolidated FastAPI app will run on 8001
 export ORCHESTRATOR_PORT=8001
 
@@ -14,7 +14,7 @@ cd /app/backend
 
 # Wait for PostgreSQL to be ready (belt-and-suspenders with docker healthcheck)
 echo "Waiting for PostgreSQL..."
-PG_URL="postgresql://${DB_USER:-astral}:${DB_PASSWORD:-astral_dev}@${DB_HOST:-localhost}:${DB_PORT:-5432}/${DB_NAME:-astralbody}"
+PG_URL="postgresql://${DB_USER:-astral}:${DB_PASSWORD:-astral_dev}@${DB_HOST:-localhost}:${DB_PORT:-5432}/${DB_NAME:-astraldeep}"
 until python3 -c "import psycopg2; psycopg2.connect('$PG_URL')" 2>/dev/null; do
     sleep 1
 done
@@ -47,7 +47,7 @@ if [ -f "$SQLITE_MAIN" ] || [ -f "$SQLITE_AUDIT" ]; then
             echo "  ⚠ SQLite migration encountered errors."
             echo "  The system will continue starting with PostgreSQL."
             echo "  You can retry manually with:"
-            echo "    docker compose exec astralbody python -m scripts.migrate_sqlite_to_postgres"
+            echo "    docker compose exec astraldeep python -m scripts.migrate_sqlite_to_postgres"
             echo ""
         fi
     else

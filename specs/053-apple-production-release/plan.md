@@ -115,9 +115,9 @@ docs/
 
 # Obsidian vault (additional working dir; per its CLAUDE.md rules) — FR-029 / US7
 ../obsidian-vault/wiki/entities/Apple Release Pipeline.md   # NEW
-../obsidian-vault/wiki/entities/{Apple Clients,Keycloak Realm Astral,AstralBody}.md  # REVISE
+../obsidian-vault/wiki/entities/{Apple Clients,Keycloak Realm Astral,AstralDeep}.md  # REVISE
 ../obsidian-vault/wiki/concepts/{CI Gates,Feature Flags,Feature Timeline}.md          # REVISE
-../obsidian-vault/wiki/sources/astralbody-repo.md          # REVISE (reviewed_commit bump)
+../obsidian-vault/wiki/sources/astraldeep-repo.md          # REVISE (reviewed_commit bump)
 ../obsidian-vault/{index.md,log.md}                        # UPDATE
 ```
 

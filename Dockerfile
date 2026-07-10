@@ -1,4 +1,4 @@
-# Dockerfile for AstralBody Multi-Agent System
+# Dockerfile for AstralDeep Multi-Agent System
 #
 # Feature 026: single backend image. The orchestrator serves the server-driven
 # web UI (astralprims primitives rendered by webrender, adapted by ROTE) directly

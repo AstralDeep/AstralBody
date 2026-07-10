@@ -1,4 +1,4 @@
-# AstralBody Development Guidelines
+# AstralDeep Development Guidelines
 
 Auto-generated from all feature plans. Last updated: 2026-07-09
 
@@ -47,12 +47,12 @@ contains no source.
 
 ## Commands
 
-Everything runs in the `astralbody` container (no host venv; backend needs py3.11):
+Everything runs in the `astraldeep` container (no host venv; backend needs py3.11):
 
 ```bash
-docker compose up -d                                   # postgres + astralbody
-docker cp <file> astralbody:/app/<repo-rel-path>       # sync one edit (source is baked)
-docker exec astralbody bash -c "cd /app/backend && python -m pytest -q"   # full suite
+docker compose up -d                                   # postgres + astraldeep
+docker cp <file> astraldeep:/app/<repo-rel-path>       # sync one edit (source is baked)
+docker exec astraldeep bash -c "cd /app/backend && python -m pytest -q"   # full suite
 ruff check .   # lint from the REPO ROOT on the HOST/CI — ruff is NOT in the image and ruff.toml is not baked (matches ci.yml)
 ```
 

@@ -33,7 +33,7 @@ linked evidence; `deferred` requires rationale. Sources: [baseline-findings.md](
 | D-024 | P3 | repo | Windows client pytest suite never runs in CI (ci.yml has no windows job; release-windows.yml builds only) | open → T010 | pending |
 | D-025 | P3 | Android | Dead code: DevAuth (debug+release, unreferenced), Screen.SurfacePlaceholder/SurfacePlaceholderScreen/pendingSurfaceLabel unreachable, navigation-compose unused, proguard-rules.pro reference dangling | open → T039/T056 | pending |
 | D-026 | P3 | docs | CLAUDE.md said tkinter (is PySide6) — fixed during planning; 041 status stale; 042 tasks all unchecked despite shipping; 043 verification/US2/US3 tasks open; README/KNOWN-ISSUES stale | open → T055 (CLAUDE.md portion done in c76054a) | pending |
-| D-027 | P3 | Windows | Launch-AstralBody.bat overwrites env config unconditionally (hardcoded WS URL/authority) | open → T055 | pending |
+| D-027 | P3 | Windows | Launch-AstralDeep.bat overwrites env config unconditionally (hardcoded WS URL/authority) | open → T055 | pending |
 | D-028 | P1 | backend | `notification` frame (scheduler → notify_user) absent from every protocol inventory — silently dropped by both natives | open → T003/T020/T021 | pending |
 | D-029 | P2 | Android | Outbound queue overflow silently drops oldest frame (OrchestratorClient.kt:147) — vanishing sends | open → T014 | pending |
 | D-030 | P3 | backend tests | `test_rest_body_equals_ws_frame_model` (042) went stale when 043 made the REST menu `include_tour=False` — failing on main before 044 touched anything; exactly the drift class the 044 manifest guards target | **fixed** (test now mirrors the WS emission's flags) | commit pending — found during T008 |

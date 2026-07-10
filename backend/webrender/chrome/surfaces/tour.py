@@ -127,7 +127,7 @@ async def render(orch, user_id, roles, params) -> str:
     """
     intro = (
         '<p class="text-sm text-astral-text/80">The guided tour walks you through '
-        "the main controls of AstralBody, step by step. It starts automatically "
+        "the main controls of AstralDeep, step by step. It starts automatically "
         "&mdash; you can skip or dismiss it at any time.</p>"
     )
     repo = _repo(orch)

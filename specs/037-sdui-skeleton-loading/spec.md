@@ -7,7 +7,7 @@
 
 ## Overview
 
-Add a **server-driven `skeleton` loading primitive** — a content-free shimmer placeholder shown while a surface (the chat-history list, a transcript, the workspace) loads. Because AstralBody is server-driven (Constitution II: *astralprims defines → orchestrator renders → ROTE adapts*) and the project rule is **never web-only UI**, the skeleton is a real primitive rendered by the orchestrator and **adapted per device by ROTE** — not a web-client loading hack. It therefore works across every ROTE target: browser/tablet/TV (full shimmer), mobile/watch (capped row count), and voice (spoken "Loading…").
+Add a **server-driven `skeleton` loading primitive** — a content-free shimmer placeholder shown while a surface (the chat-history list, a transcript, the workspace) loads. Because AstralDeep is server-driven (Constitution II: *astralprims defines → orchestrator renders → ROTE adapts*) and the project rule is **never web-only UI**, the skeleton is a real primitive rendered by the orchestrator and **adapted per device by ROTE** — not a web-client loading hack. It therefore works across every ROTE target: browser/tablet/TV (full shimmer), mobile/watch (capped row count), and voice (spoken "Loading…").
 
 The web client already *ignores* `history_list` ("not needed for the core flow"), so there is no web-only history rendering to unwind — the correct foundation is this primitive, which any surface can emit.
 

@@ -51,7 +51,7 @@ This confidential client represents the "agent actor" in the delegation flow.
    | Setting | Value |
    |---------|-------|
    | Client ID | `astral-agent-service` |
-   | Name | `AstralBody Agent Service` |
+   | Name | `AstralDeep Agent Service` |
    | Client authentication | **ON** (confidential) |
    | Authorization | OFF |
    | Standard flow | OFF |

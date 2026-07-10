@@ -22,7 +22,7 @@ class Fixture:
     """A synthetic input file spec.
 
     Attributes:
-        category: AstralBody attachment category (spreadsheet/text/image/...).
+        category: AstralDeep attachment category (spreadsheet/text/image/...).
         extension: File extension (no dot).
         filename: Display filename.
         writer: ``(path) -> None`` that materializes the file deterministically.

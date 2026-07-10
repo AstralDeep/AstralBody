@@ -41,17 +41,17 @@ def test_download_card_registered():
 def _card(**kw):
     base = {"type": "download_card", "variant": "available",
             "title": "Astral desktop app", "description": "Install me",
-            "download_url": "https://github.com/AstralDeep/AstralBody/releases/download/v1/AstralBody.exe",
-            "sha256": "a" * 64, "sigstore_bundle_url": "https://github.com/AstralDeep/AstralBody/releases/download/v1/cosign.bundle",
+            "download_url": "https://github.com/AstralDeep/AstralDeep/releases/download/v1/AstralDeep.exe",
+            "sha256": "a" * 64, "sigstore_bundle_url": "https://github.com/AstralDeep/AstralDeep/releases/download/v1/cosign.bundle",
             "version": "1.2.3", "platform": "windows-x64",
-            "html_url": "https://github.com/AstralDeep/AstralBody/releases/latest"}
+            "html_url": "https://github.com/AstralDeep/AstralDeep/releases/latest"}
     base.update(kw)
     return base
 
 
 def test_render_available_has_github_link_and_hash():
     html = render_one(_card())
-    assert "https://github.com/AstralDeep/AstralBody/releases/download/v1/AstralBody.exe" in html
+    assert "https://github.com/AstralDeep/AstralDeep/releases/download/v1/AstralDeep.exe" in html
     assert "a" * 64 in html  # sha256 shown
     assert "Download for Windows" in html
     assert "v1.2.3" in html
@@ -131,7 +131,7 @@ def test_should_inject_respects_flag_and_draft(monkeypatch):
 
 
 def test_build_card_available():
-    info = {"exe_url": "https://github.com/AstralDeep/AstralBody/releases/download/v1/AstralBody.exe",
+    info = {"exe_url": "https://github.com/AstralDeep/AstralDeep/releases/download/v1/AstralDeep.exe",
             "sha256": "b" * 64, "bundle_url": "u", "version": "1.0.0", "html_url": "h",
             "sha_url": "s"}
     card = dc.build_download_card(info)
@@ -149,10 +149,10 @@ def test_build_card_unavailable_when_no_info():
 def _mock_release(monkeypatch, *, sha="c" * 64):
     def fake_fetch():
         return {"version": "v9.9.9", "tag": "v9.9.9",
-                "exe_url": "https://github.com/AstralDeep/AstralBody/releases/download/v9.9.9/AstralBody.exe",
-                "sha_url": "https://github.com/AstralDeep/AstralBody/releases/download/v9.9.9/SHA256SUMS",
-                "bundle_url": "https://github.com/AstralDeep/AstralBody/releases/download/v9.9.9/cosign.bundle",
-                "html_url": "https://github.com/AstralDeep/AstralBody/releases/latest"}
+                "exe_url": "https://github.com/AstralDeep/AstralDeep/releases/download/v9.9.9/AstralDeep.exe",
+                "sha_url": "https://github.com/AstralDeep/AstralDeep/releases/download/v9.9.9/SHA256SUMS",
+                "bundle_url": "https://github.com/AstralDeep/AstralDeep/releases/download/v9.9.9/cosign.bundle",
+                "html_url": "https://github.com/AstralDeep/AstralDeep/releases/latest"}
     monkeypatch.setattr(dc, "_fetch_release_info", fake_fetch)
     monkeypatch.setattr(dc, "_fetch_sha256", lambda url: sha)
 
@@ -175,7 +175,7 @@ def test_get_release_info_none_when_no_cache_and_fetch_fails(monkeypatch):
 
 
 def test_fetch_sha256_extracts_hash(monkeypatch):
-    body = f"{'d' * 64}  AstralBody.exe\n{'e' * 64}  cosign.bundle\n"
+    body = f"{'d' * 64}  AstralDeep.exe\n{'e' * 64}  cosign.bundle\n"
 
     class _Resp:
         status_code = 200
@@ -185,7 +185,7 @@ def test_fetch_sha256_extracts_hash(monkeypatch):
     import requests
     monkeypatch.setattr(requests, "get",
                         lambda *a, **k: _Resp())
-    h = dc._fetch_sha256("https://github.com/AstralDeep/AstralBody/releases/download/v1/SHA256SUMS")
+    h = dc._fetch_sha256("https://github.com/AstralDeep/AstralDeep/releases/download/v1/SHA256SUMS")
     assert h == "d" * 64
 
 
@@ -248,11 +248,11 @@ def test_handle_meta_tool_exception_returns_error_card(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 _GH_RELEASE = {
-    "name": "v2.0.0", "tag_name": "v2.0.0", "html_url": "https://github.com/AstralDeep/AstralBody/releases/latest",
+    "name": "v2.0.0", "tag_name": "v2.0.0", "html_url": "https://github.com/AstralDeep/AstralDeep/releases/latest",
     "assets": [
-        {"name": "AstralBody.exe", "browser_download_url": "https://github.com/AstralDeep/AstralBody/releases/download/v2.0.0/AstralBody.exe", "size": 12345},
-        {"name": "SHA256SUMS", "browser_download_url": "https://github.com/AstralDeep/AstralBody/releases/download/v2.0.0/SHA256SUMS"},
-        {"name": "cosign.bundle", "browser_download_url": "https://github.com/AstralDeep/AstralBody/releases/download/v2.0.0/cosign.bundle"},
+        {"name": "AstralDeep.exe", "browser_download_url": "https://github.com/AstralDeep/AstralDeep/releases/download/v2.0.0/AstralDeep.exe", "size": 12345},
+        {"name": "SHA256SUMS", "browser_download_url": "https://github.com/AstralDeep/AstralDeep/releases/download/v2.0.0/SHA256SUMS"},
+        {"name": "cosign.bundle", "browser_download_url": "https://github.com/AstralDeep/AstralDeep/releases/download/v2.0.0/cosign.bundle"},
     ],
 }
 
@@ -279,7 +279,7 @@ def test_fetch_release_info_success(monkeypatch):
     info = dc._fetch_release_info()
     assert info is not None
     assert info["version"] == "v2.0.0"
-    assert info["exe_url"].endswith("AstralBody.exe")
+    assert info["exe_url"].endswith("AstralDeep.exe")
     assert info["sha_url"].endswith("SHA256SUMS")
     assert info["bundle_url"].endswith("cosign.bundle")
 
@@ -357,7 +357,7 @@ def test_get_release_info_refresh_fetches_sha(monkeypatch):
     import json
     import requests
     body = json.dumps(_GH_RELEASE).encode()
-    sha_body = ("a" * 64 + "  AstralBody.exe\n").encode()
+    sha_body = ("a" * 64 + "  AstralDeep.exe\n").encode()
     calls = {"n": 0}
 
     def fake_get(url, **k):
@@ -381,7 +381,7 @@ def test_get_release_info_cache_hit_skips_fetch(monkeypatch):
         calls["n"] += 1
         import json
         if "SHA256SUMS" in url:
-            return _FakeResp(200, ("a" * 64 + "  AstralBody.exe\n").encode())
+            return _FakeResp(200, ("a" * 64 + "  AstralDeep.exe\n").encode())
         return _FakeResp(200, json.dumps(_GH_RELEASE).encode())
     monkeypatch.setattr(requests, "get", fake_get)
     dc.get_release_info()
@@ -400,7 +400,7 @@ def test_get_release_info_refresh_failure_keeps_last_good(monkeypatch):
     def fake_get(url, **k):
         seq["i"] += 1
         if "SHA256SUMS" in url:
-            return _FakeResp(200, ("a" * 64 + "  AstralBody.exe\n").encode())
+            return _FakeResp(200, ("a" * 64 + "  AstralDeep.exe\n").encode())
         return _FakeResp(200, body)
     monkeypatch.setattr(requests, "get", fake_get)
     first = dc.get_release_info()

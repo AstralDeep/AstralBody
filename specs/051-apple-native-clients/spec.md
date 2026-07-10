@@ -10,7 +10,7 @@
 
 ## Overview
 
-AstralBody currently ships three user-facing clients — the server-rendered web shell, the native
+AstralDeep currently ships three user-facing clients — the server-rendered web shell, the native
 Windows desktop client (PySide6), and the native Android SDUI client (Kotlin/Compose) — all
 consuming one server-driven UI contract: **astralprims defines → orchestrator renders → ROTE
 adapts** (Constitution II), with cross-client behavior pinned by the committed protocol manifest
@@ -70,7 +70,7 @@ runtime dependencies** and **zero third-party dependencies in the Swift clients*
 
 ### User Story 1 - The daily chat loop on iPhone and iPad, indistinguishable from Android (Priority: P1)
 
-A researcher who already uses AstralBody on Android picks up an iPhone or iPad and gets the same
+A researcher who already uses AstralDeep on Android picks up an iPhone or iPad and gets the same
 product: sign in through the system browser, land on their chat history, open or start a chat,
 send a message (with slash-command typeahead and attachments), watch progress while agents work,
 see rich components render natively and update in place, manage agents and permissions from the
@@ -145,7 +145,7 @@ passes must pass on macOS (or carry a documented, device-appropriate variant).
 
 ### User Story 3 - Signing in on the watch by pointing another device at it (Priority: P2)
 
-A user straps on their watch, opens AstralBody, and — having never typed a password on a watch —
+A user straps on their watch, opens AstralDeep, and — having never typed a password on a watch —
 sees a QR code and a short code with an expiry countdown. They point their phone camera at it
 (any camera app), land on the sign-in page, authenticate (or are already signed in), and
 approve. Within seconds the watch flips to the signed-in home screen. At a desktop browser

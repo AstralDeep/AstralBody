@@ -3,7 +3,7 @@
 **Feature Branch**: `015-external-ai-agents`
 **Created**: 2026-05-07
 **Status**: Draft
-**Input**: User description: "As a developer, I want to connect CLASSify-2, timeseries-forecaster, and LLM-Factory-2 as agents to the AstralBody system. Each of these 3 services need API credentials and a URL field. classify's url is: classify.ai.uky.edu/, timeseries-forecaster's url is forecaster.ai.uky.edu, and llm factory's url is https://llm-factory.ai.uky.edu/. I provided these URLs for your reference, but when these 3 agents are enabled the user will need to input the url and their api key. Please explore the current AstralBody/backend/agents/ directory to see how agents currently interact with the system, then begin to implement each of these 3 agents based on their code. each should have an API interface that AstralBody can interact with."
+**Input**: User description: "As a developer, I want to connect CLASSify-2, timeseries-forecaster, and LLM-Factory-2 as agents to the AstralDeep system. Each of these 3 services need API credentials and a URL field. classify's url is: classify.ai.uky.edu/, timeseries-forecaster's url is forecaster.ai.uky.edu, and llm factory's url is https://llm-factory.ai.uky.edu/. I provided these URLs for your reference, but when these 3 agents are enabled the user will need to input the url and their api key. Please explore the current AstralDeep/backend/agents/ directory to see how agents currently interact with the system, then begin to implement each of these 3 agents based on their code. each should have an API interface that AstralDeep can interact with."
 
 ## Clarifications
 
@@ -23,7 +23,7 @@
 
 ### User Story 1 - Connect a New External AI Service With My Own Credentials (Priority: P1)
 
-A user opens AstralBody, sees one of three new external-service agents (CLASSify, Timeseries Forecaster, or LLM-Factory) listed alongside the existing agents, opens its permissions/configuration panel, enters the service's base URL and their personal API key, saves, and the agent's tools become callable from chat. Without those credentials the agent's tools remain locked and chat surfaces a clear "configuration required" message that links the user to the configuration panel.
+A user opens AstralDeep, sees one of three new external-service agents (CLASSify, Timeseries Forecaster, or LLM-Factory) listed alongside the existing agents, opens its permissions/configuration panel, enters the service's base URL and their personal API key, saves, and the agent's tools become callable from chat. Without those credentials the agent's tools remain locked and chat surfaces a clear "configuration required" message that links the user to the configuration panel.
 
 **Why this priority**: This is the foundational capability. The user must be able to plug in any one of the three services with their own credentials before any of its tools can do anything useful. Without this slice nothing else in the feature has value.
 
@@ -42,7 +42,7 @@ A user opens AstralBody, sees one of three new external-service agents (CLASSify
 
 ### User Story 2 - Use the Three External Agents from a Conversation (Priority: P2)
 
-Once configured, a user invokes capabilities from each agent inside a normal AstralBody conversation. Specifically: classify a tabular dataset (CLASSify), produce a forecast for a time series (Timeseries Forecaster), and chat with a model registered in LLM-Factory. Long-running operations (model training, forecast generation) report progress and final results without the user having to manually poll.
+Once configured, a user invokes capabilities from each agent inside a normal AstralDeep conversation. Specifically: classify a tabular dataset (CLASSify), produce a forecast for a time series (Timeseries Forecaster), and chat with a model registered in LLM-Factory. Long-running operations (model training, forecast generation) report progress and final results without the user having to manually poll.
 
 **Why this priority**: This is what makes the integration useful — the existence of a connected agent is meaningless if the user can't drive a real workflow through it. P2 because P1 must work first.
 
@@ -90,7 +90,7 @@ A user who originally entered one URL/key for an agent later needs to point it a
 
 #### Agent presence and discoverability
 
-- **FR-001**: System MUST list three new agents — "CLASSify", "Timeseries Forecaster", and "LLM-Factory" — in the same agent inventory the user already uses to view, enable, and configure existing AstralBody agents.
+- **FR-001**: System MUST list three new agents — "CLASSify", "Timeseries Forecaster", and "LLM-Factory" — in the same agent inventory the user already uses to view, enable, and configure existing AstralDeep agents.
 - **FR-002**: Each of the three agents MUST be presented in the configuration UI with a human-readable name, a one-sentence description of what it does, and a placeholder/example for the production URL of that service to help the user paste the right value.
 - **FR-003**: An administrator MUST be able to disable any of the three agents platform-wide; when disabled, the agent MUST appear as such in every user's UI and its tools MUST NOT be callable.
 
@@ -109,7 +109,7 @@ A user who originally entered one URL/key for an agent later needs to point it a
 - **FR-011**: The Timeseries Forecaster agent MUST expose a curated set of approximately 4–6 tools covering the chat-relevant workflows of the underlying service (e.g., starting a forecast / training run, checking job status, generating new forecasts, fetching a results summary, and producing model recommendations). Admin-only and internal-housekeeping endpoints are explicitly out of scope for v1.
 - **FR-012**: The LLM-Factory agent MUST expose a curated set of approximately 4–6 tools covering the chat-relevant workflows of the underlying service (e.g., listing registered models, sending a chat completion to a chosen model via the OpenAI-compatible endpoint, embedding a file, and listing available datasets). Model-registration / model-deletion administrative endpoints are explicitly out of scope for v1.
 - **FR-013**: Each tool exposed by any of the three agents MUST declare a machine-readable input schema (parameter names, types, required vs. optional) so that the orchestrator can validate calls and the chat UI can solicit missing arguments.
-- **FR-014**: Tool results MUST be rendered into the chat using AstralBody's standard rendering primitives (text/cards/tables/etc.); no agent-specific UI surface is introduced for displaying results.
+- **FR-014**: Tool results MUST be rendered into the chat using AstralDeep's standard rendering primitives (text/cards/tables/etc.); no agent-specific UI surface is introduced for displaying results.
 
 #### Long-running operations
 
@@ -119,7 +119,7 @@ A user who originally entered one URL/key for an agent later needs to point it a
 
 #### File / data inputs
 
-- **FR-018**: Where an external service requires a tabular file (CSV) as input (CLASSify training, Timeseries forecasting), the agent MUST accept that file via AstralBody's existing file-upload mechanism so the user does not need to learn a separate upload flow.
+- **FR-018**: Where an external service requires a tabular file (CSV) as input (CLASSify training, Timeseries forecasting), the agent MUST accept that file via AstralDeep's existing file-upload mechanism so the user does not need to learn a separate upload flow.
 
 #### Auditing
 
@@ -165,11 +165,11 @@ A user who originally entered one URL/key for an agent later needs to point it a
 ## Assumptions
 
 - The three external services authenticate callers with a Bearer token (`Authorization: Bearer <API_KEY>`) — true for CLASSify, Timeseries Forecaster, and LLM-Factory's OpenAI-compatible endpoint as observed in their codebases. If a future service variant uses a different scheme, that variant is out of scope for this feature.
-- AstralBody's existing per-user, end-to-end-encrypted agent-credential storage pattern (currently used by other credentialed agents) is the storage mechanism — no new credential-storage subsystem is introduced.
-- AstralBody's existing agent auto-discovery convention (one directory per agent under the agents folder, with the canonical `*_agent.py` / `mcp_server.py` / `mcp_tools.py` / `__init__.py` layout) is followed; no changes to the orchestrator's discovery or registration flow are required.
-- AstralBody's existing audit-log, file-upload, and progress-notification subsystems are reused as-is. None of them need extension for this feature.
+- AstralDeep's existing per-user, end-to-end-encrypted agent-credential storage pattern (currently used by other credentialed agents) is the storage mechanism — no new credential-storage subsystem is introduced.
+- AstralDeep's existing agent auto-discovery convention (one directory per agent under the agents folder, with the canonical `*_agent.py` / `mcp_server.py` / `mcp_tools.py` / `__init__.py` layout) is followed; no changes to the orchestrator's discovery or registration flow are required.
+- AstralDeep's existing audit-log, file-upload, and progress-notification subsystems are reused as-is. None of them need extension for this feature.
 - The user interface for configuring agent credentials is the existing agent-permissions / configuration panel; no new top-level settings page is added.
 - The default placeholder URLs shown to users in the configuration panel are the production URLs supplied in the feature description (`classify.ai.uky.edu`, `forecaster.ai.uky.edu`, `https://llm-factory.ai.uky.edu/`), but the user-entered URL always wins — including for self-hosted or alternate deployments.
-- File uploads required by CLASSify and Timeseries Forecaster (CSV inputs) flow through AstralBody's existing file-upload mechanism; no separate upload UI is built per agent.
-- "Admin" in the platform-disable scenarios refers to whatever admin role AstralBody already recognizes; no new role is introduced.
+- File uploads required by CLASSify and Timeseries Forecaster (CSV inputs) flow through AstralDeep's existing file-upload mechanism; no separate upload UI is built per agent.
+- "Admin" in the platform-disable scenarios refers to whatever admin role AstralDeep already recognizes; no new role is introduced.
 - The three agents are intended to ship together as a single feature, but each is independently testable and independently deployable per FR-024 and FR-025.

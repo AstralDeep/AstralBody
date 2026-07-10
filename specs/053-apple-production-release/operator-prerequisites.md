@@ -129,7 +129,7 @@ Still to confirm for the shipped Apple identities:
 git tag -a apple-v1.0 -m "AstralDeep 1.0" && git push origin apple-v1.0
 
 # Already tagged? A rerun re-reads the CURRENT secret values -- no re-tagging needed:
-gh run rerun 29031162527 --failed -R AstralDeep/AstralBody
+gh run rerun 29031162527 --failed -R AstralDeep/AstralDeep
 ```
 
 The build number is stamped from `GITHUB_RUN_NUMBER`, so successive runs never

@@ -13,7 +13,7 @@ Covers the two halves of the verified UX bug:
   lands. The per-chat return shape is unchanged (the no-build web client
   consumes it as-is).
 
-Runs against the live Postgres inside the astralbody container, like the
+Runs against the live Postgres inside the astraldeep container, like the
 other HistoryManager suites (see tests/test_database.py).
 """
 import os

@@ -44,7 +44,7 @@ def test_shell_served_with_token(client):
     assert resp.status_code == 200
     body = resp.text
     # The served UI is branded "AstralDeep" (shell <title>, favicon, topbar logo);
-    # "AstralBody" is the product/repo name and never appears in the shell. This
+    # "AstralDeep" is the product/repo name and never appears in the shell. This
     # assertion previously checked the stale product name and failed post-rebrand.
     assert "AstralDeep" in body
     assert "/static/client.js" in body and "/static/astral.css" in body

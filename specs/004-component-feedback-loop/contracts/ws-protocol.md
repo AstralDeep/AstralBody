@@ -1,7 +1,7 @@
 # WebSocket Protocol Additions
 
 **Feature**: `004-component-feedback-loop`
-**Substrate**: existing AstralBody WebSocket protocol — see [backend/shared/protocol.py](../../../backend/shared/protocol.py).
+**Substrate**: existing AstralDeep WebSocket protocol — see [backend/shared/protocol.py](../../../backend/shared/protocol.py).
 
 This document specifies the additions only. All other messages, fields, and conventions are unchanged.
 

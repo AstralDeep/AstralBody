@@ -37,7 +37,7 @@ def migrate():
     conn = psycopg2.connect(database_url)
     cursor = conn.cursor()
 
-    print("=== AstralBody Session Isolation Migration ===")
+    print("=== AstralDeep Session Isolation Migration ===")
     print(f"Database: {database_url.split('@')[-1]}")
 
     # Tables to migrate

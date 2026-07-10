@@ -38,9 +38,9 @@ Two records are kept per browser origin (or per Flutter-configured backend URL �
 
 We **never write to this record directly** — `oidc-client-ts` owns it.
 
-### Record 2 — AstralBody persistent-login anchor (managed by this feature)
+### Record 2 — AstralDeep persistent-login anchor (managed by this feature)
 
-**Key**: `astralbody.persistentLogin.v1`
+**Key**: `astraldeep.persistentLogin.v1`
 
 **Value** (JSON):
 
@@ -62,7 +62,7 @@ We **never write to this record directly** — `oidc-client-ts` owns it.
 | `deployment_origin` | string | The browser origin in effect when the credential was minted. Used as a defense-in-depth check in case browser origin isolation behaves unexpectedly (e.g., custom Flutter WebView origin). On every silent resume, the system rejects the stored credential if `window.location.origin !== deployment_origin`. | URL origin form (`https://host[:port]`) |
 
 **Lifecycle**:
-| Event | Action on `astralbody.persistentLogin.v1` |
+| Event | Action on `astraldeep.persistentLogin.v1` |
 |-------|-------------------------------------------|
 | Fresh interactive login (`onSigninCallback` fires) | Write a new record with `initial_login_at = now`, `last_user_sub = new sub`, `deployment_origin = window.location.origin`. **Always overwrites** any prior record. |
 | Silent renew | Untouched. |
@@ -82,7 +82,7 @@ We **never write to this record directly** — `oidc-client-ts` owns it.
 
 ### Record 3 — Revocation retry queue (managed by this feature)
 
-**Key**: `astralbody.revocationQueue.v1` (in **sessionStorage**, deliberately not localStorage — see R-5 in [research.md](research.md))
+**Key**: `astraldeep.revocationQueue.v1` (in **sessionStorage**, deliberately not localStorage — see R-5 in [research.md](research.md))
 
 **Value** (JSON array, FIFO):
 
@@ -186,6 +186,6 @@ We **never write to this record directly** — `oidc-client-ts` owns it.
 - **I-3**: `deployment_origin` is always exactly `window.location.origin` at the moment of interactive login.
 - **I-4**: The revocation queue never contains more than 16 entries.
 - **I-5**: A successful `clear()` removes both the OIDC user record AND the anchor record. Removing one without the other is forbidden.
-- **I-6**: If `astralbody.persistentLogin.v1` is missing but `oidc.user:*` is present, the latter is treated as orphan and cleared on next launch (defensive — should not happen in normal operation).
+- **I-6**: If `astraldeep.persistentLogin.v1` is missing but `oidc.user:*` is present, the latter is treated as orphan and cleared on next launch (defensive — should not happen in normal operation).
 
 These invariants are checked by unit tests in `frontend/src/auth/__tests__/persistentLogin.test.tsx`.

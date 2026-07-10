@@ -19,7 +19,7 @@ This walkthrough exercises every user-visible behavior in the spec end-to-end. I
 2. Seed initial step content from `backend/seeds/tutorial_steps_seed.sql` (idempotent `INSERT … ON CONFLICT (slug) DO NOTHING`).
 
    ```bash
-   docker exec astralbody bash -c "psql -U astralbody -f /app/backend/seeds/tutorial_steps_seed.sql"
+   docker exec astraldeep bash -c "psql -U astraldeep -f /app/backend/seeds/tutorial_steps_seed.sql"
    ```
 
 3. Start the system:
@@ -35,7 +35,7 @@ This walkthrough exercises every user-visible behavior in the spec end-to-end. I
 1. Sign in as a fresh user (one with no `onboarding_state` row). In dev with the mock-auth `test_user`:
 
    ```bash
-   docker exec astralbody bash -c "psql -U astralbody -c \"DELETE FROM onboarding_state WHERE user_id='test_user';\""
+   docker exec astraldeep bash -c "psql -U astraldeep -c \"DELETE FROM onboarding_state WHERE user_id='test_user';\""
    ```
 
 2. Open the dashboard. Within 2 seconds the `TutorialOverlay` should appear, anchored to the first step's target.
@@ -44,7 +44,7 @@ This walkthrough exercises every user-visible behavior in the spec end-to-end. I
 5. Verify the row was created:
 
    ```bash
-   docker exec astralbody bash -c "psql -U astralbody -c \"SELECT user_id, status, last_step_id FROM onboarding_state WHERE user_id='test_user';\""
+   docker exec astraldeep bash -c "psql -U astraldeep -c \"SELECT user_id, status, last_step_id FROM onboarding_state WHERE user_id='test_user';\""
    ```
 
    `status` should be `in_progress`.
@@ -67,7 +67,7 @@ This walkthrough exercises every user-visible behavior in the spec end-to-end. I
 5. Verify an `onboarding_replayed` audit event was recorded:
 
    ```bash
-   docker exec astralbody bash -c "psql -U astralbody -c \"SELECT event_class, recorded_at FROM audit_events WHERE user_id='test_user' AND event_class='onboarding_replayed' ORDER BY recorded_at DESC LIMIT 1;\""
+   docker exec astraldeep bash -c "psql -U astraldeep -c \"SELECT event_class, recorded_at FROM audit_events WHERE user_id='test_user' AND event_class='onboarding_replayed' ORDER BY recorded_at DESC LIMIT 1;\""
    ```
 
 ## 4. Tooltips on static UI (User Story 2)
@@ -93,7 +93,7 @@ This walkthrough exercises every user-visible behavior in the spec end-to-end. I
 5. Verify a `tutorial_step_revision` row was written:
 
    ```bash
-   docker exec astralbody bash -c "psql -U astralbody -c \"SELECT id, step_id, change_kind, edited_at FROM tutorial_step_revision ORDER BY edited_at DESC LIMIT 1;\""
+   docker exec astraldeep bash -c "psql -U astraldeep -c \"SELECT id, step_id, change_kind, edited_at FROM tutorial_step_revision ORDER BY edited_at DESC LIMIT 1;\""
    ```
 
 6. Verify a `tutorial_step_edited` audit event was recorded with `changed_fields = ['title','body']`.
@@ -116,7 +116,7 @@ This walkthrough exercises every user-visible behavior in the spec end-to-end. I
 ## 9. Backend tests
 
 ```bash
-docker exec astralbody bash -c "cd /app/backend && python -m pytest onboarding/tests/ -q"
+docker exec astraldeep bash -c "cd /app/backend && python -m pytest onboarding/tests/ -q"
 ```
 
 Expected: all tests pass; coverage on `backend/onboarding/` ≥ 90% (Constitution Principle III).

@@ -6,7 +6,7 @@
 
 ## 1. Browser-resident state (the only source of truth for user credentials)
 
-### 1.1 `LlmConfig` (localStorage key: `astralbody.llm.config.v1`)
+### 1.1 `LlmConfig` (localStorage key: `astraldeep.llm.config.v1`)
 
 | Field          | Type     | Required | Validation                                                                          |
 |----------------|----------|----------|-------------------------------------------------------------------------------------|

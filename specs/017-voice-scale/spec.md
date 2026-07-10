@@ -11,7 +11,7 @@
 The realtime voice system already exists and works — STT via WebSocket streaming to
 Speaches.ai's Realtime API, TTS via Speaches.ai REST, and WebRTC-compatible 24kHz
 PCM16 audio streaming from the browser. This spec covers analyzing OpenAI's approach
-to scaling voice AI and applying lessons from that analysis to make AstralBody's
+to scaling voice AI and applying lessons from that analysis to make AstralDeep's
 voice system more robust, observable, and production-ready.
 
 ## Tasks
@@ -24,21 +24,21 @@ voice system more robust, observable, and production-ready.
 
 1. OpenAI uses a **transceiver model** — a WebRTC edge service terminates client
    connections and converts media/events into simpler internal protocols. This is
-   already the pattern AstralBody uses (the `/api/voice/stream` WebSocket is a
+   already the pattern AstralDeep uses (the `/api/voice/stream` WebSocket is a
    transceiver that proxies to Speaches.ai's Realtime API).
 
 2. OpenAI's key challenge was **one-port-per-session vs Kubernetes** — they moved to
-   single-port-per-server with application-level demux. AstralBody doesn't have this
+   single-port-per-server with application-level demux. AstralDeep doesn't have this
    problem because: (a) we use HTTP WebSockets (not UDP/ICE), (b) all audio flows
    through Speaches.ai's hosted Realtime API, and (c) our Docker Compose deployment
    has a single backend instance.
 
 3. OpenAI uses **split relay + transceiver** to keep WebRTC session state stable
-   while routing packets dynamically. AstralBody's equivalent is the WebSocket
+   while routing packets dynamically. AstralDeep's equivalent is the WebSocket
    proxy pattern where the backend holds the Speaches.ai Realtime connection and
    the frontend connects to the backend via WebSocket.
 
-**Key takeaway**: AstralBody's architecture is fundamentally sound for our scale
+**Key takeaway**: AstralDeep's architecture is fundamentally sound for our scale
 (single deployment, not global 900M+ users). The primary improvements needed are
 around **resilience** (connection drops, reconnection, graceful degradation) rather
 than horizontal scaling.

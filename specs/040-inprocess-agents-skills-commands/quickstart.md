@@ -1,19 +1,19 @@
 # Quickstart: validating 040-inprocess-agents-skills-commands
 
-How to exercise each pillar against the running container. Dev posture requires `ASTRAL_ENV=development`. The backend needs Python 3.11 (run inside the `astralbody` container).
+How to exercise each pillar against the running container. Dev posture requires `ASTRAL_ENV=development`. The backend needs Python 3.11 (run inside the `astraldeep` container).
 
 ## Build / run
 
 ```bash
-docker compose up -d                                   # postgres + astralbody
-docker cp <edited-file> astralbody:/app/<repo-rel>     # sync an edit (source is baked)
-docker exec astralbody bash -c "cd /app/backend && python -m pytest -q"        # full suite
-docker exec astralbody bash -c "cd /app/backend && python -m ruff check ."     # lint
+docker compose up -d                                   # postgres + astraldeep
+docker cp <edited-file> astraldeep:/app/<repo-rel>     # sync an edit (source is baked)
+docker exec astraldeep bash -c "cd /app/backend && python -m pytest -q"        # full suite
+docker exec astraldeep bash -c "cd /app/backend && python -m ruff check ."     # lint
 ```
 
 ## US1 — In-process built-in agents
 
-1. **No per-agent ports**: with `FF_INPROCESS_AGENTS` on, start the system and confirm only the orchestrator (`:8001`) is listening — no `:8003+` agent ports. `docker exec astralbody bash -c "ss -ltnp | grep -E ':80(0[3-9]|1[0-9])' || echo 'no agent ports'"` → `no agent ports`.
+1. **No per-agent ports**: with `FF_INPROCESS_AGENTS` on, start the system and confirm only the orchestrator (`:8001`) is listening — no `:8003+` agent ports. `docker exec astraldeep bash -c "ss -ltnp | grep -E ':80(0[3-9]|1[0-9])' || echo 'no agent ports'"` → `no agent ports`.
 2. **Parity**: in a chat, run a unary tool (weather `get_current_weather`), a streaming tool (`live_temperature`), a long-running job (ml_services training), and a credentialed tool. Confirm results, UI components, streamed chunks, progress, and the prompt "started" response match the pre-change behavior.
 3. **Cancellation**: start `live_temperature`, cancel it; confirm the stream stops.
 4. **Non-blocking**: trigger a slow tool for user A and a normal turn for user B concurrently; confirm B is not stalled.
@@ -27,7 +27,7 @@ docker exec astralbody bash -c "cd /app/backend && python -m ruff check ."     #
 3. Confirm a hard-blocked tool stays blocked for the safe agent.
 4. As a non-admin, attempt to mark an agent safe; confirm server-side refusal.
 5. Revise a safe agent via the revision path; confirm `is_safe` resets and re-approval is required.
-6. `docker exec astralbody bash -c "cd /app/backend && python -c \"from audit... verify\""` — confirm `marked_safe` events exist and the per-user audit chain verifies (no divergence).
+6. `docker exec astraldeep bash -c "cd /app/backend && python -c \"from audit... verify\""` — confirm `marked_safe` events exist and the per-user audit chain verifies (no divergence).
 
 ## US3 — etf_tracker_1 removed
 

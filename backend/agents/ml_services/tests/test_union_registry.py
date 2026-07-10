@@ -246,7 +246,7 @@ ORIGINAL_SCHEMAS_UNCHANGED_NAMES = {
         "type": "object",
         "properties": {
             "model_id": {"type": "string", "description": "Identifier of a transcription-capable model (e.g. whisper-1)."},
-            "file_handle": {"type": "string", "description": "AstralBody attachment_id of the audio file."},
+            "file_handle": {"type": "string", "description": "AstralDeep attachment_id of the audio file."},
             "language": {"type": "string", "description": "Optional ISO-639-1 language hint (e.g. 'en')."},
         },
         "required": ["model_id", "file_handle"],

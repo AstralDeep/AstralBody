@@ -3,7 +3,7 @@
 The orchestrator records its own ``tool`` audit event for every dispatch, but
 the client is where files are actually touched and commands actually run. This
 module records **what the tool did on disk** — once per action — in an
-append-only JSONL file at ``%APPDATA%/AstralBody/audit.log`` (rotated), hash-
+append-only JSONL file at ``%APPDATA%/AstralDeep/audit.log`` (rotated), hash-
 chained with an HMAC key derived from the machine + user identity, mirroring
 the backend's per-user hash-chain posture.
 
@@ -35,7 +35,7 @@ _KEEP_ROTATED = 3
 
 def _appdata_dir() -> str:
     base = os.getenv("APPDATA") or os.path.expanduser("~")
-    d = os.path.join(base, "AstralBody")
+    d = os.path.join(base, "AstralDeep")
     try:
         os.makedirs(d, exist_ok=True)
     except Exception:  # noqa: BLE001

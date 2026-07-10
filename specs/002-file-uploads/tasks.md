@@ -62,7 +62,7 @@ Web app per plan.md: `backend/` (FastAPI) + `frontend/` (Vite/React/TS).
 
 ## Phase 3: User Story 1 - Attach a document for the agent to analyze (Priority: P1) 🎯 MVP
 
-**Goal**: From any chat, a user picks one file (any FR-001 type), sends a message, and the AstralBody general agent demonstrably reads the file's contents and replies. Files are user-scoped and visible inline in any of the user's chats.
+**Goal**: From any chat, a user picks one file (any FR-001 type), sends a message, and the AstralDeep general agent demonstrably reads the file's contents and replies. Files are user-scoped and visible inline in any of the user's chats.
 
 **Independent Test**: Per `quickstart.md` step 5 — attach one PDF, send "summarize this", confirm the reply quotes content only present in the PDF. Repeat for one DOCX, one XLSX, one PNG, one `.py`.
 

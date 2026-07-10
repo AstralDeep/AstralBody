@@ -36,8 +36,8 @@ from typing import Any, Dict, List, Optional
 
 # A GitHub Release URL is the ONLY value the download_card renderer will turn
 # into a live link (renderer._is_github_release_url); use a real-shaped one.
-_RELEASE_URL = "https://github.com/AstralDeep/AstralBody/releases/download/v1.0.0/AstralBody-Setup.exe"
-_RELEASE_HTML = "https://github.com/AstralDeep/AstralBody/releases/tag/v1.0.0"
+_RELEASE_URL = "https://github.com/AstralDeep/AstralDeep/releases/download/v1.0.0/AstralDeep-Setup.exe"
+_RELEASE_HTML = "https://github.com/AstralDeep/AstralDeep/releases/tag/v1.0.0"
 
 _LONG_TEXT = (
     "This is a deliberately long paragraph used to exercise wrapping, "

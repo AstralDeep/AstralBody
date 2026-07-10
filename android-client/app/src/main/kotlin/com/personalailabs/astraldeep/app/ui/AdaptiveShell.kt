@@ -660,7 +660,7 @@ private fun InputBar(
                     onValueChange = { input = it },
                     modifier = Modifier.weight(1f),
                     enabled = !readOnly,
-                    placeholder = { Text("Message AstralBody…") },
+                    placeholder = { Text("Message AstralDeep…") },
                     maxLines = 4,
                     shape = RoundedCornerShape(22.dp),
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),

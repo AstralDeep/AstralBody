@@ -6,7 +6,7 @@ This is the operator/developer runbook for exercising the bridge — including t
 
 ## 0. Prerequisites
 
-- The AstralBody stack running per CLAUDE.md (`docker compose up -d`; `.env` has `ASTRAL_ENV=development` for local dev).
+- The AstralDeep stack running per CLAUDE.md (`docker compose up -d`; `.env` has `ASTRAL_ENV=development` for local dev).
 - For **live** verification only: JDK 21+ on a host that can run the Cresco `agent-1.3-SNAPSHOT.jar`. **No JVM is added to the product image** — the fabric runs as separate external infrastructure.
 
 ## 1. Flag-off no-op (no fabric needed) — SC-001
@@ -14,7 +14,7 @@ This is the operator/developer runbook for exercising the bridge — including t
 Default posture. `FF_CRESCO` unset/off ⇒ the `cresco-1` agent is **not registered**; the system is byte-identical to before the feature.
 
 ```bash
-docker exec astralbody bash -c "cd /app/backend && python -m pytest -q"      # full suite green
+docker exec astraldeep bash -c "cd /app/backend && python -m pytest -q"      # full suite green
 # Confirm the agent is absent from the catalog while the flag is off.
 ```
 
@@ -73,7 +73,7 @@ In a chat (as a user with the agent enabled), ask for the fabric topology, e.g. 
 Verify the audit rows:
 
 ```bash
-docker exec astralbody bash -c "cd /app/backend && python - <<'PY'
+docker exec astraldeep bash -c "cd /app/backend && python - <<'PY'
 # inspect recent agent_tool_call rows for agent_id='cresco-1'; confirm fabric ids present
 PY"
 # and confirm the hash chain is intact:
@@ -89,8 +89,8 @@ PY"
 ## 7. Coverage & CI gates — SC-005/008
 
 ```bash
-docker exec astralbody bash -c "cd /app/backend && python -m ruff check ."     # clean
-docker exec astralbody bash -c "cd /app/backend && python -m pytest -q"        # green
+docker exec astraldeep bash -c "cd /app/backend && python -m ruff check ."     # clean
+docker exec astraldeep bash -c "cd /app/backend && python -m pytest -q"        # green
 git diff -- backend/requirements.txt        # MUST be empty — zero new deps (SC-005)
 # diff-cover ≥90% on changed lines; gitleaks green (no cresco_service_key material committed)
 ```

@@ -1,4 +1,4 @@
-"""WebSocket client for the AstralBody orchestrator.
+"""WebSocket client for the AstralDeep orchestrator.
 
 Speaks the exact client protocol: connects to ws://<host>/ws, sends `register_ui`
 (token + device caps) first, then streams JSON messages. Inbound messages are

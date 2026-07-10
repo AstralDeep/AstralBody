@@ -1,5 +1,5 @@
 {
-  "_meta": "t042_auth_gate.py run 2026-06-10 ~22:25 EDT with USE_MOCK_AUTH=false, ASTRAL_ENV=development (container astralbody, image rebuilt from 028 working tree). No credentials used; verifies the unauthenticated redirect chain only. Control run in mock mode returned HTTP 200 with the shell served directly (dev passthrough unchanged).",
+  "_meta": "t042_auth_gate.py run 2026-06-10 ~22:25 EDT with USE_MOCK_AUTH=false, ASTRAL_ENV=development (container astraldeep, image rebuilt from 028 working tree). No credentials used; verifies the unauthenticated redirect chain only. Control run in mock mode returned HTTP 200 with the shell served directly (dev passthrough unchanged).",
   "errors": [],
   "gate": {
     "status": 302,

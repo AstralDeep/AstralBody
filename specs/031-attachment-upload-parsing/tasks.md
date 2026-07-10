@@ -18,7 +18,7 @@ description: "Task list for feature 031 — Chat Attachment Upload & Universal P
 
 ## Path Conventions
 
-Repo root `c:\Users\sear234\Desktop\Containers\MCP\AstralBody`. Backend under `backend/`. Tests under `backend/tests/`, `backend/agents/general/tests/`, `backend/orchestrator/tests/`.
+Repo root `c:\Users\sear234\Desktop\Containers\MCP\AstralDeep`. Backend under `backend/`. Tests under `backend/tests/`, `backend/agents/general/tests/`, `backend/orchestrator/tests/`.
 
 ---
 
@@ -149,7 +149,7 @@ Repo root `c:\Users\sear234\Desktop\Containers\MCP\AstralBody`. Backend under `b
 - [X] T046 [P] Upload endpoint `summary`/`description` note the broadened allow-list + the additive `parser_status` field; the contract is documented in `contracts/attachments-protocol.md`. (FastAPI `/docs` reflects the live route.)
 - [X] T047 Audit calls in place + correlated by draft id (`gap_detected`→`auto_created`→`self_test`→`approved`/`rejected`); ownership-denied references audited (`file` class). Full end-to-end trace verification belongs to the in-container run (DB-backed recorder).
 - [X] T048 `ruff check` clean on every changed Python file (run incrementally per phase). Render-layer JS is ES5 and reviewed.
-- [~] T049 Local: `.venv` runs green (foundational/US1/US2/US3 unit suites + 342/216-test regression). The full both-invocation run + changed-code coverage ≥90% gate runs **in the `astralbody` container / CI** (migration + autoparse-pipeline integration tests are DB/lifecycle-gated and skip locally). **Pending container run.**
+- [~] T049 Local: `.venv` runs green (foundational/US1/US2/US3 unit suites + 342/216-test regression). The full both-invocation run + changed-code coverage ≥90% gate runs **in the `astraldeep` container / CI** (migration + autoparse-pipeline integration tests are DB/lifecycle-gated and skip locally). **Pending container run.**
 - [~] T050 Quickstart manual browser verification on `:8001` is **pending** (Constitution X — requires the live stack). quickstart.md documents the exact steps.
 
 ---

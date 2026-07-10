@@ -1,6 +1,6 @@
 # Phase 1 Data Model: In-Chat Progress Notifications & Persistent Step Trail
 
-Schema deltas only — all entity definitions inherit from existing AstralBody tables. Idempotent migration runs in [`backend/shared/database.py`](../../backend/shared/database.py) `Database._init_schema()` per Constitution IX.
+Schema deltas only — all entity definitions inherit from existing AstralDeep tables. Idempotent migration runs in [`backend/shared/database.py`](../../backend/shared/database.py) `Database._init_schema()` per Constitution IX.
 
 ---
 

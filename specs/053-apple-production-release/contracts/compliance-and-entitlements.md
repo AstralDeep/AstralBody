@@ -105,7 +105,7 @@ reason-coded API is reached through it, the app-target manifest still accounts f
 ### Required keys
 
 - **`NSPrivacyTracking`** = `false` — the app performs **no** cross-app/cross-site
-  tracking; auth tokens and chat content go only to the first-party AstralBody backend.
+  tracking; auth tokens and chat content go only to the first-party AstralDeep backend.
 - **`NSPrivacyTrackingDomains`** = empty array — consistent with `NSPrivacyTracking=false`.
 - **`NSPrivacyCollectedDataTypes`** — declares **only** what is actually collected, honestly
   (Constitution XIII). Chat content the user types is transmitted to the first-party backend

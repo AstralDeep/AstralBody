@@ -8,7 +8,7 @@
 **Organization**: Tasks are grouped by user story (US1–US6) to enable independent implementation and testing.
 
 > **Container + LIVE-STACK validation (2026-05-27):**
-> - `docker compose build astralbody` succeeds with the new deps (presidio, spaCy + `en_core_web_lg`, tzdata) — **requirements resolve cleanly** (image 1.08→2.17GB). In-container `pytest personalization scheduler dreaming` = **49 passed, 0 skipped**. Real Presidio PHI gate smoke test: detects PERSON/MRN/email, passes clean text.
+> - `docker compose build astraldeep` succeeds with the new deps (presidio, spaCy + `en_core_web_lg`, tzdata) — **requirements resolve cleanly** (image 1.08→2.17GB). In-container `pytest personalization scheduler dreaming` = **49 passed, 0 skipped**. Real Presidio PHI gate smoke test: detects PERSON/MRN/email, passes clean text.
 > - **Live stack (`docker compose up`)**: all 7 tables auto-migrated on startup; backend starts clean with new routers registered. **Authenticated end-to-end tests pass**: profile PUT/GET persists (US1/US3); **PHI in profile → `422` blocked by real Presidio (US4/SC-005)**; skills catalog lists live agent tools (US2); dreaming status + manual sweep run (US6); onboarding ParamPicker panel served (US1/T019); schedule governance rejects 30s interval `400`, creates a NY-tz cron job `201`, lists + deletes it (US5); audit_events recorded `success` for `personalization`/`memory`/`dreaming`/`schedule` (SC-004).
 > - **Still pending (correctly):** scheduler *execution* loop is gated OFF pending **T057** security review of the offline-grant store; LLM-driven submit interpretation (T021/T050); frontend glue (T022); formal pytest-TestClient files (T013–T015/T024/T033/T040 — behavior validated via live API instead).
 

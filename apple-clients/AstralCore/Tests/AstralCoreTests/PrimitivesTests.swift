@@ -1,6 +1,6 @@
 // AstralPrims mirror-fidelity tests. The known-answer fixtures in
 // Fixtures/astralprims-fixtures.json were generated from the LIVE Python
-// package (astralprims 0.3.0) inside the astralbody container — every Swift
+// package (astralprims 0.3.0) inside the astraldeep container — every Swift
 // construction below mirrors the Python construction that produced its
 // fixture, and the serialized dicts must be EQUAL. Regenerate the fixtures
 // from the container (see the file header in the generator notes in

@@ -4,7 +4,7 @@ A per-user-story **validation runbook** — how to prove each slice works end-to
 maps to its success criteria. Mirrors [051/quickstart.md](../051-apple-native-clients/quickstart.md),
 extended for the production (signed / submitted) posture.
 
-All paths are repo-relative to the AstralBody root. Client work runs on a Mac with
+All paths are repo-relative to the AstralDeep root. Client work runs on a Mac with
 **Xcode 16+** (project `objectVersion 77`). Steps that consume **operator-supplied signing
 material, store metadata (listing copy + screenshots), or realm changes** are marked
 **[OPERATOR-GATED]** — the surrounding work proceeds in parallel and the live
@@ -23,7 +23,7 @@ xcodebuild -list -project "$PROJ"           # expect schemes: AstralApp, AstralW
 swift test --package-path apple-clients/AstralCore     # expect all green, incl. ManifestDriftTests
 
 # Backend the clients target (dev posture for local checks)
-docker compose up -d                                   # postgres + astralbody
+docker compose up -d                                   # postgres + astraldeep
 ```
 
 Identities in play everywhere (research D8): bundle family `com.personalailabs.astraldeep`
@@ -311,11 +311,11 @@ curl -s https://iam.ai.uky.edu/realms/Astral/.well-known/openid-configuration \
 
 # 3) Fail-closed boot: placeholder secret must exit EXACTLY 78 (FR-021)
 #    (run production-posture boot with a placeholder AUDIT_HMAC_SECRET / KEYCLOAK_CLIENT_SECRET)
-docker exec astralbody bash -c 'cd /app/backend && ASTRAL_ENV=production AUDIT_HMAC_SECRET=changeme \
+docker exec astraldeep bash -c 'cd /app/backend && ASTRAL_ENV=production AUDIT_HMAC_SECRET=changeme \
   python orchestrator/orchestrator.py'; echo "exit=$?"     # expect exit=78
 
 # 4) astralprims vocabulary == client drift guard (FR-020, D11)
-docker exec astralbody bash -c 'pip show astralprims | grep -i version'   # expect >=0.2.0 (35 component types)
+docker exec astraldeep bash -c 'pip show astralprims | grep -i version'   # expect >=0.2.0 (35 component types)
 swift test --package-path apple-clients/AstralCore --filter ManifestDrift  # 47 push / 35 component / 67 accept green
 ```
 
@@ -385,8 +385,8 @@ merged so the source anchor can cite the new commit.
 ```bash
 # 1) Vault lint (per its CLAUDE.md — run the LINT workflow it defines)
 #    confirm: new "Apple Release Pipeline" entity page exists; Apple Clients / Keycloak Realm
-#    Astral / AstralBody entities and CI Gates / Feature Flags / Feature Timeline concepts revised;
-#    sources/astralbody-repo.md reviewed_commit bumped; index.md + log.md updated; NO unresolved
+#    Astral / AstralDeep entities and CI Gates / Feature Flags / Feature Timeline concepts revised;
+#    sources/astraldeep-repo.md reviewed_commit bumped; index.md + log.md updated; NO unresolved
 #    conflict block remains.
 ls "../obsidian-vault/wiki/entities/Apple Release Pipeline.md"
 grep -rn 'conflict\|astral-ios\|astral-macos\|com.kyopenscience' ../obsidian-vault/wiki   # expect none

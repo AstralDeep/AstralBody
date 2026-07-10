@@ -21,7 +21,7 @@ Start training a Random Forest classifier on a previously-uploaded CSV.
 {
   "type": "object",
   "properties": {
-    "file_handle": {"type": "string", "description": "Handle to a CSV uploaded via AstralBody's file mechanism."},
+    "file_handle": {"type": "string", "description": "Handle to a CSV uploaded via AstralDeep's file mechanism."},
     "class_column": {"type": "string", "description": "Name of the column to classify on."},
     "options": {
       "type": "object",

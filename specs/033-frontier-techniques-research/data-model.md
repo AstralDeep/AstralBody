@@ -18,7 +18,7 @@ One per-domain findings file under `research/`.
 A single frontier technique observed in one stream (≈164 total).
 - **id** — stream-local (`F1`…`Fn`).
 - **title**, **source(s)** (with URL/citation + preview-vs-GA for commercial), **what_it_is**,
-  **frontier_evidence**, **astralbody_gap**, **priority** (one or more Priority Dimensions),
+  **frontier_evidence**, **astraldeep_gap**, **priority** (one or more Priority Dimensions),
   **implementation_note** (must satisfy the Constraint Envelope), **novelty** (1–5),
   **impact** (1–5), **effort** (S/M/L), optional **hype/caveat flag**.
 

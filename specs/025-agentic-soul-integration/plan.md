@@ -5,9 +5,9 @@
 
 ## Summary
 
-Bring openclaw's agentic experience — personalized onboarding, enableable skills, agent personality ("soul"), cross-session memory, scheduled autonomous work ("cron"), and background consolidation ("dreaming") — into AstralBody **without weakening its security or HIPAA posture**, and rendered entirely through the existing server-generated UI primitives.
+Bring openclaw's agentic experience — personalized onboarding, enableable skills, agent personality ("soul"), cross-session memory, scheduled autonomous work ("cron"), and background consolidation ("dreaming") — into AstralDeep **without weakening its security or HIPAA posture**, and rendered entirely through the existing server-generated UI primitives.
 
-Technical approach: reuse AstralBody's existing machinery wherever it exists, and add the smallest number of new, security-equivalent pieces where it does not.
+Technical approach: reuse AstralDeep's existing machinery wherever it exists, and add the smallest number of new, security-equivalent pieces where it does not.
 
 - **Personalization (profile, personality/"soul", memory)** is stored per-user in Postgres and injected into the orchestrator's LLM system prompt at the existing injection point (after the knowledge-synthesis block, before `_call_llm`). The personality is **subordinate** to the existing safety/compliance preamble.
 - **Skills** are *not* a new artifact: a skill is an agent's tool, surfaced with a description and gated by the existing `agent_scopes` / `tool_overrides` model. The "catalog" is a read view over already-registered tools.

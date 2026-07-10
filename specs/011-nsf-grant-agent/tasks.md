@@ -8,7 +8,7 @@ description: "Task list for implementing the NSF TechAccess AI-Ready America gra
 **Input**: Design documents from `/specs/011-nsf-grant-agent/`
 **Prerequisites**: [plan.md](plan.md), [spec.md](spec.md), [research.md](research.md), [data-model.md](data-model.md), [contracts/](contracts/), [quickstart.md](quickstart.md)
 
-**Tests**: Tests are NOT optional for this feature. AstralBody Constitution Principle III mandates ≥90% coverage on all new code, and Principle X requires golden-path, edge-case, and error-path coverage. Test tasks below are therefore part of each phase's definition of done.
+**Tests**: Tests are NOT optional for this feature. AstralDeep Constitution Principle III mandates ≥90% coverage on all new code, and Principle X requires golden-path, edge-case, and error-path coverage. Test tasks below are therefore part of each phase's definition of done.
 
 **Organization**: Tasks are grouped by user story so each story can be implemented and merged independently. The merge target is the existing `grants` agent (per Clarifications Q2), so all source-code changes touch [backend/agents/grants/](../../backend/agents/grants/) and [backend/tests/agents/grants/](../../backend/tests/agents/grants/).
 

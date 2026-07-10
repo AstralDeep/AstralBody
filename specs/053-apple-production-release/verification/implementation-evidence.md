@@ -181,7 +181,7 @@ So the watch QR device-login broker will **not** fail closed on the realm side.
 
 ## Signed release — executed 2026-07-09
 
-Tag `apple-v1.0` → run [29036053155](https://github.com/AstralDeep/AstralBody/actions/runs/29036053155), conclusion **success**.
+Tag `apple-v1.0` → run [29036053155](https://github.com/AstralDeep/AstralDeep/actions/runs/29036053155), conclusion **success**.
 
 ```
 ✓ validate iOS    ✓ validate macOS

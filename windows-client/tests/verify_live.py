@@ -10,7 +10,7 @@ USE_MOCK_AUTH=false:
     -> client-hosted Windows tools agent (register + tool call)
 
 It connects with the EXACT device caps + native render vocabulary the GUI sends,
-so it is a faithful headless stand-in for AstralBody.exe at the wire level.
+so it is a faithful headless stand-in for AstralDeep.exe at the wire level.
 
 Not a pytest test (needs a live server + an interactive browser login the first
 time). Usage:
@@ -19,7 +19,7 @@ time). Usage:
         --prompt "roll 3 dice and show the results"
 
 The obtained token is cached to --token-file (default .astral_token.json) so
-re-runs and the GUI (`AstralBody.exe --token ...`) can reuse it within its TTL.
+re-runs and the GUI (`AstralDeep.exe --token ...`) can reuse it within its TTL.
 """
 from __future__ import annotations
 

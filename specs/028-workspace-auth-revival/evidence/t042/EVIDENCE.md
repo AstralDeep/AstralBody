@@ -1,8 +1,8 @@
 # T042 — Real-browser gate (evidence)
 
 **Date**: 2026-06-10 | **Verdict**: PASSED-WITH-NOTES
-**Environment**: rebuilt `astralbody` container (py3.11) from the 028 working tree on `:8001`,
-PostgreSQL 17 (`astralbody-postgres`), LLM `google/gemma-4-31B-it` via
+**Environment**: rebuilt `astraldeep` container (py3.11) from the 028 working tree on `:8001`,
+PostgreSQL 17 (`astraldeep-postgres`), LLM `google/gemma-4-31B-it` via
 `api-llm-factory.ai.uky.edu`. Headless Chromium (Playwright 1.60); WS frames captured.
 Scripts: `backend/tmp/e2e/t042_*.py`; per-phase machine reports (`*-report.json`),
 screenshots, and the fail-closed boot log in this directory.

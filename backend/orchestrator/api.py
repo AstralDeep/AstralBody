@@ -1,5 +1,5 @@
 """
-REST API routes for the AstralBody backend.
+REST API routes for the AstralDeep backend.
 
 Provides HTTP endpoints that mirror the WebSocket actions, enabling
 any frontend (PHP, Flutter, other JS frameworks) to interact with

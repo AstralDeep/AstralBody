@@ -4,7 +4,7 @@ When a user asks Astral to *generate code that should run on their machine*
 (e.g. "write me a Python script that sorts my downloads folder"), the chat LLM
 calls this meta-tool. It returns the generated code (a ``code`` primitive)
 **and** a ``download_card`` primitive linking to the latest GitHub-released
-``AstralBody.exe`` — downloaded directly from GitHub, integrity-checked
+``AstralDeep.exe`` — downloaded directly from GitHub, integrity-checked
 (SHA256 + sigstore) before the app runs.
 
 Design (deterministic meta-tool, not intent detection — matches the project's
@@ -38,8 +38,8 @@ from shared.protocol import MCPResponse
 logger = logging.getLogger("Orchestrator.DesktopCodegen")
 
 META_AGENT_ID = "__desktop_codegen__"
-_DESKTOP_REPO = "AstralDeep/AstralBody"  # overridable via DESKTOP_RELEASE_REPO
-_EXE_NAME = "AstralBody.exe"
+_DESKTOP_REPO = "AstralDeep/AstralDeep"  # overridable via DESKTOP_RELEASE_REPO
+_EXE_NAME = "AstralDeep.exe"
 _SHA_NAME = "SHA256SUMS"
 _BUNDLE_NAME = "cosign.bundle"
 _TTL = 300  # seconds; overridable via DESKTOP_RELEASE_TTL_SECONDS
@@ -173,7 +173,7 @@ def _fetch_release_info() -> Optional[Dict[str, Any]]:
         "html_url": data.get("html_url") or "",
     }
     if not info["exe_url"]:
-        logger.info("latest release has no AstralBody.exe asset")
+        logger.info("latest release has no AstralDeep.exe asset")
         return None
     return info
 
@@ -249,7 +249,7 @@ def build_download_card(info: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             "variant": "unavailable",
             "title": "Astral desktop app",
             "description": ("The download link is temporarily unavailable. "
-                            "You can get the app from the AstralDeep/AstralBody "
+                            "You can get the app from the AstralDeep/AstralDeep "
                             "GitHub Releases page when it's back."),
             "download_url": "",
             "sha256": "",

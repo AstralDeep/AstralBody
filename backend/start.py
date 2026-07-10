@@ -61,7 +61,7 @@ def main():
 
     try:
         print("=" * 60)
-        print("  AstralBody  ")
+        print("  AstralDeep  ")
         print("=" * 60)
         print()
 

@@ -1,6 +1,6 @@
-# AstralBody — Native Windows Client
+# AstralDeep — Native Windows Client
 
-A native Windows desktop client that renders the AstralBody orchestrator's
+A native Windows desktop client that renders the AstralDeep orchestrator's
 **server-driven UI (SDUI)** components as native Qt widgets — not a web view.
 
 It is a real ROTE/webrender *target*: it consumes the structured `components`
@@ -53,8 +53,8 @@ Env overrides: `ASTRAL_WS_URL`, `ASTRAL_TOKEN`.
 
 ```bash
 .venv/Scripts/python -m pip install pyinstaller
-.venv/Scripts/pyinstaller --noconfirm AstralBody.spec
-# → dist/AstralBody.exe  (single-file, no console)
+.venv/Scripts/pyinstaller --noconfirm AstralDeep.spec
+# → dist/AstralDeep.exe  (single-file, no console)
 ```
 
 ## Tests
@@ -153,7 +153,7 @@ result is refused — it never leaves your machine. If the check itself errors,
 the result is treated as PHI and refused (fail-closed).
 
 **Audit (every action).** Each tool call is recorded in an append-only,
-hash-chained JSONL log at `%APPDATA%/AstralBody/audit.log` (`astral_client/
+hash-chained JSONL log at `%APPDATA%/AstralDeep/audit.log` (`astral_client/
 audit_log.py`): timestamp, actor, tool, redacted args, outcome
 (`success`/`refused`/`phi_blocked`/`error`), and correlation id. The
 orchestrator records its own `tool` audit event too, so actions are double-
@@ -164,11 +164,11 @@ audited.
 When you download the app from a GitHub Release, the client verifies it **before
 it ever runs** (`astral_client/integrity.py`):
 
-1. resolves the latest release, downloads `AstralBody.exe` + `SHA256SUMS` +
+1. resolves the latest release, downloads `AstralDeep.exe` + `SHA256SUMS` +
    `cosign.bundle`;
 2. checks `sha256(exe) ==` the manifest entry;
 3. verifies the **sigstore** (keyless) signature, asserting the signing
-   identity is the `AstralDeep/AstralBody` GitHub Actions workflow;
+   identity is the `AstralDeep/AstralDeep` GitHub Actions workflow;
 4. only then launches/replaces the binary.
 
 A tampered exe, a bad hash, or an unverifiable signature ⇒ the download is
@@ -184,7 +184,7 @@ Releases are built and signed by [`.github/workflows/release-windows.yml`](../.g
 | `WIN_CMD_TIMEOUT` | `60` | `run_command` timeout (s) |
 | `WIN_CMD_MAX_BYTES` | `1048576` | `run_command` output cap |
 | `ASTRAL_DANGEROUS_BYPASS` | unset | Enables `run_shell` (full shell) |
-| `DESKTOP_RELEASE_REPO` | `AstralDeep/AstralBody` | GitHub repo for releases |
+| `DESKTOP_RELEASE_REPO` | `AstralDeep/AstralDeep` | GitHub repo for releases |
 
 ## Scope / status
 

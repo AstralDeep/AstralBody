@@ -94,7 +94,7 @@ def _build_database_url() -> str:
     if host.strip().lower() == "localhost":
         host = "127.0.0.1"
     port = os.getenv("DB_PORT", "5432")
-    name = os.getenv("DB_NAME", "astralbody")
+    name = os.getenv("DB_NAME", "astraldeep")
     user = os.getenv("DB_USER", "astral")
     password = os.getenv("DB_PASSWORD", "astral_dev")
     return f"postgresql://{user}:{password}@{host}:{port}/{name}"

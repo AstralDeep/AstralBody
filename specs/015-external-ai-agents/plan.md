@@ -5,7 +5,7 @@
 
 ## Summary
 
-Add three new MCP agents to AstralBody — **CLASSify**, **Timeseries Forecaster**, and **LLM-Factory** — each wrapping an external HTTP service and gated behind a per-user Service URL + API Key the user enters in the existing agent-permissions modal. Each agent exposes ~4–6 curated tools (curated set per [Clarification Q1, 2026-05-07](spec.md#clarifications)). Long-running operations on CLASSify and Timeseries Forecaster (ClearML-backed training/forecast jobs) are handled by the agent: the tool returns immediately with a job handle, then a background poller pushes progress and the final result into the originating chat using the existing `ToolProgress` mechanism delivered in feature 014 ([Clarification Q2](spec.md#clarifications)). A small in-memory registry caps each `(user, agent)` pair to 3 concurrent in-flight jobs, rejecting further attempts with an actionable message ([Clarification Q3](spec.md#clarifications)).
+Add three new MCP agents to AstralDeep — **CLASSify**, **Timeseries Forecaster**, and **LLM-Factory** — each wrapping an external HTTP service and gated behind a per-user Service URL + API Key the user enters in the existing agent-permissions modal. Each agent exposes ~4–6 curated tools (curated set per [Clarification Q1, 2026-05-07](spec.md#clarifications)). Long-running operations on CLASSify and Timeseries Forecaster (ClearML-backed training/forecast jobs) are handled by the agent: the tool returns immediately with a job handle, then a background poller pushes progress and the final result into the originating chat using the existing `ToolProgress` mechanism delivered in feature 014 ([Clarification Q2](spec.md#clarifications)). A small in-memory registry caps each `(user, agent)` pair to 3 concurrent in-flight jobs, rejecting further attempts with an actionable message ([Clarification Q3](spec.md#clarifications)).
 
 The implementation follows the existing canonical agent layout (one directory under [backend/agents/](backend/agents/) per agent, with `*_agent.py` / `mcp_server.py` / `mcp_tools.py` / `__init__.py`) and reuses every supporting subsystem already in place — auto-discovery in [backend/start.py](backend/start.py), E2E-encrypted credential storage in [backend/orchestrator/credential_manager.py](backend/orchestrator/credential_manager.py), the credential-form rendering in [frontend/src/components/AgentPermissionsModal.tsx](frontend/src/components/AgentPermissionsModal.tsx), and the audit-log subsystem under [backend/audit/](backend/audit/). **No new database tables, no new third-party libraries, and no constitutional waivers** are required.
 
@@ -19,7 +19,7 @@ The implementation follows the existing canonical agent layout (one directory un
 
 **Testing**: pytest (existing, see [backend/audit/tests/](backend/audit/tests/), [backend/feedback/tests/](backend/feedback/tests/), [backend/llm_config/tests/](backend/llm_config/tests/) for analogous test layouts) with `pytest-asyncio` and `responses` / `httpretty`-style HTTP mocks already in use. Frontend changes are minimal (no new components — only placeholder strings on the existing modal); covered by `vitest` + `@testing-library/react` if any change touches React. Coverage target ≥ 90% on changed files (Constitution Principle III).
 
-**Target Platform**: Linux server inside the existing `astralbody` Docker container; agents run as in-cluster subprocesses spawned by [backend/start.py](backend/start.py:37-101). External services reached over HTTPS; user supplies the URL.
+**Target Platform**: Linux server inside the existing `astraldeep` Docker container; agents run as in-cluster subprocesses spawned by [backend/start.py](backend/start.py:37-101). External services reached over HTTPS; user supplies the URL.
 
 **Project Type**: Web application (existing FastAPI + WebSocket backend with Vite/React frontend).
 
@@ -123,7 +123,7 @@ frontend/
                                             # for the three new agents' URL hints. No new component.
 ```
 
-**Structure Decision**: AstralBody's existing per-agent-directory convention is followed verbatim — three new directories, each implementing the canonical four-file layout used by every other agent. Two genuinely shared pieces of code are added at higher scopes:
+**Structure Decision**: AstralDeep's existing per-agent-directory convention is followed verbatim — three new directories, each implementing the canonical four-file layout used by every other agent. Two genuinely shared pieces of code are added at higher scopes:
 - [backend/shared/external_http.py](backend/shared/external_http.py) — because URL normalization, SSRF blocking, the cheap-ping-test for credential save, and the retry/timeout policy are identical across all three agents and have no agent-specific knowledge. Putting this in `backend/shared/` (alongside `base_agent.py` and `protocol.py`) keeps each agent thin.
 - [backend/orchestrator/concurrency_cap.py](backend/orchestrator/concurrency_cap.py) — because the FR-026 cap must be enforced before tool dispatch, which is orchestrator-layer code; a per-agent implementation would either duplicate logic or fail to coordinate across multiple agents started by the same user. One file, one class, no public API beyond `acquire(user_id, agent_id, job_id) → bool` and `release(user_id, agent_id, job_id)`.
 

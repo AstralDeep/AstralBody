@@ -33,7 +33,7 @@ def _make_release(exe_url="u/exe", sha_url="u/sha", bundle_url="u/bundle"):
 
 
 def test_extract_sha_for_exe_picks_the_exe_line():
-    body = f"{'a' * 64}  AstralBody.exe\n{'b' * 64}  cosign.bundle\n"
+    body = f"{'a' * 64}  AstralDeep.exe\n{'b' * 64}  cosign.bundle\n"
     assert integrity._extract_sha_for_exe(body) == "a" * 64
 
 
@@ -65,13 +65,13 @@ def test_verify_refuses_on_sha_mismatch(monkeypatch, tmp_path):
         lambda url, dest, **k: (open(dest, "wb").write(exe_bytes), True)[1],
     )
     monkeypatch.setattr(
-        integrity, "_download_text", lambda url: f"{'0' * 64}  AstralBody.exe\n"
+        integrity, "_download_text", lambda url: f"{'0' * 64}  AstralDeep.exe\n"
     )
     # sigstore must not even be reached (sha check fails first).
     res = integrity.verify_latest(str(tmp_path))
     assert not res.ok
     assert "SHA-256 mismatch" in res.reason
-    assert not os.path.exists(os.path.join(str(tmp_path), "AstralBody.exe"))
+    assert not os.path.exists(os.path.join(str(tmp_path), "AstralDeep.exe"))
 
 
 def test_verify_fail_closed_when_sigstore_missing(monkeypatch, tmp_path):
@@ -84,7 +84,7 @@ def test_verify_fail_closed_when_sigstore_missing(monkeypatch, tmp_path):
         lambda url, dest, **k: (open(dest, "wb").write(exe_bytes), True)[1],
     )
     monkeypatch.setattr(
-        integrity, "_download_text", lambda url: f"{sha}  AstralBody.exe\n"
+        integrity, "_download_text", lambda url: f"{sha}  AstralDeep.exe\n"
     )
 
     # Force the sigstore import to fail → fail-closed.
@@ -102,7 +102,7 @@ def test_verify_fail_closed_when_sigstore_missing(monkeypatch, tmp_path):
     res = integrity.verify_latest(str(tmp_path))
     assert not res.ok
     assert "sigstore" in res.reason
-    assert not os.path.exists(os.path.join(str(tmp_path), "AstralBody.exe"))
+    assert not os.path.exists(os.path.join(str(tmp_path), "AstralDeep.exe"))
 
 
 def test_verify_happy_path(monkeypatch, tmp_path):
@@ -115,14 +115,14 @@ def test_verify_happy_path(monkeypatch, tmp_path):
         lambda url, dest, **k: (open(dest, "wb").write(exe_bytes), True)[1],
     )
     monkeypatch.setattr(
-        integrity, "_download_text", lambda url: f"{sha}  AstralBody.exe\n"
+        integrity, "_download_text", lambda url: f"{sha}  AstralDeep.exe\n"
     )
     monkeypatch.setattr(
         integrity, "_verify_sigstore", lambda exe, bundle, **kw: (True, "verified")
     )
     res = integrity.verify_latest(str(tmp_path))
     assert res.ok, res.reason
-    assert res.exe_path.endswith("AstralBody.exe")
+    assert res.exe_path.endswith("AstralDeep.exe")
     assert os.path.exists(res.exe_path)
     assert res.version == "v1"
 
@@ -137,7 +137,7 @@ def test_verify_refuses_on_bad_signature(monkeypatch, tmp_path):
         lambda url, dest, **k: (open(dest, "wb").write(exe_bytes), True)[1],
     )
     monkeypatch.setattr(
-        integrity, "_download_text", lambda url: f"{sha}  AstralBody.exe\n"
+        integrity, "_download_text", lambda url: f"{sha}  AstralDeep.exe\n"
     )
     monkeypatch.setattr(
         integrity,
@@ -147,7 +147,7 @@ def test_verify_refuses_on_bad_signature(monkeypatch, tmp_path):
     res = integrity.verify_latest(str(tmp_path))
     assert not res.ok
     assert "bad sig" in res.reason
-    assert not os.path.exists(os.path.join(str(tmp_path), "AstralBody.exe"))
+    assert not os.path.exists(os.path.join(str(tmp_path), "AstralDeep.exe"))
 
 
 def test_latest_release_none_when_asset_missing(monkeypatch):
@@ -156,7 +156,7 @@ def test_latest_release_none_when_asset_missing(monkeypatch):
         "_api_get",
         lambda path: {
             "assets": [
-                {"name": "AstralBody.exe", "browser_download_url": "u"}
+                {"name": "AstralDeep.exe", "browser_download_url": "u"}
             ],  # no sha/bundle
         },
     )
@@ -172,7 +172,7 @@ def test_latest_release_parses(monkeypatch):
             "tag_name": "v1.2.3",
             "html_url": "h",
             "assets": [
-                {"name": "AstralBody.exe", "browser_download_url": "u/exe"},
+                {"name": "AstralDeep.exe", "browser_download_url": "u/exe"},
                 {"name": "SHA256SUMS", "browser_download_url": "u/sha"},
                 {"name": "cosign.bundle", "browser_download_url": "u/bundle"},
             ],
@@ -249,7 +249,7 @@ def test_verify_sigstore_builds_identity_from_tag(monkeypatch):
         assert ok, reason
         assert captured["issuer"] == integrity._EXPECTED_ISSUER
         assert captured["identity"] == (
-            "https://github.com/AstralDeep/AstralBody/.github/workflows/"
+            "https://github.com/AstralDeep/AstralDeep/.github/workflows/"
             "release-windows.yml@refs/tags/v0.1.0"
         )
     finally:
@@ -269,10 +269,10 @@ def _rel(version="v0.2.0"):
 
 
 def test_verify_running_exe_happy(monkeypatch, tmp_path):
-    exe = tmp_path / "AstralBody.exe"
+    exe = tmp_path / "AstralDeep.exe"
     exe.write_bytes(b"running payload")
     sha = hashlib.sha256(b"running payload").hexdigest()
-    monkeypatch.setattr(integrity, "_download_text", lambda url: f"{sha}  AstralBody.exe\n")
+    monkeypatch.setattr(integrity, "_download_text", lambda url: f"{sha}  AstralDeep.exe\n")
     monkeypatch.setattr(
         integrity, "_download", lambda url, dest, **k: (open(dest, "wb").write(b"{}"), True)[1]
     )
@@ -287,9 +287,9 @@ def test_verify_running_exe_happy(monkeypatch, tmp_path):
 
 
 def test_verify_running_exe_sha_mismatch_does_not_delete_exe(monkeypatch, tmp_path):
-    exe = tmp_path / "AstralBody.exe"
+    exe = tmp_path / "AstralDeep.exe"
     exe.write_bytes(b"running payload")
-    monkeypatch.setattr(integrity, "_download_text", lambda url: f"{'0' * 64}  AstralBody.exe\n")
+    monkeypatch.setattr(integrity, "_download_text", lambda url: f"{'0' * 64}  AstralDeep.exe\n")
     monkeypatch.setattr(
         integrity, "_download", lambda url, dest, **k: (open(dest, "wb").write(b"{}"), True)[1]
     )
@@ -308,7 +308,7 @@ def test_verify_running_exe_missing_file(tmp_path):
 
 
 def test_verify_running_exe_offline(tmp_path):
-    exe = tmp_path / "AstralBody.exe"
+    exe = tmp_path / "AstralDeep.exe"
     exe.write_bytes(b"x")
     res = integrity.verify_running_exe(
         str(exe), workdir=str(tmp_path), _release=lambda: None
@@ -337,7 +337,7 @@ def test_check_at_launch_dev_not_frozen():
 
 def test_check_at_launch_verified_same_version():
     n = integrity.check_at_launch(
-        "0.2.0", "C:/AstralBody.exe", frozen=True, workdir="/tmp",
+        "0.2.0", "C:/AstralDeep.exe", frozen=True, workdir="/tmp",
         _release=lambda: _rel("v0.2.0"), _verify_running=_verok,
     )
     assert n["status"] == "verified" and n["level"] == "success"
@@ -346,7 +346,7 @@ def test_check_at_launch_verified_same_version():
 
 def test_check_at_launch_unverified_same_version():
     n = integrity.check_at_launch(
-        "0.2.0", "C:/AstralBody.exe", frozen=True, workdir="/tmp",
+        "0.2.0", "C:/AstralDeep.exe", frozen=True, workdir="/tmp",
         _release=lambda: _rel("v0.2.0"), _verify_running=_verbad("bad sig"),
     )
     assert n["status"] == "unverified" and n["level"] == "error"
@@ -355,14 +355,14 @@ def test_check_at_launch_unverified_same_version():
 
 def test_check_at_launch_offline():
     n = integrity.check_at_launch(
-        "0.2.0", "C:/AstralBody.exe", frozen=True, workdir="/tmp", _release=lambda: None
+        "0.2.0", "C:/AstralDeep.exe", frozen=True, workdir="/tmp", _release=lambda: None
     )
     assert n["status"] == "offline" and n["level"] == "muted"
 
 
 def test_check_at_launch_update_available():
     n = integrity.check_at_launch(
-        "0.1.0", "C:/AstralBody.exe", frozen=True, workdir="/tmp",
+        "0.1.0", "C:/AstralDeep.exe", frozen=True, workdir="/tmp",
         _release=lambda: _rel("v0.2.0"), _verify_latest=_verok,
     )
     assert n["status"] == "update_available" and "v0.2.0" in n["message"]
@@ -370,7 +370,7 @@ def test_check_at_launch_update_available():
 
 def test_check_at_launch_update_unverified_is_ignored():
     n = integrity.check_at_launch(
-        "0.1.0", "C:/AstralBody.exe", frozen=True, workdir="/tmp",
+        "0.1.0", "C:/AstralDeep.exe", frozen=True, workdir="/tmp",
         _release=lambda: _rel("v0.2.0"), _verify_latest=_verbad("nope"),
     )
     assert n["status"] == "update_unverified" and n["level"] == "warning"
@@ -380,6 +380,6 @@ def test_check_at_launch_never_raises_on_error():
     def boom():
         raise RuntimeError("net down")
 
-    n = integrity.check_at_launch("0.2.0", "C:/AstralBody.exe", frozen=True,
+    n = integrity.check_at_launch("0.2.0", "C:/AstralDeep.exe", frozen=True,
                                   workdir="/tmp", _release=boom)
     assert n["status"] == "error" and n["message"] == ""

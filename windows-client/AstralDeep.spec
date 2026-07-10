@@ -1,9 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for the AstralBody native Windows client (single-file .exe).
+"""PyInstaller spec for the AstralDeep native Windows client (single-file .exe).
 
 Build (from windows-client/, in the venv):
-    .venv/Scripts/pyinstaller --noconfirm AstralBody.spec
-Output: dist/AstralBody.exe
+    .venv/Scripts/pyinstaller --noconfirm AstralDeep.spec
+Output: dist/AstralDeep.exe
 """
 import pathlib
 import re
@@ -31,12 +31,12 @@ version_res = VSVersionInfo(
     ffi=FixedFileInfo(filevers=_ver_tuple, prodvers=_ver_tuple),
     kids=[
         StringFileInfo([StringTable("040904B0", [
-            StringStruct("ProductName", "AstralBody"),
-            StringStruct("FileDescription", "AstralBody native Windows client"),
+            StringStruct("ProductName", "AstralDeep"),
+            StringStruct("FileDescription", "AstralDeep native Windows client"),
             StringStruct("FileVersion", __version__),
             StringStruct("ProductVersion", __version__),
             StringStruct("CompanyName", "AstralDeep"),
-            StringStruct("OriginalFilename", "AstralBody.exe"),
+            StringStruct("OriginalFilename", "AstralDeep.exe"),
         ])]),
         VarFileInfo([VarStruct("Translation", [0x0409, 1200])]),
     ],
@@ -67,7 +67,7 @@ a = Analysis(
     binaries=[],
     # The brand icon ships inside the bundle too, so the running app can set
     # its window/taskbar icon (assets resolve via sys._MEIPASS when frozen).
-    datas=[("assets/astralbody.ico", "assets")],
+    datas=[("assets/astraldeep.ico", "assets")],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -83,7 +83,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="AstralBody",
+    name="AstralDeep",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -96,5 +96,5 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     version=version_res,  # VERSIONINFO stamped from astral_client.__version__
-    icon="assets/astralbody.ico",
+    icon="assets/astraldeep.ico",
 )

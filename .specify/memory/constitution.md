@@ -272,7 +272,7 @@
   Follow-up TODOs: None
 -->
 
-# AstralBody Constitution
+# AstralDeep Constitution
 
 ## Core Principles
 
@@ -804,7 +804,7 @@ an ungoverned back channel for unverified claims.
 ## Governance
 
 This constitution is the highest-authority document governing
-AstralBody development practices. It supersedes all other
+AstralDeep development practices. It supersedes all other
 guidance when conflicts arise.
 
 - **Amendments**: Any change to this constitution MUST be

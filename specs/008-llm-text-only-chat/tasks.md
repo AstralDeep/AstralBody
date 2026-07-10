@@ -113,7 +113,7 @@ This is a web-app repo with split `backend/` and `frontend/` trees. Tests live i
 
 ### Implementation for User Story 3
 
-- [x] T023 [US3] Append a new INSERT row to the user-flow block in [backend/seeds/tutorial_steps_seed.sql](../../backend/seeds/tutorial_steps_seed.sql) immediately after the `open-agents-panel` row: `('enable-agents', 'user', 35, 'static', 'sidebar.agents', 'Turn an agent on', 'Open the Agents panel and switch on at least one agent. Until you do, AstralBody talks to the language model in text-only mode — it can chat, but it can''t take actions on your behalf.')`. The trailing `ON CONFLICT (slug) DO NOTHING` clause already on the multi-row INSERT covers idempotency (Constitution Principle IX).
+- [x] T023 [US3] Append a new INSERT row to the user-flow block in [backend/seeds/tutorial_steps_seed.sql](../../backend/seeds/tutorial_steps_seed.sql) immediately after the `open-agents-panel` row: `('enable-agents', 'user', 35, 'static', 'sidebar.agents', 'Turn an agent on', 'Open the Agents panel and switch on at least one agent. Until you do, AstralDeep talks to the language model in text-only mode — it can chat, but it can''t take actions on your behalf.')`. The trailing `ON CONFLICT (slug) DO NOTHING` clause already on the multi-row INSERT covers idempotency (Constitution Principle IX).
 
 **Checkpoint**: US3 fully functional — the new step appears in the user tutorial flow at display_order 35, sandwiched between "Browse available agents" (30) and "Review the audit log" (40).
 

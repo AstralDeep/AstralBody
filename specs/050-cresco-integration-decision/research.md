@@ -11,7 +11,7 @@ This document records the evaluation that produced the GO/NO-GO/DEFER decision a
 |---|---|---|
 | Platform-level adoption (JVM in image, ActiveMQ bus, protocol replacement, `pycrescolib` runtime dep) | **NO-GO** | Constitution I (Python-only backend) + V (no unapproved deps); the two systems are complementary layers, not substitutes. |
 | First-party Python bridge agent over `wsapi` | **GO** | Zero new deps proven live; fabric treated as external infrastructure (Keycloak posture); inherits all existing gates. |
-| Cresco-side Java bridge plugin (presents an AgentCard to AstralBody) | **DEFER** | Only needed if the fabric must *initiate* toward AstralBody; no current requirement. |
+| Cresco-side Java bridge plugin (presents an AgentCard to AstralDeep) | **DEFER** | Only needed if the fabric must *initiate* toward AstralDeep; no current requirement. |
 
 ## R1 — Cresco architecture (what we are integrating with)
 
@@ -21,7 +21,7 @@ This document records the evaluation that produced the GO/NO-GO/DEFER decision a
 - **Planes**: a `MsgEvent` control plane over ActiveMQ plus a pub/sub dataplane for streams.
 - **Runtime**: JDK 21, Apache Felix OSGi, a single executable JAR (`agent-1.3-SNAPSHOT.jar`); the controller additionally embeds ActiveMQ + Apache Derby.
 - **Identity**: mutual-TLS X.509 with a structured DN (`CN=<agent>, OU=<region>, O=<tenant>`); broker roles `SUPERUSER` / `TENANT`; tenant isolation is enforced at the broker.
-- **Consequence for us**: principals are **machines/tenants**, not humans. Cresco has no LLM layer, no per-user consent, no per-tool permission model, no human-anchored delegation, and no per-user tamper-evident audit chain. Everything user-facing and safety-relevant is contributed by AstralBody (see R5).
+- **Consequence for us**: principals are **machines/tenants**, not humans. Cresco has no LLM layer, no per-user consent, no per-tool permission model, no human-anchored delegation, and no per-user tamper-evident audit chain. Everything user-facing and safety-relevant is contributed by AstralDeep (see R5).
 
 ## R2 — External seam: `wsapi`
 
@@ -44,7 +44,7 @@ This document records the evaluation that produced the GO/NO-GO/DEFER decision a
 **Source**: `executor` @ `8e9020e`.
 
 - The `executor` plugin **"runs arbitrary shell commands by design — a remote execution surface."**
-- Authorization is delegated to the broker/tenant layer only; combined with the all-or-nothing `cresco_service_key`, this means **any LLM-facing wrapper concentrates the entire per-user safety case in AstralBody's gates**.
+- Authorization is delegated to the broker/tenant layer only; combined with the all-or-nothing `cresco_service_key`, this means **any LLM-facing wrapper concentrates the entire per-user safety case in AstralDeep's gates**.
 - `executor` is **enabled by default on a global node**.
 - **Consequence for us**: the executor-wrapping tool must be the most tightly gated surface in the feature — system-scoped, default-deny, hard security-flagged, never flipped on by the safe-agent baseline, and only reachable via an explicit per-user override (spec FR-006; Constitution VII Cresco clause).
 
@@ -65,9 +65,9 @@ Reconnect/backoff that the bridge needs is implemented with **stdlib** (bounded 
 
 ## R5 — What the bridge inherits (nothing new to build on the safety side)
 
-Cresco supplies none of the following; AstralBody already supplies all of them, and the bridge inherits them by being a normal first-party in-process agent:
+Cresco supplies none of the following; AstralDeep already supplies all of them, and the bridge inherits them by being a normal first-party in-process agent:
 
-| Safety property | AstralBody mechanism (already exists) |
+| Safety property | AstralDeep mechanism (already exists) |
 |---|---|
 | Fail-closed agent registration | `orchestrator/auth.py::validate_agent_api_key` (`AGENT_API_KEY`) |
 | Per-tool scopes | `tool_permissions.register_tool_scopes` + `is_tool_allowed` |
@@ -85,7 +85,7 @@ Cross-fabric provenance: a spec-048 recursive delegation chain terminating in a 
 |---|---|---|
 | Adopt Cresco as the platform agent mesh (replace A2A/WS) | Rejected | Constitution I; ActiveMQ + JVM in image; loses per-user consent/audit model. |
 | Add `pycrescolib` as a runtime dep | Rejected | New `backoff` dep (Constitution V) + global TLS-verify-off (FR-007). |
-| Cresco-side Java bridge plugin (fabric → AstralBody) | Deferred | No requirement for the fabric to initiate; revisit if that changes. |
+| Cresco-side Java bridge plugin (fabric → AstralDeep) | Deferred | No requirement for the fabric to initiate; revisit if that changes. |
 | Hand-rolled `websockets`+stdlib bridge (this feature) | **Chosen** | Zero new deps (proven live), fabric external, inherits all gates. |
 
 ## R7 — Open items carried into implementation (not blockers)

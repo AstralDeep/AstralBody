@@ -3,11 +3,11 @@
 # gate PRs or slow the main CI. Separate from ci.yml by design.
 #
 # Produces three assets per release:
-#   AstralBody.exe   — the PyInstaller-built native client
+#   AstralDeep.exe   — the PyInstaller-built native client
 #   SHA256SUMS       — the SHA-256 of the exe (the client's primary integrity check)
 #   cosign.bundle    — the sigstore bundle (keyless, signed with the workflow's
 #                      GitHub OIDC identity; verified client-side against the
-#                      AstralDeep/AstralBody workflow identity)
+#                      AstralDeep/AstralDeep workflow identity)
 #
 # No long-lived signing secret: sigstore keyless signing uses the job's OIDC
 # token (permissions.id-token: write). The client verifies both the hash and
@@ -67,13 +67,13 @@ jobs:
 
       - name: Build the exe (PyInstaller)
         working-directory: windows-client
-        run: pyinstaller --noconfirm AstralBody.spec
+        run: pyinstaller --noconfirm AstralDeep.spec
 
       - name: Create SHA256SUMS
         working-directory: windows-client/dist
         shell: bash
         run: |
-          sha256sum AstralBody.exe > SHA256SUMS
+          sha256sum AstralDeep.exe > SHA256SUMS
           cat SHA256SUMS
 
       - name: Keyless sign with sigstore (GitHub OIDC)
@@ -83,21 +83,21 @@ jobs:
         # (permissions.id-token: write) — no --identity/--oidc-issuer flags,
         # which conflict with the ambient token. Fulcio issues a cert whose
         # SAN is the token's `sub`:
-        #   https://github.com/AstralDeep/AstralBody/.github/workflows/release-windows.yml@refs/tags/<tag>
+        #   https://github.com/AstralDeep/AstralDeep/.github/workflows/release-windows.yml@refs/tags/<tag>
         # The client verifier rebuilds that exact string from the release tag.
         run: |
-          sigstore sign AstralBody.exe --bundle cosign.bundle
+          sigstore sign AstralDeep.exe --bundle cosign.bundle
 
       - name: Verify the signature (self-check)
         working-directory: windows-client/dist
         shell: bash
         env:
-          SIGSTORE_IDENTITY: "https://github.com/AstralDeep/AstralBody/.github/workflows/release-windows.yml@refs/tags/${{ github.ref_name }}"
+          SIGSTORE_IDENTITY: "https://github.com/AstralDeep/AstralDeep/.github/workflows/release-windows.yml@refs/tags/${{ github.ref_name }}"
         # sigstore 3.x merged verify-github into `verify` (same --cert-identity
         # + --cert-oidc-issuer flags). The client verifier uses the equivalent
         # sigstore-python Identity policy with the same exact-match string.
         run: |
-          sigstore verify identity AstralBody.exe --bundle cosign.bundle \
+          sigstore verify identity AstralDeep.exe --bundle cosign.bundle \
             --cert-identity "$SIGSTORE_IDENTITY" \
             --cert-oidc-issuer https://token.actions.githubusercontent.com
 
@@ -105,7 +105,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            windows-client/dist/AstralBody.exe
+            windows-client/dist/AstralDeep.exe
             windows-client/dist/SHA256SUMS
             windows-client/dist/cosign.bundle
           generate_release_notes: true

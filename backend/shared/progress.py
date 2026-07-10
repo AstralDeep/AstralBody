@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Progress indication system for AstralBody.
+Progress indication system for AstralDeep.
 
 Provides ProgressEvent, ProgressPhase, ProgressStep enums and ProgressEmitter
 for emitting structured progress events during agent generation and testing.

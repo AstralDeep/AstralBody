@@ -1,5 +1,5 @@
 """
-Summarizer Agent package for AstralBody system.
+Summarizer Agent package for AstralDeep system.
 
 Provides text/URL summarization and two-document comparison tools.
 """

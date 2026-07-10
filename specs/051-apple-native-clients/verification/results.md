@@ -24,7 +24,7 @@ timings not instrumented (observed: watch flip < 5 s after approval; speech
 begins with the delivery frame).
 
 
-**Environment**: dev backend in the `astralbody` container (localhost:8001,
+**Environment**: dev backend in the `astraldeep` container (localhost:8001,
 `ASTRAL_ENV=development`, `FF_DEVICE_LOGIN=true`,
 `KEYCLOAK_AUTHORITY=https://iam.ai.uky.edu/realms/Astral`); iPhone 17 Pro
 simulator (iOS 26.x), Apple Watch Series 11 (46 mm) simulator; macOS app on

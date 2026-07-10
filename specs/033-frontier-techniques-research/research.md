@@ -9,12 +9,12 @@
 - **Eight parallel domain analysts.** Three commercial streams (OpenAI; Google/DeepMind;
   Anthropic+Microsoft+Meta+Amazon+Vercel+startups) and five scholarly streams (agentic frameworks;
   generative/adaptive UI; memory/personalization; agentic security; device adaptation), each run
-  with the same AstralBody baseline brief and the same hard constraint envelope.
+  with the same AstralDeep baseline brief and the same hard constraint envelope.
 - **Source discipline.** Scholarly streams restricted to primary venues (arXiv, CHI/UIST/IUI,
   NeurIPS/ICML/ICLR, ACL, IEEE S&P/USENIX/CCS/NDSS, IETF, OWASP) — no Medium/listicles. Commercial
   streams restricted to official vendor sources with preview-vs-GA flags and hype call-outs.
 - **Per-finding contract.** Every finding carries Source, What-it-is, Frontier-evidence,
-  AstralBody-gap, Priority, an in-constraint "how to implement", and Novelty/Impact/Effort scores
+  AstralDeep-gap, Priority, an in-constraint "how to implement", and Novelty/Impact/Effort scores
   (see `contracts/capability-record.md`).
 - **Cross-stream synthesis.** ~164 raw findings deduplicated to 71 consolidated capabilities with a
   consensus indicator (≥3 streams = convergent = highest confidence), grouped by the four priority
