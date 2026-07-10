@@ -29,6 +29,8 @@ SURFACE_MODULES = {
     "agents": "webrender.chrome.surfaces.agents",
     "drafts": "webrender.chrome.surfaces.drafts",
     "llm": "webrender.chrome.surfaces.llm",
+    # Feature 054 — admin-only System LLM credential (web-only carve-out).
+    "llm_system": "webrender.chrome.surfaces.llm_system",
     "personalization": "webrender.chrome.surfaces.personalization",
     "audit": "webrender.chrome.surfaces.audit",
     "theme": "webrender.chrome.surfaces.theme",

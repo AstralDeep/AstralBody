@@ -888,16 +888,14 @@ def extract_search_terms(query: str, **kwargs) -> str:
     api_key = (
         session_llm.get("OPENAI_API_KEY")
         or (creds.get("OPENAI_API_KEY") if not kwargs.get("_credentials_encrypted") else None)
-        or os.getenv("OPENAI_API_KEY")
     )
     base_url = (
         session_llm.get("OPENAI_BASE_URL")
         or (creds.get("OPENAI_BASE_URL") if not kwargs.get("_credentials_encrypted") else None)
-        or os.getenv("OPENAI_BASE_URL")
     )
     model = (
         session_llm.get("LLM_MODEL")
-        or os.getenv("LLM_MODEL", "gpt-4o")
+        or "gpt-4o"
     )
     
     if not api_key:

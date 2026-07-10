@@ -107,41 +107,66 @@ class InteractionCollector:
 class KnowledgeSynthesizer:
     """Periodically analyzes interaction data and produces knowledge markdown."""
 
-    def __init__(self, db, knowledge_dir: str = None, knowledge_index: "KnowledgeIndex" = None):
+    def __init__(self, db, knowledge_dir: str = None, knowledge_index: "KnowledgeIndex" = None,
+                 config_resolver=None):
+        """Args:
+            config_resolver: Zero-arg SYNC callable returning the current
+                system LLM configuration, or ``None``. Feature 054: the
+                synthesizer is a cross-user system flow — it runs on the
+                admin-managed system credential, re-checked EVERY cycle
+                (an admin save re-enables synthesis without a restart; the
+                retired ``OPENAI_*``/``KNOWLEDGE_LLM_MODEL`` env reads are
+                gone). No resolver, or no stored record, means each cycle
+                logs and skips with data preserved.
+        """
         self.db = db
         self.knowledge_dir = knowledge_dir or DEFAULT_KNOWLEDGE_DIR
         self.knowledge_index = knowledge_index
+        self._config_resolver = config_resolver
 
-        def _empty_to_none(v):
-            if v is None:
-                return None
-            v = v.strip()
-            return v or None
-
-        base_url = _empty_to_none(os.getenv("OPENAI_BASE_URL"))
-        api_key = _empty_to_none(os.getenv("OPENAI_API_KEY"))
-        self.model = _empty_to_none(os.getenv("KNOWLEDGE_LLM_MODEL")) or _empty_to_none(os.getenv("LLM_MODEL"))
+        self.model = None
+        self.client = None
         self.synthesis_interval = int(os.getenv("KNOWLEDGE_SYNTHESIS_INTERVAL", str(DEFAULT_SYNTHESIS_INTERVAL)))
         self.min_interactions = int(os.getenv("KNOWLEDGE_MIN_INTERACTIONS", str(DEFAULT_MIN_INTERACTIONS)))
 
-        if not (base_url and api_key and self.model):
-            logger.info("knowledge synthesis disabled — operator LLM not configured")
-            self._available = False
-            self.client = None
-        else:
-            try:
-                self.client = OpenAI(
-                    api_key=api_key,
-                    base_url=base_url,
-                    timeout=Timeout(300.0, connect=10.0),
-                )
-                self._available = True
-            except Exception as e:
-                logger.warning(f"Knowledge LLM client init failed: {e}")
-                self._available = False
-                self.client = None
-
         self._ensure_dirs()
+
+    def _refresh_client(self) -> bool:
+        """Per-cycle system-credential resolution (SYNC — call off-loop).
+
+        Returns True when a usable client/model pair is in place."""
+        if self._config_resolver is None:
+            self.client = None
+            self.model = None
+            return False
+        try:
+            cfg = self._config_resolver()
+        except Exception as e:
+            logger.warning(f"knowledge synthesis: system LLM resolution failed: {e}")
+            cfg = None
+        if cfg is None:
+            self.client = None
+            self.model = None
+            return False
+        try:
+            self.client = OpenAI(
+                api_key=getattr(cfg, "api_key", "") or "not-needed",
+                base_url=cfg.base_url,
+                timeout=Timeout(300.0, connect=10.0),
+            )
+            self.model = cfg.model
+            return True
+        except Exception as e:
+            logger.warning(f"Knowledge LLM client init failed: {e}")
+            self.client = None
+            self.model = None
+            return False
+
+    @property
+    def _available(self) -> bool:
+        """Kept for compatibility with existing tests/telemetry: True iff the
+        LAST refresh produced a client."""
+        return self.client is not None
 
     def _ensure_dirs(self):
         """Create knowledge directory structure if it doesn't exist."""
@@ -174,8 +199,12 @@ class KnowledgeSynthesizer:
             )
             return
 
-        if not self._available or not self.client:
-            logger.warning("Knowledge LLM unavailable — skipping synthesis, data preserved")
+        # Feature 054: re-resolve the admin-managed system credential each
+        # cycle (system_llm_unconfigured ⇒ honest skip, data preserved).
+        if not await asyncio.to_thread(self._refresh_client):
+            logger.warning(
+                "system_llm_unconfigured: knowledge synthesis skipped — "
+                "configure the System LLM in admin settings; data preserved")
             return
 
         logger.info(f"Starting knowledge synthesis with {len(interactions)} interactions")

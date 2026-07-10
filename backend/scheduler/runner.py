@@ -136,6 +136,7 @@ class JobRunner:
         # 4. Execute as a background chat turn (in-app delivery via VirtualWebSocket).
         outcome = "success"
         summary = None
+        llm_unavailable = False
         try:
             # SEAM (verify against orchestrator internals during T057/staging):
             # run the instruction through the normal chat path under the minted
@@ -150,9 +151,22 @@ class JobRunner:
                 correlation_id=correlation_id,
             )
         except Exception as exc:
-            logger.exception("scheduled job execution failed", extra={"job_id": job_id})
-            outcome = "failure"
-            summary = f"error: {exc}"
+            # Feature 054 (FR-020): a run whose AI was unavailable is a
+            # FAILURE, reported honestly — never the old silent "success".
+            try:
+                from llm_config import LLMUnavailable
+                llm_unavailable = isinstance(exc, LLMUnavailable)
+            except Exception:  # pragma: no cover - defensive import guard
+                llm_unavailable = False
+            if llm_unavailable:
+                logger.warning("scheduled job skipped: system_llm_unconfigured",
+                               extra={"job_id": job_id})
+                outcome = "failure"
+                summary = "llm_unavailable: no system AI credential configured"
+            else:
+                logger.exception("scheduled job execution failed", extra={"job_id": job_id})
+                outcome = "failure"
+                summary = f"error: {exc}"
 
         self.store.finish_run(run_id, outcome=outcome, summary=summary, auth_ref=correlation_id)
 
@@ -173,5 +187,14 @@ class JobRunner:
             await self._notify(user_id, level="success",
                                 title=f"{job['name']} is ready",
                                 body=(summary or "Your scheduled task finished.")[:200],
+                                job_id=job_id, chat_id=job.get("target_chat_id"))
+        elif llm_unavailable:
+            # Feature 054 (US4-AS1): the owner is told the AI was unavailable
+            # — the run must never read as "finished".
+            await self._notify(user_id, level="error",
+                                title=f"Scheduled job failed: {job['name']}",
+                                body=("The AI was unavailable — the task did not run. "
+                                      "An admin needs to configure the System LLM "
+                                      "in settings."),
                                 job_id=job_id, chat_id=job.get("target_chat_id"))
         return outcome

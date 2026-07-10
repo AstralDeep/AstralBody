@@ -210,18 +210,40 @@ class MCPServer:
 class AgentCodeGenerator:
     """Generates agent code files using LLM for tool implementations and templates for boilerplate."""
 
-    def __init__(self, llm_client: Optional[OpenAI] = None, llm_model: str = None):
+    def __init__(self, llm_client: Optional[OpenAI] = None, llm_model: str = None,
+                 config_resolver=None):
+        """Args:
+            llm_client / llm_model: An explicit pre-built client (tests,
+                injection seams). When absent, ``config_resolver`` is used.
+            config_resolver: Zero-arg SYNC callable returning the current
+                system LLM configuration (feature 054 — codegen is a
+                system-context flow billed to the admin-managed credential;
+                the retired ``OPENAI_*`` env fallback is gone). Resolved
+                per generation call so an admin save takes effect without
+                a restart.
+        """
         self.llm_client = llm_client
         self.llm_model = llm_model
-        if not self.llm_client:
-            api_key = os.getenv("OPENAI_API_KEY")
-            base_url = os.getenv("OPENAI_BASE_URL")
-            self.llm_model = os.getenv("LLM_MODEL", "meta-llama/Llama-3.2-90B-Vision-Instruct")
-            if api_key and base_url:
-                self.llm_client = OpenAI(
-                    api_key=api_key, base_url=base_url,
-                    timeout=Timeout(180.0, connect=10.0)
-                )
+        self._config_resolver = config_resolver
+
+    async def _aresolve_client(self):
+        """Resolve (client, model) for one generation call, or (None, None)."""
+        if self.llm_client is not None:
+            return self.llm_client, self.llm_model
+        if self._config_resolver is None:
+            return None, None
+        try:
+            cfg = await asyncio.to_thread(self._config_resolver)
+        except Exception:
+            logger.exception("agent codegen: system LLM config resolution failed")
+            return None, None
+        if cfg is None:
+            return None, None
+        return OpenAI(
+            api_key=getattr(cfg, "api_key", "") or "not-needed",
+            base_url=cfg.base_url,
+            timeout=Timeout(180.0, connect=10.0),
+        ), cfg.model
 
     def _slugify(self, name: str) -> str:
         """Convert agent name to a safe directory/module slug."""
@@ -287,7 +309,8 @@ class AgentCodeGenerator:
                                    packages: List[str] = None,
                                    knowledge_context: str = "") -> str:
         """Use LLM to generate mcp_tools.py with tool implementations."""
-        if not self.llm_client:
+        _client, _model = await self._aresolve_client()
+        if not _client:
             raise RuntimeError("LLM not configured — cannot generate agent tools")
 
         tools_description = ""
@@ -381,8 +404,8 @@ Output ONLY the Python code. No markdown fences, no explanations."""
         ]
 
         response = await asyncio.to_thread(
-            self.llm_client.chat.completions.create,
-            model=self.llm_model,
+            _client.chat.completions.create,
+            model=_model,
             messages=messages,
             temperature=0.2,
         )
@@ -403,7 +426,8 @@ Output ONLY the Python code. No markdown fences, no explanations."""
     async def refine_tools_file(self, current_code: str, user_message: str,
                                  agent_name: str, description: str) -> str:
         """Refine existing mcp_tools.py based on user feedback."""
-        if not self.llm_client:
+        _client, _model = await self._aresolve_client()
+        if not _client:
             raise RuntimeError("LLM not configured — cannot refine agent tools")
 
         ui_spec = generate_llm_prompt_section()
@@ -463,8 +487,8 @@ Output ONLY the Python code. No markdown fences, no explanations."""
         ]
 
         response = await asyncio.to_thread(
-            self.llm_client.chat.completions.create,
-            model=self.llm_model,
+            _client.chat.completions.create,
+            model=_model,
             messages=messages,
             temperature=0.2,
         )

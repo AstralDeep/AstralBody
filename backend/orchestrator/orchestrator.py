@@ -694,6 +694,9 @@ class Orchestrator:
                 db=self.history.db,
                 knowledge_dir=knowledge_dir,
                 knowledge_index=self.knowledge_index,
+                # Feature 054: cross-user system flow — runs on the admin-
+                # managed system credential, re-resolved per cycle.
+                config_resolver=self._llm_store.get_system_sync,
             )
             self.hooks.register(HookEvent.POST_TOOL_USE, self._interaction_collector.on_tool_use)
             self.hooks.register(HookEvent.POST_TOOL_FAILURE, self._interaction_collector.on_tool_use)
@@ -1829,6 +1832,27 @@ class Orchestrator:
                         "payload": {"chat_id": chat_id, "from_message": False}
                     }))
 
+                # Feature 054 (FR-014): LLM-dependent workspace/component
+                # verbs are refused server-side while the acting user has no
+                # LLM configuration, regardless of client behavior. (The
+                # combine/condense execution itself runs on the SYSTEM
+                # credential; this gate is about the unconfigured USER.)
+                elif msg.action in ("combine_components", "condense_components",
+                                    "component_action") \
+                        and user_id \
+                        and not await self.llm_configured_for(user_id):
+                    actor_user_id, auth_principal = self._llm_audit_principals(websocket)
+                    await self._record_llm_unconfigured(
+                        self.audit_recorder,
+                        actor_user_id=actor_user_id,
+                        auth_principal=auth_principal,
+                        feature=f"ui_event:{msg.action}",
+                    )
+                    await self.send_ui_render(websocket, [
+                        Alert(message="Set up your AI provider to use this.",
+                              variant="error").to_dict()
+                    ], target="chat")
+
                 # Saved components actions
                 elif msg.action in ("save_component", "delete_saved_component",
                                     "combine_components", "condense_components") \
@@ -2927,6 +2951,25 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         in production (see specs/030-finish-soul-integration/security-review.md).
         """
         from orchestrator.async_tasks import BackgroundTask, VirtualWebSocket
+
+        # Feature 054 (FR-020): scheduled turns run on the admin-managed
+        # system credential. Fail HONESTLY before executing when it is
+        # absent — the pre-054 path swallowed the unavailability alert
+        # inside the VirtualWebSocket and recorded a "success" run while
+        # nothing actually happened.
+        if await self._llm_store.get_system() is None:
+            try:
+                await self._record_llm_unconfigured(
+                    self.audit_recorder,
+                    actor_user_id=user_id or "system",
+                    auth_principal="system",
+                    feature="scheduled_job",
+                )
+            except Exception:  # pragma: no cover — audit is best-effort
+                logger.debug("scheduled_job llm_unconfigured audit failed",
+                             exc_info=True)
+            raise self._LLMUnavailable(
+                "no system LLM credential configured — scheduled turn not run")
 
         target_chat = chat_id or f"scheduled-{user_id}"
         bg = BackgroundTask(

@@ -2,8 +2,42 @@
 
 **Feature Branch**: `006-user-llm-config`
 **Created**: 2026-04-28
-**Status**: Draft
+**Status**: Draft — **AMENDED BY FEATURE 054** (see conformance note below)
 **Input**: User description: "As a user, I want to use my own LLM subscription. move env variables for openai_api_key, openai_base_url, and llm_model to the frontend so a user can use whatever model they want (openai api compatible)"
+
+> ## Amended by 054-byo-llm-setup (2026-07-10)
+>
+> Feature 054 (bring-your-own-LLM: mandatory provider setup +
+> shipped-credential removal, [spec](../054-byo-llm-setup/spec.md))
+> **supersedes** the following elements of this spec:
+>
+> - **FR-002 storage clause** ("no database row") — replaced by encrypted
+>   server-side per-user storage (`user_llm_config`, API key Fernet at
+>   rest). The log/audit/cross-user clauses of FR-002 survive verbatim.
+> - **FR-004 / FR-004a** (operator default; "user MUST NOT be blocked or
+>   forced to configure") — replaced by the mandatory first-run
+>   provider-setup gate.
+> - **FR-010** (env vars "MUST continue to be supported") — the operator
+>   env credential path is deleted; the vars are inert.
+> - **FR-011** (background jobs use the operator default) — replaced by
+>   the admin-managed system credential (`system_llm_config`).
+> - **FR-012 / US2** ("Clear reverts to the operator default") — clearing
+>   now re-gates the user behind the setup dialog.
+> - **Clarifications Q1–Q3** (device-local persistence; operator-default
+>   semantics; clear-reverts-to-default) — superseded as above.
+> - **Out of Scope "no provider catalog"** — rescinded (054 ships the
+>   server-owned provider preset catalog).
+> - **US1 acceptance 1, US4 entirely, SC-001/SC-006's
+>   `operator_default` queries, FR-016/US3:4** — retargeted per 054
+>   (`credential_source` is now `user` | `system` for new events).
+>
+> **Surviving invariants** (unchanged and still binding): FR-005 probe
+> semantics (real chat-completion, `max_tokens: 1`), FR-006 audit
+> redaction (no key substring ≥ 4), FR-007a per-call source auditing,
+> FR-009 no-silent-fallback (now: no fallback of any kind, in either
+> direction, and never another user's record), FR-012 immediate effect of
+> Clear, FR-014..FR-017 token-usage counters (in their current
+> per-session form), SC-002 zero-key-leak validation.
 
 ## Clarifications
 
