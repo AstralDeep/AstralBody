@@ -28,8 +28,6 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from jose import jwt as jose_jwt
 from dotenv import load_dotenv
-from openai import OpenAI
-from httpx import Timeout
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from orchestrator.history import HistoryManager

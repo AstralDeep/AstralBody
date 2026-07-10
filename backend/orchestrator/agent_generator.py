@@ -6,7 +6,6 @@ Generates the 3 files needed for a new agent:
 - mcp_server.py    — from template (not LLM)
 - mcp_tools.py     — LLM-generated tool implementations
 """
-import os
 import re
 import json
 import logging
