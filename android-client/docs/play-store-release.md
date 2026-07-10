@@ -12,22 +12,22 @@ Setup → App signing → *Request upload key reset*); losing the app signing ke
 impossible because you never have it.
 
 Local signing material (**never committed** — `.gitignore` covers
-`key.properties`, `*.jks`, `*.keystore`):
+`keystore.properties`, `*.jks`, `*.keystore`):
 
 | What | Where |
 |---|---|
 | Upload keystore | `%USERPROFILE%\.android-keys\astral-upload.jks` (alias `astral-upload`) |
 | Keystore/key password | `%USERPROFILE%\.android-keys\astral-upload.pass.txt` |
-| Gradle signing config | `android-client/key.properties` (points at the above) |
+| Gradle signing config | `android-client/keystore.properties` (points at the above) |
 
 > **Back up `%USERPROFILE%\.android-keys\` somewhere safe** (password manager,
 > encrypted drive). It lives outside the repo and outside any clone.
 
-`app/build.gradle.kts` loads `key.properties` only if it exists — CI and fresh
+`app/build.gradle.kts` loads `keystore.properties` only if it exists — CI and fresh
 clones without it still build/test normally; their release builds are simply
 unsigned.
 
-To recreate `key.properties` on a new machine (note doubled backslashes):
+To recreate `keystore.properties` on a new machine (note doubled backslashes):
 
 ```properties
 storeFile=C:\\Users\\<you>\\.android-keys\\astral-upload.jks

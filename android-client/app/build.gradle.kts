@@ -10,7 +10,7 @@ plugins {
     alias(libs.plugins.ktlint)
 }
 
-// Release signing is read from a gitignored key.properties (see docs/play-store-release.md).
+// Release signing is read from a gitignored keystore.properties (see docs/play-store-release.md).
 // Absent on CI and fresh clones — release builds are simply unsigned there.
 val keystoreProperties =
     Properties().apply {
@@ -30,8 +30,8 @@ android {
         applicationId = "com.personalailabs.astraldeep"
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "1.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // AppAuth captures the OIDC redirect via this scheme (RedirectUriReceiverActivity).
