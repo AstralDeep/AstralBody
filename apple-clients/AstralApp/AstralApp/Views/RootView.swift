@@ -93,26 +93,31 @@ struct AstralTopBar: View {
 
             Spacer()
 
-            newButton
+            // 054 first-run gate: while the server pins a mandatory surface,
+            // every navigation control is hidden — only the Settings gear
+            // stays, reduced to its sign-out affordance (FR-013).
+            if !model.mandatorySurface {
+                newButton
 
-            Button { model.goTo(.history) } label: {
-                Image(systemName: "bubble.left.and.bubble.right")
-                    .font(.system(size: 18)).foregroundStyle(p.text)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Recent chats")
+                Button { model.goTo(.history) } label: {
+                    Image(systemName: "bubble.left.and.bubble.right")
+                        .font(.system(size: 18)).foregroundStyle(p.text)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Recent chats")
 
-            // Server-owned top-bar actions (pulse / timeline), rendered from the model.
-            ForEach(model.chromeMenu?.topbarActions ?? []) { control in
-                if let action = control.action, !action.surface.isEmpty {
-                    Button {
-                        model.openSurface(action.surface, params: action.params)
-                    } label: {
-                        Image(systemName: topBarIcon(control.icon))
-                            .font(.system(size: 18)).foregroundStyle(p.text)
+                // Server-owned top-bar actions (pulse / timeline), rendered from the model.
+                ForEach(model.chromeMenu?.topbarActions ?? []) { control in
+                    if let action = control.action, !action.surface.isEmpty {
+                        Button {
+                            model.openSurface(action.surface, params: action.params)
+                        } label: {
+                            Image(systemName: topBarIcon(control.icon))
+                                .font(.system(size: 18)).foregroundStyle(p.text)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(control.label ?? action.surface)
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(control.label ?? action.surface)
                 }
             }
 
@@ -140,14 +145,18 @@ struct AstralTopBar: View {
 
     private var settingsMenu: some View {
         Menu {
-            ForEach(model.chromeMenu?.menu ?? []) { group in
-                Section(group.label) {
-                    ForEach(group.items) { item in
-                        Button(item.label) { model.openMenuItem(item) }
+            // 054: server menu items are navigation — suppressed while the
+            // mandatory surface is pinned; sign-out below always remains.
+            if !model.mandatorySurface {
+                ForEach(model.chromeMenu?.menu ?? []) { group in
+                    Section(group.label) {
+                        ForEach(group.items) { item in
+                            Button(item.label) { model.openMenuItem(item) }
+                        }
                     }
                 }
+                Divider()
             }
-            Divider()
             if !model.accountName.isEmpty {
                 Text(model.accountName)
             }

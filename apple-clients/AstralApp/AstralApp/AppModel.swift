@@ -112,6 +112,10 @@ final class AppModel: NSObject {
     var pendingSurfaceKey = ""
     var pendingSurfaceParams: JSONValue = .object([:])
     var pendingSurface: SurfaceContent?
+    /// 054 first-run gate: the server pinned the current surface
+    /// (`chrome_surface` `mode:"mandatory"`) — navigation is suppressed until
+    /// the server replaces or closes it. Sign-out stays available (FR-013).
+    var mandatorySurface = false
     var timelineReadOnly = false
 
     var signInError: String?
@@ -364,6 +368,7 @@ final class AppModel: NSObject {
         signedIn = false
         resetChatState()
         chromeMenu = nil
+        mandatorySurface = false   // the next session re-gates server-side
         agents = []; history = []; audit = []
     }
 
@@ -441,7 +446,8 @@ final class AppModel: NSObject {
 
     // MARK: reduce (port of AppViewModel.reduce)
 
-    private func handleFrame(_ frame: InboundFrame) {
+    /// Internal (not private) so XCTests can drive frames through the reducer.
+    func handleFrame(_ frame: InboundFrame) {
         switch frame.name {
         case "ui_render":
             reduceUiRender(frame)
@@ -587,12 +593,26 @@ final class AppModel: NSObject {
         let title = frame.payload["title"]?.stringValue ?? ""
         let components = AstralComponent.list(from: frame.payload["components"])
         if surfaceKey.isEmpty && components.isEmpty {
+            // The server's blank close instruction also lifts the 054
+            // mandatory pin (save success → close, then welcome ui_render).
+            mandatorySurface = false
             if screen == .surface {
                 screen = .chat
                 pendingSurface = nil
                 pendingSurfaceKey = ""
                 pendingSurfaceParams = .object([:])
             }
+            return
+        }
+        if frame.surfaceMode == "mandatory" {
+            // 054 first-run gate: accept the surface even though unsolicited
+            // and pin it — goTo/newChat/openSurface and the top bar suppress
+            // navigation until the server closes it; sign-out stays (FR-013).
+            mandatorySurface = true
+            screen = .surface
+            pendingSurfaceKey = surfaceKey
+            pendingSurfaceParams = .object([:])
+            pendingSurface = SurfaceContent(surfaceKey: surfaceKey, title: title, components: components)
             return
         }
         if screen == .surface && pendingSurfaceKey == surfaceKey {
@@ -815,6 +835,7 @@ final class AppModel: NSObject {
     }
 
     func newChat() {
+        if mandatorySurface { return }   // 054: navigation pinned (sign-out only)
         seqState.removeAll()
         resetChatState()
         screen = .chat
@@ -839,6 +860,7 @@ final class AppModel: NSObject {
     }
 
     func goTo(_ target: Screen) {
+        if mandatorySurface { return }   // 054: navigation pinned (sign-out only)
         screen = target
         agentsLoading = target == .agents || agentsLoading
         historyLoading = target == .history || historyLoading
@@ -854,6 +876,7 @@ final class AppModel: NSObject {
     func openMenuItem(_ item: ChromeMenuItem) { openSurface(item.surface, params: item.params) }
 
     func openSurface(_ surface: String, params: JSONValue = .object([:])) {
+        if mandatorySurface { return }   // 054: the pinned surface can't be replaced client-side
         switch surface {
         case "agents": goTo(.agents)
         case "audit": goTo(.audit)

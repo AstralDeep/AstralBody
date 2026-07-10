@@ -4557,6 +4557,10 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         from orchestrator.async_tasks import VirtualWebSocket
         if isinstance(websocket, VirtualWebSocket):
             return None
+        # A live socket absent from ui_sessions has no user claims yet; the
+        # _registered_events gate guarantees no LLM dispatch happens before
+        # registration, so treating it as SYSTEM here can only surface as an
+        # LLMUnavailable refusal, never a credential borrow.
         claims = self.ui_sessions.get(websocket) or {}
         return claims.get("sub")
 

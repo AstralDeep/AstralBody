@@ -1,4 +1,4 @@
-"""T033 — POST /api/llm/test integration tests.
+"""T033 (006) + 054 — POST /api/llm/test integration tests.
 
 Builds a minimal FastAPI app with the llm_router mounted, stubs:
 
@@ -6,7 +6,10 @@ Builds a minimal FastAPI app with the llm_router mounted, stubs:
 * The orchestrator dependency to provide an audit recorder.
 * The OpenAI client constructor to return a controllable fake.
 
-Then verifies the response shape, error_class taxonomy, and audit emission.
+Then verifies the response shape, error_class taxonomy, and audit
+emission. The probe contract is unchanged by feature 054 (the shared
+classifier now lives in ``llm_config.probe`` — an internal detail); 054
+adds the per-user probe rate limit (HTTP 429) tested at the bottom.
 """
 from __future__ import annotations
 
@@ -17,7 +20,16 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import llm_config.api as llm_api
 from llm_config.api import llm_router
+
+
+@pytest.fixture(autouse=True)
+def _reset_probe_rate_state():
+    """The per-user rate limiter is module-global state — isolate tests."""
+    llm_api._probe_hits.clear()
+    yield
+    llm_api._probe_hits.clear()
 
 
 @pytest.fixture
@@ -185,3 +197,65 @@ def test_failure_audit_does_not_contain_api_key(client, fake_recorder):
     ev = fake_recorder.record.await_args.args[0]
     serialised = ev.model_dump_json()
     assert "sk-mostsensitive1234567890abcdef" not in serialised
+
+
+# ============================================================================
+# Feature 054 — per-user probe rate limit (HTTP 429)
+# ============================================================================
+
+
+_PROBE_BODY = {
+    "api_key": "sk-ratelimit1234567890abcd",
+    "base_url": "https://x.example/v1",
+    "model": "m",
+}
+
+
+def test_probe_rate_limit_429_on_third_call(client, fake_recorder, monkeypatch):
+    monkeypatch.setattr(llm_api, "_PROBE_RATE_PER_MINUTE", 2)
+    llm_api._probe_hits.clear()
+    fake = MagicMock()
+    fake.chat.completions.create = MagicMock(return_value=_success_response())
+    with patch("llm_config.api.OpenAI", return_value=fake):
+        assert client.post("/api/llm/test", json=_PROBE_BODY).status_code == 200
+        assert client.post("/api/llm/test", json=_PROBE_BODY).status_code == 200
+        r3 = client.post("/api/llm/test", json=_PROBE_BODY)
+    assert r3.status_code == 429
+    assert "probe" in r3.json()["detail"].lower()
+    # The refused call ran no probe and emitted no audit — only the two
+    # admitted calls did.
+    assert fake.chat.completions.create.call_count == 2
+    assert fake_recorder.record.await_count == 2
+
+
+def test_probe_rate_limit_shared_with_list_models(client, monkeypatch):
+    """Both /api/llm/* probe endpoints draw from the same per-user budget."""
+    monkeypatch.setattr(llm_api, "_PROBE_RATE_PER_MINUTE", 2)
+    llm_api._probe_hits.clear()
+    fake = MagicMock()
+    fake.chat.completions.create = MagicMock(return_value=_success_response())
+    fake.models.list = MagicMock(
+        return_value=SimpleNamespace(data=[SimpleNamespace(id="m")]))
+    with patch("llm_config.api.OpenAI", return_value=fake):
+        assert client.post("/api/llm/test", json=_PROBE_BODY).status_code == 200
+        assert client.post("/api/llm/test", json=_PROBE_BODY).status_code == 200
+        r = client.post("/api/llm/list-models", json={
+            "api_key": _PROBE_BODY["api_key"],
+            "base_url": _PROBE_BODY["base_url"],
+        })
+    assert r.status_code == 429
+
+
+def test_probe_rate_limit_window_expires(client, monkeypatch):
+    """Hits older than 60 s roll out of the window."""
+    monkeypatch.setattr(llm_api, "_PROBE_RATE_PER_MINUTE", 1)
+    llm_api._probe_hits.clear()
+    fake = MagicMock()
+    fake.chat.completions.create = MagicMock(return_value=_success_response())
+    with patch("llm_config.api.OpenAI", return_value=fake):
+        assert client.post("/api/llm/test", json=_PROBE_BODY).status_code == 200
+        assert client.post("/api/llm/test", json=_PROBE_BODY).status_code == 429
+        # Age the recorded hit past the 60-second window.
+        hits = llm_api._probe_hits["test_user"]
+        hits[0] -= 61.0
+        assert client.post("/api/llm/test", json=_PROBE_BODY).status_code == 200

@@ -51,6 +51,20 @@ class WireTest {
         assertEquals(2, r.components.size)
         assertEquals("button", r.components[0].type)
         assertEquals("color_picker", r.components[1].type)
+        // No `mode` on the wire — defaults to today's behavior (054).
+        assertEquals("replace", r.mode)
+    }
+
+    @Test
+    fun decodes_chrome_surface_mandatory_mode() {
+        val r =
+            assertIs<Inbound.ChromeSurface>(
+                Wire.decode(
+                    """{"type":"chrome_surface","surface_key":"llm","title":"Set up your AI provider","components":[{"type":"text","content":"form"}],"mode":"mandatory"}""",
+                ),
+            )
+        assertEquals("llm", r.surfaceKey)
+        assertEquals("mandatory", r.mode)
     }
 
     @Test

@@ -146,7 +146,7 @@ async def record_llm_config_change(
         auth_principal=auth_principal,
         event_class="llm_config_change",
         action_type=f"llm_config.{action}",
-        description=_describe_config_change(action, model, result),
+        description=_describe_config_change(action, model, result, scope),
         correlation_id=correlation_id or str(uuid4()),
         outcome=outcome,
         inputs_meta=inputs_meta,
@@ -158,21 +158,27 @@ async def record_llm_config_change(
 
 
 def _describe_config_change(
-    action: str, model: Optional[str], result: Optional[str]
+    action: str, model: Optional[str], result: Optional[str],
+    scope: str = "user",
 ) -> str:
+    # scope="system" describes the admin-managed deployment credential
+    # (feature 054); scope="user" describes a user's personal record.
+    who, what = (("Admin", "the system LLM credential") if scope == "system"
+                 else ("User", "their personal LLM configuration"))
     if action == "cleared":
-        return "User cleared their personal LLM configuration"
+        return f"{who} cleared {what}"
     if action == "discarded_undecryptable":
-        return ("Stored LLM configuration could not be decrypted and was "
-                "discarded (treated as unconfigured)")
+        return (f"Stored {'system ' if scope == 'system' else ''}LLM "
+                "configuration could not be decrypted and was discarded "
+                "(treated as unconfigured)")
     model_str = f" ({model})" if model else ""
     if action == "tested":
         if result == "success":
-            return f"User successfully tested their LLM configuration{model_str}"
-        return f"User's LLM configuration test failed{model_str}"
+            return f"{who} successfully tested {what}{model_str}"
+        return f"{who}'s LLM configuration test failed{model_str}"
     if action == "created":
-        return f"User saved their personal LLM configuration{model_str}"
-    return f"User updated their personal LLM configuration{model_str}"
+        return f"{who} saved {what}{model_str}"
+    return f"{who} updated {what}{model_str}"
 
 
 async def record_llm_unconfigured(

@@ -1,110 +1,116 @@
-"""T015 — build_llm_client factory unit tests.
+"""Feature 054 — build_llm_client factory unit tests.
 
-Covers all five branches of the resolution decision tree:
-1. user-only      → returns USER client
-2. default-only   → returns OPERATOR_DEFAULT client
-3. both-present   → user wins
-4. neither       → raises LLMUnavailable
-5. partial-default with user present → user still wins (irrelevant default)
+New signature: ``build_llm_client(config, source)`` — the caller
+(``Orchestrator._resolve_llm_client_for``) picks the record and source;
+the factory only materializes the client. The feature-006 two-tier
+user→operator-default rule is gone:
+
+* config present  ⇒ client bound to that record's base_url/api_key.
+* config None     ⇒ LLMUnavailable (first-run gate / honest system skip).
+* OPERATOR_DEFAULT source ⇒ ValueError (retired; no new call may carry it).
+* keyless config  ⇒ api_key placeholder "not-needed".
 """
 from __future__ import annotations
-
-import time
 
 import pytest
 
 from llm_config.client_factory import build_llm_client
-from llm_config.operator_creds import OperatorDefaultCreds
-from llm_config.session_creds import SessionCreds
-from llm_config.types import CredentialSource, LLMUnavailable
+from llm_config.types import CredentialSource, LLMUnavailable, ResolvedConfig
+from llm_config.user_store import PersistedLLMConfig
 
 
-def _user_creds() -> SessionCreds:
-    return SessionCreds(
-        api_key="sk-user",
-        base_url="https://user.example/v1",
-        model="user-model",
-        set_at=time.monotonic(),
-    )
+def _cfg(api_key="sk-user-key-1234567890abcdef",
+         base_url="https://user.example/v1",
+         model="user-model") -> PersistedLLMConfig:
+    return PersistedLLMConfig(
+        provider="custom", base_url=base_url, model=model, api_key=api_key)
 
 
-def _full_default() -> OperatorDefaultCreds:
-    return OperatorDefaultCreds(
-        api_key="sk-operator",
-        base_url="https://operator.example/v1",
-        model="operator-model",
-    )
-
-
-def _empty_default() -> OperatorDefaultCreds:
-    return OperatorDefaultCreds(api_key=None, base_url=None, model=None)
-
-
-def _partial_default() -> OperatorDefaultCreds:
-    """Real-world: api_key set, base_url missing (deployment misconfiguration)."""
-    return OperatorDefaultCreds(api_key="sk-op", base_url=None, model="m")
-
-
-class TestFactoryBranches:
-    def test_user_creds_present_default_absent(self):
-        client, source, resolved = build_llm_client(_user_creds(), _empty_default())
+class TestConfigPresent:
+    def test_user_source_builds_client_from_record(self):
+        client, source, resolved = build_llm_client(_cfg(), CredentialSource.USER)
         assert source is CredentialSource.USER
+        assert client.api_key == "sk-user-key-1234567890abcdef"
+        assert str(client.base_url).rstrip("/") == "https://user.example/v1"
+        assert isinstance(resolved, ResolvedConfig)
         assert resolved.base_url == "https://user.example/v1"
         assert resolved.model == "user-model"
-        assert client is not None
 
-    def test_user_absent_default_complete(self):
-        client, source, resolved = build_llm_client(None, _full_default())
-        assert source is CredentialSource.OPERATOR_DEFAULT
-        assert resolved.base_url == "https://operator.example/v1"
-        assert resolved.model == "operator-model"
+    def test_system_source_builds_client_from_record(self):
+        cfg = _cfg(api_key="sk-system-key-1234567890abcd",
+                   base_url="https://system.example/v1", model="sys-model")
+        client, source, resolved = build_llm_client(cfg, CredentialSource.SYSTEM)
+        assert source is CredentialSource.SYSTEM
+        assert client.api_key == "sk-system-key-1234567890abcd"
+        assert str(client.base_url).rstrip("/") == "https://system.example/v1"
+        assert resolved.model == "sys-model"
 
-    def test_both_present_user_wins(self):
-        _, source, resolved = build_llm_client(_user_creds(), _full_default())
-        assert source is CredentialSource.USER
-        assert resolved.base_url == "https://user.example/v1"
-
-    def test_neither_present_raises(self):
-        with pytest.raises(LLMUnavailable):
-            build_llm_client(None, _empty_default())
-
-    def test_user_present_default_partial_user_still_wins(self):
-        _, source, _ = build_llm_client(_user_creds(), _partial_default())
-        assert source is CredentialSource.USER
-
-    def test_user_absent_default_partial_raises(self):
-        with pytest.raises(LLMUnavailable):
-            build_llm_client(None, _partial_default())
+    def test_resolved_config_never_carries_the_key(self):
+        _, _, resolved = build_llm_client(_cfg(), CredentialSource.USER)
+        assert not hasattr(resolved, "api_key")
+        assert "sk-user-key" not in repr(resolved)
 
 
-class TestFactoryDoesNotCacheClients:
-    """FR-012: clearing user creds takes effect on next call.
-    The factory MUST NOT cache the OpenAI client across calls; each
-    invocation rebuilds from the passed credentials.
-    """
+class TestConfigAbsent:
+    def test_none_with_user_source_raises_llmunavailable(self):
+        with pytest.raises(LLMUnavailable, match="provider setup"):
+            build_llm_client(None, CredentialSource.USER)
 
-    def test_two_calls_with_different_user_creds_yield_different_clients(self):
-        c1, _, _ = build_llm_client(_user_creds(), _empty_default())
-        other = SessionCreds(
-            api_key="sk-other",
-            base_url="https://other.example/v1",
-            model="other-model",
-            set_at=time.monotonic(),
-        )
-        c2, _, _ = build_llm_client(other, _empty_default())
-        # Different OpenAI() instances each time.
+    def test_none_with_system_source_raises_llmunavailable(self):
+        with pytest.raises(LLMUnavailable, match="system credential"):
+            build_llm_client(None, CredentialSource.SYSTEM)
+
+    def test_user_and_system_messages_differ(self):
+        with pytest.raises(LLMUnavailable) as user_exc:
+            build_llm_client(None, CredentialSource.USER)
+        with pytest.raises(LLMUnavailable) as system_exc:
+            build_llm_client(None, CredentialSource.SYSTEM)
+        assert str(user_exc.value) != str(system_exc.value)
+
+
+class TestOperatorDefaultRetired:
+    def test_operator_default_raises_valueerror_even_with_config(self):
+        with pytest.raises(ValueError, match="retired"):
+            build_llm_client(_cfg(), CredentialSource.OPERATOR_DEFAULT)
+
+    def test_operator_default_raises_valueerror_with_none_config(self):
+        # The source check precedes the config check: no path may carry
+        # the retired source, not even the unavailable one.
+        with pytest.raises(ValueError, match="OPERATOR_DEFAULT"):
+            build_llm_client(None, CredentialSource.OPERATOR_DEFAULT)
+
+
+class TestKeylessConfig:
+    def test_empty_key_becomes_not_needed_placeholder(self):
+        cfg = _cfg(api_key="", base_url="http://localhost:11434/v1",
+                   model="llama3")
+        client, source, resolved = build_llm_client(cfg, CredentialSource.USER)
+        assert client.api_key == "not-needed"
+        assert str(client.base_url).rstrip("/") == "http://localhost:11434/v1"
+        assert resolved.model == "llama3"
+
+
+class TestFactoryIsPureAndUncached:
+    """A clear (which re-gates the user) must be observed on the very
+    next call — the factory never caches clients across calls."""
+
+    def test_two_calls_yield_different_clients(self):
+        c1, _, _ = build_llm_client(_cfg(), CredentialSource.USER)
+        c2, _, _ = build_llm_client(
+            _cfg(api_key="sk-other-key-1234567890abcd",
+                 base_url="https://other.example/v1", model="other-model"),
+            CredentialSource.USER)
         assert c1 is not c2
 
-    def test_user_then_default_yields_different_clients(self):
-        c1, _, _ = build_llm_client(_user_creds(), _full_default())
-        c2, _, _ = build_llm_client(None, _full_default())
+    def test_same_config_still_yields_fresh_client(self):
+        cfg = _cfg()
+        c1, _, _ = build_llm_client(cfg, CredentialSource.USER)
+        c2, _, _ = build_llm_client(cfg, CredentialSource.USER)
         assert c1 is not c2
 
 
 class TestTimeoutPassthrough:
     def test_timeout_kwarg_is_threaded_through(self):
-        # OpenAI client accepts timeout — we verify it doesn't raise
-        # when we pass a value. Behavioural assertion (no exception);
-        # full HTTP-level verification is outside the scope of a unit test.
-        client, _, _ = build_llm_client(_user_creds(), _empty_default(), timeout=5.0)
+        client, _, _ = build_llm_client(_cfg(), CredentialSource.USER,
+                                        timeout=5.0)
         assert client is not None
