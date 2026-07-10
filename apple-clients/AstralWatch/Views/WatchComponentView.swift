@@ -12,22 +12,45 @@ struct WatchComponentView: View {
     var body: some View {
         switch component.type {
         case "text":
-            Text(component.textContent ?? component.fallbackText)
-                .font(.footnote)
-                .fixedSize(horizontal: false, vertical: true)
+            // ROTE can degrade an image to an empty text node — never a blank row.
+            let content = component.textContent ?? component.fallbackText
+            if content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                EmptyView()
+            } else if component.variant == "caption" {
+                markdown(content)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                markdown(content)
+                    .font(fontForTextVariant(component.variant))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         case "alert":
-            Label(component.message ?? component.fallbackText,
-                  systemImage: iconForVariant)
-                .font(.footnote)
-                .foregroundStyle(alertColor)
+            HStack(alignment: .top, spacing: 4) {
+                Image(systemName: iconForVariant)
+                VStack(alignment: .leading, spacing: 1) {
+                    if let title = component.title, !title.isEmpty {
+                        markdown(title).font(.footnote.bold())
+                    }
+                    markdown(component.message ?? component.fallbackText)
+                        .font(.footnote)
+                }
+            }
+            .foregroundStyle(alertColor)
         case "metric":
             VStack(alignment: .leading, spacing: 0) {
-                Text(component.title ?? component.label ?? "")
+                markdown(component.title ?? component.label ?? "")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Text(component.value ?? "—")
                     .font(.title3.bold())
                     .minimumScaleFactor(0.6)
+                // Carries the server's "(chart condensed for watch)" note and
+                // any agent-authored context — dropping it left a bare number.
+                if let sub = component.raw["subtitle"]?.stringValue, !sub.isEmpty {
+                    markdown(sub).font(.caption2).foregroundStyle(.secondary)
+                }
             }
         case "badge":
             Text(component.label ?? component.fallbackText)
@@ -40,7 +63,7 @@ struct WatchComponentView: View {
                 ForEach(Array(component.listItems.enumerated()), id: \.offset) { _, item in
                     HStack(alignment: .top, spacing: 4) {
                         Text("•")
-                        Text(item)
+                        markdown(item)
                     }
                     .font(.footnote)
                 }
@@ -58,18 +81,34 @@ struct WatchComponentView: View {
             }
         case "progress":
             VStack(alignment: .leading, spacing: 2) {
-                titleLine
+                // The wire caption field is `label` (progress has no `title`).
+                if let label = component.label ?? component.title, !label.isEmpty {
+                    HStack {
+                        markdown(label).font(.caption2).foregroundStyle(.secondary)
+                        Spacer(minLength: 4)
+                        if component.raw["show_percentage"]?.boolValue != false {
+                            Text("\(Int((progressFraction * 100).rounded()))%")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                }
                 ProgressView(value: progressFraction)
             }
         case "card", "container", "grid", "collapsible":
-            VStack(alignment: .leading, spacing: 4) {
-                titleLine
-                ForEach(Array(component.children.enumerated()), id: \.offset) { _, child in
-                    WatchComponentView(component: child)
+            // A childless untitled container (grid collapse can produce one)
+            // must not draw an empty gray lozenge.
+            if component.title?.isEmpty != false && component.children.isEmpty {
+                EmptyView()
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    titleLine
+                    ForEach(Array(component.children.enumerated()), id: \.offset) { _, child in
+                        WatchComponentView(component: child)
+                    }
                 }
+                .padding(6)
+                .background(.gray.opacity(0.15), in: RoundedRectangle(cornerRadius: 8))
             }
-            .padding(6)
-            .background(.gray.opacity(0.15), in: RoundedRectangle(cornerRadius: 8))
         case "divider":
             Divider()
         case "button", "input", "file_upload", "color_picker", "param_picker":
@@ -88,7 +127,7 @@ struct WatchComponentView: View {
             // Deterministic fallback chain terminates in readable text —
             // zero blank canvases (FR-032).
             VStack(alignment: .leading, spacing: 2) {
-                Text(component.fallbackText)
+                markdown(component.fallbackText)
                     .font(.footnote)
                     .fixedSize(horizontal: false, vertical: true)
                 Text(component.type)
@@ -98,10 +137,25 @@ struct WatchComponentView: View {
         }
     }
 
+    /// Wire text is markdown (parity with the phone/desktop renderers):
+    /// flatten block structure to plain lines, then parse inline spans — the
+    /// wrist shows neither literal asterisks nor literal `##`/fence syntax.
+    private func markdown(_ string: String) -> Text {
+        Text(InlineMarkdown.attributed(MarkdownBlocks.plainText(string)))
+    }
+
     @ViewBuilder
     private var titleLine: some View {
         if let title = component.title, !title.isEmpty {
-            Text(title).font(.caption.bold())
+            markdown(title).font(.caption.bold())
+        }
+    }
+
+    private func fontForTextVariant(_ variant: String?) -> Font {
+        switch variant {
+        case "h1", "h2": return .headline
+        case "h3": return .subheadline.weight(.semibold)
+        default: return .footnote
         }
     }
 

@@ -326,7 +326,14 @@ final class WatchModel {
         case "ui_render":
             let comps = frame.renderComponents
             guard !comps.isEmpty else { return }
-            canvas = comps
+            if frame.renderTarget == "chat" {
+                // End-of-turn narrative — a transcript entry, NOT a canvas
+                // replacement: clobbering here wiped the components the
+                // ui_upsert just delivered (iOS diverts the same way).
+                entries.append(.turn(id: "turn-\(entries.count)", components: comps))
+            } else {
+                canvas = comps
+            }
             statusText = nil
             speaker.speak(frame.speech)
         case "ui_upsert":

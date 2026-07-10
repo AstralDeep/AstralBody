@@ -174,18 +174,28 @@ final class AppModel: NSObject {
 
     override init() {
         let defaults = UserDefaults.standard
-        let storedBase = defaults.string(forKey: "serverBase") ?? ""
-        let storedAuthority = defaults.string(forKey: "authority") ?? ""
+        var storedBase = defaults.string(forKey: "serverBase") ?? ""
+        var storedAuthority = defaults.string(forKey: "authority") ?? ""
+        // The override keys hold USER edits only. Earlier builds seeded the
+        // build-time DEFAULT into them on first launch, freezing the endpoint
+        // for the whole install base — a stored value equal to the current
+        // default is that seed (or a no-op edit), not an override: clear it so
+        // a future xcconfig repoint reaches existing installs and their
+        // paired watches.
+        if storedBase == AstralConfig.serverBaseURL {
+            defaults.removeObject(forKey: "serverBase")
+            storedBase = ""
+        }
+        if storedAuthority == AstralConfig.keycloakAuthority {
+            defaults.removeObject(forKey: "authority")
+            storedAuthority = ""
+        }
         serverBaseText = storedBase.isEmpty ? AstralConfig.serverBaseURL : storedBase
         authorityText = storedAuthority.isEmpty ? AstralConfig.keycloakAuthority : storedAuthority
         super.init()
-        if storedBase.isEmpty { defaults.set(AstralConfig.serverBaseURL, forKey: "serverBase") }
-        if storedAuthority.isEmpty { defaults.set(AstralConfig.keycloakAuthority, forKey: "authority") }
-        // Feature 053 — activate the watch link and seed it with the current
-        // endpoint. No-ops when there is no paired watch app.
         #if os(iOS)
         WatchOverrideSync.shared.activate()
-        WatchOverrideSync.shared.push(serverBaseText)
+        if !storedBase.isEmpty { WatchOverrideSync.shared.push(serverBaseText) }
         #endif
     }
 
@@ -477,7 +487,17 @@ final class AppModel: NSObject {
         case "tool_progress":
             let head = [frame.payload["tool_name"]?.stringValue, frame.payload["message"]?.stringValue]
                 .compactMap { $0 }.joined(separator: ": ")
-            let pct = frame.payload["percentage"]?.stringValue.map { " (\($0)%)" } ?? ""
+            // The wire `percentage` is a JSON number (Optional[int] server-side).
+            // Bounds-checked: Int(Double) traps on out-of-range values, and no
+            // inbound frame may crash the client (FR-003).
+            let pct = frame.payload["percentage"]
+                .flatMap { value -> String? in
+                    if let s = value.stringValue { return s }
+                    guard let n = value.numberValue, n.isFinite, n >= 0, n <= 999
+                    else { return nil }
+                    return String(Int(n))
+                }
+                .map { " (\($0)%)" } ?? ""
             let label = (head + pct).isEmpty ? "Working…" : head + pct
             stepTrail = trailUpsert(stepTrail, "• \(label)")
         case "task_started":
