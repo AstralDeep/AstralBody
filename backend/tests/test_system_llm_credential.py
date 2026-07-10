@@ -444,3 +444,149 @@ async def test_system_context_never_resolves_a_user_record(
             await orch._resolve_llm_client_for(vws)
     finally:
         await orch._llm_store.clear(uid)
+
+
+# ---------------------------------------------------------------------------
+# (g) surface render + models/test handlers (coverage for the web-only UI)
+# ---------------------------------------------------------------------------
+
+async def test_render_unconfigured_custom_vs_preset(orch, clean_system_row):
+    from webrender.chrome.surfaces import llm_system
+
+    # Preset provider: endpoint is display-only (set automatically).
+    html = await llm_system.render(orch, "admin1", ["admin"], {"provider": "openai"})
+    assert "set automatically" in html.lower()
+    assert 'name="base_url"' not in html
+    assert "not configured" in html
+    assert "chrome_llm_sys_save" in html
+    assert "Clear system credential" not in html
+
+    # Custom provider: free-form endpoint field renders.
+    html = await llm_system.render(orch, "admin1", ["admin"],
+                                   {"provider": "custom", "base_url": "https://x.example/v1"})
+    assert 'name="base_url"' in html and "https://x.example/v1" in html
+
+
+async def test_render_configured_shows_badge_and_never_the_key(
+        orch, clean_system_row):
+    from webrender.chrome.surfaces import llm_system
+
+    await _seed_system(orch)
+    html = await llm_system.render(orch, "admin1", ["admin"], {})
+    assert "configured" in html
+    assert "Clear system credential" in html
+    assert "leave blank to keep" in html.lower()
+    assert SECRET not in html  # write-only key, never echoed
+    # models param upgrades the model input to a select
+    html = await llm_system.render(orch, "admin1", ["admin"],
+                                   {"models": ["m1", "m2"]})
+    assert "<select" in html and "m1" in html and "m2" in html
+
+
+async def test_sys_models_validation_and_success(orch, clean_system_row, monkeypatch):
+    from webrender.chrome.surfaces import llm_system
+
+    # custom without a URL -> field error, no upstream call
+    surface, keep, notice = await llm_system._handle_models(
+        orch, None, "admin1", ["admin"],
+        {"fields": {"provider": "custom", "api_key": SECRET}})
+    assert surface == "llm_system" and "endpoint address" in notice
+
+    # key-required preset without a key (and nothing saved) -> error
+    surface, keep, notice = await llm_system._handle_models(
+        orch, None, "admin1", ["admin"], {"fields": {"provider": "openai"}})
+    assert "API key is required" in notice
+
+    async def fake_list(*, body, request, user_id, user_payload):
+        return SimpleNamespace(ok=True, models=["b-model", "a-model"],
+                               error_class=None, upstream_message=None)
+
+    monkeypatch.setattr("llm_config.api.list_models", fake_list)
+    surface, keep, notice = await llm_system._handle_models(
+        orch, None, "admin1", ["admin"],
+        {"fields": {"provider": "openai", "api_key": SECRET}})
+    assert keep["models"] == ["b-model", "a-model"]
+    assert "Loaded 2 models" in notice
+
+
+async def test_sys_models_failure_and_empty(orch, clean_system_row, monkeypatch):
+    from webrender.chrome.surfaces import llm_system
+
+    async def fail_list(*, body, request, user_id, user_payload):
+        return SimpleNamespace(ok=False, models=[], error_class="transport_error",
+                               upstream_message="boom")
+
+    monkeypatch.setattr("llm_config.api.list_models", fail_list)
+    _s, _k, notice = await llm_system._handle_models(
+        orch, None, "admin1", ["admin"],
+        {"fields": {"provider": "openai", "api_key": SECRET}})
+    assert "load models" in notice and "transport_error" in notice  # esc()'d apostrophe
+
+    async def empty_list(*, body, request, user_id, user_payload):
+        return SimpleNamespace(ok=True, models=[], error_class=None,
+                               upstream_message=None)
+
+    monkeypatch.setattr("llm_config.api.list_models", empty_list)
+    _s, _k, notice = await llm_system._handle_models(
+        orch, None, "admin1", ["admin"],
+        {"fields": {"provider": "openai", "api_key": SECRET}})
+    assert "advertises no models" in notice
+
+
+async def test_sys_test_validation_success_and_failure(
+        orch, clean_system_row, monkeypatch):
+    from webrender.chrome.surfaces import llm_system
+
+    # missing model -> error before any upstream call
+    _s, _k, notice = await llm_system._handle_test(
+        orch, None, "admin1", ["admin"],
+        {"fields": {"provider": "openai", "api_key": SECRET}})
+    assert "required" in notice
+
+    async def ok_test(*, body, request, user_id, user_payload):
+        return SimpleNamespace(ok=True, model=body.model, latency_ms=42,
+                               error_class=None, upstream_message=None)
+
+    monkeypatch.setattr("llm_config.api.test_connection", ok_test)
+    _s, _k, notice = await llm_system._handle_test(
+        orch, None, "admin1", ["admin"],
+        {"fields": {"provider": "openai", "api_key": SECRET,
+                    "model": "gpt-4o-mini"}})
+    assert "Connection OK" in notice and "42 ms" in notice
+
+    async def bad_test(*, body, request, user_id, user_payload):
+        return SimpleNamespace(ok=False, model=body.model, latency_ms=None,
+                               error_class="auth_failed", upstream_message="401")
+
+    monkeypatch.setattr("llm_config.api.test_connection", bad_test)
+    _s, _k, notice = await llm_system._handle_test(
+        orch, None, "admin1", ["admin"],
+        {"fields": {"provider": "openai", "api_key": SECRET,
+                    "model": "gpt-4o-mini"}})
+    assert "Connection test failed" in notice and "auth_failed" in notice
+
+
+async def test_sys_saved_key_reused_on_blank_submission(
+        orch, clean_system_row, monkeypatch):
+    """Write-only semantics: a blank key submission keeps the saved system key
+    (the probe must receive the SAVED key)."""
+    from webrender.chrome.surfaces import llm_system
+
+    await _seed_system(orch)
+    probed = {}
+
+    async def fake_probe(*, api_key, base_url, model, **kw):
+        probed.update(api_key=api_key, base_url=base_url, model=model)
+        return True, None, None
+
+    monkeypatch.setattr(
+        "webrender.chrome.surfaces.llm_system.probe_chat_completion", fake_probe)
+    _s, _k, notice = await llm_system._handle_save(
+        orch, None, "admin1", ["admin"],
+        {"fields": {"provider": "custom",
+                    "base_url": "https://system.example.com/v1",
+                    "model": "sys-model-2"}})  # no api_key field
+    assert probed["api_key"] == SECRET
+    assert "kept the previously saved API key" in notice
+    cfg = await orch._llm_store.get_system()
+    assert cfg.model == "sys-model-2" and cfg.api_key == SECRET
