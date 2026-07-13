@@ -118,7 +118,9 @@ from orchestrator import desktop_codegen as dc  # noqa: E402
 def test_meta_tool_definition():
     defs = dc.meta_tool_definitions()
     assert defs[0]["function"]["name"] == "offer_desktop_codegen"
-    assert "code" in defs[0]["function"]["parameters"]["required"]
+    # 057: `code` is optional — a link-only ask calls the tool without it.
+    assert defs[0]["function"]["parameters"]["required"] == []
+    assert "code" in defs[0]["function"]["parameters"]["properties"]
 
 
 def test_should_inject_respects_flag_and_draft(monkeypatch):
@@ -203,12 +205,35 @@ def test_handle_meta_tool_returns_code_and_card(monkeypatch):
     assert res.result["status"] == "offered"
 
 
-def test_handle_meta_tool_needs_code(monkeypatch):
+def test_handle_meta_tool_link_only_returns_card_without_code(monkeypatch):
+    # 057: asking for the app without any generated code yields just the card.
     import asyncio
+    _mock_release(monkeypatch)
+    dc._CACHE.clear()
     res = asyncio.run(dc.handle_meta_tool(
         None, "offer_desktop_codegen", {"language": "python", "code": ""},
         user_id="u1", chat_id="c1", websocket=None))
-    assert res.error is not None
+    assert res.error is None
+    types = [c["type"] for c in res.ui_components]
+    assert types == ["download_card"]
+    assert res.result["status"] == "offered"
+    card = res.ui_components[0]
+    assert card["title"] == "Astral desktop app for Windows"
+    assert "run this code" not in card["description"]
+
+
+def test_handle_meta_tool_link_only_unavailable_keeps_honest_card(monkeypatch):
+    # No cached release + fetch failure -> unavailable variant, untouched text.
+    import asyncio
+    dc._CACHE.clear()
+    monkeypatch.setattr(dc, "_fetch_release_info", lambda: None)
+    res = asyncio.run(dc.handle_meta_tool(
+        None, "offer_desktop_codegen", {}, user_id="u1", chat_id="c1",
+        websocket=None))
+    assert res.error is None
+    assert [c["type"] for c in res.ui_components] == ["download_card"]
+    assert res.ui_components[0]["variant"] == "unavailable"
+    assert res.result["status"] == "unavailable"
 
 
 def test_handle_meta_tool_unavailable_when_no_release(monkeypatch):

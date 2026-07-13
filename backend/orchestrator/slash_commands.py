@@ -48,12 +48,20 @@ def _t_weather(args: str) -> str:
     return f"What's the current weather and short-term forecast for: {where}?"
 
 
+def _t_download(_args: str) -> str:
+    return ("The user wants to install the AstralDeep desktop app for Windows. "
+            "Offer them the verified download card for the latest released "
+            "version and briefly explain the install + sign-in steps. Never "
+            "paste a download URL from memory or fabricate one.")
+
+
 COMMANDS: Dict[str, Dict] = {
     "help": {"usage": "/help", "description": "show available commands", "template": _t_help},
     "agents": {"usage": "/agents", "description": "list your enabled agents", "template": _t_agents},
     "summarize": {"usage": "/summarize <url|text>", "description": "summarize a link or text", "template": _t_summarize},
     "research": {"usage": "/research <topic>", "description": "research + cited brief", "template": _t_research},
     "weather": {"usage": "/weather <location>", "description": "weather + forecast", "template": _t_weather},
+    "download": {"usage": "/download", "description": "get the Windows desktop app", "template": _t_download},
 }
 
 

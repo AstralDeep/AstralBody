@@ -49,15 +49,24 @@ def test_slash_path_is_not_a_command():
 
 def test_help_lists_all_commands():
     out = slash_commands.expand_message("/help")
-    for name in ("/help", "/agents", "/summarize", "/research", "/weather"):
+    for name in ("/help", "/agents", "/summarize", "/research", "/weather",
+                 "/download"):
         assert name in out
 
 
 def test_command_list_exposes_discovery_metadata():
     cmds = slash_commands.command_list()
     names = {c["name"] for c in cmds}
-    assert {"help", "agents", "summarize", "research", "weather"} <= names
+    assert {"help", "agents", "summarize", "research", "weather",
+            "download"} <= names
     assert all(c["usage"].startswith("/") for c in cmds)
+
+
+def test_download_command_expands_without_url_or_tool_directive():
+    out = slash_commands.expand_message("/download")
+    assert "desktop app" in out
+    assert "http" not in out  # never a baked-in URL
+    assert "tools/call" not in out and "tool_call" not in out
 
 
 def test_expansion_is_prompt_only_no_tool_directive():
