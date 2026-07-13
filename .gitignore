@@ -95,3 +95,4 @@ verification_log.txt
 
 # Feature 032 — verification harness run artifacts (gitignored, per-run namespaced)
 backend/verification/.runs/
+._*
