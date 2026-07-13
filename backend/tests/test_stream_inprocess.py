@@ -115,7 +115,7 @@ async def test_terminal_persists_via_loopback(env):
         tool_metadata=orch._streamable_tools[TOOL],
     )
     await asyncio.sleep(0.15)
-    live = orch.workspace.live_components(chat_id, user_id)
+    live = await asyncio.to_thread(orch.workspace.live_components, chat_id, user_id)
     persisted = [c for c in live if c.get("type") == "metric"]
     assert persisted, f"streamed content not persisted on agent_end: {live}"
     assert persisted[0]["_source_agent"] == AGENT

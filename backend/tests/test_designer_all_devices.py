@@ -174,7 +174,7 @@ async def test_native_turn_persists_layout_and_renders_after_done(env, monkeypat
     await orch.handle_chat_message(ws, "make a dashboard", chat_id, user_id=user_id)
 
     assert design_calls, "the coalesced post-done pass must run for native origin"
-    layouts = orch.workspace.live_layouts(chat_id, user_id)
+    layouts = await asyncio.to_thread(orch.workspace.live_layouts, chat_id, user_id)
     assert len(layouts) == 1, "native-origin turn persists a workspace_layout row"
 
     types = [f.get("type") for f in _frames(ws)]
@@ -234,7 +234,8 @@ async def test_stale_guard_drops_late_push(env, monkeypatch):
 
     await orch.handle_chat_message(ws, "make a dashboard", chat_id, user_id=user_id)
 
-    assert orch.workspace.live_layouts(chat_id, user_id), "layout still persists"
+    assert await asyncio.to_thread(
+        orch.workspace.live_layouts, chat_id, user_id), "layout still persists"
     assert not _canvas_renders(ws), "late designed push dropped by the turn marker"
 
 
@@ -249,7 +250,7 @@ async def test_flag_off_restores_native_skip(env, monkeypatch):
 
     assert not design_calls, "designer never invoked for native origin when off"
     assert "ui_designer" not in features
-    assert orch.workspace.live_layouts(chat_id, user_id) == []
+    assert await asyncio.to_thread(orch.workspace.live_layouts, chat_id, user_id) == []
     assert not _canvas_renders(ws)
     assert "ui_upsert" in [f.get("type") for f in _frames(ws)], \
         "flat delivery unchanged with the flag off"

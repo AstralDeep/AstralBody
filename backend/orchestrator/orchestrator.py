@@ -7018,16 +7018,18 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
     # PUSH STREAMING (001-tool-stream-ui)
     # =========================================================================
 
-    def _validate_chat_ownership_for_stream(
+    async def _validate_chat_ownership_for_stream(
         self, websocket, user_id: str, chat_id: str,
     ) -> bool:
         """Callback used by StreamManager to verify that ``chat_id`` belongs
         to ``user_id``. Reuses the existing history.get_chat ownership
-        check that all other chat-scoped operations go through.
+        check that all other chat-scoped operations go through (off-loop —
+        the 052 detector refuses sync DB calls on the event-loop thread).
         Returns True if the chat exists AND is owned by the user.
         """
         try:
-            chat = self.history.get_chat(chat_id, user_id=user_id)
+            chat = await asyncio.to_thread(
+                self.history.get_chat, chat_id, user_id=user_id)
             return chat is not None
         except Exception as e:
             logger.warning(f"chat ownership check failed: {e}")

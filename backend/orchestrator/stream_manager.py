@@ -524,7 +524,7 @@ class StreamManager:
 
         # 2. Chat ownership
         if self._validate_chat_ownership is not None:
-            if not self._validate_chat_ownership(ws, user_id, chat_id):
+            if not await self._validate_chat_ownership(ws, user_id, chat_id):
                 raise ValueError(f"chat {chat_id!r} is not owned by this user")
 
         # 3. Param size cap

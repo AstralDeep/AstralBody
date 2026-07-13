@@ -12,6 +12,7 @@ mid-turn, natives receive it once after ``chat_status done``.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import uuid
@@ -233,7 +234,7 @@ async def test_both_origins_persist_equal_layout_rows(env, monkeypatch):
 
     assert len(design_calls) == 2, "the designer ran for BOTH origins"
     from orchestrator.workspace import iter_layout_refs
-    layouts = {d: orch.workspace.live_layouts(chats[d], user_id)
+    layouts = {d: await asyncio.to_thread(orch.workspace.live_layouts, chats[d], user_id)
                for d in ("browser", "android")}
     for device, rows in layouts.items():
         assert len(rows) == 1, f"{device}-origin turn persists a workspace_layout row"
@@ -253,7 +254,7 @@ async def test_materialized_canvases_equivalent_per_profile(env, monkeypatch):
 
     await _drive_both(orch, sockets, chats, user_id)
 
-    canvases = {d: orch._canvas_components(chats[d], user_id)
+    canvases = {d: await asyncio.to_thread(orch._canvas_components, chats[d], user_id)
                 for d in ("browser", "android")}
     assert _identities(canvases["browser"]) == _identities(canvases["android"]) \
         == _expected_family(), "persisted canvas identities are origin-independent"
