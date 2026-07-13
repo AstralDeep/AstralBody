@@ -134,7 +134,7 @@
 - [x] T047 Flags-off byte-equivalence job: CI variant running the backend suite + all drift guards with the six 055 flags forced off in `.github/workflows/ci.yml`; prove SC-009
 - [x] T048 [P] Observability sweep: structured logs for stripper hits, stream-bridge fallbacks, designer post-done skips (stale guard), share mint/refusals — verify each has agent/chat/correlation context
 - [x] T049 [P] Documentation: renderer docstrings for the new behaviors (Constitution VI), `.env.example` flag notes, contracts kept in sync with any implementation drift
-- [ ] T050 Full gate run: container pytest suite, host `ruff check .`, `./gradlew test`, `swift test --package-path apple-clients/AstralCore`, `python -m pytest windows-client/tests -q`, changed-code coverage ≥90% (diff-cover), representative-dataset migration evidence attached to the PR
+- [x] T050 Full gate run: container pytest suite, host `ruff check .`, `./gradlew test`, `swift test --package-path apple-clients/AstralCore`, `python -m pytest windows-client/tests -q`, changed-code coverage ≥90% (diff-cover), representative-dataset migration evidence attached to the PR
 
 ---
 
