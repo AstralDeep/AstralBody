@@ -305,6 +305,11 @@ class Canvas(QScrollArea):
         # of the turn (set_components / apply_ops, which streaming also routes
         # through) or explicitly when the turn ends without any.
         self._skeleton: Optional[QWidget] = None
+        # Mirrors the window's per-turn flag (feature 055 US1): an EMPTY full
+        # render mid-turn keeps the loading state instead of swapping the
+        # skeleton for the idle hint; out-of-turn empty renders remain
+        # authoritative clears.
+        self.turn_active = False
         self.show_empty_state()
 
     def _drop_empty(self) -> None:
@@ -348,6 +353,9 @@ class Canvas(QScrollArea):
         """Append the loading placeholder below any existing components."""
         if self._skeleton is not None:
             return
+        # The idle hint never co-shows with a turn's loading state (055
+        # FR-005); resolve_loading restores it if the turn ends canvas-empty.
+        self._drop_empty()
         w = render({"type": "skeleton", "variant": "card", "count": 3}, self.ctx)
         self._skeleton = w
         self._insert(w)
@@ -358,6 +366,33 @@ class Canvas(QScrollArea):
         if w is not None:
             w.setParent(None)
             w.deleteLater()
+
+    def resolve_loading(self) -> None:
+        """Turn-end resolution (chat_status done / error): drop the skeleton
+        and, when the turn ended with no canvas output (a text-only answer
+        after the welcome purge), restore the idle empty-state hint — the
+        server no longer sends the turn-start empty render that used to leave
+        the hint behind (feature 055 US1)."""
+        self.hide_skeleton()
+        if not self._last_components and not self._by_id:
+            self.show_empty_state()
+
+    def purge_welcome(self) -> None:
+        """Feature 055 (US1, uniform rule): at turn start drop every ephemeral
+        welcome component — identity (``component_id`` or ``id``) prefixed
+        ``wel_`` — re-rendering the remainder through the identity-reconciled
+        path. When the server flag is off the welcome arrives id-less, nothing
+        matches and this is a byte-equivalent no-op. Callers flip
+        ``turn_active`` first, so a welcome-only canvas empties WITHOUT the
+        idle hint (the skeleton is armed right after)."""
+        kept = [
+            comp for comp in self._last_components
+            if not (isinstance(comp, dict) and str(
+                comp.get("component_id") or comp.get("id") or ""
+            ).startswith("wel_"))
+        ]
+        if len(kept) != len(self._last_components):
+            self.set_components(kept)
 
     def set_components(self, components: list) -> None:
         """Full canvas render (a `ui_render` to the canvas region), reconciled BY
@@ -374,16 +409,26 @@ class Canvas(QScrollArea):
         full render and the incoming list is the same object as (or compares
         equal to) the previous one, the canvas already IS this state — skip
         reconciliation entirely. apply_ops/restyle flip ``_mutated_since_render``
-        so patched or palette-stale canvases always reconcile."""
+        so patched or palette-stale canvases always reconcile.
+
+        Feature 055 (US1): an EMPTY set while a turn is in flight
+        (``turn_active``) keeps the loading state — the armed skeleton
+        survives the rebuild and the idle empty-state hint is NOT shown. Only
+        out-of-turn empty renders resolve to the hint (authoritative clears)."""
         incoming = components or []
+        # Mid-turn empty render: never swap the skeleton for the idle hint.
+        keep_loading = not incoming and self.turn_active
         if not self._mutated_since_render and (
             incoming is self._last_components
             or incoming == self._last_components
         ):
-            self.hide_skeleton()
+            if not keep_loading:
+                self.hide_skeleton()
             return
         components = list(incoming)
-        self.hide_skeleton()  # canvas content arrived (or is being rebuilt)
+        skeleton = self._skeleton if keep_loading else None
+        if skeleton is None:
+            self.hide_skeleton()  # canvas content arrived (or is being rebuilt)
         self._last_components = components  # retained for restyle() (US5)
         # The empty-state hint is dropped before the rebuild (the detach loop
         # below would otherwise delete it out from under self._empty) and
@@ -411,7 +456,7 @@ class Canvas(QScrollArea):
                 detached.append(w)
         reused = set(reusable.values())
         for w in detached:
-            if w not in reused:
+            if w not in reused and w is not skeleton:
                 w.setParent(None)
                 w.deleteLater()
         # Re-insert in the new order, reusing a kept widget by id or rendering
@@ -438,9 +483,11 @@ class Canvas(QScrollArea):
                 if cid not in placed:
                     rendered[cid] = comp
                 placed.add(cid)
+        if skeleton is not None:
+            self._insert(skeleton)  # the loading placeholder stays at the bottom
         self._rendered = rendered
         self._mutated_since_render = False
-        if not components:
+        if not components and not keep_loading:
             self.show_empty_state()
 
     def restyle(self) -> None:
@@ -1919,6 +1966,13 @@ class MainWindow(QMainWindow):
             else:
                 self.rail.add_note("📎 " + names)
         self.client.send_chat(text, self.active_chat, attachments=atts or None)
+        # Optimistic loading state until the turn's first canvas content — the
+        # typed path matches _emit's chat_message twin (feature 055 US1):
+        # retire the ephemeral welcome, then arm the skeleton.
+        if not self._timeline_mode:
+            self._set_turn_active(True)
+            self.canvas.purge_welcome()
+            self.canvas.show_skeleton()
         # Clear only the chips that went out; keep still-uploading ones so a late
         # upload result isn't lost (they remain staged for the next turn).
         self._clear_sent_attachments()
@@ -1935,8 +1989,11 @@ class MainWindow(QMainWindow):
                 self.rail.add("user", msg)
             self.client.send_chat(msg, self.active_chat)
             # Optimistic loading state until the turn's first canvas content
-            # (parity with the Android twin's send-time skeleton).
+            # (parity with the Android twin's send-time skeleton); the welcome
+            # is retired BEFORE the skeleton arms (feature 055 US1).
             if not self._timeline_mode:
+                self._set_turn_active(True)
+                self.canvas.purge_welcome()
                 self.canvas.show_skeleton()
         else:
             self.client.send_event(action, payload, session_id=self.active_chat)
@@ -2008,6 +2065,13 @@ class MainWindow(QMainWindow):
         registration, which on every turn completion would wipe task/error/
         notification banners and cause redundant round-trips (feature 044 fix)."""
         self.topbar.set_status("Connected", T.VARIANT_COLORS["success"][0])
+
+    def _set_turn_active(self, active: bool) -> None:
+        """Single write point for the per-turn flag; the canvas mirrors it so
+        an empty render mid-turn keeps the loading state instead of the idle
+        empty-state hint (feature 055 US1)."""
+        self._turn_active = active
+        self.canvas.turn_active = active
 
     def _begin_silent_refresh(self) -> None:
         """FR-004: silently refresh the session token OFF the GUI thread — the
@@ -2244,23 +2308,24 @@ class MainWindow(QMainWindow):
             st = msg.get("status")
             if st in ("thinking", "executing", "fixing", "processing_async",
                       "combining", "condensing"):
-                self._turn_active = True
+                self._set_turn_active(True)
                 self.topbar.set_status(
                     msg.get("message") or st, T.VARIANT_COLORS["accent"][0]
                 )
             elif st == "done":
-                self._turn_active = False
+                self._set_turn_active(False)
                 # The turn ended without canvas output (text-only answer,
-                # cancellation) — clear the query-start skeleton.
-                self.canvas.hide_skeleton()
+                # cancellation) — clear the query-start skeleton (and restore
+                # the idle hint when the canvas ended the turn empty).
+                self.canvas.resolve_loading()
                 # A per-turn status reset ONLY — not the full reconnect re-sync
                 # (which would hide banners + re-fire discover/history every turn).
                 self._reset_status_line()
         elif t == "error":
             # FR-002/SC-006 — never silent; resolve any stuck turn.
             self._show_banner(normalize_error(msg), "error")
-            self._turn_active = False
-            self.canvas.hide_skeleton()
+            self._set_turn_active(False)
+            self.canvas.resolve_loading()
             self.topbar.set_status("Connected", T.VARIANT_COLORS["success"][0])
         elif t == "notification":
             title = msg.get("title") or ""
@@ -2268,7 +2333,7 @@ class MainWindow(QMainWindow):
             self._show_banner(f"{title}: {body}" if title else body,
                               "error" if msg.get("level") == "error" else "info")
         elif t == "user_message_acked":
-            self._turn_active = True
+            self._set_turn_active(True)
             self.topbar.set_status("Working…", T.VARIANT_COLORS["accent"][0])
         elif t == "chat_step":
             step = msg.get("step") or {}
@@ -2282,7 +2347,7 @@ class MainWindow(QMainWindow):
         elif t == "task_started":
             self._show_banner("Working on this in the background…")
         elif t == "task_completed":
-            self._turn_active = False
+            self._set_turn_active(False)
             self._show_banner("Background task finished.")
         elif t == "workspace_timeline_mode":
             self._timeline_mode = bool(msg.get("active") or msg.get("on"))

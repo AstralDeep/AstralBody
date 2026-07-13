@@ -14,6 +14,19 @@ public extension AstralComponent {
     }
 }
 
+public extension Array where Element == AstralComponent {
+    /// Feature 055 (US1) — the uniform welcome purge: drops the ephemeral
+    /// welcome components (identity prefixed `wel_`, stamped server-side on
+    /// both `id` and `component_id`). iOS/macOS apply it at turn start and
+    /// keep `wel_` out of every canvas-history archive; the watch — which has
+    /// no turn state — applies it at every `ui_upsert` apply. Unconditional
+    /// client-side: with the server flag off the welcome ships id-less,
+    /// nothing matches, and this is a no-op (wire-contract §1).
+    func dropWelcome() -> [AstralComponent] {
+        filter { $0.componentId?.hasPrefix("wel_") != true }
+    }
+}
+
 public enum Canvas {
     /// Ordered, identity-keyed apply. `upsert` replaces in place (keeping
     /// position) or appends; `remove` drops by id. Returns a NEW list.

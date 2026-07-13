@@ -16,7 +16,7 @@
 
 **Purpose**: the wire-vocabulary and flag scaffolding every story hangs off. The manifest and all three client disposition tables MUST land together (drift guards fail otherwise).
 
-- [ ] T001 Register the six 055 feature flags (`FF_FIRST_TURN_CONTRACT` on, `FF_STREAM_ARTIFACTS` on, `FF_DESIGNER_ALL_DEVICES` on, `FF_COMPONENT_REFINE` on, `FF_ARTIFACT_EXPORT` on, `FF_ARTIFACT_SHARING` off) in `backend/shared/feature_flags.py` + document each in `.env.example`
+- [x] T001 Register the six 055 feature flags (`FF_FIRST_TURN_CONTRACT` on, `FF_STREAM_ARTIFACTS` on, `FF_DESIGNER_ALL_DEVICES` on, `FF_COMPONENT_REFINE` on, `FF_ARTIFACT_EXPORT` on, `FF_ARTIFACT_SHARING` off) in `backend/shared/feature_flags.py` + document each in `.env.example`
 - [ ] T002 Edit `backend/shared/ui_protocol.json`: add `additive_fields` entry for `component_id` on `ui_stream_data`+`stream_subscribed` (per contracts/wire-contract.md §2) and add `component_refine`, `component_restore` to `accept_actions` (sorted)
 - [ ] T003 [P] Update Windows dispositions in `windows-client/astral_client/protocol_manifest.py`: the 8 `component_verbs` frames ignored→handled, new accept actions classified; keep `tests/test_protocol_manifest.py` green
 - [ ] T004 [P] Update Android dispositions in `android-client/core/src/main/kotlin/**/ProtocolManifest.kt` (same deltas); keep `ProtocolManifestTest`/`VocabularyParityTest` green
@@ -29,9 +29,9 @@
 
 ## Phase 2: Foundational (blocking prerequisites)
 
-- [ ] T007 Add idempotent `_init_db` migrations for `component_version` and `share_grant` per data-model.md (guarded CREATE TABLE/INDEX IF NOT EXISTS), bump `SCHEMA_REVISION` 054.001→055.001 in `backend/shared/database.py`; test in `backend/tests/test_migrations_055.py` (fresh boot, re-boot no-op, representative-dataset boot)
-- [ ] T008 [P] Add the `wel_` namespace guard to `backend/orchestrator/workspace.py` (resolve/upsert refuses `wel_`-prefixed identities with a structured warning); unit tests in `backend/tests/test_workspace_wel_guard.py`
-- [ ] T009 [P] Preserve `id`/`component_id` through ROTE degrade rebuilds in `backend/rote/adapter.py` (fallback-ladder rebuild ≈62-76, grid→container collapse ≈408-410); unit tests in `backend/tests/test_rote_identity_preservation.py` (watch-profile hero→text and grid-collapse keep identities)
+- [x] T007 Add idempotent `_init_db` migrations for `component_version` and `share_grant` per data-model.md (guarded CREATE TABLE/INDEX IF NOT EXISTS), bump `SCHEMA_REVISION` 054.001→055.001 in `backend/shared/database.py`; test in `backend/tests/test_migrations_055.py` (fresh boot, re-boot no-op, representative-dataset boot)
+- [x] T008 [P] Add the `wel_` namespace guard to `backend/orchestrator/workspace.py` (resolve/upsert refuses `wel_`-prefixed identities with a structured warning); unit tests in `backend/tests/test_workspace_wel_guard.py`
+- [x] T009 [P] Preserve `id`/`component_id` through ROTE degrade rebuilds in `backend/rote/adapter.py` (fallback-ladder rebuild ≈62-76, grid→container collapse ≈408-410); unit tests in `backend/tests/test_rote_identity_preservation.py` (watch-profile hero→text and grid-collapse keep identities)
 
 **Checkpoint**: migrations green on representative data; identity plumbing ready for US1/US2.
 
@@ -43,15 +43,15 @@
 
 **Independent test**: quickstart.md §US1 — fresh chat per target, typed + example-card sends, text-only first turn, second-query parity.
 
-- [ ] T010 [US1] Stamp `wel_` identities (`id` AND `component_id`) on every welcome component in `backend/orchestrator/welcome.py` (`wel_hero`, `wel_enable`, `wel_ex_<slug>`, `wel_hint`); unit tests in `backend/tests/test_welcome_identity.py` (both fields present, slugs stable, never workspace-persistable via T008 guard)
-- [ ] T011 [US1] Behind `FF_FIRST_TURN_CONTRACT`: remove ONLY the blanking `send_ui_render(websocket, [])` at `backend/orchestrator/orchestrator.py` ≈1497-1499 (keep `_ws_welcome` bookkeeping — enable_recommended_agents re-render must still work); integration test in `backend/tests/test_first_turn_contract.py` (VirtualWebSocket: first chat_message emits NO empty canvas render, flag off restores it byte-identically, welcome re-render paths still fire)
-- [ ] T012 [US1] Fix the all-tools-denied `break` path so it sends `chat_status done` (orchestrator.py ≈4120-4125); regression test in `backend/tests/test_first_turn_contract.py::test_denied_break_sends_done`
-- [ ] T013 [P] [US1] Web `backend/webrender/static/client.js`: selective purge of `[data-component-id^="wel_"]` (+ legacy `[id^="wel_"]`) nodes in `sendChat` (never blanket clear); canvas `ui_render` empty-state decision keyed on the structured `components` array (not `data.html` truthiness)
-- [ ] T014 [P] [US1] Windows `windows-client/astral_client/app.py`: arm `Canvas.show_skeleton()` in `_send` (typed path, ≈1905-1924) matching `_emit`; suppress the idle empty-state hint while turn-active; purge `wel_` entries from `_last_components` + canvas at both send sites; tests in `windows-client/tests/test_first_turn.py` (offscreen)
-- [ ] T015 [P] [US1] Android `android-client/app/**/AppViewModel.kt`: filter `wel_` components from `canvas` at `sendChat` (≈254-267) and `sendEvent` chat_message (≈303-314) arming; exclude `wel_` from `commitTurn` history push (≈879-888); text-only-turn resurrection covered by the arming purge; tests added to `CanvasClobberTest.kt` (welcome never in history; text-only first turn ends welcome-free)
-- [ ] T016 [P] [US1] Apple `apple-clients/AstralApp/AstralApp/AppModel.swift`: same purge at `sendChat` (≈782-784) / `sendEvent` (≈816-824) + `commitTurn` history filter (≈668-671); tests in AstralApp test target mirroring Android
-- [ ] T017 [P] [US1] watchOS `apple-clients/AstralWatch/WatchModel.swift`: unconditional `wel_` filter applied when `ui_upsert` ops are applied (≈339-342); test in AstralWatch tests (first-turn upserts never land under welcome)
-- [ ] T018 [US1] Live verification per quickstart.md §US1 on ALL six targets (Constitution X) — record evidence (screenshots + notes) under `specs/055-uniform-artifacts/evidence/us1/`
+- [x] T010 [US1] Stamp `wel_` identities (`id` AND `component_id`) on every welcome component in `backend/orchestrator/welcome.py` (`wel_hero`, `wel_enable`, `wel_ex_<slug>`, `wel_hint`); unit tests in `backend/tests/test_welcome_identity.py` (both fields present, slugs stable, never workspace-persistable via T008 guard)
+- [x] T011 [US1] Behind `FF_FIRST_TURN_CONTRACT`: remove ONLY the blanking `send_ui_render(websocket, [])` at `backend/orchestrator/orchestrator.py` ≈1497-1499 (keep `_ws_welcome` bookkeeping — enable_recommended_agents re-render must still work); integration test in `backend/tests/test_first_turn_contract.py` (VirtualWebSocket: first chat_message emits NO empty canvas render, flag off restores it byte-identically, welcome re-render paths still fire)
+- [x] T012 [US1] Fix the all-tools-denied `break` path so it sends `chat_status done` (orchestrator.py ≈4120-4125); regression test in `backend/tests/test_first_turn_contract.py::test_denied_break_sends_done`
+- [x] T013 [P] [US1] Web `backend/webrender/static/client.js`: selective purge of `[data-component-id^="wel_"]` (+ legacy `[id^="wel_"]`) nodes in `sendChat` (never blanket clear); canvas `ui_render` empty-state decision keyed on the structured `components` array (not `data.html` truthiness)
+- [x] T014 [P] [US1] Windows `windows-client/astral_client/app.py`: arm `Canvas.show_skeleton()` in `_send` (typed path, ≈1905-1924) matching `_emit`; suppress the idle empty-state hint while turn-active; purge `wel_` entries from `_last_components` + canvas at both send sites; tests in `windows-client/tests/test_first_turn.py` (offscreen)
+- [x] T015 [P] [US1] Android `android-client/app/**/AppViewModel.kt`: filter `wel_` components from `canvas` at `sendChat` (≈254-267) and `sendEvent` chat_message (≈303-314) arming; exclude `wel_` from `commitTurn` history push (≈879-888); text-only-turn resurrection covered by the arming purge; tests added to `CanvasClobberTest.kt` (welcome never in history; text-only first turn ends welcome-free)
+- [x] T016 [P] [US1] Apple `apple-clients/AstralApp/AstralApp/AppModel.swift`: same purge at `sendChat` (≈782-784) / `sendEvent` (≈816-824) + `commitTurn` history filter (≈668-671); tests in AstralApp test target mirroring Android
+- [x] T017 [P] [US1] watchOS `apple-clients/AstralWatch/WatchModel.swift`: unconditional `wel_` filter applied when `ui_upsert` ops are applied (≈339-342); test in AstralWatch tests (first-turn upserts never land under welcome)
+- [ ] T018 [US1] Live verification per quickstart.md §US1 on ALL six targets — WEB verified 2026-07-13 (skeleton survives first send, welcome purged, no blank window); Windows/Android/Apple/watch pending (Constitution X) — record evidence (screenshots + notes) under `specs/055-uniform-artifacts/evidence/us1/`
 
 **Checkpoint**: US1 shippable — SC-001/SC-002 measurable; flags-off run byte-identical.
 

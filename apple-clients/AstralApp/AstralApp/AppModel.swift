@@ -661,13 +661,19 @@ final class AppModel: NSObject {
             return
         }
         if pendingCanvas.isEmpty {
+            // Text-only turn keeps the canvas — minus any welcome that
+            // resurrected mid-turn (055: `wel_` never survives a turn).
+            canvas = canvas.dropWelcome()
             turnActive = false; pendingReplace = false; statusText = nil
             stepTrail = []; asyncDetached = false
             return
         }
-        if !canvas.isEmpty {
+        // 055: `wel_` identities never enter the timeline; a welcome-only
+        // canvas archives nothing.
+        let archived = canvas.dropWelcome()
+        if !archived.isEmpty {
             let label = canvasLabel.isEmpty ? "Canvas \(canvasHistory.count + 1)" : canvasLabel
-            canvasHistory.append(CanvasSnapshot(label: label, components: canvas))
+            canvasHistory.append(CanvasSnapshot(label: label, components: archived))
         }
         canvas = pendingCanvas
         pendingCanvas = []
@@ -782,6 +788,10 @@ final class AppModel: NSObject {
         turnActive = true
         pendingReplace = true
         pendingCanvas = []
+        // 055 uniform rule: purge the ephemeral welcome (`wel_` identities)
+        // from the committed canvas at turn start — the server no longer
+        // sends the blanking `ui_render []` (wire-contract §1).
+        canvas = canvas.dropWelcome()
         pendingLabel = String((text.isEmpty ? (ready.first?.filename ?? "") : text).prefix(80))
         staged = []
         viewingIndex = nil
@@ -817,6 +827,7 @@ final class AppModel: NSObject {
             turnActive = true
             pendingReplace = true
             pendingCanvas = []
+            canvas = canvas.dropWelcome()   // 055: same turn-start purge as sendChat
             viewingIndex = nil
             errorBanner = nil
             stepTrail = []

@@ -264,6 +264,24 @@
     if (d && d.parentNode) d.parentNode.removeChild(d);
   }
 
+  // Feature 055 (uniform rule, wire-contract §1): turn start drops the
+  // ephemeral welcome components (identity prefix "wel_") from the canvas.
+  // SELECTIVE removal only — mid-chat the canvas holds client-side workspace
+  // nodes a blanket clear would lose. Unconditional on purpose: when the
+  // server flag is off the welcome arrives id-less, nothing matches, and
+  // this is a no-op.
+  function purgeWelcome() {
+    var nodes = canvas.querySelectorAll('[data-component-id^="wel_"]');
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodes[i].parentNode) nodes[i].parentNode.removeChild(nodes[i]);
+    }
+    // Legacy safety: bare-id welcome nodes sitting directly under the canvas.
+    for (var j = canvas.children.length - 1; j >= 0; j--) {
+      var kid = canvas.children[j];
+      if (kid.id && kid.id.indexOf("wel_") === 0) canvas.removeChild(kid);
+    }
+  }
+
   // ---- workspace upsert morph ----
   // Each op targets [data-component-id]: replace the node in place when it
   // exists (no flicker, neighbors untouched), append when new, remove on op
@@ -330,7 +348,13 @@
       case "ui_render":
         if (data.target === "chat") appendChatBubble("assistant", data.html);
         else if (data.target === "history") { var hr = document.getElementById("astral-history"); if (hr) setHTML(hr, data.html); }
-        else { hideSkeleton(); setHTML(canvas, data.html); if (!data.html) showCanvasEmpty(); }
+        else {
+          hideSkeleton(); setHTML(canvas, data.html);
+          // Emptiness comes from the STRUCTURED payload: render_workspace
+          // emits a truthy wrapper div even for zero components (055), so
+          // html truthiness only decides frames without a components array.
+          if (Array.isArray(data.components) ? !data.components.length : !data.html) showCanvasEmpty();
+        }
         break;
       case "ui_upsert": applyUpsert(data); break; // in-place workspace updates
       case "ui_update": hideSkeleton(); setHTML(canvas, data.html); if (!data.html) showCanvasEmpty(); break;
@@ -507,6 +531,7 @@
       });
     }
     send({ type: "ui_event", action: "chat_message", session_id: activeChatId || undefined, payload: payload });
+    purgeWelcome(); // 055 uniform rule: welcome never survives the first send
     showSkeleton(); // optimistic loading state until the first canvas content
     if (typeof clearStagedAttachments === "function") clearStagedAttachments();
   }

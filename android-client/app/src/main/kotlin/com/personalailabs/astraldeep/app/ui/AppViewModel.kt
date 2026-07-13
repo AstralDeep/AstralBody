@@ -252,18 +252,11 @@ class AppViewModel(
                 (text + "\n📎 " + ready.joinToString(", ") { it.filename }).trim()
             }
         _state.value =
-            s.copy(
+            armTurn(s).copy(
                 turns = s.turns + ChatTurn("user", bubble),
-                turnActive = true,
-                pendingReplace = true,
-                pendingCanvas = emptyList(),
                 pendingLabel = (text.ifBlank { ready.firstOrNull()?.filename ?: "" }).take(80),
                 staged = emptyList(),
-                viewingIndex = null,
                 statusText = null,
-                banner = null,
-                stepTrail = emptyList(),
-                asyncDetached = false,
             )
         val attachments = ready.map { ChatAttachment(it.attachmentId!!, it.filename, it.category) }
         client.sendChat(text, _state.value.activeChatId, attachments)
@@ -301,19 +294,28 @@ class AppViewModel(
         // canvas shows the skeleton the instant it's tapped, not only once the
         // server acks the turn.
         if (action == "chat_message") {
-            _state.value =
-                _state.value.copy(
-                    turnActive = true,
-                    pendingReplace = true,
-                    pendingCanvas = emptyList(),
-                    viewingIndex = null,
-                    banner = null,
-                    stepTrail = emptyList(),
-                    asyncDetached = false,
-                )
+            _state.value = armTurn(_state.value)
         }
         client.sendEvent(action, _state.value.activeChatId, payload)
     }
+
+    /**
+     * Optimistic turn-start arming shared by [sendChat] and the rendered-control
+     * `chat_message` path: buffer the replacing turn and purge the turn-scoped
+     * welcome components from the committed canvas (feature 055 uniform rule —
+     * see [dropWelcome]). `internal` so the JVM unit test can drive it.
+     */
+    internal fun armTurn(s: UiState): UiState =
+        s.copy(
+            canvas = s.canvas.dropWelcome(),
+            turnActive = true,
+            pendingReplace = true,
+            pendingCanvas = emptyList(),
+            viewingIndex = null,
+            banner = null,
+            stepTrail = emptyList(),
+            asyncDetached = false,
+        )
 
     /** Start a fresh conversation (clears the canvas, timeline, and transcript). */
     fun newChat() {
@@ -861,14 +863,18 @@ class AppViewModel(
     /**
      * A turn finished (`chat_status done`). For a replacing turn that produced a
      * canvas, swap the buffer in and push the prior canvas onto the timeline; a
-     * text-only turn leaves the canvas untouched (never blank it).
+     * text-only turn leaves the canvas untouched (never blank it) apart from the
+     * welcome purge (see [dropWelcome]).
      */
     private fun commitTurn(s: UiState): UiState {
         if (!s.pendingReplace) {
             return s.copy(turnActive = false, statusText = null, stepTrail = emptyList(), asyncDetached = false)
         }
         if (s.pendingCanvas.isEmpty()) {
+            // Text-only turn: keep the canvas — minus welcome (belt-and-braces;
+            // the arming purge already dropped it).
             return s.copy(
+                canvas = s.canvas.dropWelcome(),
                 turnActive = false,
                 pendingReplace = false,
                 statusText = null,
@@ -876,12 +882,15 @@ class AppViewModel(
                 asyncDetached = false,
             )
         }
+        // Welcome components never enter the timeline; a welcome-only canvas
+        // archives nothing (the "Canvas 1" leak regression).
+        val archived = s.canvas.dropWelcome()
         val newHistory =
-            if (s.canvas.isNotEmpty()) {
+            if (archived.isNotEmpty()) {
                 s.canvasHistory +
                     CanvasSnapshot(
                         label = s.canvasLabel.ifBlank { "Canvas ${s.canvasHistory.size + 1}" },
-                        components = s.canvas,
+                        components = archived,
                     )
             } else {
                 s.canvasHistory
@@ -911,6 +920,13 @@ class AppViewModel(
 
     /** A `skeleton` loading placeholder — stray in a finished canvas, so dropped. */
     private fun isSkeleton(c: Component?): Boolean = c != null && c.type.equals("skeleton", ignoreCase = true)
+
+    /**
+     * Turn-scoped welcome components (feature 055 uniform rule): identities are
+     * "wel_"-prefixed, purged at turn start and never archived. Unconditional —
+     * when the server flag is off the welcome arrives id-less, so this is a no-op.
+     */
+    private fun List<Component>.dropWelcome(): List<Component> = filterNot { it.id?.startsWith("wel_") == true }
 
     private fun flattenText(components: List<Component>): String =
         components.joinToString("\n") { c ->

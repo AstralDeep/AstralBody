@@ -339,7 +339,11 @@ final class WatchModel {
         case "ui_upsert":
             let ops = frame.upsertOps
             guard !ops.isEmpty else { return }
-            canvas = Canvas.apply(canvas, ops)
+            // 055 uniform rule: the watch has no turn state, so the ephemeral
+            // welcome (`wel_` identities) is purged whenever ops land — turn
+            // content must never render under a retained welcome (the empty
+            // blanking render was always dropped by the guard above).
+            canvas = Canvas.apply(canvas.dropWelcome(), ops)
             speaker.speak(frame.speech)
         case "ui_stream_data":
             if let text = frame.streamComponents.first?.textContent {
