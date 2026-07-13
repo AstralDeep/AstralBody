@@ -1263,7 +1263,8 @@
     { name: "/agents", desc: "list your enabled agents" },
     { name: "/summarize", desc: "summarize a link or text" },
     { name: "/research", desc: "research + cited brief" },
-    { name: "/weather", desc: "weather + forecast" }
+    { name: "/weather", desc: "weather + forecast" },
+    { name: "/download", desc: "get the Windows desktop app" }
   ];
   var input = document.getElementById("astral-input");
   var menu = document.getElementById("astral-slash-menu");
