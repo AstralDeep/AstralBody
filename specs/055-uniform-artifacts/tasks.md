@@ -17,11 +17,11 @@
 **Purpose**: the wire-vocabulary and flag scaffolding every story hangs off. The manifest and all three client disposition tables MUST land together (drift guards fail otherwise).
 
 - [x] T001 Register the six 055 feature flags (`FF_FIRST_TURN_CONTRACT` on, `FF_STREAM_ARTIFACTS` on, `FF_DESIGNER_ALL_DEVICES` on, `FF_COMPONENT_REFINE` on, `FF_ARTIFACT_EXPORT` on, `FF_ARTIFACT_SHARING` off) in `backend/shared/feature_flags.py` + document each in `.env.example`
-- [ ] T002 Edit `backend/shared/ui_protocol.json`: add `additive_fields` entry for `component_id` on `ui_stream_data`+`stream_subscribed` (per contracts/wire-contract.md §2) and add `component_refine`, `component_restore` to `accept_actions` (sorted)
-- [ ] T003 [P] Update Windows dispositions in `windows-client/astral_client/protocol_manifest.py`: the 8 `component_verbs` frames ignored→handled, new accept actions classified; keep `tests/test_protocol_manifest.py` green
-- [ ] T004 [P] Update Android dispositions in `android-client/core/src/main/kotlin/**/ProtocolManifest.kt` (same deltas); keep `ProtocolManifestTest`/`VocabularyParityTest` green
-- [ ] T005 [P] Update Apple dispositions in `apple-clients/AstralCore/Sources/AstralCore/Protocol/Dispositions.swift` (same deltas; watch keeps verbs/refine ignored-with-reason); keep `ManifestDriftTests` green
-- [ ] T006 Update `specs/044-native-client-parity/parity-matrix.md`: rows for the 8 verb promotions, the 2 new actions, the `component_id` additive field, the provenance-field render note, and the declared watch carve-outs
+- [x] T002 Edit `backend/shared/ui_protocol.json`: add `additive_fields` entry for `component_id` on `ui_stream_data`+`stream_subscribed` (per contracts/wire-contract.md §2) and add `component_refine`, `component_restore` to `accept_actions` (sorted)
+- [x] T003 [P] Update Windows dispositions in `windows-client/astral_client/protocol_manifest.py`: the 8 `component_verbs` frames ignored→handled, new accept actions classified; keep `tests/test_protocol_manifest.py` green
+- [x] T004 [P] Update Android dispositions in `android-client/core/src/main/kotlin/**/ProtocolManifest.kt` (same deltas); keep `ProtocolManifestTest`/`VocabularyParityTest` green
+- [x] T005 [P] Update Apple dispositions in `apple-clients/AstralCore/Sources/AstralCore/Protocol/Dispositions.swift` (same deltas; watch keeps verbs/refine ignored-with-reason); keep `ManifestDriftTests` green
+- [x] T006 Update `specs/044-native-client-parity/parity-matrix.md`: rows for the 8 verb promotions, the 2 new actions, the `component_id` additive field, the provenance-field render note, and the declared watch carve-outs
 
 **Checkpoint**: backend + all three client drift-guard suites pass with the new vocabulary.
 
