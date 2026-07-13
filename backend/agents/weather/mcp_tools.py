@@ -904,7 +904,7 @@ def get_weather_alerts(
             area = props.get("areaDesc", "Unknown area")
             
             # Convert ISO datetime strings to datetime objects
-            from datetime import datetime
+            # (datetime is imported at module level — no local import needed)
             try:
                 effective_dt = datetime.fromisoformat(effective.replace('Z', '+00:00')) if effective else datetime.now()
                 expires_dt = datetime.fromisoformat(expires.replace('Z', '+00:00')) if expires else datetime.now()
