@@ -557,6 +557,12 @@ class StreamManager:
                     f"subscribe({existing.stream_id}): attached additional "
                     f"ws (subscribers={len(existing.subscribers)})"
                 )
+                # 055 late-join: the attaching socket missed every prior
+                # frame — replay the retained chunk so it renders current
+                # state, not a blank placeholder. Bridged-only (retention is
+                # bridged-only), so unbridged attach stays send-free,
+                # byte-identical to pre-055.
+                await self.replay_retained(ws, existing.stream_id)
             return existing.stream_id, True
 
         # --- US4 (T063): dormant-wake attach path -------------------------
@@ -815,9 +821,14 @@ class StreamManager:
 
     async def _send_chunk_to_ws(
         self, sub: StreamSubscription, ws: "WebSocket", chunk: StreamChunk,
+        include_html: bool = False,
     ) -> None:
         """Send a single chunk to a single ws (used by unsubscribe ack and
-        per-subscriber error chunks in US4)."""
+        per-subscriber error chunks in US4). ``include_html`` server-renders
+        the components exactly like the fan-out path — the late-join replay
+        needs it so web clients (which render from ``html``) can paint the
+        frame; acks/error chunks omit the key so their frames stay
+        byte-identical to pre-055."""
         adapted_components = chunk.components
         if chunk.components and self._rote is not None:
             try:
@@ -834,6 +845,17 @@ class StreamManager:
             "terminal": chunk.terminal,
             "error": chunk.error,
         }
+        if include_html:
+            chunk_html = None
+            if adapted_components:
+                try:
+                    from webrender import render_for_target, target_for_profile
+                    profile = self._rote.get_profile(ws) if self._rote is not None else None
+                    chunk_html = render_for_target(
+                        target_for_profile(profile), adapted_components, profile)
+                except Exception:
+                    logger.exception("webrender: failed to render stream chunk")
+            wire_msg["html"] = chunk_html
         if sub.bridged_component_id is not None:
             wire_msg["component_id"] = sub.bridged_component_id
         await self._send_to_ws(ws, json.dumps(wire_msg))
@@ -954,6 +976,56 @@ class StreamManager:
             self._dormant.pop(outer_key, None)
 
         return resumed
+
+    async def attach_to_chat(
+        self, ws: "WebSocket", user_id: str, chat_id: str,
+    ) -> List[Tuple[str, str]]:
+        """Attach ``ws`` to every ACTIVE subscription of ``(user_id, chat_id)``.
+
+        055 late-join: ``resume()`` only covers DORMANT streams, so a socket
+        loading a chat whose streams are kept ACTIVE by the user's other
+        sockets would otherwise never receive chunks. Attach-only — the agent
+        run is already live, nothing is re-dispatched. Returns
+        ``(stream_id, tool_name)`` for each newly attached subscription so
+        the orchestrator can send the matching ``stream_subscribed`` acks
+        (mirrors ``resume()``).
+        """
+        session = self._get_user_session(ws)
+        if session is None or session.get("sub") != user_id:
+            logger.warning(
+                f"attach_to_chat called with mismatched user/session for {user_id}"
+            )
+            return []
+        attached: List[Tuple[str, str]] = []
+        for sub in self._active.values():
+            if sub.user_id != user_id or sub.chat_id != chat_id:
+                continue
+            if ws in sub.subscribers:
+                continue
+            sub.subscribers.append(ws)
+            attached.append((sub.stream_id, sub.tool_name))
+            logger.info(
+                f"attach_to_chat({sub.stream_id}): attached loading ws "
+                f"(subscribers={len(sub.subscribers)})"
+            )
+        return attached
+
+    async def replay_retained(self, ws: "WebSocket", stream_id: str) -> None:
+        """Re-deliver the retained content chunk to ONE just-attached socket
+        so it shows the stream's current state instead of a blank placeholder
+        (055 late-join). Bridged-only by construction — retention itself is
+        bridged-only. The chunk keeps its stored seq: the joining socket has
+        no seq state for this stream so it accepts, while an already-caught-up
+        socket's dedup drops the duplicate. Fail-open: a lost replay degrades
+        to waiting for the next live chunk.
+        """
+        sub = self.subscription_for_stream(stream_id)
+        if sub is None or sub.bridged_component_id is None or sub.retained_chunk is None:
+            return
+        try:
+            await self._send_chunk_to_ws(sub, ws, sub.retained_chunk, include_html=True)
+        except Exception:
+            logger.debug(f"replay_retained failed for {stream_id}", exc_info=True)
 
     # ------------------------------------------------------------------
     # 055 US2: lookups for the orchestrator's stream_subscribed builders

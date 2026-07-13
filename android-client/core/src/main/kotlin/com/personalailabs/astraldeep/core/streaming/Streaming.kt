@@ -96,9 +96,18 @@ fun streamFrameToOps(
     return listOf(CanvasOp("upsert", node, body))
 }
 
-/** A lightweight placeholder shown on `stream_subscribed`, replaced by the first frame. */
-fun subscribeAckOps(msg: Inbound.StreamSubscribed): List<CanvasOp> {
+/**
+ * A lightweight placeholder shown on `stream_subscribed`, replaced by the first
+ * frame. [existingIds] (ids already on the target canvas) guards the late-join
+ * case (055): a device subscribing mid-stream may already hold retained content
+ * under the node's identity, and the placeholder must not blank it.
+ */
+fun subscribeAckOps(
+    msg: Inbound.StreamSubscribed,
+    existingIds: Set<String> = emptySet(),
+): List<CanvasOp> {
     val (node, _) = nodeKey(msg.streamId, msg.toolName, msg.componentId) ?: return emptyList()
+    if (node in existingIds) return emptyList()
     val tool = msg.toolName ?: "tool"
     val attrs =
         buildJsonObject {

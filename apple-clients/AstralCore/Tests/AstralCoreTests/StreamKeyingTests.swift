@@ -42,6 +42,29 @@ final class StreamKeyingTests: XCTestCase {
         XCTAssertEqual(legacy.map(\.componentId), ["stream-s1"])
     }
 
+    // MARK: mid-stream join — placeholder must not blank a held component
+
+    func testSubscribedPlaceholderSkippedWhenIdentityAlreadyHeld() {
+        let ack = subscribeAckOps(frame(
+            #"{"type":"stream_subscribed","stream_id":"s1","tool_name":"live_chart","component_id":"wc_abc"}"#),
+            existingIds: ["wc_abc"])
+        XCTAssertTrue(ack.isEmpty)
+    }
+
+    func testSubscribedPlaceholderSkippedForHeldSyntheticNode() {
+        let ack = subscribeAckOps(frame(
+            #"{"type":"stream_subscribed","stream_id":"s1","tool_name":"live_chart"}"#),
+            existingIds: ["stream-s1"])
+        XCTAssertTrue(ack.isEmpty)
+    }
+
+    func testSubscribedPlaceholderStillBuiltWhenIdentityAbsent() {
+        let ack = subscribeAckOps(frame(
+            #"{"type":"stream_subscribed","stream_id":"s1","tool_name":"live_chart","component_id":"wc_abc"}"#),
+            existingIds: ["wc_other", "stream-s1"])
+        XCTAssertEqual(ack.map(\.componentId), ["wc_abc"])
+    }
+
     func testAbsentFieldKeepsSyntheticNodeExactly() {
         var seq: [String: Int] = [:]
         let ops = streamFrameToOps(chunk(seq: 1), activeChat: "c1", seqState: &seq)

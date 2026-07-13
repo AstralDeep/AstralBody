@@ -347,6 +347,138 @@ class TestNarrativeAndLegacyExclusion:
 
 
 # ---------------------------------------------------------------------------
+# Late-join attach replay — a socket joining mid-stream gets current state
+# ---------------------------------------------------------------------------
+
+class TestAttachReplay:
+    """Attaching to an existing bridged subscription replays the retained
+    content chunk to JUST the attaching socket (spec edge case: a device
+    joining mid-stream gets the current component state, not a blank
+    placeholder). Unbridged/flag-off attach stays send-free as before."""
+
+    async def _attach_second_ws(self, mgr, deps):
+        ws2 = FakeWebSocket()
+        deps["sessions"][ws2] = {"sub": "alice"}
+        sid, attached = await mgr.subscribe(
+            ws=ws2, user_id="alice", chat_id="chat-1",
+            tool_name="live_temperature", agent_id="weather",
+            params={"latitude": 51.5, "longitude": -0.12},
+        )
+        return ws2, sid, attached
+
+    async def test_attach_replays_retained_chunk_to_joining_ws_only(self):
+        mgr, deps = _make_manager()
+        ws1, stream_id = await _subscribed(mgr, deps)
+        await mgr.handle_agent_chunk(
+            _chunk(stream_id, 3, [{"type": "metric", "value": "12C"}]))
+        await asyncio.sleep(0.05)
+        deps["send_to_ws"].reset_mock()
+
+        ws2, sid, attached = await self._attach_second_ws(mgr, deps)
+        assert (sid, attached) == (stream_id, True)
+
+        calls = deps["send_to_ws"].await_args_list
+        assert len(calls) == 1, "exactly one replay frame expected"
+        assert calls[0].args[0] is ws2
+        frame = json.loads(calls[0].args[1])
+        assert frame["type"] == "ui_stream_data"
+        assert frame["seq"] == 3  # stored seq: the joining ws has no seq state
+        assert frame["components"] == [{"type": "metric", "value": "12C"}]
+        assert frame["component_id"] == fingerprint(
+            "weather", "live_temperature", {"latitude": 51.5, "longitude": -0.12})
+        assert frame["terminal"] is False
+        # Replay must match the fan-out shape web clients render from.
+        assert "html" in frame
+
+    async def test_no_replay_when_nothing_retained(self):
+        mgr, deps = _make_manager()
+        ws1, stream_id = await _subscribed(mgr, deps)
+        deps["send_to_ws"].reset_mock()
+
+        ws2, _, attached = await self._attach_second_ws(mgr, deps)
+        assert attached is True
+        assert deps["send_to_ws"].await_args_list == []
+
+    async def test_already_attached_ws_gets_no_replay(self):
+        mgr, deps = _make_manager()
+        ws1, stream_id = await _subscribed(mgr, deps)
+        await mgr.handle_agent_chunk(
+            _chunk(stream_id, 1, [{"type": "metric", "value": "12C"}]))
+        await asyncio.sleep(0.05)
+        deps["send_to_ws"].reset_mock()
+
+        sid, attached = await mgr.subscribe(
+            ws=ws1, user_id="alice", chat_id="chat-1",
+            tool_name="live_temperature", agent_id="weather",
+            params={"latitude": 51.5, "longitude": -0.12},
+        )
+        assert (sid, attached) == (stream_id, True)
+        assert deps["send_to_ws"].await_args_list == []
+
+    async def test_flag_off_attach_sends_nothing(self, stream_artifacts_off):
+        mgr, deps = _make_manager()
+        ws1, stream_id = await _subscribed(mgr, deps)
+        await mgr.handle_agent_chunk(
+            _chunk(stream_id, 1, [{"type": "metric", "value": "12C"}]))
+        await asyncio.sleep(0.05)
+        deps["send_to_ws"].reset_mock()
+
+        ws2, _, attached = await self._attach_second_ws(mgr, deps)
+        assert attached is True
+        assert deps["send_to_ws"].await_args_list == []
+
+
+class TestAttachToChat:
+    """Manager half of the load_chat late-join wiring: walk _active for the
+    (user, chat), attach the loading socket, report what was attached."""
+
+    async def test_attaches_and_reports_new_socket(self):
+        mgr, deps = _make_manager()
+        ws1, stream_id = await _subscribed(mgr, deps)
+        ws2 = FakeWebSocket()
+        deps["sessions"][ws2] = {"sub": "alice"}
+
+        attached = await mgr.attach_to_chat(ws2, "alice", "chat-1")
+        assert attached == [(stream_id, "live_temperature")]
+        sub = mgr.subscription_for_stream(stream_id)
+        assert ws2 in sub.subscribers and ws1 in sub.subscribers
+        # Idempotent: a second load of the same chat attaches nothing.
+        assert await mgr.attach_to_chat(ws2, "alice", "chat-1") == []
+
+    async def test_other_chat_and_other_user_excluded(self):
+        mgr, deps = _make_manager()
+        await _subscribed(mgr, deps, chat_id="chat-other")
+        ws2 = FakeWebSocket()
+        deps["sessions"][ws2] = {"sub": "alice"}
+        assert await mgr.attach_to_chat(ws2, "alice", "chat-1") == []
+
+        # Session mismatch is refused outright (defense in depth).
+        ws3 = FakeWebSocket()
+        deps["sessions"][ws3] = {"sub": "mallory"}
+        assert await mgr.attach_to_chat(ws3, "alice", "chat-other") == []
+
+    async def test_replay_retained_sends_only_bridged_retained(self):
+        mgr, deps = _make_manager()
+        ws1, stream_id = await _subscribed(mgr, deps)
+        # Nothing retained yet → no send.
+        await mgr.replay_retained(ws1, stream_id)
+        assert deps["send_to_ws"].await_args_list == []
+
+        await mgr.handle_agent_chunk(
+            _chunk(stream_id, 2, [{"type": "metric", "value": "12C"}]))
+        await asyncio.sleep(0.05)
+        deps["send_to_ws"].reset_mock()
+        await mgr.replay_retained(ws1, stream_id)
+        frames = _sent_frames(deps)
+        assert len(frames) == 1
+        assert frames[0]["seq"] == 2
+        assert frames[0]["component_id"].startswith("wc_")
+        # Unknown stream: no-op.
+        await mgr.replay_retained(ws1, "stream-never-existed")
+        assert len(_sent_frames(deps)) == 1
+
+
+# ---------------------------------------------------------------------------
 # Seq continuation across retry/wake + terminal-hook coverage (review fixes)
 # ---------------------------------------------------------------------------
 

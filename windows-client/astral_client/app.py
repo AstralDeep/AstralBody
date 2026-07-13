@@ -2550,7 +2550,7 @@ class MainWindow(QMainWindow):
         """Handle stream control frames (subscribe ack / error / teardown)."""
         t = msg.get("type")
         if t == "stream_subscribed":
-            ops = subscribe_ack_ops(msg)
+            ops = subscribe_ack_ops(msg, existing_ids=self.canvas._by_id)
             if ops:
                 self.canvas.apply_ops(ops)
             self.topbar.set_status(

@@ -56,6 +56,33 @@ def test_subscribed_placeholder_without_field_keeps_stream_node():
     assert ops[0]["component_id"] == stream_node_id("s1")
 
 
+def test_subscribed_placeholder_skipped_when_identity_present():
+    # Mid-stream join: the canvas already holds the component under that
+    # identity — the ack must NOT blank it with a placeholder.
+    ops = subscribe_ack_ops(
+        {"stream_id": "s1", "tool_name": "ticker", "component_id": "wc_abc"},
+        existing_ids={"wc_abc"},
+    )
+    assert ops == []
+
+
+def test_subscribed_placeholder_applied_when_identity_absent():
+    ops = subscribe_ack_ops(
+        {"stream_id": "s1", "tool_name": "ticker", "component_id": "wc_abc"},
+        existing_ids={"wc_other"},
+    )
+    assert ops[0]["component_id"] == "wc_abc"
+
+
+def test_subscribed_placeholder_skipped_for_existing_stream_node():
+    # The guard also covers legacy stream-<id> nodes (re-subscribe/reconnect).
+    ops = subscribe_ack_ops(
+        {"stream_id": "s1", "tool_name": "ticker"},
+        existing_ids={stream_node_id("s1")},
+    )
+    assert ops == []
+
+
 def test_seq_dedupe_still_keyed_on_stream_id():
     seq: dict = {}
     stream_frame_to_ops(
@@ -128,6 +155,17 @@ def test_no_double_render_on_terminal_persist_upsert(canvas):
                        "component": {"type": "text", "content": "persisted"}}])
     assert list(canvas._by_id) == ["wc_abc"]
     assert canvas._rendered["wc_abc"] == {"type": "text", "content": "persisted"}
+
+
+def test_late_join_ack_keeps_retained_component(canvas):
+    # A device joining mid-stream re-hydrates the component, THEN receives the
+    # stream_subscribed ack: the retained content must survive, not be blanked.
+    canvas.apply_ops([{"op": "upsert", "component_id": "wc_abc",
+                       "component": {"type": "text", "content": "retained"}}])
+    canvas.apply_ops(subscribe_ack_ops(
+        {"stream_id": "s1", "tool_name": "ticker", "component_id": "wc_abc"},
+        existing_ids=canvas._by_id))
+    assert canvas._rendered["wc_abc"] == {"type": "text", "content": "retained"}
 
 
 def test_absent_field_keeps_todays_two_node_shape(canvas):

@@ -323,9 +323,15 @@ def _stamp_provenance(comp, kind=None) -> None:
     overwriting any agent/model-supplied value — trust cannot be
     self-upgraded. ``kind`` is a server-side override; anything outside the
     vocabulary falls back to derivation. With FF_COMPONENT_REFINE off the
-    field is never written (pre-055 wire bytes).
+    field is STRIPPED, never merely left alone: 055-era clients render trust
+    badges from this field, so letting an agent-supplied value ride through
+    with the kill switch off would let agents mint their own badges (FR-026
+    has no flag carve-out).
     """
-    if not isinstance(comp, dict) or not flags.is_enabled("component_refine"):
+    if not isinstance(comp, dict):
+        return
+    if not flags.is_enabled("component_refine"):
+        comp.pop("provenance", None)
         return
     comp["provenance"] = kind if kind in _PROVENANCE_KINDS else _derive_provenance(comp)
 
@@ -340,6 +346,9 @@ def _stamp_canvas_provenance(components) -> None:
     are derived in place.
     """
     if not flags.is_enabled("component_refine"):
+        for comp in components or []:
+            if isinstance(comp, dict):
+                comp.pop("provenance", None)
         return
     from orchestrator.ui_designer import GARNISH_ID_PREFIX
     for comp in components or []:
@@ -1991,6 +2000,43 @@ class Orchestrator:
                                     await self._safe_send(websocket, json.dumps(resumed_ack))
                             except Exception as e:
                                 logger.warning(f"stream_manager.resume failed: {e}")
+
+                        # 055 late-join: resume() above only revives DORMANT
+                        # streams. Streams kept ACTIVE by the user's other
+                        # sockets need this socket attached too, plus a
+                        # replay of the retained chunk so the canvas shows
+                        # current state instead of a blank placeholder.
+                        # Rides FF_STREAM_ARTIFACTS — flag off keeps
+                        # load_chat's frames byte-identical to pre-055.
+                        if (self.stream_manager is not None
+                                and flags.is_enabled("stream_artifacts")):
+                            try:
+                                attached_subs = await self.stream_manager.attach_to_chat(
+                                    websocket, user_id, chat_id,
+                                )
+                                for att_stream_id, att_tool_name in attached_subs:
+                                    cfg = self._streamable_tools.get(att_tool_name, {})
+                                    att_ack = {
+                                        "type": "stream_subscribed",
+                                        "stream_id": att_stream_id,
+                                        "tool_name": att_tool_name,
+                                        "agent_id": cfg.get("agent_id", ""),
+                                        "session_id": chat_id,
+                                        "max_fps": cfg.get("max_fps", 30),
+                                        "min_fps": cfg.get("min_fps", 5),
+                                        "attached": True,
+                                    }
+                                    att_cid = self.stream_manager.component_id_for(
+                                        att_stream_id)
+                                    if att_cid is not None:
+                                        att_ack["component_id"] = att_cid
+                                    await self._safe_send(websocket, json.dumps(att_ack))
+                                    # Ack first: clients key the placeholder
+                                    # off it before the replay frame fills it.
+                                    await self.stream_manager.replay_retained(
+                                        websocket, att_stream_id)
+                            except Exception as e:
+                                logger.warning(f"stream_manager.attach_to_chat failed: {e}")
                     else:
                         await self.send_ui_render(websocket, [
                             Alert(message="Chat not found", variant="error").to_dict()

@@ -126,15 +126,17 @@ def test_property_agent_supplied_provenance_never_survives():
         assert provenance_of(comp) == expected
 
 
-def test_flag_off_stamps_nothing_and_leaves_agent_values_alone():
+def test_flag_off_stamps_nothing_and_strips_agent_values():
     flags._flags["component_refine"] = False
     absent = _table()
     _tag_source(absent, AGENT, TOOL, tool_params={})
     assert "provenance" not in absent
-    # Pre-055 bytes: an agent-supplied value passes through untouched.
+    # FR-026 has no flag carve-out: an agent-supplied value is STRIPPED, not
+    # passed through — 055-era clients render badges from this field, so
+    # pass-through would let agents mint their own trust marks.
     supplied = _table(provenance="estimated")
     _tag_source(supplied, AGENT, TOOL)
-    assert supplied["provenance"] == "estimated"
+    assert "provenance" not in supplied
     _stamp_canvas_provenance([absent])
     assert "provenance" not in absent
 
@@ -321,3 +323,33 @@ async def test_flag_off_canvas_is_field_free(env):
     await orch._send_or_replace_components(None, [comp], chat_id, user_id)
     canvas = await asyncio.to_thread(orch._canvas_components, chat_id, user_id)
     assert canvas and all("provenance" not in c for c in canvas)
+
+
+class TestFlagOffStripsForgedTrust:
+    """FR-026 has no flag carve-out: with FF_COMPONENT_REFINE off the server
+    must STRIP agent-supplied provenance, not pass it through — 055-era
+    native badge renderers would otherwise mint the agent's own trust mark."""
+
+    def test_stamp_strips_agent_supplied_value_flag_off(self):
+        from orchestrator.orchestrator import _stamp_provenance
+        flags._flags["component_refine"] = False
+        comp = {"type": "metric", "title": "M", "provenance": "grounded"}
+        _stamp_provenance(comp)
+        assert "provenance" not in comp
+
+    def test_canvas_pass_strips_flag_off(self):
+        from orchestrator.orchestrator import _stamp_canvas_provenance
+        flags._flags["component_refine"] = False
+        comps = [{"type": "card", "provenance": "verified"},
+                 {"type": "text", "content": "x"}]
+        _stamp_canvas_provenance(comps)
+        assert all("provenance" not in c for c in comps)
+
+    def test_tag_source_strips_nested_flag_off(self):
+        from orchestrator.orchestrator import _tag_source
+        flags._flags["component_refine"] = False
+        comp = {"type": "card", "provenance": "grounded",
+                "content": [{"type": "metric", "provenance": "grounded"}]}
+        _tag_source(comp, "agent-1", "tool_x")
+        assert "provenance" not in comp
+        assert "provenance" not in comp["content"][0]

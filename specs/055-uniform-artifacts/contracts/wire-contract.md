@@ -214,5 +214,8 @@ changes `FF_LLM_STREAMING` frame boundaries (final assembled text unchanged);
 (e) the web provenance footer no longer normalizes agent-supplied synonym
 values (`verified`, `approx`, `model`, …) — non-canonical values fall back to
 derivation regardless of flag state, so an agent can no longer self-upgrade
-trust through the footer. Each is a spec'd correctness fix
+trust through the footer; (f) with `FF_COMPONENT_REFINE` off, agent-supplied
+`provenance` values are STRIPPED server-side rather than passed through —
+FR-026 (no self-upgraded trust) has no flag carve-out, and 055-era client
+badge renderers cannot know the flag state. Each is a spec'd correctness fix
 (FR-004/FR-013/FR-026/D6) with its own pinned tests.

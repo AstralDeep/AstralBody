@@ -684,7 +684,7 @@ class AppViewModel(
             is Inbound.UiStreamData ->
                 applyCanvasOps(s, streamFrameToOps(msg, s.activeChatId, seqState))
             is Inbound.StreamSubscribed ->
-                applyCanvasOps(s, subscribeAckOps(msg))
+                applyCanvasOps(s, subscribeAckOps(msg, canvasIds(s)))
             is Inbound.StreamErrorMsg ->
                 applyCanvasOps(s, streamErrorOps(msg))
             is Inbound.ChromeMenu -> s.copy(chromeMenu = msg.model)
@@ -852,6 +852,14 @@ class AppViewModel(
         val next = if (idx >= 0) trail.toMutableList().also { it[idx] = line } else trail + line
         return next.takeLast(MAX_TRAIL)
     }
+
+    /**
+     * Ids already on the canvas [applyCanvasOps] would target (same buffer-vs-live
+     * selection) — the subscribe-ack placeholder guard, so a device joining
+     * mid-stream never blanks retained content under the same identity (055).
+     */
+    private fun canvasIds(s: UiState): Set<String> =
+        (if (s.pendingReplace) s.pendingCanvas else s.canvas).mapNotNullTo(HashSet()) { it.id }
 
     /** Route streaming/patch ops to the buffer (mid-replace-turn) or live canvas. */
     private fun applyCanvasOps(

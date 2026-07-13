@@ -126,6 +126,33 @@ class StreamingTest {
         assertTrue(streamFrameToOps(frame(seq = 1, componentId = "wc_abc"), null, seq).isEmpty())
     }
 
+    // ---- 055 late join: placeholder must not blank retained content ----
+
+    @Test
+    fun subscribe_ack_skipped_when_identity_already_on_canvas() {
+        assertTrue(subscribeAckOps(Inbound.StreamSubscribed("s1", "ticker", "wc_abc"), setOf("wc_abc")).isEmpty())
+    }
+
+    @Test
+    fun subscribe_ack_skipped_for_existing_legacy_stream_node() {
+        assertTrue(subscribeAckOps(Inbound.StreamSubscribed("s1", "ticker"), setOf(streamNodeId("s1"))).isEmpty())
+    }
+
+    @Test
+    fun subscribe_ack_emitted_when_only_other_identities_present() {
+        val ops = subscribeAckOps(Inbound.StreamSubscribed("s1", "ticker", "wc_abc"), setOf("wc_other"))
+        assertEquals("wc_abc", ops[0].componentId)
+    }
+
+    @Test
+    fun late_join_placeholder_does_not_blank_retained_component() {
+        var canvas = Canvas.apply(emptyList(), listOf(CanvasOp("upsert", "wc_abc", comp("card").copy(id = "wc_abc"))))
+        val existing = canvas.mapNotNullTo(mutableSetOf()) { it.id }
+        canvas = Canvas.apply(canvas, subscribeAckOps(Inbound.StreamSubscribed("s1", "ticker", "wc_abc"), existing))
+        assertEquals(1, canvas.size)
+        assertEquals("card", canvas[0].type) // retained render survives the mid-stream join
+    }
+
     @Test
     fun terminal_persist_upsert_replaces_bridged_node_no_double_render() {
         val seq = mutableMapOf<String, Int>()

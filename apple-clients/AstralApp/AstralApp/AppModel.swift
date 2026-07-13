@@ -477,7 +477,11 @@ final class AppModel: NSObject {
         case "ui_stream_data", "stream_data":
             applyCanvasOps(streamFrameToOps(frame, activeChat: activeChatId, seqState: &seqState))
         case "stream_subscribed":
-            applyCanvasOps(subscribeAckOps(frame))
+            // 055 mid-stream join: load_chat may already have re-hydrated the
+            // streamed component — the placeholder must not blank it. Guard
+            // against the same list applyCanvasOps would mutate.
+            let held = pendingReplace ? pendingCanvas : canvas
+            applyCanvasOps(subscribeAckOps(frame, existingIds: Set(held.compactMap(\.componentId))))
         case "stream_error":
             applyCanvasOps(streamErrorOps(frame))
         case "chrome_menu":

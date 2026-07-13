@@ -121,13 +121,17 @@ public func streamFrameToOps(_ frame: InboundFrame, activeChat: String?,
     return [UpsertOp(op: "upsert", componentId: node, component: body)]
 }
 
-/// A lightweight placeholder shown on `stream_subscribed`.
-public func subscribeAckOps(_ frame: InboundFrame) -> [UpsertOp] {
+/// A lightweight placeholder shown on `stream_subscribed`. `existingIds` —
+/// identities the target canvas already holds — suppresses the placeholder so
+/// a device joining mid-stream keeps the re-hydrated component instead of a
+/// blank node (web twin: the `stream_subscribed` guard in client.js).
+public func subscribeAckOps(_ frame: InboundFrame, existingIds: Set<String> = []) -> [UpsertOp] {
     let streamId = frame.payload["stream_id"]?.stringValue
     let toolName = frame.payload["tool_name"]?.stringValue
     let componentId = frame.payload["component_id"]?.stringValue
     guard let (node, _) = nodeKey(streamId: streamId, toolName: toolName,
                                   componentId: componentId) else { return [] }
+    if existingIds.contains(node) { return [] }
     let tool = toolName ?? "tool"
     let comp = AstralComponent(type: "text", raw: .object([
         "type": .string("text"), "component_id": .string(node),

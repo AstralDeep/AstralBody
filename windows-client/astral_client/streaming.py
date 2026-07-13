@@ -29,7 +29,7 @@ here degrade to that shape gracefully but the desktop targets the push system.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from typing import Container, Dict, List, Optional, Tuple
 
 #: Canvas component-id prefix for a live stream's node (mirrors the web client).
 STREAM_NODE_PREFIX = "stream-"
@@ -118,12 +118,17 @@ def stream_frame_to_ops(
     return [{"op": "upsert", "component_id": node, "component": body}]
 
 
-def subscribe_ack_ops(frame: dict) -> List[dict]:
+def subscribe_ack_ops(frame: dict, *, existing_ids: Container[str] = ()) -> List[dict]:
     """A lightweight placeholder shown on ``stream_subscribed`` so the canvas
     reflects activity before the first data frame arrives (replaced in place by
-    the first ``ui_stream_data`` for the same node)."""
+    the first ``ui_stream_data`` for the same node).
+
+    ``existing_ids`` is the canvas's current identity map: when the node is
+    already rendered — a device joining mid-stream whose canvas holds the
+    retained component — the placeholder is suppressed rather than blanking it
+    (055 mid-stream join; mirrors the web client's node-exists guard)."""
     node, _ = _node_key(frame)
-    if not node:
+    if not node or node in existing_ids:
         return []
     tool = frame.get("tool_name") or "tool"
     return [{
