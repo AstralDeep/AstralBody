@@ -3269,9 +3269,16 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         except Exception:  # pragma: no cover - defensive
             logger.debug("_send_to_user_sockets: unserializable frame", exc_info=True)
             return 0
+        from orchestrator.async_tasks import VirtualWebSocket
         sent = 0
         for ws, claims in list(self.ui_sessions.items()):
             if (claims or {}).get("sub") != user_id:
+                continue
+            # A background turn's own VirtualWebSocket sits in ui_sessions for
+            # the turn's lifetime — "delivering" to it would count as a
+            # notified device and silently skip the register_ui catch-up
+            # replay for users with no real socket connected.
+            if isinstance(ws, VirtualWebSocket):
                 continue
             try:
                 if await self._safe_send(ws, data):

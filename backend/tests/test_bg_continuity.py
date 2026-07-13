@@ -50,12 +50,29 @@ def orch(bg_flag, monkeypatch):
     return o
 
 
+class _CaptureSocket:
+    """Frame-capture device double. Deliberately NOT a VirtualWebSocket: the
+    production fan skips vws instances (they are background turns, not
+    devices — a turn's own vws counting as "notified" would suppress the
+    register_ui catch-up replay). Exposes the same .task.outputs read surface
+    the assertions use."""
+
+    def __init__(self):
+        from types import SimpleNamespace
+        self.task = SimpleNamespace(outputs=[])
+
+    async def send_text(self, text):
+        try:
+            self.task.outputs.append(json.loads(text))
+        except (ValueError, TypeError):
+            pass
+
+    async def send_json(self, obj):
+        self.task.outputs.append(obj if isinstance(obj, dict) else json.loads(obj))
+
+
 def _capture_socket(orch, user_id):
-    """A registered capture socket (the established VirtualWebSocket test
-    stand-in; its own empty task identity never re-fans)."""
-    from orchestrator.async_tasks import BackgroundTask, VirtualWebSocket
-    task = BackgroundTask(task_id=uuid.uuid4().hex, chat_id="", user_id="")
-    ws = VirtualWebSocket(task)
+    ws = _CaptureSocket()
     orch.ui_sessions[ws] = {"sub": user_id, "preferred_username": user_id}
     orch.ui_clients.append(ws)
     orch.rote.register_device(ws, {})
@@ -377,3 +394,18 @@ async def test_scheduled_fallback_chat_created(orch, monkeypatch):
         (f"scheduled-{off_user}", off_user)) is None
 
     await _cleanup(orch, user_id, [fallback])
+
+
+async def test_completion_with_no_real_sockets_stays_unnotified(orch):
+    """The turn's own VirtualWebSocket must not count as a notified device —
+    else the register_ui catch-up replay never fires for a user who started a
+    task and closed every client before it finished (found live)."""
+    from orchestrator.async_tasks import BackgroundTask, VirtualWebSocket
+    user_id = f"bgc-{uuid.uuid4().hex[:8]}"
+    task = BackgroundTask(task_id=uuid.uuid4().hex[:8], chat_id="c", user_id=user_id)
+    vws = VirtualWebSocket(task)
+    orch.ui_sessions[vws] = {"sub": user_id}
+    delivered = await orch._send_to_user_sockets(
+        user_id, {"type": "task_completed", "payload": {"task_id": task.task_id}})
+    assert delivered == 0, "vws must never count as a notified device"
+    orch.ui_sessions.pop(vws, None)
