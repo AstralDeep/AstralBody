@@ -303,6 +303,53 @@ def _log_stripped_empty(surface: str, chat_id: Optional[str], raw: str) -> None:
     )
 
 
+#: 055 US4 (wire-contract §6): the server-owned provenance vocabulary.
+_PROVENANCE_KINDS = ("grounded", "estimated", "generated")
+
+
+def _derive_provenance(comp) -> str:
+    """Reuses the web footer's subtree derivation (renderer._subtree_tool_source)
+    so server stamp and footer always classify identically: a subtree tracing
+    to a tool result is "grounded", anything else "generated". "estimated" is
+    never derivable — only server code may assign it (a refine that did not
+    re-run the source tool, research D10) via ``_stamp_provenance(kind=...)``.
+    """
+    from webrender.renderer import _subtree_tool_source
+    return "grounded" if _subtree_tool_source(comp) else "generated"
+
+
+def _stamp_provenance(comp, kind=None) -> None:
+    """055 US4 (FR-026): stamp ``provenance`` on a component dict, ALWAYS
+    overwriting any agent/model-supplied value — trust cannot be
+    self-upgraded. ``kind`` is a server-side override; anything outside the
+    vocabulary falls back to derivation. With FF_COMPONENT_REFINE off the
+    field is never written (pre-055 wire bytes).
+    """
+    if not isinstance(comp, dict) or not flags.is_enabled("component_refine"):
+        return
+    comp["provenance"] = kind if kind in _PROVENANCE_KINDS else _derive_provenance(comp)
+
+
+def _stamp_canvas_provenance(components) -> None:
+    """Stamp a materialized canvas — the last stop before delivery, and the
+    only place designer garnish exists as component dicts. Garnish (``dg_``
+    ids, rebuilt from the layout JSON on every materialization) can never
+    self-assign trust, so it is re-derived unconditionally — a garnish
+    container wrapping tool-sourced refs correctly reads grounded; persisted
+    components keep their server stamp, and legacy (pre-055) rows without one
+    are derived in place.
+    """
+    if not flags.is_enabled("component_refine"):
+        return
+    from orchestrator.ui_designer import GARNISH_ID_PREFIX
+    for comp in components or []:
+        if not isinstance(comp, dict):
+            continue
+        ident = str(comp.get("id") or comp.get("component_id") or "")
+        if ident.startswith(GARNISH_ID_PREFIX) or comp.get("provenance") not in _PROVENANCE_KINDS:
+            _stamp_provenance(comp)
+
+
 def _tag_source(comp, agent_id, tool_name, tool_params=None, correlation_id=None):
     """Recursively tag a component dict and all nested children with source
     metadata (055 US2: hoisted from handle_chat_message so the stream
@@ -315,6 +362,10 @@ def _tag_source(comp, agent_id, tool_name, tool_params=None, correlation_id=None
     tool dispatch. When present, every component (including nested children)
     carries it so the frontend can scope user feedback to the originating
     dispatch.
+
+    055 US4: every tagged node also gets its ``provenance`` field stamped
+    from the just-written source attribution (agent-supplied values are
+    always overwritten — FR-026).
     """
     if not isinstance(comp, dict):
         return
@@ -324,6 +375,7 @@ def _tag_source(comp, agent_id, tool_name, tool_params=None, correlation_id=None
         comp["_source_params"] = tool_params
     if correlation_id is not None:
         comp["_source_correlation_id"] = correlation_id
+    _stamp_provenance(comp)
     for key in ("content", "children"):
         nested = comp.get(key)
         if isinstance(nested, list):
@@ -2447,6 +2499,16 @@ class Orchestrator:
                     # Feature 028 — standardized deterministic component
                     # action (contracts/component-action.md).
                     await self._handle_component_action(websocket, user_id, msg.payload or {})
+
+                elif msg.action == "component_refine":
+                    # 055 US4 (wire-contract §3) — component-scoped LLM edit
+                    # in place; gated + refused inside the handler.
+                    await self._handle_component_refine(websocket, user_id, msg.payload or {})
+
+                elif msg.action == "component_restore":
+                    # 055 US4 — restore an archived component_version under
+                    # the same identity (no LLM).
+                    await self._handle_component_restore(websocket, user_id, msg.payload or {})
 
                 elif msg.action == "authorize_action":
                     # C-S8 — the user confirmed a require_token-gated call: mint a
@@ -7154,7 +7216,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         """
         if websocket is None or not chat_id or not user_id:
             return
-        if (self.stream_manager is None
+        # getattr: dispatch-focused test stubs build partial Orchestrators
+        # without a stream_manager — fail-open applies to those too.
+        if (getattr(self, "stream_manager", None) is None
                 or not flags.is_enabled("stream_artifacts")
                 or not flags.is_enabled("tool_streaming")):
             return
@@ -7182,7 +7246,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 )
             except Exception as e:
                 logger.info(
-                    "stream auto-subscribe skipped (tool=%s): %s", tool_name, e)
+                    "stream_artifacts.auto_subscribe_skipped tool=%s agent=%s "
+                    "chat=%s user=%s err=%s", tool_name, agent_id, chat_id,
+                    user_id, e)
                 continue
             reply = {
                 "type": "stream_subscribed",
@@ -7264,18 +7330,24 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 chat_id, user_id, components, force_component_id=cid)
         except Exception:
             logger.exception(
-                "stream persist failed (stream=%s chat=%s)", sub.stream_id, chat_id)
+                "stream_artifacts.persist_failed stream=%s component=%s agent=%s "
+                "tool=%s chat=%s user=%s",
+                sub.stream_id, cid, sub.agent_id, sub.tool_name, chat_id, user_id)
             return
         if not ops:
             return
         try:
             await self.send_ui_upsert(None, chat_id, user_id, ops)
         except Exception:
-            logger.debug("stream persist upsert fan failed", exc_info=True)
+            logger.debug("stream_artifacts.persist_fanout_failed stream=%s "
+                         "component=%s chat=%s", sub.stream_id, cid, chat_id,
+                         exc_info=True)
         try:
             await self.workspace.asnapshot(chat_id, user_id, cause="stream")
         except Exception:
-            logger.debug("stream persist snapshot failed", exc_info=True)
+            logger.debug("stream_artifacts.persist_snapshot_failed stream=%s "
+                         "component=%s chat=%s", sub.stream_id, cid, chat_id,
+                         exc_info=True)
         try:
             from audit.hooks import record_workspace_event
             for op in ops:
@@ -7729,7 +7801,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         order. With no arrangements this is exactly the pre-029 flat canvas."""
         layouts = self.workspace.live_layouts(chat_id, user_id)
         if not layouts:
-            return self.workspace.live_components(chat_id, user_id)
+            components = self.workspace.live_components(chat_id, user_id)
+            _stamp_canvas_provenance(components)
+            return components
         from orchestrator import ui_designer
         from orchestrator.workspace import iter_layout_refs
         by_id: Dict[str, Dict] = {}
@@ -7758,6 +7832,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         out: List[Dict] = []
         for _pos, _kind, payload in sorted(stream, key=lambda t: (t[0], t[1])):
             out.extend(payload)
+        _stamp_canvas_provenance(out)
         return out
 
     async def _push_canvas(self, chat_id: str, user_id: str, originating_ws=None,
@@ -7973,7 +8048,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 chat_id, user_id, originating, turn_marker)
         except Exception:
             logger.exception(
-                "post-done designer pass failed — flat components already delivered")
+                "ui_designer.post_done_failed chat=%s user=%s — flat components "
+                "already delivered", chat_id, user_id)
 
     async def _push_designed_native_canvas(self, chat_id: str, user_id: str,
                                            originating_ws, turn_marker: str) -> None:
@@ -7983,8 +8059,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         latest = str(await asyncio.to_thread(
             self.history.get_latest_message_id, chat_id, user_id=user_id) or "")
         if latest != str(turn_marker):
-            logger.info("ui_designer: chat %s advanced past the designed "
-                        "turn — post-done push dropped", chat_id)
+            logger.info("ui_designer.post_done_dropped chat=%s user=%s turn=%s "
+                        "latest=%s reason=stale_turn",
+                        chat_id, user_id, turn_marker, latest)
             return
         components = await asyncio.to_thread(self._canvas_components, chat_id, user_id)
         native_components = _native_canvas_components(components)
@@ -8011,9 +8088,16 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         the disappearing-UI defect. Updates morph in place on every socket of
         this user viewing the chat (FR-040); new components append. Returns
         the persisted op list so callers can snapshot the turn (FR-030).
+
+        055 US4: stamps ``provenance`` on every component before it persists
+        or renders — this is where model-authored components (parsed rounds,
+        narrative doc cards) enter the workspace without passing
+        ``_tag_source``, so a model-supplied trust value is overwritten here.
         """
         if not components:
             return []
+        for comp in components:
+            _stamp_provenance(comp)
         if not chat_id:
             await self.send_ui_render(websocket, components)
             return []
@@ -8174,6 +8258,310 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             await self._safe_send(websocket, json.dumps({
                 "type": "chat_status", "status": "done", "message": ""
             }))
+
+    async def _refine_restore_gate(self, websocket, user_id: str,
+                                   payload: Dict[str, Any]):
+        """055 US4 (wire-contract §3): shared gate sequence for
+        component_refine/component_restore — the component_action stack:
+        feature flag, watch carve-out, component context, timeline read-only
+        guard, row existence, retired-source refusal, security flags +
+        per-user permission on the source agent/tool. The source gates are
+        skipped only when the component has no source at all (a
+        model-authored artifact has no tool to gate; the refine LLM gate
+        still applies in the caller). Refusals are per-action error frames
+        (Alert to the chat rail), never socket teardown.
+
+        Returns ``(chat_id, component_id, row)`` or ``None`` after refusing.
+        """
+        chat_id = payload.get("chat_id") or self._ws_active_chat.get(id(websocket))
+        component_id = payload.get("component_id")
+        if not flags.is_enabled("component_refine"):
+            await self._audit_workspace_denial(user_id, chat_id or "", component_id or "",
+                                               "feature_disabled")
+            await self.send_ui_render(websocket, [
+                Alert(message="Component refine is not enabled on this server.",
+                      variant="error").to_dict()
+            ], target="chat")
+            return None
+        # Declared ROTE-capability divergence: the watch renders no
+        # refine/restore affordance and the server refuses honestly.
+        profile = self.rote.get_profile(websocket)
+        if getattr(profile.device_type, "value", str(profile.device_type)) == "watch":
+            await self._audit_workspace_denial(user_id, chat_id or "", component_id or "",
+                                               "watch_unsupported")
+            await self.send_ui_render(websocket, [
+                Alert(message="This action isn't available on the watch.",
+                      variant="warning").to_dict()
+            ], target="chat")
+            return None
+        if not chat_id or not component_id:
+            await self.send_ui_render(websocket, [
+                Alert(message="This action is missing its component context.",
+                      variant="error").to_dict()
+            ], target="chat")
+            return None
+        if self._ws_timeline_mode.get(id(websocket)):
+            await self._audit_workspace_denial(user_id, chat_id, component_id, "timeline_readonly")
+            await self.send_ui_render(websocket, [
+                Alert(message="You are viewing a past workspace state — return to live to interact.",
+                      variant="warning").to_dict()
+            ], target="chat")
+            return None
+        row = await self.workspace.aget_by_component_id(chat_id, user_id, component_id)
+        if row is None or not isinstance(row.get("component_data"), dict):
+            await self.send_ui_render(websocket, [
+                Alert(message="This component is no longer available.",
+                      variant="warning").to_dict()
+            ], target="chat")
+            return None
+        cd = row["component_data"]
+        agent_id = cd.get("_source_agent", "")
+        tool_name = cd.get("_source_tool", "")
+        if agent_id in RETIRED_AGENT_IDS:
+            await self._audit_workspace_denial(user_id, chat_id, component_id, "agent_retired")
+            await self.send_ui_render(websocket, [
+                Alert(
+                    title="Capability retired",
+                    message="This component came from an agent that has been retired; "
+                            "it can still be viewed but no longer changed.",
+                    variant="warning",
+                ).to_dict()
+            ], target="chat")
+            return None
+        if agent_id and tool_name:
+            agent_id, tool_name = remap_merged_source(agent_id, tool_name)
+            allowed, deny_reason = await asyncio.to_thread(
+                self._component_action_allowed, user_id, agent_id, tool_name)
+            if not allowed:
+                await self._audit_workspace_denial(user_id, chat_id, component_id, deny_reason)
+                await self.send_ui_render(websocket, [
+                    Alert(message=f"Action not permitted: {deny_reason}",
+                          variant="error").to_dict()
+                ], target="chat")
+                return None
+        return chat_id, component_id, row
+
+    async def _handle_component_refine(self, websocket, user_id: str, payload: Dict[str, Any]):
+        """055 US4 (FR-022/FR-023, research D10): bounded LLM edit of ONE
+        component in place under its existing identity.
+
+        Gate order is the component_action stack plus the 054 per-user LLM
+        gate — a refine is an LLM turn billed to the user's own provider
+        config. The source tool is NOT re-run, so the result re-stamps
+        provenance as 'estimated'; the prior dict is archived to
+        component_version BEFORE the overwrite (FR-024).
+        """
+        gate = await self._refine_restore_gate(websocket, user_id, payload)
+        if gate is None:
+            return
+        chat_id, component_id, _row = gate
+        instruction = str(payload.get("instruction") or "").strip()
+        if not instruction:
+            await self.send_ui_render(websocket, [
+                Alert(message="Tell me how this component should change.",
+                      variant="warning").to_dict()
+            ], target="chat")
+            return
+        if not await self.llm_configured_for(user_id):
+            actor_user_id, auth_principal = self._llm_audit_principals(websocket)
+            await self._record_llm_unconfigured(
+                self.audit_recorder,
+                actor_user_id=actor_user_id,
+                auth_principal=auth_principal,
+                feature="ui_event:component_refine",
+            )
+            await self.send_ui_render(websocket, [
+                Alert(message="Set up your AI provider to use this.",
+                      variant="error").to_dict()
+            ], target="chat")
+            return
+
+        from orchestrator import artifact_versions
+        lock = self._workspace_locks.setdefault(chat_id, asyncio.Lock())
+        try:
+            async with lock:
+                # Re-read inside the lock: the archived "current" must be the
+                # dict actually being overwritten, not a pre-lock snapshot.
+                row = await self.workspace.aget_by_component_id(chat_id, user_id, component_id)
+                if row is None or not isinstance(row.get("component_data"), dict):
+                    await self.send_ui_render(websocket, [
+                        Alert(message="This component is no longer available.",
+                              variant="warning").to_dict()
+                    ], target="chat")
+                    return
+                current = row["component_data"]
+                refined = await self._refine_component_llm(
+                    websocket, current, instruction[:4000])
+                if refined is None:
+                    await self.send_ui_render(websocket, [
+                        Alert(message="The AI couldn't produce a valid same-type edit "
+                                      "for this component, so it was left unchanged.",
+                              variant="warning").to_dict()
+                    ], target="chat")
+                    return
+                version_no = await artifact_versions.aarchive(
+                    self.history.db, chat_id, user_id, component_id, current, "refine")
+                # Hydrate the history affordance (web data-versions popover) —
+                # without this the restore path is unreachable from the UI.
+                refined["versions"] = await artifact_versions.alist_versions(
+                    self.history.db, chat_id, user_id, component_id)
+                ops = await self.workspace.aupsert(
+                    chat_id, user_id, [refined], force_component_id=component_id)
+                await self.send_ui_upsert(websocket, chat_id, user_id, ops)
+                try:
+                    await self.workspace.asnapshot(chat_id, user_id, cause="component_refine")
+                except Exception:
+                    logger.debug("workspace snapshot failed (component_refine)", exc_info=True)
+                try:
+                    from audit.hooks import record_workspace_event
+                    await record_workspace_event(
+                        user_id=user_id, action="component_refined",
+                        chat_id=chat_id, component_id=component_id,
+                        detail={"archived_version": version_no},
+                    )
+                except Exception:
+                    logger.debug("workspace audit failed (component_refined)", exc_info=True)
+        except Exception as e:
+            logger.error(f"component_refine failed: {e}", exc_info=True)
+            await self.send_ui_render(websocket, [
+                Alert(message=f"The refine failed: {e}", variant="error").to_dict()
+            ], target="chat")
+        finally:
+            await self._safe_send(websocket, json.dumps({
+                "type": "chat_status", "status": "done", "message": ""
+            }))
+
+    async def _handle_component_restore(self, websocket, user_id: str, payload: Dict[str, Any]):
+        """055 US4 (FR-024): restore an archived component_version under the
+        same identity — the component_action gate stack minus the LLM gate
+        (no model runs). The current dict is archived first, so a restore is
+        itself undoable and the version chain stays complete."""
+        gate = await self._refine_restore_gate(websocket, user_id, payload)
+        if gate is None:
+            return
+        chat_id, component_id, _row = gate
+        from orchestrator import artifact_versions
+        version = await artifact_versions.aget_version(
+            self.history.db, chat_id, user_id, component_id, payload.get("version_no"))
+        if version is None or not isinstance(version.get("component"), dict):
+            await self.send_ui_render(websocket, [
+                Alert(message="That version is no longer available.",
+                      variant="warning").to_dict()
+            ], target="chat")
+            return
+        lock = self._workspace_locks.setdefault(chat_id, asyncio.Lock())
+        try:
+            async with lock:
+                row = await self.workspace.aget_by_component_id(chat_id, user_id, component_id)
+                if row is None or not isinstance(row.get("component_data"), dict):
+                    await self.send_ui_render(websocket, [
+                        Alert(message="This component is no longer available.",
+                              variant="warning").to_dict()
+                    ], target="chat")
+                    return
+                current = row["component_data"]
+                restored = dict(version["component"])
+                restored["component_id"] = component_id
+                archived_no = await artifact_versions.aarchive(
+                    self.history.db, chat_id, user_id, component_id, current, "restore")
+                restored["versions"] = await artifact_versions.alist_versions(
+                    self.history.db, chat_id, user_id, component_id)
+                ops = await self.workspace.aupsert(
+                    chat_id, user_id, [restored], force_component_id=component_id)
+                await self.send_ui_upsert(websocket, chat_id, user_id, ops)
+                try:
+                    await self.workspace.asnapshot(chat_id, user_id, cause="component_restore")
+                except Exception:
+                    logger.debug("workspace snapshot failed (component_restore)", exc_info=True)
+                try:
+                    from audit.hooks import record_workspace_event
+                    await record_workspace_event(
+                        user_id=user_id, action="component_restored",
+                        chat_id=chat_id, component_id=component_id,
+                        detail={"restored_version": int(version["version_no"]),
+                                "archived_version": archived_no},
+                    )
+                except Exception:
+                    logger.debug("workspace audit failed (component_restored)", exc_info=True)
+        except Exception as e:
+            logger.error(f"component_restore failed: {e}", exc_info=True)
+            await self.send_ui_render(websocket, [
+                Alert(message=f"The restore failed: {e}", variant="error").to_dict()
+            ], target="chat")
+        finally:
+            await self._safe_send(websocket, json.dumps({
+                "type": "chat_status", "status": "done", "message": ""
+            }))
+
+    async def _refine_component_llm(self, websocket, component: Dict[str, Any],
+                                    instruction: str) -> Optional[Dict[str, Any]]:
+        """Bounded single-purpose LLM edit constrained to the SAME component
+        type (research D10): one structured-output call under the user's
+        provider config, validated against the renderer registry. Returns
+        the refined dict with identity + source metadata carried over and
+        provenance re-stamped 'estimated', or ``None`` when the model
+        refused / emitted an unusable or type-changing result (the caller
+        leaves the component untouched)."""
+        from webrender import allowed_primitive_types
+        valid_types = set(allowed_primitive_types()) | {"chart"}
+        orig_type = str(component.get("type") or "").strip().lower()
+        if orig_type not in valid_types:
+            return None
+        view = {k: v for k, v in component.items()
+                if not str(k).startswith("_") and k not in ("component_id", "provenance")}
+        comp_json = json.dumps(view)
+        if len(comp_json) > 30000:
+            logger.info("component_refine: component too large to refine (%d chars)",
+                        len(comp_json))
+            return None
+        source_line = ""
+        if component.get("_source_tool"):
+            source_line = (
+                f"\nIts data came from tool '{component.get('_source_tool')}' of agent "
+                f"'{component.get('_source_agent')}' — do not fabricate data that "
+                "tool did not provide.")
+        prompt = (
+            f"Here is a UI component of type '{orig_type}' as JSON:{source_line}\n\n"
+            f"{comp_json}\n\n"
+            f"Apply this change requested by the user: {instruction}\n\n"
+            f'Respond with ONLY the complete edited component as one JSON object. '
+            f'It MUST keep "type": "{orig_type}" and remain a valid component of '
+            "that type; preserve all data the instruction does not ask you to change."
+        )
+        result = await self._call_llm_json(
+            websocket,
+            [
+                {"role": "system", "content": (
+                    "You are a precise UI component editor. Output ONLY one valid "
+                    "JSON object — no explanations, no markdown fences.")},
+                {"role": "user", "content": prompt},
+            ],
+            feature="component_refine", temperature=0.1,
+        )
+        if not isinstance(result, dict):
+            return None
+        if isinstance(result.get("component"), dict) and "type" not in result:
+            result = result["component"]  # tolerate a {"component": {...}} wrapper
+        if str(result.get("type") or "").strip().lower() != orig_type:
+            logger.info("component_refine: model changed the component type "
+                        "(%r -> %r) — rejected", orig_type, result.get("type"))
+            return None
+        # The model can neither stamp trust nor mint identities/attribution:
+        # strip anything it invented, then carry the original's over.
+        refined = {k: v for k, v in result.items() if not str(k).startswith("_")}
+        for key in ("provenance", "component_id", "id"):
+            refined.pop(key, None)
+        self._validate_component_tree(refined, valid_types)
+        for key in ("_source_agent", "_source_tool", "_source_params",
+                    "_source_correlation_id"):
+            if key in component:
+                refined[key] = component[key]
+        if component.get("id"):
+            refined["id"] = component["id"]
+        if component.get("component_id"):
+            refined["component_id"] = component["component_id"]
+        _stamp_provenance(refined, kind="estimated")
+        return refined
 
     async def _reconcile_legacy_replacement(self, websocket, chat_id: str, user_id: str,
                                             *, cause: str):
@@ -9459,7 +9847,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         app.mount("/static", _NoCacheStaticFiles(directory=_os.path.join(_webrender_dir, "static")), name="static")
 
         # Mount REST API routers
-        from orchestrator.api import chat_router, component_router, agent_router, dashboard_router, draft_router, voice_router, task_router, async_task_router, user_router, chrome_router
+        from orchestrator.api import chat_router, component_router, agent_router, dashboard_router, draft_router, voice_router, task_router, async_task_router, user_router, chrome_router, export_router, share_router
         from orchestrator.auth import auth_router
         from orchestrator.web_auth import web_auth_router  # Feature 026 — server-side OIDC
         from orchestrator.attachments.router import attachments_router
@@ -9483,6 +9871,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         app.include_router(draft_router)
         app.include_router(dashboard_router)
         app.include_router(chrome_router)  # Feature 042 — GET /api/chrome/menu
+        # Feature 055 US5 — flag-gated export/share (routes 404 while off)
+        app.include_router(export_router)
+        app.include_router(share_router)
         app.include_router(auth_router)
         app.include_router(web_auth_router)  # Feature 026 — /auth/login,/callback,/session,/logout
         app.include_router(attachments_router)

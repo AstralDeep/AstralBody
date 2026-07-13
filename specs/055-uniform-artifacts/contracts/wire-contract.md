@@ -107,13 +107,23 @@ handler, same PR):
 
 | Action | Payload | Server behavior |
 |--------|---------|-----------------|
-| `component_refine` | `{component_id, instruction}` | Full component_action-equivalent gate stack (timeline read-only guard, security flags, per-user permission on source agent/tool, per-user LLM gate, audit) → bounded LLM edit constrained to same component type → force-upsert onto `component_id` → prior dict archived to `component_version` → `ui_upsert` fan-out |
-| `component_restore` | `{component_id, version_no}` | Same gates (no LLM) → archive current → restore archived dict → `ui_upsert` fan-out |
+| `component_refine` | `{component_id, instruction, chat_id?}` | Full component_action-equivalent gate stack (timeline read-only guard, security flags, per-user permission on source agent/tool — skipped only when the component carries no source attribution at all, per-user 054 LLM gate, audit) → prior dict archived to `component_version` → bounded LLM edit constrained to same component type (identity/attribution/trust fields stripped from the model output and re-carried from the original; provenance re-stamped `estimated` — the source tool is not re-run) → force-upsert onto `component_id` → `ui_upsert` fan-out |
+| `component_restore` | `{component_id, version_no, chat_id?}` | Same gates (no LLM gate — no model runs) → archive current → restore archived dict under the same identity → `ui_upsert` fan-out |
 
-Refusals are per-action `error` frames (existing shape), never socket teardown.
+`chat_id` is optional on the wire: absent, the server resolves the socket's
+active chat (web sends it; natives rely on the fallback). Refusals are
+delivered exactly like `component_action` refusals — a chat-rail Alert
+(`ui_render {target:'chat'}`) followed by the terminal
+`chat_status done`, never an `error` frame or socket teardown; the archive
+happens BEFORE the live row is overwritten, so a failed refine/restore leaves
+the component untouched.
 Watch: both actions are out of scope (no affordance rendered; server refuses
-with honest error if received) — declared ROTE-capability divergence recorded in
-the parity matrix.
+with an honest Alert if received) — declared ROTE-capability divergence
+recorded in the parity matrix. Affordance scope on the other clients: web
+renders refine + version-history/restore in the component chrome;
+Windows/Android/iOS/macOS render a refine entry only (context/overflow menu) —
+no native frame carries the version list, so restore is a web-only affordance
+even though the action itself is accepted from any non-watch client.
 
 ## 4. Disposition promotions (US3) — no wire change
 
@@ -159,13 +169,31 @@ Web delivery is unchanged (mid-turn `_push_canvas`, which also gains
 ## 6. Provenance field (US4) — component dict field, no manifest type change
 
 Every delivered/persisted component dict carries
-`provenance: "grounded"|"estimated"|"generated"` (top-level field, stamped
-server-side post-designer; agent-supplied values overwritten). Renderers:
-- web: existing footer, now driven by the field;
-- Windows/Android/iOS/macOS: compact badge in the component chrome;
+`provenance: "grounded"|"estimated"|"generated"` (top-level field; stamping is
+gated by `FF_COMPONENT_REFINE` — off, the field is never written). Stamp
+points (agent/model-supplied values are ALWAYS overwritten, FR-026):
+- at source-tagging (`_tag_source` — every tool-result component, nested
+  children included);
+- at workspace persist (`send_ui_upsert` — catches model-authored components
+  that never pass `_tag_source`, e.g. parsed rounds and narrative doc cards);
+- at canvas materialization (`_canvas_components`, post-designer — designer
+  garnish (`dg_` ids, rebuilt from layout JSON every materialization) is
+  re-derived unconditionally so it can never self-assign trust; persisted
+  components keep their stamp; legacy pre-055 rows without one are derived in
+  place).
+`estimated` is never derivable — only server code assigns it (a refine that
+did not re-run the source tool). Renderers:
+- web: existing footer, now driven by the field — ONLY the three canonical
+  values are honored; agent-supplied synonyms (`verified`, `approx`, `model`,
+  …), formerly normalized by the footer, now fall back to the stamp's own
+  derivation so trust cannot be self-upgraded through the renderer;
+- Windows/Android/iOS/macOS: compact badge in the component chrome
+  (top-level components only; absent/unknown values render nothing —
+  Windows/Apple honor the three canonical values only, Android additionally
+  normalizes the legacy web-footer synonym sets to the same three badges);
 - watch: inherited through list/text degradation.
-ROTE: `provenance` is a preserved field (host bounds never strip it).
-Parity-matrix note added; no `component_types` change.
+ROTE: `provenance` is a preserved field (host bounds and degrade rebuilds
+never strip it). Parity-matrix note added; no `component_types` change.
 
 ## 7. Flags-off byte equivalence (SC-009)
 
@@ -181,6 +209,10 @@ it in a dedicated CI variant.
 byte-identity claim above): (a) the D6 leak-stripper pattern extensions run on
 every narrative/doc-card/tool-summary; (b) the all-tools-denied loop exit now
 sends its missing `chat_status done`; (c) ROTE degrade rebuilds preserve
-`id`/`component_id`; (d) the D5 markdown hold-back changes `FF_LLM_STREAMING`
-frame boundaries (final assembled text unchanged). Each is a spec'd correctness
-fix (FR-004/FR-013/D6) with its own pinned tests.
+`id`/`component_id` (and now `provenance`); (d) the D5 markdown hold-back
+changes `FF_LLM_STREAMING` frame boundaries (final assembled text unchanged);
+(e) the web provenance footer no longer normalizes agent-supplied synonym
+values (`verified`, `approx`, `model`, …) — non-canonical values fall back to
+derivation regardless of flag state, so an agent can no longer self-upgrade
+trust through the footer. Each is a spec'd correctness fix
+(FR-004/FR-013/FR-026/D6) with its own pinned tests.

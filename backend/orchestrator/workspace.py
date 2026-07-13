@@ -561,6 +561,13 @@ class WorkspaceManager:
                         )
             except Exception:
                 logger.debug("layout ref pruning failed on remove", exc_info=True)
+            # Feature 055 (US4): a deleted component's refine history goes
+            # with it (component_version has no saved_components FK).
+            try:
+                from orchestrator import artifact_versions
+                artifact_versions.delete_for_component(self.db, chat_id, user_id, component_id)
+            except Exception:
+                logger.debug("version-history cascade failed on remove", exc_info=True)
         if removed:
             count = self.db.fetch_one(
                 "SELECT COUNT(*) as count FROM saved_components WHERE chat_id = ? AND user_id = ?",

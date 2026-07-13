@@ -18,7 +18,7 @@ import urllib.error
 import urllib.request
 import uuid
 from typing import List, Optional, Tuple
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 # Valid audit outcomes (mirror backend/audit/schemas.py OUTCOMES).
 OUTCOMES = ("in_progress", "success", "failure", "interrupted")
@@ -110,6 +110,24 @@ def parse_chrome_menu(model: dict) -> dict:
     so = model.get("signout") or {}
     signout = {"label": str(so.get("label") or "Sign out"), "action": str(so.get("action") or "logout")}
     return {"sections": sections, "topbar_actions": topbar_actions, "signout": signout}
+
+
+# --- feature 055 (US5): artifact export URLs ---------------------------------- #
+
+def export_component_csv_url(http_base: str, component_id: str, chat_id: str) -> str:
+    """Build ``GET /api/export/component/{id}.csv?chat_id=…`` (table data
+    export, contracts/rest-endpoints.md). Opened in the system browser — the
+    route is session-authed, so the user's web session serves the download."""
+    return (f"{http_base.rstrip('/')}/api/export/component/"
+            f"{quote(str(component_id), safe='')}.csv?"
+            f"{urlencode({'chat_id': chat_id})}")
+
+
+def export_canvas_html_url(http_base: str, chat_id: str) -> str:
+    """Build ``GET /api/export/canvas/{chat_id}.html`` (self-contained canvas
+    snapshot, contracts/rest-endpoints.md)."""
+    return (f"{http_base.rstrip('/')}/api/export/canvas/"
+            f"{quote(str(chat_id), safe='')}.html")
 
 
 def _fmt_ts(value) -> str:

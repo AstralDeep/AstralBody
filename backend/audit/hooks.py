@@ -173,6 +173,51 @@ async def record_workspace_event(
 
 
 # ---------------------------------------------------------------------------
+# Share-grant lifecycle (feature 055 US5 — research D11)
+# ---------------------------------------------------------------------------
+
+async def record_share_event(
+    *, user_id: str, action: str, share_id: Optional[int] = None,
+    chat_id: Optional[str] = None, description: str = "",
+    outcome: str = "success", principal: Optional[str] = None,
+    detail: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Record a share-grant lifecycle event.
+
+    ``action`` is the suffix after ``share.`` — ``minted``, ``opened``,
+    ``revoked``, ``refused_phi``. Classified under ``conversation`` per
+    data-model.md, matching the workspace hooks. ``principal`` overrides
+    ``auth_principal`` for public opens (``share:<id>`` — the actor stays
+    the share owner). Rows carry ids and scalar metadata only — never token
+    material or snapshot content.
+    """
+    rec = get_recorder()
+    if rec is None or not user_id or user_id == "legacy":
+        return
+    inputs_meta: Dict[str, Any] = {}
+    if share_id is not None:
+        inputs_meta["share_id"] = share_id
+    for k, v in (detail or {}).items():
+        if isinstance(v, (str, int, float, bool)):
+            inputs_meta[k] = v
+    try:
+        await rec.record(AuditEventCreate(
+            actor_user_id=user_id,
+            auth_principal=principal or user_id,
+            event_class="conversation",
+            action_type=f"share.{action}",
+            description=description or f"Share {action.replace('_', ' ')}",
+            conversation_id=chat_id,
+            correlation_id=make_correlation_id(),
+            outcome=outcome,
+            inputs_meta=inputs_meta,
+            started_at=now_utc(),
+        ))
+    except Exception as exc:  # pragma: no cover
+        logger.debug("share audit record failed: %s", exc)
+
+
+# ---------------------------------------------------------------------------
 # Tool-dispatch hook (FR-001 + FR-021 — the headline scenario)
 # ---------------------------------------------------------------------------
 

@@ -327,6 +327,7 @@
       else renderer.appendChild(fresh);
       processSideEffects(fresh);
     }
+    syncCanvasToolbar(); // last-known flags (full renders refresh them)
   }
 
   // Plotly keeps per-node state and handlers; purge a node's charts before it
@@ -407,15 +408,20 @@
           // emits a truthy wrapper div even for zero components (055), so
           // html truthiness only decides frames without a components array.
           if (Array.isArray(data.components) ? !data.components.length : !data.html) showCanvasEmpty();
+          readCanvasFlags(); syncCanvasToolbar();
         }
         break;
       case "ui_upsert": applyUpsert(data); break; // in-place workspace updates
-      case "ui_update": hideSkeleton(); setHTML(canvas, data.html); if (!data.html) showCanvasEmpty(); break;
+      case "ui_update":
+        hideSkeleton(); setHTML(canvas, data.html); if (!data.html) showCanvasEmpty();
+        readCanvasFlags(); syncCanvasToolbar();
+        break;
       case "ui_append": hideSkeleton(); hideCanvasEmpty(); appendHTML(canvas, data.html); break;
       case "workspace_timeline_mode": // read-only history view
         timelineMode = !!data.active;
         if (timelineMode) hideSkeleton();
         setStatus(timelineMode ? "Viewing workspace history (read-only)" : "");
+        syncCanvasToolbar(); // export/share chrome hides in the read-only view
         break;
       case "chat_deleted": // chat removed (possibly from another tab)
         if (data.chat_id && data.chat_id === activeChatId) {
@@ -757,6 +763,241 @@
       component_id: paginateComponentId(el), chat_id: activeChatId,
       params: Object.assign({}, ctx.source_params, { limit: size, offset: 0 }) });
   }
+
+  // ---- 055 US4/US5: component chrome (refine / history / export / share) ----
+  // The server renders the affordances (flag-gated, renderer.py
+  // _component_chrome); this block owns their click behavior. The instruction
+  // capture is an inline popover (same idiom as the paperclip menu — the
+  // codebase never uses window.prompt/alert).
+  var chromePop = null;
+  function closeChromePop() {
+    if (chromePop && chromePop.parentNode) chromePop.parentNode.removeChild(chromePop);
+    chromePop = null;
+  }
+  function openChromePop(anchor) {
+    closeChromePop();
+    var row = anchor.parentNode; // the .astral-component-chrome affordance row
+    if (row && !row.style.position) row.style.position = "relative";
+    chromePop = document.createElement("div");
+    chromePop.className = "astral-chrome-pop";
+    chromePop.style.cssText = "position:absolute;right:0;bottom:100%;margin-bottom:6px;z-index:40;"
+      + "min-width:260px;max-width:340px;padding:10px;border-radius:10px;"
+      + "background:rgb(var(--astral-surface,26 30 46));border:1px solid rgba(255,255,255,.12);"
+      + "box-shadow:0 8px 24px rgba(0,0,0,.45);font-size:13px;";
+    (row || document.body).appendChild(chromePop);
+    return chromePop;
+  }
+  function chromePopButton(text, primary) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.textContent = text;
+    b.style.cssText = "font-size:12px;border-radius:8px;padding:4px 10px;cursor:pointer;"
+      + (primary ? "background:rgb(var(--astral-primary,99 102 241));border:0;color:#fff;"
+                 : "background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:inherit;");
+    return b;
+  }
+  function chromeComponentId(el) {
+    var host = el.closest && el.closest("[data-component-id]");
+    return host ? host.getAttribute("data-component-id") : null;
+  }
+
+  function openRefinePrompt(btn) {
+    if (timelineMode) { setStatus("Read-only history view — go back to live to interact."); return; }
+    var cid = chromeComponentId(btn);
+    if (!cid) return;
+    var pop = openChromePop(btn);
+    var label = document.createElement("div");
+    label.textContent = "Describe the change to this component";
+    label.style.cssText = "font-size:12px;margin-bottom:6px;opacity:.8;";
+    var inp = document.createElement("input");
+    inp.type = "text";
+    inp.placeholder = "e.g. add a totals row";
+    inp.style.cssText = "width:100%;box-sizing:border-box;font-size:13px;padding:6px 8px;border-radius:8px;"
+      + "background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:inherit;";
+    var rowEl = document.createElement("div");
+    rowEl.style.cssText = "display:flex;justify-content:flex-end;gap:8px;margin-top:8px;";
+    var cancel = chromePopButton("Cancel", false);
+    var go = chromePopButton("Refine", true);
+    function submit() {
+      var text = (inp.value || "").trim();
+      if (!text) { inp.focus(); return; }
+      action("component_refine", { component_id: cid, instruction: text, chat_id: activeChatId });
+      closeChromePop();
+      showToast("Refining component…", "info");
+    }
+    go.addEventListener("click", submit);
+    cancel.addEventListener("click", closeChromePop);
+    inp.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { e.preventDefault(); submit(); }
+      else if (e.key === "Escape") { e.stopPropagation(); closeChromePop(); }
+    });
+    pop.appendChild(label); pop.appendChild(inp); pop.appendChild(rowEl);
+    rowEl.appendChild(cancel); rowEl.appendChild(go);
+    inp.focus();
+  }
+
+  function openHistoryList(btn) {
+    if (timelineMode) { setStatus("Read-only history view — go back to live to interact."); return; }
+    var cid = chromeComponentId(btn);
+    if (!cid) return;
+    var versions = [];
+    try { versions = JSON.parse(btn.getAttribute("data-versions") || "[]"); } catch (e) {}
+    var pop = openChromePop(btn);
+    var label = document.createElement("div");
+    label.textContent = "Version history";
+    label.style.cssText = "font-size:12px;margin-bottom:6px;opacity:.8;";
+    pop.appendChild(label);
+    if (!versions.length) {
+      var none = document.createElement("div");
+      none.textContent = "No earlier versions yet — refine the component to create one.";
+      none.style.cssText = "font-size:12px;opacity:.6;";
+      pop.appendChild(none);
+      return;
+    }
+    versions.forEach(function (v) {
+      if (!v || v.version_no == null) return;
+      var b = document.createElement("button");
+      b.type = "button";
+      var when = String(v.created_at || "").replace("T", " ").slice(0, 16);
+      b.textContent = "v" + v.version_no
+        + (v.title ? " · " + v.title : "")
+        + (when ? " · " + when : "");
+      b.title = "Restore this version" + (v.reason ? " (archived on " + v.reason + ")" : "");
+      b.style.cssText = "display:block;width:100%;text-align:left;font-size:12px;padding:6px 8px;"
+        + "border-radius:8px;background:transparent;border:0;color:inherit;cursor:pointer;";
+      b.addEventListener("click", function () {
+        action("component_restore", { component_id: cid, version_no: v.version_no, chat_id: activeChatId });
+        closeChromePop();
+        showToast("Restoring version " + v.version_no + "…", "info");
+      });
+      pop.appendChild(b);
+    });
+  }
+
+  // Exports are authenticated downloads: fetch with the bearer token, then
+  // hand the blob to a temporary <a download> (a plain href can't carry auth).
+  function exportDownload(path, filename, appendChat) {
+    var url = path;
+    if (appendChat) {
+      if (!activeChatId) { showToast("Open a chat first — nothing to export yet.", "error"); return; }
+      url += (url.indexOf("?") === -1 ? "?" : "&") + "chat_id=" + encodeURIComponent(activeChatId);
+    }
+    fetch(API_URL + url, { headers: { Authorization: "Bearer " + token }, credentials: "same-origin" })
+      .then(function (r) {
+        if (!r.ok) throw new Error("Export failed (" + r.status + ")");
+        return r.blob();
+      })
+      .then(function (blob) {
+        var a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = filename || "export";
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () {
+          URL.revokeObjectURL(a.href);
+          if (a.parentNode) a.parentNode.removeChild(a);
+        }, 1000);
+      })
+      .catch(function (err) { showToast(String((err && err.message) || err), "error"); });
+  }
+
+  function mintShare(scope, componentId) {
+    if (!activeChatId) { showToast("Open a chat first — nothing to share yet.", "error"); return; }
+    var body = { chat_id: activeChatId, scope: scope };
+    if (componentId) body.component_id = componentId;
+    fetch(API_URL + "/api/share", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify(body),
+    })
+      .then(function (r) {
+        return r.json().then(function (j) { return { ok: r.ok, status: r.status, body: j }; });
+      })
+      .then(function (res) {
+        if (!res.ok) {
+          var msg = res.body && res.body.error === "phi_blocked"
+            ? "Sharing refused: the content matched the PHI gate."
+            : (res.body && (res.body.detail || res.body.error)) || ("Share failed (" + res.status + ")");
+          showToast(msg, "error");
+          return;
+        }
+        var shareUrl = res.body && res.body.share_url;
+        if (!shareUrl) { showToast("Share failed: no link returned.", "error"); return; }
+        var abs = shareUrl.indexOf("http") === 0 ? shareUrl : API_URL + shareUrl;
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(abs).then(
+            function () { showToast("Share link copied to clipboard.", "info"); },
+            function () { showToast("Share link: " + abs, "info"); });
+        } else { showToast("Share link: " + abs, "info"); }
+      })
+      .catch(function () { showToast("Couldn't create the share link.", "error"); });
+  }
+
+  // Canvas toolbar (export page / share page). The server stamps the flag
+  // state as data-astral-export / data-astral-share on the .dynamic-renderer
+  // root of every full canvas render (renderer.py _workspace_flag_attrs);
+  // the toolbar exists only while a flagged renderer is on the canvas.
+  var canvasFlags = { exp: false, share: false };
+  function readCanvasFlags() {
+    var r = canvas.querySelector(".dynamic-renderer");
+    canvasFlags.exp = !!(r && r.getAttribute("data-astral-export"));
+    canvasFlags.share = !!(r && r.getAttribute("data-astral-share"));
+  }
+  function syncCanvasToolbar() {
+    var bar = document.getElementById("astral-canvas-toolbar");
+    var want = (canvasFlags.exp || canvasFlags.share) && !timelineMode
+      && !!canvas.querySelector(".dynamic-renderer");
+    if (!want) {
+      if (bar && bar.parentNode) bar.parentNode.removeChild(bar);
+      return;
+    }
+    if (bar) return; // already up
+    bar = document.createElement("div");
+    bar.id = "astral-canvas-toolbar";
+    bar.style.cssText = "position:sticky;top:0;z-index:5;display:flex;justify-content:flex-end;gap:8px;padding:2px 4px;";
+    if (canvasFlags.exp) bar.appendChild(chromeToolbarButton("⬇ Export page", "astral-export-canvas", null));
+    if (canvasFlags.share) bar.appendChild(chromeToolbarButton("↗ Share page", "astral-share-btn", "canvas"));
+    canvas.insertBefore(bar, canvas.firstChild);
+  }
+  function chromeToolbarButton(text, cls, shareScope) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.className = cls;
+    b.textContent = text;
+    if (shareScope) b.setAttribute("data-share-scope", shareScope);
+    b.style.cssText = "font-size:11px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);"
+      + "border-radius:8px;padding:3px 10px;color:inherit;cursor:pointer;";
+    return b;
+  }
+
+  document.addEventListener("click", function (e) {
+    var t = e.target;
+    var refine = t.closest && t.closest(".astral-refine-btn");
+    if (refine) { openRefinePrompt(refine); return; }
+    var hist = t.closest && t.closest(".astral-vhistory-btn");
+    if (hist) { openHistoryList(hist); return; }
+    var csv = t.closest && t.closest(".astral-export-csv");
+    if (csv) {
+      e.preventDefault();
+      var cid = chromeComponentId(csv);
+      exportDownload(csv.getAttribute("href"), (cid || "table") + ".csv", true);
+      return;
+    }
+    var expCanvas = t.closest && t.closest(".astral-export-canvas");
+    if (expCanvas) {
+      if (!activeChatId) { showToast("Open a chat first — nothing to export yet.", "error"); return; }
+      exportDownload("/api/export/canvas/" + encodeURIComponent(activeChatId) + ".html",
+        "canvas-" + activeChatId + ".html", false);
+      return;
+    }
+    var share = t.closest && t.closest(".astral-share-btn");
+    if (share) {
+      mintShare(share.getAttribute("data-share-scope") || "component", chromeComponentId(share));
+      return;
+    }
+    if (chromePop && !chromePop.contains(t)) closeChromePop();
+  });
 
   // Attachment staging: paperclip → pick → upload → chip → send as structured
   // attachments[] on the next chat_message.

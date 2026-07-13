@@ -100,13 +100,13 @@
 
 **Independent test**: quickstart.md §US4.
 
-- [ ] T034 [US4] Provenance stamp in `_tag_source` (`backend/orchestrator/orchestrator.py` ≈4009-4054): derive grounded/estimated/generated from the `_source_*` subtree (same logic as the web footer), stamp AFTER designer output is final, ALWAYS overwrite agent-supplied values; ROTE preserved-field rule in `backend/rote/adapter.py`; property + unit tests in `backend/tests/test_provenance_stamp.py`
-- [ ] T035 [P] [US4] Web `backend/webrender/renderer.py`: provenance footer reads the stamped field (keep visual parity with today's footer); golden-test updates
-- [ ] T036 [P] [US4] Native provenance badges: Windows `windows-client/astral_client/renderer.py`, Android `android-client/app/**/renderers/` shared chrome, Apple `apple-clients/AstralApp/**/ComponentView.swift` (compact badge from the field; watch inherits via text degradation); per-client renderer tests; screenshot set for SC-006
-- [ ] T037 [US4] `backend/orchestrator/artifact_versions.py` (NEW): archive/list/get/prune (retain 5) per data-model.md, `(chat_id, user_id)`-scoped, cascade on component/chat delete; unit tests in `backend/tests/test_artifact_versions.py`
-- [ ] T038 [US4] `component_refine` + `component_restore` handlers in `backend/orchestrator/orchestrator.py` beside `component_action` (≈7599): full gate sequence (timeline guard, security flags, per-user permission on source agent/tool, 054 LLM gate, audit), bounded same-type-validated LLM edit, version archive before overwrite, force-upsert onto the same id, `ui_upsert` fan; behind `FF_COMPONENT_REFINE`; integration tests in `backend/tests/test_component_refine.py` (gates, refusal paths, version cycle, restore audit)
-- [ ] T039 [P] [US4] Web refine/restore affordance in `backend/webrender/renderer.py` component chrome + `client.js` (instruction prompt → `component_refine` ui_event; history list → restore); stripped on non-interactive hosts by existing ROTE rule
-- [ ] T040 [P] [US4] Native refine affordances: Windows context menu, Android overflow, Apple context menu → same ui_events; per-client tests (watch: none — declared carve-out)
+- [x] T034 [US4] Provenance stamp in `_tag_source` (`backend/orchestrator/orchestrator.py` ≈4009-4054): derive grounded/estimated/generated from the `_source_*` subtree (same logic as the web footer), stamp AFTER designer output is final, ALWAYS overwrite agent-supplied values; ROTE preserved-field rule in `backend/rote/adapter.py`; property + unit tests in `backend/tests/test_provenance_stamp.py`
+- [x] T035 [P] [US4] Web `backend/webrender/renderer.py`: provenance footer reads the stamped field (keep visual parity with today's footer); golden-test updates
+- [x] T036 [P] [US4] Native provenance badges: Windows `windows-client/astral_client/renderer.py`, Android `android-client/app/**/renderers/` shared chrome, Apple `apple-clients/AstralApp/**/ComponentView.swift` (compact badge from the field; watch inherits via text degradation); per-client renderer tests; screenshot set for SC-006
+- [x] T037 [US4] `backend/orchestrator/artifact_versions.py` (NEW): archive/list/get/prune (retain 5) per data-model.md, `(chat_id, user_id)`-scoped, cascade on component/chat delete; unit tests in `backend/tests/test_artifact_versions.py`
+- [x] T038 [US4] `component_refine` + `component_restore` handlers in `backend/orchestrator/orchestrator.py` beside `component_action` (≈7599): full gate sequence (timeline guard, security flags, per-user permission on source agent/tool, 054 LLM gate, audit), bounded same-type-validated LLM edit, version archive before overwrite, force-upsert onto the same id, `ui_upsert` fan; behind `FF_COMPONENT_REFINE`; integration tests in `backend/tests/test_component_refine.py` (gates, refusal paths, version cycle, restore audit)
+- [x] T039 [P] [US4] Web refine/restore affordance in `backend/webrender/renderer.py` component chrome + `client.js` (instruction prompt → `component_refine` ui_event; history list → restore); stripped on non-interactive hosts by existing ROTE rule
+- [x] T040 [P] [US4] Native refine affordances: Windows context menu, Android overflow, Apple context menu → same ui_events; per-client tests (watch: none — declared carve-out)
 - [ ] T041 [US4] Live verification per quickstart.md §US4 (refine + restore on web and one native; provenance distinct on all six targets; timeline + unconfigured-LLM refusals) — evidence under `evidence/us4/`
 
 **Checkpoint**: US4 shippable — SC-006/SC-007 measurable.
@@ -119,10 +119,10 @@
 
 **Independent test**: quickstart.md §US5.
 
-- [ ] T042 [US5] `backend/orchestrator/artifact_share.py` (NEW): share_grant store (mint with PHI gate fail-closed, hashed token, snapshot html+json; list; revoke; open-count) per data-model.md; unit tests in `backend/tests/test_artifact_share.py` (incl. PHI refusal + audit events)
-- [ ] T043 [US5] Export endpoints in `backend/orchestrator/api.py` behind `FF_ARTIFACT_EXPORT`: `GET /api/export/component/{id}.csv` (ownership check; full-data re-invoke via the component_action pipeline when paginated; formula-injection guard; `?stored_only=1` fallback) and `GET /api/export/canvas/{chat_id}.html` (materialized layouts via `_canvas_components`, standalone document wrapper added in `backend/webrender/renderer.py`, charts degraded, provenance + date stamped); tests in `backend/tests/test_artifact_export.py`
-- [ ] T044 [US5] Share endpoints in `backend/orchestrator/api.py` behind `FF_ARTIFACT_SHARING`: `POST /api/share`, `GET /api/share`, `DELETE /api/share/{id}`, public `GET /share/{token}` with noindex/no-store/no-referrer/CSP headers per contracts/rest-endpoints.md; tests in `backend/tests/test_share_routes.py` (unauth serve, revoke-immediate, flag-off 404, header assertions)
-- [ ] T045 [P] [US5] Client affordances: web component-footer/canvas-toolbar export+share entries (`client.js` + `renderer.py`); Windows/Android/Apple menu entries opening the export URLs via system browser; parity-matrix rows (watch: none — carve-out)
+- [x] T042 [US5] `backend/orchestrator/artifact_share.py` (NEW): share_grant store (mint with PHI gate fail-closed, hashed token, snapshot html+json; list; revoke; open-count) per data-model.md; unit tests in `backend/tests/test_artifact_share.py` (incl. PHI refusal + audit events)
+- [x] T043 [US5] Export endpoints in `backend/orchestrator/api.py` behind `FF_ARTIFACT_EXPORT`: `GET /api/export/component/{id}.csv` (ownership check; full-data re-invoke via the component_action pipeline when paginated; formula-injection guard; `?stored_only=1` fallback) and `GET /api/export/canvas/{chat_id}.html` (materialized layouts via `_canvas_components`, standalone document wrapper added in `backend/webrender/renderer.py`, charts degraded, provenance + date stamped); tests in `backend/tests/test_artifact_export.py`
+- [x] T044 [US5] Share endpoints in `backend/orchestrator/api.py` behind `FF_ARTIFACT_SHARING`: `POST /api/share`, `GET /api/share`, `DELETE /api/share/{id}`, public `GET /share/{token}` with noindex/no-store/no-referrer/CSP headers per contracts/rest-endpoints.md; tests in `backend/tests/test_share_routes.py` (unauth serve, revoke-immediate, flag-off 404, header assertions)
+- [x] T045 [P] [US5] Client affordances: web component-footer/canvas-toolbar export+share entries (`client.js` + `renderer.py`); Windows/Android/Apple menu entries opening the export URLs via system browser; parity-matrix rows (watch: none — carve-out)
 - [ ] T046 [US5] Live verification per quickstart.md §US5 (incognito open, revoke, PHI fixture refusal, offline HTML open) — evidence under `evidence/us5/`
 
 **Checkpoint**: US5 shippable — SC-008 measurable.
@@ -131,9 +131,9 @@
 
 ## Phase 8: Polish & cross-cutting
 
-- [ ] T047 Flags-off byte-equivalence job: CI variant running the backend suite + all drift guards with the six 055 flags forced off in `.github/workflows/ci.yml`; prove SC-009
-- [ ] T048 [P] Observability sweep: structured logs for stripper hits, stream-bridge fallbacks, designer post-done skips (stale guard), share mint/refusals — verify each has agent/chat/correlation context
-- [ ] T049 [P] Documentation: renderer docstrings for the new behaviors (Constitution VI), `.env.example` flag notes, contracts kept in sync with any implementation drift
+- [x] T047 Flags-off byte-equivalence job: CI variant running the backend suite + all drift guards with the six 055 flags forced off in `.github/workflows/ci.yml`; prove SC-009
+- [x] T048 [P] Observability sweep: structured logs for stripper hits, stream-bridge fallbacks, designer post-done skips (stale guard), share mint/refusals — verify each has agent/chat/correlation context
+- [x] T049 [P] Documentation: renderer docstrings for the new behaviors (Constitution VI), `.env.example` flag notes, contracts kept in sync with any implementation drift
 - [ ] T050 Full gate run: container pytest suite, host `ruff check .`, `./gradlew test`, `swift test --package-path apple-clients/AstralCore`, `python -m pytest windows-client/tests -q`, changed-code coverage ≥90% (diff-cover), representative-dataset migration evidence attached to the PR
 
 ---

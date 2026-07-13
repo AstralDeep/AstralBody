@@ -36,11 +36,16 @@ Query: `chat_id` (required).
 Body: `{chat_id, scope: "component"|"canvas", component_id?}`.
 - Ownership check; renders the snapshot rendition (fragment or full canvas as
   above) at mint time.
-- **PHI gate (fail-closed)** over the snapshot text; on hit → 403
-  `{error:"phi_blocked"}` + audit `share.refused_phi`.
+- **PHI gate (fail-closed)** over the snapshot's component JSON — the HTML is
+  rendered from those dicts, so gating the JSON covers every piece of user
+  data the link would expose. A hit, OR an unavailable/erroring analyzer,
+  refuses the mint → 403 `{error:"phi_blocked"}` + audit `share.refused_phi`;
+  nothing is written on refusal.
 - Token: `secrets.token_urlsafe(32)`; stores `sha256(token)` only; returns
   `{share_url: "/share/<token>", id, created_at, expires_at}` exactly once.
 - Audit: `share.minted`.
+- Store layer: `orchestrator/artifact_share.py` (`ShareGrantStore`) — it
+  re-checks the flag itself (defense in depth behind the route-level 404).
 
 ## GET /api/share
 
@@ -49,8 +54,9 @@ revoked_at, open_count}` — never token material.
 
 ## DELETE /api/share/{id}
 
-Owner-scoped revoke; sets `revoked_at`; idempotent; audit `share.revoked`.
-Subsequent public opens refuse immediately.
+Owner-scoped revoke; sets `revoked_at`; idempotent (audited on the
+live→revoked transition only, so a repeated DELETE stays idempotent in the
+log too); audit `share.revoked`. Subsequent public opens refuse immediately.
 
 ## GET /share/{token}  (public, unauthenticated)
 

@@ -481,7 +481,11 @@ class StreamManager:
         try:
             await self.terminal_hook(sub)
         except Exception:
-            logger.exception("stream terminal hook failed (stream=%s)", sub.stream_id)
+            logger.exception(
+                "stream_artifacts.terminal_hook_failed stream=%s component=%s "
+                "agent=%s tool=%s chat=%s user=%s",
+                sub.stream_id, sub.bridged_component_id, sub.agent_id,
+                sub.tool_name, sub.chat_id, sub.user_id)
 
     # ------------------------------------------------------------------
     # Lifecycle: subscribe / attach / unsubscribe / detach / resume

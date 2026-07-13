@@ -53,8 +53,10 @@ class ComponentAdapter:
         """Copy identity fields onto a rebuilt/substituted component (055 US1):
         a degraded component must stay addressable — clients key canvases and
         purge welcome content by ``component_id ?? id``, and upsert morphs
-        target the same identity."""
-        for key in ("id", "component_id"):
+        target the same identity. ``provenance`` is a preserved field too
+        (055 US4, wire-contract §6): a degrade/collapse must never strip the
+        server-stamped trust mark."""
+        for key in ("id", "component_id", "provenance"):
             if comp_val := src.get(key):
                 out.setdefault(key, comp_val)
         return out

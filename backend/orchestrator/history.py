@@ -267,6 +267,16 @@ class HistoryManager:
     def delete_chat(self, chat_id: str, user_id: str = 'legacy'):
         """Delete a chat and its messages."""
         self.db.execute("DELETE FROM chats WHERE id = ? AND user_id = ?", (chat_id, user_id))
+        # Feature 055 (US4): component_version has no chats FK (unlike
+        # saved_components), so the chat's refine history is swept manually
+        # once the chat row is gone. Chat row first — a failed sweep only
+        # orphans version rows; the reverse order could lose history for a
+        # still-live chat.
+        try:
+            from orchestrator import artifact_versions
+            artifact_versions.delete_for_chat(self.db, chat_id, user_id)
+        except Exception:
+            logger.debug("version-history cascade failed on delete_chat", exc_info=True)
 
     # =========================================================================
     # Saved UI Components Methods
@@ -338,23 +348,37 @@ class HistoryManager:
     
     def delete_component(self, component_id: str, user_id: str = 'legacy') -> bool:
         """Delete a saved component."""
-        # Get chat_id before deleting
+        # Get chat_id (and the workspace identity, feature 055) before deleting
         row = self.db.fetch_one(
-            "SELECT chat_id FROM saved_components WHERE id = ? AND user_id = ?",
+            "SELECT chat_id, component_data FROM saved_components WHERE id = ? AND user_id = ?",
             (component_id, user_id)
         )
-        
+
         if not row:
             return False
-        
+
         chat_id = row['chat_id']
-        
+
         # Delete the component
         self.db.execute(
             "DELETE FROM saved_components WHERE id = ? AND user_id = ?",
             (component_id, user_id)
         )
-        
+
+        # Feature 055 (US4): sweep the component's refine history. Versions
+        # are keyed by the workspace component_id carried inside the stored
+        # dict, not by this row's uuid.
+        try:
+            data = row.get('component_data')
+            if isinstance(data, str):
+                data = json.loads(data)
+            ws_component_id = data.get('component_id') if isinstance(data, dict) else None
+            if ws_component_id:
+                from orchestrator import artifact_versions
+                artifact_versions.delete_for_component(self.db, chat_id, user_id, ws_component_id)
+        except Exception:
+            logger.debug("version-history cascade failed on delete_component", exc_info=True)
+
         # Check if chat still has components
         count_row = self.db.fetch_one(
             "SELECT COUNT(*) as count FROM saved_components WHERE chat_id = ? AND user_id = ?",

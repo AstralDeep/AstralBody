@@ -157,7 +157,11 @@ final class AppModel: NSObject {
 
     private let docMarker = "full write-up is on the canvas"
     private let maxTrail = 20
-    private let timelineMutations: Set<String> = ["chat_message", "component_action", "table_paginate", "save_theme"]
+    private let timelineMutations: Set<String> = ["chat_message", "component_action", "table_paginate",
+                                                  "save_theme", "component_refine", "component_restore"]
+
+    /// Test seam: observes every outbound WS frame text (nil in production).
+    @ObservationIgnored var outboundTap: ((String) -> Void)?
 
     var serverBase: URL {
         URL(string: serverBaseText) ?? URL(string: AstralConfig.serverBaseURL)!
@@ -889,7 +893,37 @@ final class AppModel: NSObject {
     }
 
     private func rawSend(_ text: String) {
+        outboundTap?(text)
         Task { await ws?.send(text) }
+    }
+
+    // MARK: refine + export (055 US4/US5)
+
+    /// 055 US4: component-scoped refine (wire-contract §3). The instruction
+    /// comes from the context-menu sheet; an empty one never reaches the wire.
+    func refineComponent(_ componentId: String, instruction: String) {
+        let trimmed = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !componentId.isEmpty, !trimmed.isEmpty else { return }
+        sendEvent("component_refine", .object([
+            "component_id": .string(componentId),
+            "instruction": .string(trimmed),
+        ]))
+    }
+
+    /// 055 US5: CSV export URL for one table component, chat-scoped per the
+    /// REST contract; opened in the system browser (session-authed route).
+    func exportComponentURL(_ componentId: String) -> URL? {
+        guard let chatId = activeChatId, !chatId.isEmpty, !componentId.isEmpty else { return nil }
+        let base = serverBase.appendingPathComponent("api/export/component/\(componentId).csv")
+        var comps = URLComponents(url: base, resolvingAgainstBaseURL: false)
+        comps?.queryItems = [URLQueryItem(name: "chat_id", value: chatId)]
+        return comps?.url
+    }
+
+    /// 055 US5: self-contained HTML export of the current chat's canvas.
+    func exportCanvasURL() -> URL? {
+        guard let chatId = activeChatId, !chatId.isEmpty else { return nil }
+        return serverBase.appendingPathComponent("api/export/canvas/\(chatId).html")
     }
 
     func newChat() {

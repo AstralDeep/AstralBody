@@ -85,6 +85,18 @@ def _sent_frames(deps):
     return [json.loads(call.args[1]) for call in deps["send_to_ws"].await_args_list]
 
 
+# The bridge behaviors under test are flag-on semantics, so force the flag
+# rather than inherit the environment's default (the SC-009 CI job runs this
+# suite with every 055 flag off). Autouse fixtures instantiate before the
+# explicitly-requested stream_artifacts_off, so flag-off tests still win.
+@pytest.fixture(autouse=True)
+def stream_artifacts_on():
+    prior = flags._flags["stream_artifacts"]
+    flags._flags["stream_artifacts"] = True
+    yield
+    flags._flags["stream_artifacts"] = prior
+
+
 @pytest.fixture
 def stream_artifacts_off():
     prior = flags._flags["stream_artifacts"]

@@ -147,6 +147,63 @@ jobs:
           name: coverage
           path: backend/coverage.xml
 
+  # ── Feature 055 (T047/SC-009): the same backend suite — including the drift
+  #    guards it carries — with every 055 flag forced OFF, proving the off
+  #    state restores pre-055 wire behavior byte-identically (safe rollback).
+  #    Env names match backend/shared/feature_flags.py _read() keys; "0" is
+  #    falsy there. FF_ARTIFACT_SHARING is default-off but pinned anyway so
+  #    the job's posture is explicit and default-drift-proof. ──
+  test-flags-off:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: build
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: astral
+          POSTGRES_PASSWORD: astral_ci
+          POSTGRES_DB: astraldeep
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U astral -d astraldeep"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: image
+          path: /tmp
+      - name: Load built image
+        run: docker load -i /tmp/astraldeep.tar
+      # Same invocations as the test job, minus the coverage plumbing (the
+      # flags-on run owns the coverage artifact).
+      - name: Backend suite with all six 055 flags off
+        run: |
+          docker run --rm --network host \
+            -v "$PWD/backend:/app/backend" \
+            -e ASTRAL_ENV=development \
+            -e DB_HOST=localhost \
+            -e DB_PORT=5432 \
+            -e DB_NAME=astraldeep \
+            -e DB_USER=astral \
+            -e DB_PASSWORD=astral_ci \
+            -e AGENT_API_KEY=ci-test-agent-key \
+            -e AUDIT_HMAC_SECRET=ci-test-hmac-secret \
+            -e LOOP_GUARD_ENFORCE=1 \
+            -e PERF_CONCURRENT_FLOOR_MS=5000 \
+            -e FF_FIRST_TURN_CONTRACT=0 \
+            -e FF_STREAM_ARTIFACTS=0 \
+            -e FF_DESIGNER_ALL_DEVICES=0 \
+            -e FF_COMPONENT_REFINE=0 \
+            -e FF_ARTIFACT_EXPORT=0 \
+            -e FF_ARTIFACT_SHARING=0 \
+            -w /app/backend --entrypoint bash astraldeep:ci \
+            -c "python -m pytest -q -m 'not integration' && python -m pytest audit/tests llm_config/tests orchestrator/tests onboarding/tests personalization/tests scheduler/tests dreaming/tests verification/tests -q && python -m pytest tests/perf/concurrent_surfaces.py -q"
+
   # ── FR-034: changed-code coverage ≥ 90% vs origin/main (Constitution III). ──
   coverage-gate:
     runs-on: ubuntu-latest
@@ -324,7 +381,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: [lint, build, test, coverage-gate, smoke, secret-scan]
+    needs: [lint, build, test, test-flags-off, coverage-gate, smoke, secret-scan]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read

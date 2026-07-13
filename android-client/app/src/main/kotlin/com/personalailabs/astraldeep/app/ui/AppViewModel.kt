@@ -154,13 +154,15 @@ data class UiState(
 /**
  * The `ui_event` actions refused while the read-only workspace-timeline snapshot
  * is active (T041). Covers the real mutation entry points reachable from rendered
- * components — chat send, component actions, table pagination, and theme saves.
+ * components — chat send, component actions (incl. the 055 refine/restore verbs),
+ * table pagination, and theme saves.
  * Navigation (chrome_open, load_chat, discover_agents, …) and the timeline-exit
  * action stay allowed so the user is never trapped. Pure → unit-tested.
  */
 internal fun isTimelineMutation(action: String): Boolean = action in TIMELINE_MUTATIONS
 
-private val TIMELINE_MUTATIONS = setOf("chat_message", "component_action", "table_paginate", "save_theme")
+private val TIMELINE_MUTATIONS =
+    setOf("chat_message", "component_action", "component_refine", "component_restore", "table_paginate", "save_theme")
 
 /**
  * Owns the connection + derived UI state. Folds each [Inbound] into [state] and

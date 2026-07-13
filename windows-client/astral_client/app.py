@@ -20,7 +20,7 @@ import sys
 import threading
 from typing import Any, Dict, List, Optional
 
-from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt, QSettings, QTimer, Signal
+from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt, QSettings, QTimer, QUrl, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -47,7 +48,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QWidgetAction,
 )
-from PySide6.QtGui import QAction, QBrush, QColor
+from PySide6.QtGui import QAction, QBrush, QColor, QDesktopServices
 
 from . import theme as T
 from .auth import LoginCancelled
@@ -298,6 +299,21 @@ class ChatRail(QWidget):
         self._hint = hint
 
 
+def _ask_refine_instruction(parent, title: str) -> str:
+    """Small modal prompt for a component-refine instruction (055 US4).
+    Factored out (like renderer._choose_color) so the emit path is
+    offscreen-testable without driving a modal dialog. '' == cancelled."""
+    what = f'"{title}"' if title else "this component"
+    text, ok = QInputDialog.getText(
+        parent, "Refine component", f"How should {what} change?")
+    return text.strip() if ok and text else ""
+
+
+def _open_external(url: str) -> None:
+    """Open a URL in the system browser (the download-card / OIDC model)."""
+    QDesktopServices.openUrl(QUrl(url))
+
+
 class Canvas(QScrollArea):
     """The SDUI canvas: native widgets per structured component, keyed by id."""
 
@@ -336,6 +352,15 @@ class Canvas(QScrollArea):
         # skeleton for the idle hint; out-of-turn empty renders remain
         # authoritative clears.
         self.turn_active = False
+        # Feature 055 (US4/US5): per-component context menu (refine + export).
+        # `timeline_mode` mirrors the window's read-only flag (refine disabled);
+        # `http_base` is set by the MainWindow; `open_url` is injectable for
+        # offscreen tests.
+        self.timeline_mode = False
+        self.http_base = ""
+        self.open_url = _open_external
+        self._inner.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._inner.customContextMenuRequested.connect(self._on_context_menu)
         self.show_empty_state()
 
     def _drop_empty(self) -> None:
@@ -500,7 +525,7 @@ class Canvas(QScrollArea):
             # single widget object is never added to the layout more than once.
             w = reusable.get(cid) if (cid and cid not in placed) else None
             if w is None:
-                w = render(comp, self.ctx)
+                w = render(comp, self.ctx, top_level=True)
                 if cid:
                     w.setProperty("component_id", cid)
             self._insert(w)
@@ -555,7 +580,7 @@ class Canvas(QScrollArea):
                     w.deleteLater()
                 continue
             comp = op.get("component") or {}
-            new_w = render(comp, self.ctx)
+            new_w = render(comp, self.ctx, top_level=True)
             new_w.setProperty("component_id", cid)
             old = self._by_id.get(cid)
             if old is not None:
@@ -566,6 +591,78 @@ class Canvas(QScrollArea):
                 self._insert(new_w)
             self._by_id[cid] = new_w
             self._rendered[cid] = comp  # keep the payload map in sync
+
+    # --- 055 US4/US5: component context menu (refine + export) ------------- #
+
+    def _component_at(self, pos) -> tuple:
+        """``(component_id, component dict)`` of the top-level canvas component
+        under ``pos`` (inner coords), else ``(None, None)``. Walks parents from
+        the deepest child, accepting only canvas-tracked identities — nested
+        children may carry an author ``id`` property that is NOT a workspace
+        identity and must not be targeted by refine/export."""
+        w = self._inner.childAt(pos)
+        while w is not None and w is not self._inner:
+            raw = w.property("component_id")
+            if raw and str(raw) in self._by_id:
+                cid = str(raw)
+                return cid, self._rendered.get(cid)
+            w = w.parentWidget()
+        return None, None
+
+    def component_menu(self, cid, comp) -> Optional[QMenu]:
+        """Build the context menu for a component (or bare canvas when ``cid``
+        is None): Refine… (055 US4, disabled while viewing history), Export
+        data (CSV) for tables, Export canvas (HTML). Returns ``None`` when no
+        entry applies (no menu shown)."""
+        comp = comp if isinstance(comp, dict) else {}
+        chat_id = getattr(self.ctx, "chat_id", None)
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            f"QMenu {{ background:{T.SURFACE}; color:{T.TEXT}; border:1px solid {T.BORDER}; padding:4px; }}"
+            f"QMenu::item {{ padding:6px 24px; }}"
+            f"QMenu::item:selected {{ background:{T.PRIMARY}; color:#ffffff; }}"
+            f"QMenu::separator {{ height:1px; background:{T.BORDER}; margin:4px 8px; }}"
+        )
+        if cid:
+            refine = menu.addAction("Refine…")
+            refine.setEnabled(not self.timeline_mode)
+            refine.triggered.connect(lambda _=False, x=cid: self.request_refine(x))
+            if str(comp.get("type") or "") == "table" and chat_id:
+                csv = menu.addAction("Export data (CSV)")
+                csv.triggered.connect(lambda _=False, x=cid, c=chat_id: self.open_url(
+                    rest.export_component_csv_url(self.http_base, x, c)))
+        if chat_id:
+            if not menu.isEmpty():
+                menu.addSeparator()
+            html = menu.addAction("Export canvas (HTML)")
+            html.triggered.connect(lambda _=False, c=chat_id: self.open_url(
+                rest.export_canvas_html_url(self.http_base, c)))
+        return None if menu.isEmpty() else menu
+
+    def _on_context_menu(self, pos) -> None:
+        cid, comp = self._component_at(pos)
+        menu = self.component_menu(cid, comp)
+        if menu is not None:
+            menu.exec(self._inner.mapToGlobal(pos))
+
+    def request_refine(self, cid: str) -> None:
+        """Prompt for an instruction and emit ``component_refine`` (wire-contract
+        §3). Empty/cancelled prompt sends nothing; historical views are
+        read-only (the server also refuses — `_ws_timeline_mode` guard).
+        No versions submenu: no native frame carries the version list, so
+        restore stays a web affordance (declared in the parity matrix)."""
+        if self.timeline_mode:
+            return
+        comp = self._rendered.get(cid)
+        title = str(comp.get("title") or "") if isinstance(comp, dict) else ""
+        instruction = _ask_refine_instruction(self, title)
+        if not instruction:
+            return
+        payload = {"component_id": cid, "instruction": instruction}
+        chat_id = getattr(self.ctx, "chat_id", None)
+        if chat_id:
+            payload["chat_id"] = chat_id
+        self.ctx.emit("component_refine", payload)
 
 
 class SurfaceDialog(QDialog):
@@ -1421,6 +1518,8 @@ class MainWindow(QMainWindow):
         self.rail = ChatRail()
         self.rail.show_empty_hint()
         self.canvas = Canvas(ctx)
+        # 055 US5: the canvas context menu opens export URLs against this origin.
+        self.canvas.http_base = _http_base(url)
         split = QSplitter(Qt.Orientation.Horizontal)
         split.addWidget(self._wrap(self.rail, "Conversation"))
         split.addWidget(self._wrap(self.canvas, "Canvas"))
@@ -2409,6 +2508,9 @@ class MainWindow(QMainWindow):
             self._show_banner("Background task finished.")
         elif t == "workspace_timeline_mode":
             self._timeline_mode = bool(msg.get("active") or msg.get("on"))
+            # The canvas mirrors the flag: refine is disabled in its context
+            # menu while a historical (read-only) view is active (055 US4).
+            self.canvas.timeline_mode = self._timeline_mode
             if self._timeline_mode:
                 self.canvas.hide_skeleton()
             # FR-007: a historical workspace view is strictly read-only — disable

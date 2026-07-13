@@ -98,7 +98,10 @@ def _grid_layout(*cids: str) -> List[Dict[str, Any]]:
 def test_flat_canvas_returns_all_components_when_no_layouts():
     ws = FakeWorkspace(rows=[_comp("c1", 0), _comp("c2", 1), _comp("c3", 2)], layouts=[])
     out = _orch(ws)._canvas_components("chat", "user")
-    assert out == ws.live_components("chat", "user")
+    # 055 US4 stamps ``provenance`` at delivery (flag-gated, covered by
+    # test_provenance_stamp.py); the content is otherwise untouched.
+    stripped = [{k: v for k, v in c.items() if k != "provenance"} for c in out]
+    assert stripped == ws.live_components("chat", "user")
     assert _collect_ids(out) == {"c1", "c2", "c3"}
 
 
