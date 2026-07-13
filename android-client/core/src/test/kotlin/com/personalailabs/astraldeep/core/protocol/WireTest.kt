@@ -258,6 +258,48 @@ class WireTest {
     }
 
     @Test
+    fun decodes_workspace_verb_acks() {
+        val saved = assertIs<Inbound.ComponentSaved>(Wire.decode("""{"type":"component_saved","component":{"id":"row1","title":"Chart"}}"""))
+        assertEquals("Chart", saved.title)
+        val saveErr = assertIs<Inbound.ComponentSaveError>(Wire.decode("""{"type":"component_save_error","error":"Component not found"}"""))
+        assertEquals("Component not found", saveErr.error)
+        val deleted = assertIs<Inbound.ComponentDeleted>(Wire.decode("""{"type":"component_deleted","component_id":"row1"}"""))
+        assertEquals("row1", deleted.componentId)
+        val status = assertIs<Inbound.CombineStatus>(Wire.decode("""{"type":"combine_status","status":"combining","message":"Combining A with B..."}"""))
+        assertEquals("combining", status.status)
+        assertEquals("Combining A with B...", status.message)
+        val err = assertIs<Inbound.CombineError>(Wire.decode("""{"type":"combine_error","error":"boom"}"""))
+        assertEquals("boom", err.error)
+        val list = assertIs<Inbound.SavedComponentsList>(Wire.decode("""{"type":"saved_components_list","components":[{"id":"r1"},{"id":"r2"}]}"""))
+        assertEquals(2, list.count)
+    }
+
+    @Test
+    fun decodes_components_combined_rows_with_identity_fallback() {
+        val r =
+            assertIs<Inbound.ComponentsReplaced>(
+                Wire.decode(
+                    """{"type":"components_combined","removed_ids":["rowA","rowB"],"new_components":[{"id":"rowC","component_data":{"type":"card","component_id":"wc_1"}},{"id":"rowD","component_data":{"type":"table"}}]}""",
+                ),
+            )
+        assertEquals(listOf("rowA", "rowB"), r.removedIds)
+        // The first result carries its stamped workspace identity; the second
+        // falls back to the fresh saved-row id.
+        assertEquals(listOf("wc_1", "rowD"), r.newComponents.map { it.id })
+        assertEquals("card", r.newComponents[0].type)
+    }
+
+    @Test
+    fun decodes_components_condensed_same_shape() {
+        val r =
+            assertIs<Inbound.ComponentsReplaced>(
+                Wire.decode("""{"type":"components_condensed","removed_ids":["r1","r2","r3"],"new_components":[{"id":"r4","component_data":{"type":"card"}}]}"""),
+            )
+        assertEquals(3, r.removedIds.size)
+        assertEquals(listOf("r4"), r.newComponents.map { it.id })
+    }
+
+    @Test
     fun unknown_type_falls_back() {
         val r = assertIs<Inbound.Unknown>(Wire.decode("""{"type":"totally_new_primitive"}"""))
         assertEquals("totally_new_primitive", r.type)

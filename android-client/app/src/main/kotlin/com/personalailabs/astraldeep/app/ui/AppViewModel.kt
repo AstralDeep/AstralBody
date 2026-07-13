@@ -780,6 +780,36 @@ class AppViewModel(
                     s.copy(banner = text, bannerKind = if (msg.level == "error") "error" else "info")
                 }
             }
+            // 055 (US3): the eight workspace verb acks, promoted ignored → handled
+            // (wire-contract §4). The server's follow-up ui_upsert/ui_render
+            // fan-outs stay authoritative; these give the issuing socket immediate
+            // identity-keyed reconcile + feedback without waiting on them.
+            is Inbound.ComponentSaved ->
+                s.copy(
+                    banner = msg.title?.takeIf { it.isNotBlank() }?.let { "Saved $it" } ?: "Component saved",
+                    bannerKind = "info",
+                )
+            is Inbound.ComponentSaveError ->
+                s.copy(banner = msg.error ?: "Couldn't save component", bannerKind = "error")
+            is Inbound.ComponentDeleted ->
+                msg.componentId?.takeIf { it.isNotBlank() }
+                    ?.let { applyCanvasOps(s, listOf(CanvasOp("remove", it))) } ?: s
+            is Inbound.CombineStatus -> s.copy(statusText = msg.message ?: msg.status)
+            is Inbound.CombineError ->
+                s.copy(statusText = null, banner = msg.error ?: "Couldn't combine components", bannerKind = "error")
+            is Inbound.ComponentsReplaced -> {
+                val ops =
+                    msg.removedIds.map { CanvasOp("remove", it) } +
+                        msg.newComponents.mapNotNull { c -> c.id?.let { CanvasOp("upsert", it, c) } }
+                applyCanvasOps(s.copy(statusText = null), ops)
+            }
+            is Inbound.SavedComponentsList -> {
+                // Accepted ack; no native saved-components surface exists to
+                // refresh (browsing rides the server-driven chrome surfaces) —
+                // logged so it is never a silent drop (FR-002).
+                Log.i(TAG, "saved_components_list acked (${msg.count} components)")
+                s
+            }
             is Inbound.Unknown -> {
                 // A deliberately-ignored frame (parity matrix) is a quiet drop; a
                 // truly unclassified type warns so drift is visible (FR-001).

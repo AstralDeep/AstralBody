@@ -199,6 +199,15 @@ class StreamSubscription:
     # deltas never overwrite it) — the orchestrator's persist-on-terminal
     # payload. Only ever set on bridged subscriptions; never persisted here.
     retained_chunk: Optional[StreamChunk] = field(default=None, repr=False)
+    # Clients dedup on monotonic seq keyed by stream_id, but each agent RUN
+    # restarts seq near 0 — so retry/dormant-wake re-dispatches must offset
+    # inbound seqs above the previous high-water or every recovered frame is
+    # silently dropped until the new run catches up.
+    max_seq_seen: int = 0
+    seq_offset: int = 0
+    # Set by the orchestrator's persist-on-terminal so the in-band wrapper
+    # and the manager's terminal hook can both fire without double-writing.
+    persist_done: bool = False
 
     # Per-tool metadata snapshot (so we don't have to look it up on every chunk)
     max_chunk_bytes: int = DEFAULT_MAX_CHUNK_BYTES
@@ -303,9 +312,10 @@ def _inline_safe_len(line: str) -> int:
                 in_target = True
                 i += 1
                 continue
-        if ch == "\\" and not code:
-            i += 2
-            continue
+        # No backslash-escape rule: the renderer (webrender/sanitize.py
+        # inline_md) has none, and the scanner must mirror what will RENDER —
+        # honoring escapes here would ship a "\`" the renderer treats as a
+        # live backtick.
         if ch == "`":
             code = not code
             i += 1
@@ -455,6 +465,23 @@ class StreamManager:
         # spin it up.
         self._sweep_task: Optional[asyncio.Task] = None
         self._shutdown = False
+
+        # 055 US2 (FR-011): awaited with the subscription at EVERY terminal
+        # transition — including the out-of-band ones no agent frame reaches
+        # (retry exhaustion, agent_end while dormant, dormant TTL eviction) —
+        # so the orchestrator's persist-on-terminal misses none. The manager
+        # itself stays storage-free.
+        self.terminal_hook: Optional[Callable[[StreamSubscription], Awaitable[None]]] = None
+
+    async def _fire_terminal_hook(self, sub: StreamSubscription) -> None:
+        """Invoke the orchestrator's terminal hook, never letting it break
+        stream teardown (persistence is fail-open by design)."""
+        if self.terminal_hook is None:
+            return
+        try:
+            await self.terminal_hook(sub)
+        except Exception:
+            logger.exception("stream terminal hook failed (stream=%s)", sub.stream_id)
 
     # ------------------------------------------------------------------
     # Lifecycle: subscribe / attach / unsubscribe / detach / resume
@@ -854,6 +881,9 @@ class StreamManager:
                 sub.send_in_progress = False
                 sub.delivered_count = 0
                 sub.dropped_count = 0
+                # The woken agent run restarts seq near 0, but the client that
+                # watched the pre-dormant run still holds the old high-water.
+                sub.seq_offset = sub.max_seq_seen
 
                 # Re-register in active
                 self._active[sub.key] = sub
@@ -880,7 +910,7 @@ class StreamManager:
                         # Transition to FAILED + send error chunk
                         err_chunk = StreamChunk(
                             stream_id=sub.stream_id,
-                            seq=1,
+                            seq=sub.max_seq_seen + 1,
                             components=[],
                             error={
                                 "code": "upstream_unavailable",
@@ -900,6 +930,7 @@ class StreamManager:
                         self._teardown_subscription(
                             sub, StreamState.FAILED, reason="resume_dispatch_failed",
                         )
+                        await self._fire_terminal_hook(sub)
                         continue
 
                 resumed.append((sub.stream_id, sub.tool_name))
@@ -1004,15 +1035,18 @@ class StreamManager:
             sub.state = StreamState.ACTIVE
 
         # Wrap the inbound message into our internal StreamChunk shape so the
-        # send loop has a stable type.
+        # send loop has a stable type. seq is offset past the previous run's
+        # high-water after a retry/wake re-dispatch (see StreamSubscription).
+        effective_seq = int(getattr(msg, "seq", 0) or 0) + sub.seq_offset
         chunk = StreamChunk(
             stream_id=sub.stream_id,
-            seq=getattr(msg, "seq", 0),
+            seq=effective_seq,
             components=list(getattr(msg, "components", []) or []),
             raw=getattr(msg, "raw", None),
             error=None,
             terminal=bool(getattr(msg, "terminal", False)),
         )
+        sub.max_seq_seen = max(sub.max_seq_seen, effective_seq)
         sub.last_chunk_at = time.monotonic()
 
         if chunk.components and sub.bridged_component_id is not None:
@@ -1085,7 +1119,7 @@ class StreamManager:
         next_retry_ms = int((time.time() + backoff_seconds) * 1000)
         chunk = StreamChunk(
             stream_id=sub.stream_id,
-            seq=sub.delivered_count + 1,
+            seq=sub.max_seq_seen + 1,
             components=[],
             error={
                 "code": error_code,
@@ -1126,6 +1160,9 @@ class StreamManager:
         sub.state = StreamState.STARTING
         sub.next_retry_at = None
         sub._retry_handle = None
+        # The fresh agent run restarts seq near 0 — continue above the old
+        # high-water so client dedup (keyed on stream_id) keeps accepting.
+        sub.seq_offset = sub.max_seq_seen
 
         if self._agent_dispatcher is None:
             return
@@ -1159,7 +1196,7 @@ class StreamManager:
 
         chunk = StreamChunk(
             stream_id=sub.stream_id,
-            seq=sub.delivered_count + 1,
+            seq=sub.max_seq_seen + 1,
             components=[],
             error={
                 "code": error_code,
@@ -1173,6 +1210,7 @@ class StreamManager:
         # Cancel the agent-side stream if still tracked
         await self._cancel_on_agent(sub)
         self._teardown_subscription(sub, StreamState.FAILED, reason=error_code)
+        await self._fire_terminal_hook(sub)
 
     async def handle_agent_end(self, msg: Any) -> None:
         """Receive a ``ToolStreamEnd`` from an agent. Mark the subscription
@@ -1184,6 +1222,10 @@ class StreamManager:
         request_id = getattr(msg, "request_id", "")
         key = self._request_to_key.get(request_id)
         if key is None:
+            # Unroutable by design for DORMANT/RECONNECTING streams — both
+            # transitions pop the request mapping (and dormancy cancels the
+            # agent run); abandoned retained content is persisted by the
+            # dormant-TTL terminal hook instead.
             return
         sub = self._active.get(key)
         if sub is None:
@@ -1192,7 +1234,7 @@ class StreamManager:
         # stream is done.
         terminal_chunk = StreamChunk(
             stream_id=sub.stream_id,
-            seq=sub.delivered_count + 1,
+            seq=sub.max_seq_seen + 1,
             components=[],
             terminal=True,
         )
@@ -1200,6 +1242,7 @@ class StreamManager:
         await self._send_chunk_to_subscribers(sub, terminal_chunk)
         # Clean up
         self._teardown_subscription(sub, StreamState.STOPPED, reason="agent_end")
+        await self._fire_terminal_hook(sub)
 
     # ------------------------------------------------------------------
     # Send loop (US1)
@@ -1442,6 +1485,13 @@ class StreamManager:
                 if (now - sub.created_at) > DORMANT_TTL_SECONDS:
                     entries.pop(inner_key, None)
                     evicted += 1
+                    # Abandonment is a terminal state too (055 FR-011): give
+                    # the persist hook its shot at the retained content before
+                    # the record is dropped. Sweep is sync — schedule it.
+                    sub.state = StreamState.STOPPED
+                    sub.state_reason = "dormant_ttl"
+                    if self.terminal_hook is not None:
+                        asyncio.create_task(self._fire_terminal_hook(sub))
             if not entries:
                 self._dormant.pop(outer_key, None)
         if evicted > 0:

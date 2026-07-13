@@ -95,6 +95,32 @@ def parser_status_glyph(status: str) -> tuple:
     }.get(status or "", ("•", "staged"))
 
 
+def replacement_ops(msg: dict) -> list:
+    """Feature 055 (US3): ``components_combined`` / ``components_condensed`` →
+    canvas ops — remove each consumed id, upsert each carried result. Results
+    are saved-row shapes (``{id, chat_id, component_data, …}``); the component
+    dict rides in ``component_data`` and may not carry a workspace identity yet
+    (the server stamps it in the reconcile ``ui_render`` that follows), so
+    identity falls back to the fresh row id — mirroring the Apple twin."""
+    ops = [
+        {"op": "remove", "component_id": str(rid)}
+        for rid in msg.get("removed_ids") or [] if rid
+    ]
+    for row in msg.get("new_components") or []:
+        if not isinstance(row, dict):
+            continue
+        comp = row.get("component_data")
+        if not isinstance(comp, dict):
+            continue
+        cid = comp.get("component_id") or row.get("id")
+        if not cid:
+            continue
+        comp = dict(comp)
+        comp.setdefault("component_id", str(cid))
+        ops.append({"op": "upsert", "component_id": str(cid), "component": comp})
+    return ops
+
+
 #: ui_event actions handled entirely in-app (never sent to the server, so they
 #: never produce a server ``chrome_surface`` re-render) — a surface's
 #: load-timeout bound is NOT armed for them (which would wrongly fire and wipe
@@ -2268,6 +2294,38 @@ class MainWindow(QMainWindow):
         elif t == "ui_upsert":
             if not msg.get("chat_id") or msg.get("chat_id") == self.active_chat:
                 self.canvas.apply_ops(msg.get("ops") or [])
+        # 055 (US3, wire-contract §4): the eight workspace verb acks, promoted
+        # ignored → handled. The server's follow-up ui_upsert/ui_render
+        # reconcile stays authoritative; these give this socket immediate
+        # identity-keyed feedback without waiting on it.
+        elif t == "component_deleted":
+            cid = msg.get("component_id")
+            if cid:
+                self.canvas.apply_ops([{"op": "remove", "component_id": str(cid)}])
+        elif t in ("components_combined", "components_condensed"):
+            self._reset_status_line()
+            rows = msg.get("new_components") or []
+            chat = next((r.get("chat_id") for r in rows
+                         if isinstance(r, dict) and r.get("chat_id")), None)
+            if not chat or chat == self.active_chat:
+                ops = replacement_ops(msg)
+                if ops:
+                    self.canvas.apply_ops(ops)
+        elif t == "component_saved":
+            title = (msg.get("component") or {}).get("title") or ""
+            self._show_banner(f"Saved {title}" if title else "Component saved")
+        elif t == "component_save_error":
+            self._show_banner(msg.get("error") or "Couldn't save component", "error")
+        elif t == "combine_status":
+            self.topbar.set_status(
+                msg.get("message") or msg.get("status") or "Combining…",
+                T.VARIANT_COLORS["accent"][0],
+            )
+        elif t == "combine_error":
+            self._reset_status_line()
+            self._show_banner(msg.get("error") or "Couldn't combine components", "error")
+        elif t == "saved_components_list":
+            self._refresh_saved_components(msg.get("components") or [])
         elif t == "chat_created":
             self.active_chat = (msg.get("payload") or {}).get(
                 "chat_id"
@@ -2438,6 +2496,13 @@ class MainWindow(QMainWindow):
         if self._history_dialog is not None and items:
             self._history_dialog.set_chats(items)
         logger.info("history surface rendered (%d chats)", len(items))
+
+    def _refresh_saved_components(self, components: list) -> None:
+        """Feature 055 (US3): the ``saved_components_list`` ack. The desktop has
+        no native saved-components surface yet (workspace browsing rides the
+        server-driven chrome surfaces), so this is a logged refresh hook — never
+        a silent drop (FR-002 posture); a future surface consumes the list here."""
+        logger.info("saved components list received (%d items)", len(components or []))
 
     def _replay_transcript(self, chat: dict) -> None:
         """Repopulate the rail from a loaded chat's messages (best-effort)."""

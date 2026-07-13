@@ -140,6 +140,18 @@ object Wire {
             // Read-only workspace timeline toggle ({active}); `on` is tolerated.
             "workspace_timeline_mode" ->
                 Inbound.WorkspaceTimelineMode(active = root.bool("active") ?: root.bool("on") ?: false)
+            // Workspace verb acks (055 US3, wire-contract §4).
+            "component_saved" -> Inbound.ComponentSaved(title = root.obj("component")?.str("title"))
+            "component_save_error" -> Inbound.ComponentSaveError(root.str("error"))
+            "component_deleted" -> Inbound.ComponentDeleted(root.str("component_id"))
+            "combine_status" -> Inbound.CombineStatus(root.str("status"), root.str("message"))
+            "combine_error" -> Inbound.CombineError(root.str("error"))
+            "components_combined", "components_condensed" ->
+                Inbound.ComponentsReplaced(
+                    removedIds = root.strList("removed_ids"),
+                    newComponents = replacementsFromJson(root.arr("new_components")),
+                )
+            "saved_components_list" -> Inbound.SavedComponentsList(count = root.arr("components")?.size ?: 0)
             else -> Inbound.Unknown(type)
         }
 
@@ -243,6 +255,18 @@ object Wire {
                 componentId = cid,
                 component = o.obj("component")?.let { Component.fromJson(it) },
             )
+        } ?: emptyList()
+
+    // components_combined/condensed results are saved-row shapes ({id,
+    // component_data, …}); the primitive dict rides in `component_data` and may
+    // not carry a workspace identity yet (the reconcile ui_render that follows
+    // stamps it), so identity falls back to the fresh row id.
+    private fun replacementsFromJson(arr: JsonArray?): List<Component> =
+        arr?.mapIndexedNotNull { i, el ->
+            val row = el as? JsonObject ?: return@mapIndexedNotNull null
+            val data = row.obj("component_data") ?: return@mapIndexedNotNull null
+            val comp = Component.fromJson(data)
+            if (comp.id != null) comp else comp.copy(id = row.str("id") ?: "combined-$i")
         } ?: emptyList()
 
     private fun errorFromJson(o: JsonObject?): StreamError? =

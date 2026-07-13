@@ -147,7 +147,7 @@ async def test_push_canvas_sends_the_full_canvas_to_matching_sockets():
     orch = _orch(ws_state)
     sends: List[Any] = []
 
-    async def _capture_send(sock, components, target="canvas"):
+    async def _capture_send(sock, components, target="canvas", speak=True):
         sends.append((sock, list(components), target))
 
     orch.send_ui_render = _capture_send

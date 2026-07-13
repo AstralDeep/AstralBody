@@ -520,6 +520,35 @@ final class AppModel: NSObject {
                 bannerIsError = frame.payload["level"]?.stringValue == "error"
                 errorBanner = text
             }
+        // 055 (US3): the eight workspace verb acks, promoted ignored → handled
+        // (wire-contract §4). The server's follow-up ui_upsert/ui_render
+        // fan-outs stay authoritative; these give the issuing socket immediate
+        // feedback without waiting on them.
+        case "component_saved":
+            let title = frame.payload["component"]?["title"]?.stringValue ?? ""
+            bannerIsError = false
+            errorBanner = title.isEmpty ? "Component saved" : "Saved \(title)"
+        case "component_save_error":
+            bannerIsError = true
+            errorBanner = frame.payload["error"]?.stringValue ?? "Couldn't save component"
+        case "component_deleted":
+            if let cid = frame.payload["component_id"]?.stringValue, !cid.isEmpty {
+                applyCanvasOps([UpsertOp(op: "remove", componentId: cid, component: nil)])
+            }
+        case "combine_status":
+            statusText = frame.payload["message"]?.stringValue ?? frame.payload["status"]?.stringValue
+        case "combine_error":
+            statusText = nil
+            bannerIsError = true
+            errorBanner = frame.payload["error"]?.stringValue ?? "Couldn't combine components"
+        case "components_combined", "components_condensed":
+            statusText = nil
+            applyCanvasOps(replacementOps(frame))
+        case "saved_components_list":
+            // Accepted ack; there is no native saved-components surface to
+            // refresh (browsing rides the server-driven chrome surface) — a
+            // future surface would consume `payload["components"]` here.
+            break
         case "auth_required":
             Task { await self.handleAuthRequired() }
         default:
@@ -704,6 +733,24 @@ final class AppModel: NSObject {
             return UpsertOp(op: "upsert", componentId: id,
                             component: c.componentId == nil ? c.withComponentId(id) : c)
         }
+    }
+
+    /// components_combined / components_condensed → canvas ops: remove the
+    /// consumed ids, upsert each carried result. Results are saved-row shapes
+    /// (`{id, component_data, …}`); the component dict rides in
+    /// `component_data` and may not carry a workspace identity yet (the
+    /// server stamps it in the reconcile ui_render that follows), so identity
+    /// falls back to the fresh row id.
+    private func replacementOps(_ frame: InboundFrame) -> [UpsertOp] {
+        let removed = frame.payload["removed_ids"]?.arrayValue?.compactMap { $0.stringValue } ?? []
+        var ops: [UpsertOp] = removed.map { UpsertOp(op: "remove", componentId: $0, component: nil) }
+        for row in frame.payload["new_components"]?.arrayValue ?? [] {
+            guard let comp = row["component_data"].flatMap({ AstralComponent(json: $0) }) else { continue }
+            let cid = comp.componentId ?? row["id"]?.stringValue ?? "combined-\(ops.count)"
+            ops.append(UpsertOp(op: "upsert", componentId: cid,
+                                component: comp.componentId == nil ? comp.withComponentId(cid) : comp))
+        }
+        return ops
     }
 
     private func stepLine(name: String?, status: String?) -> String {

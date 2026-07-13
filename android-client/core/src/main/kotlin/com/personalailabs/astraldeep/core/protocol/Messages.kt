@@ -164,5 +164,37 @@ sealed interface Inbound {
      */
     data class WorkspaceTimelineMode(val active: Boolean) : Inbound
 
+    // --- workspace component verbs (055 US3, wire-contract §4) — promoted
+    // ignored → handled; the server's ui_upsert/ui_render fan-outs stay
+    // authoritative, these give the issuing socket immediate feedback. ---
+
+    /** A `save_component` ack (`component_saved`); [title] names the saved row. */
+    data class ComponentSaved(val title: String?) : Inbound
+
+    /** `component_save_error` — a save/delete failure. */
+    data class ComponentSaveError(val error: String?) : Inbound
+
+    /** `component_deleted` — an identity-keyed remove of [componentId]. */
+    data class ComponentDeleted(val componentId: String?) : Inbound
+
+    /** `combine_status` — combine/condense progress. */
+    data class CombineStatus(val status: String?, val message: String?) : Inbound
+
+    /** `combine_error` — a combine/condense failure. */
+    data class CombineError(val error: String?) : Inbound
+
+    /**
+     * `components_combined` / `components_condensed` — the consumed identities
+     * to remove plus the carried result component(s), identity-assigned at
+     * decode (workspace id when stamped, else the fresh saved-row id).
+     */
+    data class ComponentsReplaced(
+        val removedIds: List<String>,
+        val newComponents: List<Component>,
+    ) : Inbound
+
+    /** `saved_components_list` — [count] rows; no native surface consumes the rows yet. */
+    data class SavedComponentsList(val count: Int) : Inbound
+
     data class Unknown(val type: String) : Inbound
 }

@@ -332,3 +332,96 @@ class TestNarrativeAndLegacyExclusion:
         assert "stream_data" in types_seen
         for frame in sent:
             assert "component_id" not in frame
+
+
+# ---------------------------------------------------------------------------
+# Seq continuation across retry/wake + terminal-hook coverage (review fixes)
+# ---------------------------------------------------------------------------
+
+class TestSeqContinuation:
+    """A fresh agent run restarts seq near 0; the manager must offset it past
+    the previous high-water or every client (dedup keyed on stream_id) drops
+    the recovered frames."""
+
+    async def test_retry_offsets_new_run_seqs(self):
+        mgr, deps = _make_manager()
+        ws, stream_id = await _subscribed(mgr, deps)
+        sub = mgr.subscription_for_stream(stream_id)
+        for seq in (1, 2, 3):
+            await mgr.handle_agent_chunk(_chunk(stream_id, seq, [{"type": "text"}]))
+            await asyncio.sleep(0.01)
+        assert sub.max_seq_seen == 3
+
+        # Transient error → RECONNECTING; fire the retry immediately.
+        await mgr._handle_error(sub, "upstream_unavailable", "blip")
+        assert sub.state.value == "reconnecting"
+        if sub._retry_handle is not None:
+            sub._retry_handle.cancel()
+            sub._retry_handle = None
+        await mgr._retry(sub)
+        assert sub.seq_offset == 3
+
+        # New run restarts at seq 1 — the wire frame must land ABOVE 3.
+        await mgr.handle_agent_chunk(_chunk(stream_id, 1, [{"type": "text"}]))
+        await asyncio.sleep(0.01)
+        data_frames = [f for f in _sent_frames(deps)
+                       if f.get("type") == "ui_stream_data" and f.get("seq")]
+        assert data_frames[-1]["seq"] == 4
+
+    async def test_terminal_seq_rides_above_high_water(self):
+        mgr, deps = _make_manager()
+        ws, stream_id = await _subscribed(mgr, deps)
+        await mgr.handle_agent_chunk(_chunk(stream_id, 7, [{"type": "text"}]))
+        await asyncio.sleep(0.01)
+        await mgr.handle_agent_end(ToolStreamEnd(request_id="req-1", stream_id=stream_id))
+        frames = _sent_frames(deps)
+        terminal = [f for f in frames if f.get("terminal")]
+        assert terminal and terminal[-1]["seq"] == 8
+
+
+class TestTerminalHook:
+    """FR-011: every terminal transition — including the out-of-band ones no
+    agent frame reaches — must offer the subscription to the persist hook."""
+
+    def _hook(self):
+        seen = []
+
+        async def hook(sub):
+            seen.append((sub.stream_id, sub.state.value, sub.state_reason))
+
+        return hook, seen
+
+    async def test_fail_subscription_fires_hook(self):
+        mgr, deps = _make_manager()
+        hook, seen = self._hook()
+        mgr.terminal_hook = hook
+        ws, stream_id = await _subscribed(mgr, deps)
+        sub = mgr.subscription_for_stream(stream_id)
+        await mgr._fail_subscription(sub, "upstream_unavailable", "dead", retryable=True)
+        assert seen == [(stream_id, "failed", "upstream_unavailable")]
+
+    async def test_agent_end_after_dormancy_is_unroutable_no_hook(self):
+        # Dormancy cancels the agent run and pops the request mapping, so a
+        # straggler ToolStreamEnd must be dropped — the TTL sweep owns the
+        # abandoned-content persist instead.
+        mgr, deps = _make_manager()
+        hook, seen = self._hook()
+        mgr.terminal_hook = hook
+        ws, stream_id = await _subscribed(mgr, deps)
+        await mgr.detach(ws)
+        await mgr.handle_agent_end(ToolStreamEnd(request_id="req-1", stream_id=stream_id))
+        assert seen == []
+        assert mgr.subscription_for_stream(stream_id) is not None  # still parked dormant
+
+    async def test_dormant_ttl_eviction_fires_hook(self):
+        import orchestrator.stream_manager as sm
+        mgr, deps = _make_manager()
+        hook, seen = self._hook()
+        mgr.terminal_hook = hook
+        ws, stream_id = await _subscribed(mgr, deps)
+        sub = mgr.subscription_for_stream(stream_id)
+        await mgr.detach(ws)
+        sub.created_at -= (sm.DORMANT_TTL_SECONDS + 1)
+        mgr._sweep_dormant_ttl()
+        await asyncio.sleep(0.05)  # hook is scheduled from the sync sweep
+        assert seen == [(stream_id, "stopped", "dormant_ttl")]

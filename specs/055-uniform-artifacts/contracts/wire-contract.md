@@ -91,6 +91,14 @@ Semantics:
 - Rollout caveat: pre-055 native binaries ignore the field and may show a
   transient duplicate on terminal until updated (all first-party clients ship
   in the same PR).
+- **Declared divergence (originating native device, mid-turn)**: Android/Apple
+  buffer in-turn canvas ops (accumulate-then-commit, pinned by
+  `CanvasClobberTest` + twins), so on the DEVICE THAT SENT the turn, stream
+  frames land in the pending canvas and become visible at `chat_status done` —
+  the user sees skeleton → final state, not progressive fill. Web, Windows,
+  and every co-viewing device render frames live. Accepted trade-off: the
+  in-turn buffer is what prevents mid-turn canvas clobber (044); revisiting it
+  is out of 055's scope.
 
 ## 3. Accept actions (US4, `FF_COMPONENT_REFINE`)
 
@@ -165,6 +173,14 @@ With `FF_FIRST_TURN_CONTRACT`, `FF_STREAM_ARTIFACTS`, `FF_DESIGNER_ALL_DEVICES`,
 `FF_COMPONENT_REFINE`, `FF_ARTIFACT_EXPORT`, `FF_ARTIFACT_SHARING` all off:
 welcome ships id-less, the blanking frame returns, `ui_stream_data` carries no
 `component_id`, the designer skip tuple returns, refine/restore refuse, export/
-share endpoints 404, and no `provenance` field is stamped. Wire behavior is
-byte-identical to pre-055; the existing suites + drift guards prove it in a
-dedicated CI variant.
+share endpoints 404, and no `provenance` field is stamped. Flag-gated wire
+behavior is byte-identical to pre-055; the existing suites + drift guards prove
+it in a dedicated CI variant.
+
+**Unflagged bug-fix deltas** (deliberately always-on; NOT covered by the
+byte-identity claim above): (a) the D6 leak-stripper pattern extensions run on
+every narrative/doc-card/tool-summary; (b) the all-tools-denied loop exit now
+sends its missing `chat_status done`; (c) ROTE degrade rebuilds preserve
+`id`/`component_id`; (d) the D5 markdown hold-back changes `FF_LLM_STREAMING`
+frame boundaries (final assembled text unchanged). Each is a spec'd correctness
+fix (FR-004/FR-013/D6) with its own pinned tests.

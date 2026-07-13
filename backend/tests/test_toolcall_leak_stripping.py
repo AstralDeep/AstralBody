@@ -193,3 +193,14 @@ async def test_tool_summary_honest_fallback_when_stripped_empty(caplog):
     assert cards[0]["content"][0]["content"] == _LEAK_FALLBACK_TEXT
     assert any("toolcall_leak.stripped_empty" in r.getMessage()
                and "surface=tool_summary" in r.getMessage() for r in caplog.records)
+
+
+def test_email_with_boolean_domain_label_survives():
+    """Adversarial-review fix: `@(?:true|false)` must be TERMINAL — an email
+    whose domain starts with `true.`/`false.` is prose, not a value train."""
+    from orchestrator.orchestrator import _strip_toolcall_leakage
+    text = "Email me at john@true.example.com today."
+    assert _strip_toolcall_leakage(text) == text
+    # The value train itself still strips (terminal boolean, then whitespace).
+    assert "NEW_PAGE@true" not in _strip_toolcall_leakage("done NEW_PAGE@true now")
+    assert "@false" not in _strip_toolcall_leakage("SET_MODE@false end")

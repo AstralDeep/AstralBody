@@ -82,9 +82,14 @@ def test_bare_list_marker_held():
     assert markdown_safe_prefix_len("1. ") == 0
 
 
-def test_escaped_asterisk_does_not_open():
+def test_backslash_is_not_an_escape():
+    # The renderer (webrender/sanitize.py inline_md) has no backslash-escape
+    # rule, so "\*" renders as a literal backslash plus a LIVE asterisk. The
+    # scanner must mirror what renders: the "*" opens an italic span and the
+    # tail is held until it closes.
     text = r"a \*lit and more"
-    assert markdown_safe_prefix_len(text) == len(r"a \*lit and ")
+    assert markdown_safe_prefix_len(text) == len("a ")
+    assert markdown_safe_prefix_len(r"a \*lit\* done ") == len(r"a \*lit\* done ")
 
 
 def test_no_boundary_yet():

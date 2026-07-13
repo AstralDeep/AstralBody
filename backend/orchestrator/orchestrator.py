@@ -212,9 +212,10 @@ _LEAKED_TOOL_CALL_PATTERNS = [
     re.compile(r"</?｜DSML｜[^>]*>"),
     re.compile(r"</?arg_(?:key|value)>", re.IGNORECASE),
     # 055 (D6) — NAME@true attribute trains riding alongside the pseudo-calls
-    # (`NEW_PAGE@true`). Anchored on a boolean so addresses like a@b.com
-    # survive.
-    re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*@(?:true|false)\b", re.IGNORECASE),
+    # (`NEW_PAGE@true`). Anchored on a TERMINAL boolean so addresses survive:
+    # the lookahead keeps john@true.example.com intact (the "true" there is a
+    # domain label, not a value).
+    re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*@(?:true|false)(?![\w.@-])", re.IGNORECASE),
 ]
 
 
@@ -520,6 +521,37 @@ def remap_merged_source(agent_id: str, tool_name: str):
     return new_agent, tool_name
 
 
+def _is_native_device(profile) -> bool:
+    """Windows/Android/iOS/macOS/watch — surfaces that render structured
+    components with their own layout engine (not the designer's web HTML)."""
+    from rote.capabilities import DeviceType
+    return profile is not None and profile.device_type in (
+        DeviceType.WINDOWS, DeviceType.ANDROID,
+        DeviceType.IOS, DeviceType.MACOS, DeviceType.WATCH)
+
+
+def _native_canvas_components(components) -> List[Dict[str, Any]]:
+    """055 US3 (wire-contract §5): the materialized canvas for NATIVE delivery
+    excludes ``doc_`` narrative cards and model "Reasoning" collapsibles —
+    their reducers divert those to the chat rail, so shipping them in a canvas
+    frame would have them silently dropped client-side. Matchers mirror the
+    clients' (AppViewModel.kt isDocCard/isReasoning and the Swift twin)."""
+    out = []
+    for c in components or []:
+        if not isinstance(c, dict):
+            continue
+        # The author id is "doc_…"; the workspace persists it under the
+        # namespaced "au_doc_…" identity — match both.
+        if (str(c.get("id") or "").startswith("doc_")
+                or str(c.get("component_id") or "").startswith(("doc_", "au_doc_"))):
+            continue
+        if (str(c.get("type") or "").lower() == "collapsible"
+                and str(c.get("title") or "").strip().lower() == "reasoning"):
+            continue
+        out.append(c)
+    return out
+
+
 class Orchestrator:
     def __init__(self):
         # 020-async-queries: background task manager for async chat processing
@@ -708,6 +740,11 @@ class Orchestrator:
             agent_canceller=self._cancel_stream_request,
             validate_chat_ownership=self._validate_chat_ownership_for_stream,
         )
+        # 055 US2 (FR-011): out-of-band terminals (retry exhaustion, dormant
+        # TTL eviction, resume-dispatch failure) reach the persist path via
+        # this hook; the in-band wrapper in handle_agent_message covers frames
+        # that arrive as agent messages. persist_done keeps them idempotent.
+        self.stream_manager.terminal_hook = self._persist_stream_terminal
 
         # Hook/Event System — extensible lifecycle events
         self.hooks = HookManager()
@@ -3880,6 +3917,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             MAX_TURNS = 10
             turn_count = 0
             heartbeat_task = await self._start_heartbeat(websocket)
+            # 055 US3: every rich component this turn lands on the canvas —
+            # feeds the coalesced post-done designer pass for native origins.
+            _turn_canvas_components: List[Dict[str, Any]] = []
 
             # Denial loop detection: track tools denied by permission checks
             denial_tracker: Dict[str, int] = {}  # tool_name -> denial count
@@ -4119,6 +4159,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                             websocket, tool_ui_components, chat_id, user_id=user_id,
                             user_request=message,
                         )
+                        _turn_canvas_components.extend(tool_ui_components)
                         if chat_id:
                             await asyncio.to_thread(
                                 self.history.add_message, chat_id, "assistant",
@@ -4411,6 +4452,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                             final_ops = await self._send_or_replace_components(
                                 websocket, parsed_components, chat_id, user_id=user_id
                             ) or []
+                            _turn_canvas_components.extend(parsed_components)
                             chat_summary = (list(leak_alerts) + chat_core
                                             + [self._provenance_caption(_tools_ran)])
                             await self.send_ui_render(websocket, chat_summary, target="chat")
@@ -4431,6 +4473,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                             narrative_doc = self._narrative_doc_card(chat_id, content)
                             final_ops = await self._send_or_replace_components(
                                 websocket, [narrative_doc], chat_id, user_id=user_id) or []
+                            _turn_canvas_components.append(narrative_doc)
                             chat_core = [
                                 Text(content=self._concise_lead(content)).to_dict(),
                                 Text(content="The full write-up is on the canvas.",
@@ -4479,6 +4522,10 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                         "status": "done",
                         "message": ""
                     }))
+                    # 055 US3: native-origin turns get their coalesced designer
+                    # pass here — after done, before the handler returns.
+                    await self._design_turn_post_done(
+                        websocket, chat_id, user_id, message, _turn_canvas_components)
                     return
 
             # If loop exits without final response — generate LLM summary
@@ -4515,6 +4562,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     "status": "done",
                     "message": ""
                 }))
+                # 055 US3: the max-turns exit is also a completed turn.
+                await self._design_turn_post_done(
+                    websocket, chat_id, user_id, message, _turn_canvas_components)
 
         except websockets.exceptions.ConnectionClosed:
             logger.warning(f"WebSocket closed during chat processing for chat_id {chat_id} — client likely reconnected")
@@ -5940,6 +5990,10 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                                        ui_components=[alert.to_dict()])
                 if decision.args is not None:
                     args = decision.args  # rewritten (e.g. a secret arg redacted)
+                    # The streaming twin must dispatch the SAME redacted args —
+                    # auto-subscribe with the pre-rewrite capture would hand
+                    # the agent the secret the rule just removed.
+                    stream_params = dict(args)
                 # Never forward a consumed authorization token to the agent.
                 if isinstance(args, dict) and "_txn_token" in args:
                     args = {k: v for k, v in args.items() if k != "_txn_token"}
@@ -6999,7 +7053,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         this user/agent pair we inject them encrypted alongside the args
         before sending — exactly like the polling path.
         """
-        if agent_id not in self.agents:
+        if agent_id not in self.agents and agent_id not in self.local_agents:
             raise RuntimeError(f"agent {agent_id!r} is not connected")
 
         request_id = f"stream_{tool_name}_{int(time.time() * 1000)}_{stream_id[-6:]}"
@@ -7025,6 +7079,21 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 "_stream_id": stream_id,
             },
         )
+        if agent_id in self.local_agents:
+            # Feature 040 built-ins run in-process with no agent WS — the
+            # loopback routes their ToolStreamData/End frames back through
+            # handle_agent_message exactly like the networked path (this
+            # dispatch had predated 040 and knew only self.agents, leaving
+            # push streaming dead for every built-in).
+            from shared.local_transport import LoopbackSocket
+            agent = self.local_agents[agent_id]
+            loopback = LoopbackSocket(self, agent_id)
+            asyncio.create_task(agent.handle_mcp_request(loopback, request))
+            logger.info(
+                f"Dispatched streaming tool call (in-process): {tool_name} → "
+                f"{agent_id} (stream_id={stream_id}, request_id={request_id})"
+            )
+            return request_id
         agent_ws = self.agents[agent_id]
         await agent_ws.send(request.to_json())
         logger.info(
@@ -7040,13 +7109,24 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         The agent's BaseA2AAgent loop closes the underlying generator and
         sends a final ``ToolStreamData`` with ``terminal: true``.
         """
+        cancel_msg = ToolStreamCancel(request_id=request_id, stream_id=stream_id)
+        if agent_id in self.local_agents:
+            # In-process twin of the WS send: hand the cancel straight to the
+            # agent's own handler (the loopback has no inbound channel).
+            try:
+                await self.local_agents[agent_id]._handle_stream_cancel(cancel_msg)
+                logger.info(
+                    f"Cancelled in-process stream: stream_id={stream_id} → {agent_id}"
+                )
+            except Exception as e:
+                logger.warning(f"_cancel_stream_request (in-process) failed: {e}")
+            return
         if agent_id not in self.agents:
             logger.debug(
                 f"_cancel_stream_request: agent {agent_id} not connected, "
                 f"nothing to cancel"
             )
             return
-        cancel_msg = ToolStreamCancel(request_id=request_id, stream_id=stream_id)
         try:
             await self.agents[agent_id].send(cancel_msg.to_json())
             logger.info(
@@ -7148,6 +7228,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         cid = sub.bridged_component_id
         if cid is None:
             return
+        if sub.persist_done:
+            return
         if sub.state is StreamState.FAILED:
             reason = (sub.state_reason or "error").replace("_", " ")
             components = [Alert(
@@ -7155,12 +7237,15 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                          f"an error ({reason}) before completing."),
                 variant="error").to_dict()]
         elif (sub.state is StreamState.STOPPED
-                and sub.state_reason == "agent_end"
+                # dormant_ttl = abandonment: nobody was watching when the TTL
+                # swept it, but what streamed is still what persists.
+                and sub.state_reason in ("agent_end", "dormant_ttl")
                 and sub.retained_chunk is not None
                 and sub.retained_chunk.components):
             components = copy.deepcopy(sub.retained_chunk.components)
         else:
             return
+        sub.persist_done = True
         for comp in components:
             if isinstance(comp, dict):
                 # The agent SDK stamps every top-level id with the stream id;
@@ -7672,10 +7757,22 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             out.extend(payload)
         return out
 
-    async def _push_canvas(self, chat_id: str, user_id: str, originating_ws=None):
+    async def _push_canvas(self, chat_id: str, user_id: str, originating_ws=None,
+                           turn_marker: Optional[str] = None):
         """Full-canvas ui_render (materialized arrangements) to every socket of
         the user on this chat — the same fan-out + per-socket ROTE adaptation
-        the legacy reconciliation path uses."""
+        the legacy reconciliation path uses.
+
+        ``turn_marker`` (055 US3): the chat's latest message id when the canvas
+        was designed — the push is dropped when the chat has since moved on
+        (cross-socket/async stale guard)."""
+        if turn_marker is not None:
+            latest = str(await asyncio.to_thread(
+                self.history.get_latest_message_id, chat_id, user_id=user_id) or "")
+            if latest != str(turn_marker):
+                logger.info("ui_designer: chat %s advanced past the designed "
+                            "turn — canvas push dropped", chat_id)
+                return
         components = await asyncio.to_thread(self._canvas_components, chat_id, user_id)
         targets = [
             ws for ws in self.ui_clients
@@ -7685,7 +7782,70 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         if originating_ws is not None and originating_ws not in targets:
             targets.append(originating_ws)
         for ws in targets:
-            await self.send_ui_render(ws, components)
+            # speak=False: a full-canvas push re-presents existing content —
+            # watch sockets must never re-speak it (055 US3 / FR-030).
+            await self.send_ui_render(ws, components, speak=False)
+
+    async def _run_designer(self, websocket, components: List[Dict], chat_id: str,
+                            user_id: str, user_request: str, layout_key: str,
+                            *, progress: bool = True) -> Optional[List[Dict]]:
+        """One bounded designer conversation over ``components``; returns the
+        validated arrangement or ``None`` (None ALWAYS = keep the flat canvas).
+
+        ``progress=False`` suppresses the per-pass ``chat_status`` frames —
+        required on the post-done native pass (055 US3), where they would flip
+        clients back to turn-active behind a stuck status line."""
+        from orchestrator import ui_designer
+
+        _designer_pass = {"n": 0}
+
+        async def _designer_llm(messages):
+            # Same credential resolution as the round itself (feature 006,
+            # websocket-scoped) and the same llm_call auditing (FR-028).
+            # Feature 030: each pass announces itself — the walkthrough
+            # measured an 83 s frame-silent gap while the designer worked
+            # behind a stale status line.
+            _designer_pass["n"] += 1
+            if progress:
+                try:
+                    await self._safe_send(websocket, json.dumps({
+                        "type": "chat_status", "status": "thinking",
+                        "message": f"Designing your layout (pass {_designer_pass['n']} of "
+                                   f"{ui_designer.designer_max_rounds()})...",
+                    }))
+                except Exception:
+                    logger.debug("designer progress status send failed", exc_info=True)
+            msg, _usage = await self._call_llm(
+                websocket, messages, tools_desc=None,
+                temperature=0.2, feature="ui_designer",
+            )
+            return (msg.content or "") if msg else None
+
+        from webrender import allowed_primitive_types
+        # The current persisted arrangement for this layout_key (if any)
+        # lets the designer avoid re-arranging it for a marginal gain.
+        _current_layout = None
+        try:
+            for _lay in await asyncio.to_thread(
+                    self.workspace.live_layouts, chat_id, user_id):
+                if _lay.get("layout_key") == layout_key:
+                    _current_layout = _lay.get("layout")
+                    break
+        except Exception:
+            _current_layout = None
+        canvas_rows = await asyncio.to_thread(
+            self.workspace.live_rows, chat_id, user_id)
+        with perf_span("turn.designer", chat=chat_id):
+            return await ui_designer.design_round(
+                user_request=user_request,
+                round_components=components,
+                canvas_rows=canvas_rows,
+                chat_id=chat_id,
+                layout_key=layout_key,
+                allowed_types=set(allowed_primitive_types()),
+                llm_call=_designer_llm,
+                current_layout=_current_layout,
+            )
 
     async def _deliver_round_components(self, websocket, components: List[Dict], chat_id: str,
                                         user_id: str, *, user_request: str = "") -> List[Dict]:
@@ -7702,19 +7862,15 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         """
         from orchestrator import ui_designer
         from orchestrator.workspace import layout_key_for
-        from rote.capabilities import DeviceType
         timeline = self._ws_timeline_mode.get(id(websocket), False)
-        # Native clients (Windows/Android) render structured components with their
-        # OWN responsive layout. The web-oriented designer pass — a slow LLM call
-        # that emits a layout tree they can't render — only hurts them (the
-        # walkthrough saw a ~150 s wait, after which the flat components the user
-        # already saw were replaced by an unrenderable designed canvas, leaving only
-        # the text doc). Deliver the flat components and let the client arrange them;
-        # web/voice/etc. still get the adaptive designer.
+        # Native clients render structured components with their OWN responsive
+        # layout, so the per-round designer pass never runs for them: rounds
+        # deliver flat, and with FF_DESIGNER_ALL_DEVICES on the turn handler
+        # runs ONE coalesced post-done pass instead (_design_turn_post_done,
+        # 055 US3). Flag off restores the 052 skip (native-origin turns are
+        # never designed — the walkthrough saw a ~150 s mid-turn wait).
         _prof = self.rote.get_profile(websocket) if websocket is not None else None
-        if _prof is not None and _prof.device_type in (
-                DeviceType.WINDOWS, DeviceType.ANDROID,
-                DeviceType.IOS, DeviceType.MACOS, DeviceType.WATCH):
+        if _is_native_device(_prof):
             return await self._send_or_replace_components(websocket, components, chat_id, user_id)
         if not chat_id or not ui_designer.should_design(components, timeline_mode=timeline):
             return await self._send_or_replace_components(websocket, components, chat_id, user_id)
@@ -7733,55 +7889,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             turn_marker = str(await asyncio.to_thread(
                 self.history.get_latest_message_id, chat_id, user_id=user_id) or "")
             layout_key = layout_key_for(chat_id, turn_marker)
-
-            _designer_pass = {"n": 0}
-
-            async def _designer_llm(messages):
-                # Same credential resolution as the round itself (feature 006,
-                # websocket-scoped) and the same llm_call auditing (FR-028).
-                # Feature 030: each pass announces itself — the walkthrough
-                # measured an 83 s frame-silent gap while the designer worked
-                # behind a stale status line.
-                _designer_pass["n"] += 1
-                try:
-                    await self._safe_send(websocket, json.dumps({
-                        "type": "chat_status", "status": "thinking",
-                        "message": f"Designing your layout (pass {_designer_pass['n']} of "
-                                   f"{ui_designer.designer_max_rounds()})...",
-                    }))
-                except Exception:
-                    logger.debug("designer progress status send failed", exc_info=True)
-                msg, _usage = await self._call_llm(
-                    websocket, messages, tools_desc=None,
-                    temperature=0.2, feature="ui_designer",
-                )
-                return (msg.content or "") if msg else None
-
-            from webrender import allowed_primitive_types
-            # The current persisted arrangement for this layout_key (if any)
-            # lets the designer avoid re-arranging it for a marginal gain.
-            _current_layout = None
-            try:
-                for _lay in await asyncio.to_thread(
-                        self.workspace.live_layouts, chat_id, user_id):
-                    if _lay.get("layout_key") == layout_key:
-                        _current_layout = _lay.get("layout")
-                        break
-            except Exception:
-                _current_layout = None
-            canvas_rows = await asyncio.to_thread(
-                self.workspace.live_rows, chat_id, user_id)
-            with perf_span("turn.designer", chat=chat_id):
-                layout = await ui_designer.design_round(
-                    user_request=user_request,
-                    round_components=components,
-                    canvas_rows=canvas_rows,
-                    chat_id=chat_id,
-                    layout_key=layout_key,
-                    allowed_types=set(allowed_primitive_types()),
-                    llm_call=_designer_llm,
-                    current_layout=_current_layout,
-                )
+            layout = await self._run_designer(
+                websocket, components, chat_id, user_id, user_request, layout_key)
         except Exception:
             logger.exception("ui_designer crashed — flat ui_upsert already delivered")
             layout = None
@@ -7793,12 +7902,14 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 # forced to the originating socket while it still views this
                 # chat; other sockets are chat-filtered inside _push_canvas.
                 if self._ws_active_chat.get(id(websocket)) == chat_id:
-                    await self._push_canvas(chat_id, user_id, originating_ws=websocket)
+                    await self._push_canvas(chat_id, user_id, originating_ws=websocket,
+                                            turn_marker=turn_marker)
                 else:
                     logger.info(
                         "ui_designer: originating socket left chat %s — "
                         "designed render not forced to it", chat_id)
-                    await self._push_canvas(chat_id, user_id, originating_ws=None)
+                    await self._push_canvas(chat_id, user_id, originating_ws=None,
+                                            turn_marker=turn_marker)
             except Exception:
                 logger.exception(
                     "designed canvas delivery failed — flat ui_upsert already delivered")
@@ -7814,6 +7925,78 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         except Exception:
             logger.debug("workspace audit failed", exc_info=True)
         return ops
+
+    async def _design_turn_post_done(self, websocket, chat_id: str, user_id: str,
+                                     user_request: str, turn_components: List[Dict]) -> None:
+        """055 US3 (FF_DESIGNER_ALL_DEVICES): the ONE coalesced designer pass
+        for native-origin turns, run inline AFTER the terminal ``chat_status
+        done`` and before the turn handler returns — per-socket chat lock +
+        TCP ordering keep done → designed render → next ack race-free on the
+        originating socket, and async-mode turns are still inside
+        ``handle_chat_message`` here, so the push precedes ``task_completed``.
+        Progress frames are suppressed (they would flip natives back to
+        turn-active). ANY failure is log-only: the flat components already
+        delivered per round are the fallback rendering."""
+        if not chat_id or not turn_components:
+            return
+        if not flags.is_enabled("designer_all_devices"):
+            return
+        prof = self.rote.get_profile(websocket) if websocket is not None else None
+        if not _is_native_device(prof):
+            return
+        from orchestrator import ui_designer
+        from orchestrator.workspace import layout_key_for
+        timeline = self._ws_timeline_mode.get(id(websocket), False)
+        components = _native_canvas_components(turn_components)
+        if not ui_designer.should_design(components, timeline_mode=timeline):
+            return
+        try:
+            turn_marker = str(await asyncio.to_thread(
+                self.history.get_latest_message_id, chat_id, user_id=user_id) or "")
+            layout_key = layout_key_for(chat_id, turn_marker)
+            layout = await self._run_designer(
+                websocket, components, chat_id, user_id, user_request,
+                layout_key, progress=False)
+            if not layout:
+                return
+            await asyncio.to_thread(
+                self.workspace.upsert_layout, chat_id, user_id, layout_key, layout)
+            # Same stale-chat rule as the mid-turn path: the designed render is
+            # only forced to the originating socket while it still views this
+            # chat; other sockets are chat-filtered inside the push.
+            originating = websocket if (
+                self._ws_active_chat.get(id(websocket)) == chat_id) else None
+            await self._push_designed_native_canvas(
+                chat_id, user_id, originating, turn_marker)
+        except Exception:
+            logger.exception(
+                "post-done designer pass failed — flat components already delivered")
+
+    async def _push_designed_native_canvas(self, chat_id: str, user_id: str,
+                                           originating_ws, turn_marker: str) -> None:
+        """Out-of-turn full ``ui_render`` of the designed canvas (055 US3):
+        materialized pre-ROTE, doc/Reasoning-filtered for native sockets,
+        never spoken, dropped when a newer turn has started on the chat."""
+        latest = str(await asyncio.to_thread(
+            self.history.get_latest_message_id, chat_id, user_id=user_id) or "")
+        if latest != str(turn_marker):
+            logger.info("ui_designer: chat %s advanced past the designed "
+                        "turn — post-done push dropped", chat_id)
+            return
+        components = await asyncio.to_thread(self._canvas_components, chat_id, user_id)
+        native_components = _native_canvas_components(components)
+        targets = [
+            ws for ws in self.ui_clients
+            if self._get_user_id(ws) == user_id
+            and self._ws_active_chat.get(id(ws)) == chat_id
+        ]
+        if originating_ws is not None and originating_ws not in targets:
+            targets.append(originating_ws)
+        for ws in targets:
+            payload = (native_components
+                       if _is_native_device(self.rote.get_profile(ws))
+                       else components)
+            await self.send_ui_render(ws, payload, speak=False)
 
     async def _send_or_replace_components(self, websocket, components: List[Dict], chat_id: str,
                                           user_id: str, *, force_component_id: Optional[str] = None) -> List[Dict]:

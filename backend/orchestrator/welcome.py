@@ -141,8 +141,10 @@ def _stamp_welcome_tree(rendered: List[Dict[str, Any]]) -> None:
         elif ctype == "grid":
             _stamp(comp, "wel_examples")
             for child in comp.get("children") or []:
+                if not isinstance(child, dict):
+                    continue
                 title = child.get("title") or ""
-                if isinstance(child, dict) and title:
+                if title:
                     _stamp(child, f"wel_ex_{_slug(title)}")
         elif ctype == "text":
             _stamp(comp, "wel_hint")
