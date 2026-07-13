@@ -11,16 +11,21 @@ request/response access for CRUD operations.
 """
 import asyncio
 import base64
+import csv
+import io
 import json
 import os
+import re
 import time
 import logging
-from typing import Any, Dict, Optional
+from datetime import date
+from typing import Any, Dict, List, Optional
 
 import aiohttp
 import websockets as ws_client
 from fastapi import APIRouter, Depends, HTTPException, status, Request, UploadFile, File, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
+from pydantic import BaseModel
 
 from orchestrator.models import (
     ChatMessageRequest, ChatMessageResponse,
@@ -43,6 +48,7 @@ from orchestrator.models import (
     DraftAgentResponse, DraftAgentListResponse,
 )
 from orchestrator.auth import get_current_user_id, require_user_id, get_current_user_payload
+from shared.feature_flags import flags
 
 logger = logging.getLogger("API")
 
@@ -2032,3 +2038,351 @@ async def cancel_async_task(task_id: str, request: Request):
             content={"error": "Task not found or already completed", "task_id": task_id},
         )
     return {"status": "cancelled", "task_id": task_id}
+
+
+# =============================================================================
+# 055-uniform-artifacts US5 (T043): Export Router — FF_ARTIFACT_EXPORT
+# =============================================================================
+
+export_router = APIRouter(prefix="/api/export", tags=["Export"])
+
+
+class _ExportError(Exception):
+    """CSV full-export refusal carrying the contract's `{error, detail?}` body."""
+
+    def __init__(self, status_code: int, error: str, detail: Optional[str] = None):
+        super().__init__(error)
+        self.status_code = status_code
+        self.error = error
+        self.detail = detail
+
+    def response(self) -> JSONResponse:
+        body: Dict[str, Any] = {"error": self.error}
+        if self.detail:
+            body["detail"] = self.detail
+        return JSONResponse(status_code=self.status_code, content=body)
+
+
+def _flag_404(flag: str) -> None:
+    """Contract (rest-endpoints.md): flag off ⇒ 404 as if the route were
+    absent — the body matches FastAPI's unknown-path default, never a 500."""
+    if not flags.is_enabled(flag):
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
+def _export_filename(stem: str, ext: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(stem)).strip("._") or "export"
+    return f"{safe}.{ext}"
+
+
+def _csv_body(headers: List[Any], rows: List[Any]) -> str:
+    def guard(cell: Any) -> str:
+        # OWASP CSV-injection rule: neutralize leading formula triggers so a
+        # spreadsheet opening the download treats the cell as text.
+        s = "" if cell is None else str(cell)
+        return "'" + s if s[:1] in ("=", "+", "-", "@") else s
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    if headers:
+        writer.writerow([guard(h) for h in headers])
+    for r in rows:
+        cells = r if isinstance(r, (list, tuple)) else [r]
+        writer.writerow([guard(c) for c in cells])
+    return buf.getvalue()
+
+
+def _render_export_html(components: List[Dict[str, Any]], title: str) -> str:
+    """Standalone export/share rendition (research D11): charts degrade down
+    their table/text fallback ladder (a static file runs no Plotly), the
+    workspace renders non-interactively (no buttons/chrome, provenance footer
+    kept), and the whole page is the self-contained export document."""
+    from rote.adapter import ComponentAdapter
+    from rote.capabilities import DeviceProfile
+    from webrender import (
+        allowed_primitive_types,
+        render_export_document,
+        render_workspace,
+    )
+
+    profile = DeviceProfile.default()
+    profile.supports_interactivity = False
+    profile.supported_types = frozenset(
+        t for t in allowed_primitive_types() if not t.endswith("_chart"))
+    adapted = ComponentAdapter.adapt([dict(c) for c in components], profile)
+    counts: Dict[str, int] = {}
+    for c in components:
+        mark = str(c.get("provenance") or "generated") if isinstance(c, dict) else "generated"
+        counts[mark] = counts.get(mark, 0) + 1
+    note = "Provenance: " + ", ".join(
+        f"{counts[k]} {k}" for k in ("grounded", "estimated", "generated") if counts.get(k))
+    return render_export_document(
+        render_workspace(adapted, profile), title, note, date.today().isoformat())
+
+
+async def _full_table_rows(orch, user_id: str, chat_id: str,
+                           cd: Dict[str, Any], total: int):
+    """Re-invoke a paginated table's recorded source tool for the complete
+    row set — the component_action gate sequence (retired/merged-agent
+    handling, security flags + per-user permission, credential injection)
+    without its canvas write-back: the export is serve-only."""
+    from orchestrator.orchestrator import RETIRED_AGENT_IDS, remap_merged_source
+
+    agent_id = cd.get("_source_agent") or ""
+    tool_name = cd.get("_source_tool") or ""
+    if not agent_id or not tool_name:
+        raise _ExportError(503, "source_unavailable", "partial data available")
+    if agent_id in RETIRED_AGENT_IDS:
+        raise _ExportError(503, "source_retired", "partial data available")
+    agent_id, tool_name = remap_merged_source(agent_id, tool_name)
+    allowed, deny_reason = await asyncio.to_thread(
+        orch._component_action_allowed, user_id, agent_id, tool_name)
+    if not allowed:
+        raise _ExportError(403, "forbidden", deny_reason)
+    args = dict(cd.get("_source_params") or {})
+    # Full-range paging under the same param names the pagination footer patches.
+    args.update({"limit": int(total), "offset": 0})
+    try:
+        creds = await asyncio.to_thread(
+            orch.credential_manager.get_agent_credentials_encrypted, user_id, agent_id)
+        if creds:
+            args["_credentials"] = creds
+            args["_credentials_encrypted"] = True
+    except Exception:
+        logger.debug("csv export: credential injection failed", exc_info=True)
+    try:
+        result = await orch._execute_with_retry(None, agent_id, tool_name, args)
+    except Exception:
+        logger.warning("csv export: source re-invoke failed", exc_info=True)
+        result = None
+    if result is not None and not result.error:
+        for comp in result.ui_components or []:
+            if isinstance(comp, dict) and str(comp.get("type") or "").strip().lower() == "table":
+                return list(comp.get("headers") or []), list(comp.get("rows") or [])
+    raise _ExportError(503, "source_unavailable", "partial data available")
+
+
+@export_router.get(
+    "/component/{component_id}.csv",
+    summary="Export a table component as CSV",
+    description=(
+        "Downloads a table component's data as CSV. Paginated tables are "
+        "re-invoked through the component_action pipeline for the complete "
+        "row set; pass `stored_only=1` to skip the re-invoke and export the "
+        "stored page (dead-source fallback)."
+    ),
+    responses={403: {"model": ErrorResponse}, 404: {"model": ErrorResponse},
+               422: {"model": ErrorResponse}, 503: {"model": ErrorResponse}},
+)
+async def export_component_csv(
+    request: Request,
+    component_id: str,
+    chat_id: str,
+    stored_only: int = 0,
+    user_id: str = Depends(require_user_id),
+):
+    _flag_404("artifact_export")
+    orch = _get_orchestrator(request)
+    # The (chat_id, user_id)-scoped lookup IS the ownership check: foreign or
+    # unknown components are indistinguishable (uniform 404).
+    row = await orch.workspace.aget_by_component_id(chat_id, user_id, component_id)
+    if row is None or not isinstance(row.get("component_data"), dict):
+        raise HTTPException(status_code=404, detail="Component not found")
+    cd = row["component_data"]
+    if str(cd.get("type") or "").strip().lower() != "table":
+        return JSONResponse(status_code=422, content={
+            "error": "not_a_table",
+            "detail": "Only table components can be exported as CSV",
+        })
+    headers = list(cd.get("headers") or [])
+    rows = list(cd.get("rows") or [])
+    try:
+        total = int(cd.get("total_rows"))
+    except (TypeError, ValueError):
+        total = None
+    full_export = False
+    if total is not None and total > len(rows) and not stored_only:
+        try:
+            headers, rows = await _full_table_rows(orch, user_id, chat_id, cd, total)
+            full_export = True
+        except _ExportError as e:
+            return e.response()
+    body = await asyncio.to_thread(_csv_body, headers, rows)
+    try:
+        from audit.hooks import record_workspace_event
+        await record_workspace_event(
+            user_id=user_id, action="component_exported", chat_id=chat_id,
+            component_id=component_id,
+            detail={"format": "csv", "rows": len(rows), "full": full_export},
+        )
+    except Exception:
+        logger.debug("export audit failed", exc_info=True)
+    return Response(
+        content=body,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition":
+                 f'attachment; filename="{_export_filename(component_id, "csv")}"'},
+    )
+
+
+@export_router.get(
+    "/canvas/{chat_id}.html",
+    summary="Export the chat's workspace canvas as a standalone HTML document",
+    responses={404: {"model": ErrorResponse}},
+)
+async def export_canvas_html(
+    request: Request,
+    chat_id: str,
+    user_id: str = Depends(require_user_id),
+):
+    _flag_404("artifact_export")
+    orch = _get_orchestrator(request)
+    # Materialized designed layouts, (chat_id, user_id)-scoped — an unowned
+    # chat and an empty canvas are indistinguishable (uniform 404).
+    components = await asyncio.to_thread(orch._canvas_components, chat_id, user_id)
+    if not components:
+        raise HTTPException(status_code=404, detail="Nothing to export for this chat")
+    html = await asyncio.to_thread(_render_export_html, components, "AstralDeep workspace")
+    try:
+        from audit.hooks import record_workspace_event
+        await record_workspace_event(
+            user_id=user_id, action="canvas_exported", chat_id=chat_id,
+            detail={"format": "html", "components": len(components)},
+        )
+    except Exception:
+        logger.debug("export audit failed", exc_info=True)
+    return Response(
+        content=html,
+        media_type="text/html; charset=utf-8",
+        headers={"Content-Disposition":
+                 f'attachment; filename="{_export_filename("canvas-" + chat_id, "html")}"'},
+    )
+
+
+# =============================================================================
+# 055-uniform-artifacts US5 (T044): Share Router — FF_ARTIFACT_SHARING
+# (DEFAULT OFF, fail-closed: every route 404s while the flag is off)
+# =============================================================================
+
+share_router = APIRouter(tags=["Share"])
+
+_SHARE_PUBLIC_HEADERS = {
+    "X-Robots-Tag": "noindex, nofollow",
+    "Cache-Control": "no-store",
+    "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy":
+        "default-src 'none'; style-src 'unsafe-inline'; img-src data:",
+}
+
+
+class ShareCreateRequest(BaseModel):
+    chat_id: str
+    scope: str
+    component_id: Optional[str] = None
+
+
+@share_router.post(
+    "/api/share",
+    status_code=status.HTTP_201_CREATED,
+    summary="Mint a revocable read-only share link",
+    description=(
+        "Snapshots the component or canvas rendition at mint time (a share "
+        "never reads live workspace rows afterwards), runs the PHI gate "
+        "fail-closed, and returns the share URL exactly once — the raw token "
+        "is never stored."
+    ),
+    responses={403: {"model": ErrorResponse}, 404: {"model": ErrorResponse},
+               422: {"model": ErrorResponse}},
+)
+async def create_share(
+    request: Request,
+    body: ShareCreateRequest,
+    user_id: str = Depends(require_user_id),
+):
+    _flag_404("artifact_sharing")
+    orch = _get_orchestrator(request)
+    scope = (body.scope or "").strip().lower()
+    if scope not in ("component", "canvas"):
+        return JSONResponse(status_code=422, content={
+            "error": "invalid_scope", "detail": "scope must be 'component' or 'canvas'"})
+    component_id = body.component_id if scope == "component" else None
+    if scope == "component":
+        if not component_id:
+            return JSONResponse(status_code=422, content={
+                "error": "invalid_request",
+                "detail": "component-scoped share requires component_id"})
+        row = await orch.workspace.aget_by_component_id(body.chat_id, user_id, component_id)
+        if row is None or not isinstance(row.get("component_data"), dict):
+            raise HTTPException(status_code=404, detail="Component not found")
+        snapshot = [row["component_data"]]
+        title = str(row["component_data"].get("title") or "Shared component")
+    else:
+        snapshot = await asyncio.to_thread(orch._canvas_components, body.chat_id, user_id)
+        if not snapshot:
+            raise HTTPException(status_code=404, detail="Nothing to share for this chat")
+        title = "AstralDeep workspace"
+    snapshot_html = await asyncio.to_thread(_render_export_html, snapshot, title)
+
+    from orchestrator.artifact_share import (
+        SharePHIRefusedError,
+        SharingDisabledError,
+        get_share_store,
+    )
+    try:
+        minted = await get_share_store().mint(
+            user_id=user_id, chat_id=body.chat_id, scope=scope,
+            snapshot_html=snapshot_html, snapshot_json=snapshot,
+            component_id=component_id,
+        )
+    except SharePHIRefusedError:
+        return JSONResponse(status_code=403, content={"error": "phi_blocked"})
+    except SharingDisabledError:
+        raise HTTPException(status_code=404, detail="Not Found")
+    except ValueError as e:
+        return JSONResponse(status_code=422, content={
+            "error": "invalid_request", "detail": str(e)})
+    # The raw token appears exactly once — inside share_url; it is never
+    # recoverable from storage or the owner listing.
+    return {"id": minted["id"], "share_url": minted["share_url"],
+            "created_at": minted["created_at"], "expires_at": minted["expires_at"]}
+
+
+@share_router.get(
+    "/api/share",
+    summary="List my share grants",
+    description="Owner's grants, newest first — metadata only, never token material.",
+)
+async def list_shares(user_id: str = Depends(require_user_id)):
+    _flag_404("artifact_sharing")
+    from orchestrator.artifact_share import get_share_store
+    grants = await get_share_store().list_grants(user_id)
+    return {"shares": grants}
+
+
+@share_router.delete(
+    "/api/share/{share_id}",
+    summary="Revoke a share grant",
+    description="Owner-scoped, idempotent, immediate — subsequent public opens refuse.",
+    responses={404: {"model": ErrorResponse}},
+)
+async def revoke_share(share_id: int, user_id: str = Depends(require_user_id)):
+    _flag_404("artifact_sharing")
+    from orchestrator.artifact_share import get_share_store
+    found = await get_share_store().revoke(user_id, share_id)
+    if not found:
+        raise HTTPException(status_code=404, detail="Share not found")
+    return {"message": f"Share {share_id} revoked"}
+
+
+@share_router.get("/share/{token}", include_in_schema=False)
+async def serve_share(token: str):
+    """PUBLIC (unauthenticated) snapshot serve. Uniform 404 for unknown,
+    revoked, expired, and flag-off — indistinguishable from an absent route."""
+    _flag_404("artifact_sharing")
+    from orchestrator.artifact_share import get_share_store
+    store = get_share_store()
+    grant = await store.resolve(token)
+    if grant is None:
+        raise HTTPException(status_code=404, detail="Not Found")
+    await store.record_open(grant)
+    return HTMLResponse(content=grant["snapshot_html"], headers=_SHARE_PUBLIC_HEADERS)

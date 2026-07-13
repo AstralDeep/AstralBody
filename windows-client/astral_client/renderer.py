@@ -1173,6 +1173,66 @@ def _r_skeleton(c, ctx):
     return w
 
 
+# Feature 055 (US4, wire-contract §6): the server-stamped ``provenance`` field
+# → compact trust badge (glyph, label, tooltip, semantic color). Absent/unknown
+# values render nothing — pre-055 servers (and FF off) stay byte-identical.
+# Colors mirror the web footer: grounded=success green, estimated=warning
+# yellow, generated=muted. ``None`` color resolves to T.MUTED at render time
+# (the palette is live-themable, so colors can't be captured at import).
+_PROVENANCE_BADGES = {
+    "grounded": ("✓", "tool data", "success",
+                 "Sourced from a tool result"),
+    "estimated": ("≈", "estimated", "warning",
+                  "Estimated / low-confidence value"),
+    "generated": ("✦", "AI-generated", None,
+                  "Written by the assistant — not sourced from a tool"),
+}
+
+#: Decorative / structural types that assert no facts — never badged
+#: (parity with the web footer's skip set).
+_PROVENANCE_SKIP_TYPES = frozenset({"divider", "skeleton"})
+
+
+def provenance_badge(c: dict) -> Optional[QLabel]:
+    """The compact provenance badge for a component dict, or ``None`` when the
+    field is absent/unknown or the type is decorative (render nothing)."""
+    if not isinstance(c, dict):
+        return None
+    if str(c.get("type", "")).strip().lower() in _PROVENANCE_SKIP_TYPES:
+        return None
+    meta = _PROVENANCE_BADGES.get(c.get("provenance"))
+    if meta is None:
+        return None
+    icon, text, variant, tip = meta
+    color = T.VARIANT_COLORS[variant][0] if variant else T.MUTED
+    lab = QLabel(f"{icon} {text}")
+    lab.setObjectName("provenance_badge")
+    lab.setProperty("provenance", str(c["provenance"]))
+    lab.setToolTip(tip)
+    lab.setStyleSheet(f"color:{color}; font-size:10px; background:transparent;")
+    lab.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Maximum)
+    return lab
+
+
+def _with_provenance_badge(widget: QWidget, c: dict) -> QWidget:
+    """Wrap a rendered top-level component with its right-aligned provenance
+    badge row (the native component chrome). No badge → the widget is returned
+    unwrapped, byte-identical to pre-055 rendering."""
+    badge = provenance_badge(c)
+    if badge is None:
+        return widget
+    wrap = QWidget()
+    lay = _vbox(2)
+    wrap.setLayout(lay)
+    lay.addWidget(widget)
+    row = QHBoxLayout()
+    row.setContentsMargins(0, 0, 4, 0)
+    row.addStretch(1)
+    row.addWidget(badge)
+    lay.addLayout(row)
+    return wrap
+
+
 def _r_fallback(c, ctx):
     frame = QFrame()
     frame.setStyleSheet(
@@ -1303,8 +1363,13 @@ def _r_theme_apply(c, ctx):
 REGISTRY.update({"color_picker": _r_color_picker, "theme_apply": _r_theme_apply})
 
 
-def render(component: Any, ctx: RenderContext) -> QWidget:
-    """Render one structured SDUI component dict into a native widget."""
+def render(component: Any, ctx: RenderContext, *, top_level: bool = False) -> QWidget:
+    """Render one structured SDUI component dict into a native widget.
+
+    ``top_level=True`` adds the component chrome — today the provenance badge
+    (055 US4) — and is passed only by the canvas for its top-level components;
+    nested children are stamped with ``provenance`` too (``_tag_source``
+    recurses) but must not each grow a badge."""
     if not isinstance(component, dict):
         return _label(str(component))
     builder = REGISTRY.get(component.get("type", ""), _r_fallback)
@@ -1314,6 +1379,8 @@ def render(component: Any, ctx: RenderContext) -> QWidget:
         widget = _label(
             f"[render error: {component.get('type')}: {exc}]", color=T.MUTED, size=12
         )
+    if top_level:
+        widget = _with_provenance_badge(widget, component)
     cid = component.get("component_id") or component.get("id")
     if cid:
         widget.setProperty("component_id", str(cid))

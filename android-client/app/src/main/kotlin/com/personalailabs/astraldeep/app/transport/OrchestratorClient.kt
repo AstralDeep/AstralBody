@@ -69,11 +69,16 @@ class OrchestratorClient(
     /** The `action` of each frame dropped from the full offline queue — overflow is never silent (T014). */
     val dropped: SharedFlow<String> = _dropped.asSharedFlow()
 
-    /** Reconnecting inbound stream. Collect this for the life of the session. */
+    /**
+     * Reconnecting inbound stream. Collect this for the life of the session.
+     * [sessionId] is a provider, read at each (re)connect, so `register_ui`
+     * always carries the chat active NOW — not the one open when the session
+     * started (cross-device continuity, audit item 12).
+     */
     fun stream(
         token: String,
         device: DeviceCapabilities,
-        sessionId: String? = null,
+        sessionId: () -> String? = { null },
     ): Flow<Inbound> =
         flow {
             var attempt = 0
@@ -88,7 +93,7 @@ class OrchestratorClient(
     private fun connectOnce(
         token: String,
         device: DeviceCapabilities,
-        sessionId: String?,
+        sessionId: () -> String?,
         onOpen: () -> Unit,
     ): Flow<Inbound> =
         callbackFlow {
@@ -100,11 +105,16 @@ class OrchestratorClient(
                         webSocket: WebSocket,
                         response: Response,
                     ) {
-                        _state.value = ConnectionState.Connected
+                        // register_ui MUST be the first frame on the socket:
+                        // only after it is enqueued may the offline queue flush
+                        // and Connected-reactive sends (the reconnect load_chat
+                        // refresh) flow, or the server would refuse them as
+                        // unregistered.
+                        webSocket.send(Wire.encodeRegisterUi(token, sessionId(), device))
                         open = true
                         onOpen()
-                        webSocket.send(Wire.encodeRegisterUi(token, sessionId, device))
                         flushPending(webSocket)
+                        _state.value = ConnectionState.Connected
                     }
 
                     override fun onMessage(

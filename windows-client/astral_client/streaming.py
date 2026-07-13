@@ -10,15 +10,17 @@ The orchestrator streams live tool output as ``ui_stream_data`` frames (Feature
 This module is pure (no Qt): it translates a stream frame into canvas ops that
 ``Canvas.apply_ops`` already knows how to apply — an in-place upsert keyed by a
 synthetic ``stream-<stream_id>`` component id (mirroring the web client's
-``"stream-"+stream_id`` node). It owns the per-stream monotonic ``seq`` dedupe,
-the ``session_id`` filter, terminal final/forget, and error rendering, so the
-behaviour is unit-testable without constructing the GUI.
+``"stream-"+stream_id`` node), or by the frame's ``component_id`` when the
+stream is bridged to a workspace identity (feature 055, ``FF_STREAM_ARTIFACTS``).
+It owns the per-stream monotonic ``seq`` dedupe, the ``session_id`` filter,
+terminal final/forget, and error rendering, so the behaviour is unit-testable
+without constructing the GUI.
 
 Wire reference (push fan-out, ``stream_manager`` + ``orchestrator``):
   ui_stream_data: {stream_id, session_id, seq, components[], html?, raw?,
-                   terminal, error?}
+                   terminal, error?, component_id?}
   stream_subscribed: {stream_id, tool_name, agent_id, session_id, max_fps,
-                      min_fps, attached}
+                      min_fps, attached, component_id?}
   stream_error: {request_action, session_id, payload:{stream_id?, tool_name?,
                  code, message}}
 The legacy *poll* system reuses the ``stream_*`` namespace with a flatter shape
@@ -27,7 +29,7 @@ here degrade to that shape gracefully but the desktop targets the push system.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from typing import Container, Dict, List, Optional, Tuple
 
 #: Canvas component-id prefix for a live stream's node (mirrors the web client).
 STREAM_NODE_PREFIX = "stream-"
@@ -43,10 +45,17 @@ def _node_key(frame: dict) -> Tuple[Optional[str], Optional[str]]:
 
     Push frames key on ``stream_id``; legacy poll frames (no ``stream_id``) key
     on ``tool_name``. Returns ``(None, None)`` for an unaddressable frame.
+
+    A push frame carrying ``component_id`` (055 stream→workspace bridge) keys
+    the canvas node by that identity instead — never a ``stream-<stream_id>``
+    node — so the terminal persist ``ui_upsert`` under the same identity
+    replaces the streamed content in place (no double render). The dedupe key
+    stays ``stream_id``.
     """
     sid = frame.get("stream_id")
     if sid:
-        return stream_node_id(str(sid)), str(sid)
+        cid = frame.get("component_id")
+        return (str(cid) if cid else stream_node_id(str(sid))), str(sid)
     tool = frame.get("tool_name")
     if tool:
         return f"{STREAM_NODE_PREFIX}tool-{tool}", f"tool:{tool}"
@@ -109,12 +118,17 @@ def stream_frame_to_ops(
     return [{"op": "upsert", "component_id": node, "component": body}]
 
 
-def subscribe_ack_ops(frame: dict) -> List[dict]:
+def subscribe_ack_ops(frame: dict, *, existing_ids: Container[str] = ()) -> List[dict]:
     """A lightweight placeholder shown on ``stream_subscribed`` so the canvas
     reflects activity before the first data frame arrives (replaced in place by
-    the first ``ui_stream_data`` for the same node)."""
+    the first ``ui_stream_data`` for the same node).
+
+    ``existing_ids`` is the canvas's current identity map: when the node is
+    already rendered — a device joining mid-stream whose canvas holds the
+    retained component — the placeholder is suppressed rather than blanking it
+    (055 mid-stream join; mirrors the web client's node-exists guard)."""
     node, _ = _node_key(frame)
-    if not node:
+    if not node or node in existing_ids:
         return []
     tool = frame.get("tool_name") or "tool"
     return [{

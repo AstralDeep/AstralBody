@@ -20,6 +20,7 @@ import math
 import os
 import re as _re
 from typing import Any, Callable, Dict, List
+from urllib.parse import quote
 
 logger = logging.getLogger("webrender")
 
@@ -1191,8 +1192,10 @@ def provenance_enabled() -> bool:
 
 #: Decorative / structural types that assert no facts — never footed.
 _PROV_SKIP_TYPES = frozenset({"divider", "skeleton"})
-_PROV_GROUNDED = frozenset({"grounded", "verified", "tool", "search", "source"})
-_PROV_ESTIMATED = frozenset({"estimated", "uncertain", "approx", "low_confidence"})
+#: The canonical server-stamped vocabulary (055 US4, wire-contract §6). The
+#: orchestrator stamps exactly these values; anything else on a component is
+#: untrusted and re-derived.
+_PROV_KINDS = frozenset({"grounded", "estimated", "generated"})
 
 
 def _subtree_tool_source(comp: Dict[str, Any]) -> str:
@@ -1223,21 +1226,23 @@ def _subtree_tool_source(comp: Dict[str, Any]) -> str:
 
 
 def provenance_of(component: Dict[str, Any]) -> str:
-    """The effective provenance kind for a component: an explicit ``provenance``
-    attribute (normalized) wins; otherwise ``grounded`` when the subtree traces
-    to a tool, else ``generated``."""
+    """The effective provenance kind for a component.
+
+    The server-stamped ``provenance`` field (055 US4) is authoritative when it
+    holds a canonical value — the orchestrator writes it AFTER agent/designer
+    output is final and always overwrites agent-supplied values (FR-026).
+    Anything else (legacy rows, flag-off deliveries, agent-supplied synonyms —
+    deliberately NOT honored so trust cannot be self-upgraded through the
+    renderer) falls back to the stamp's own derivation: ``grounded`` when the
+    subtree traces to a tool result, else ``generated``.
+    """
     if not isinstance(component, dict):
         return "generated"
-    explicit = component.get("provenance")
-    if isinstance(explicit, str) and explicit.strip():
-        kind = explicit.strip().lower()
-        if kind in _PROV_GROUNDED:
-            return "grounded"
-        if kind in _PROV_ESTIMATED:
-            return "estimated"
-        if kind in ("generated", "model", "ai"):
-            return "generated"
-        # unknown explicit value → fall through to derivation
+    stamped = component.get("provenance")
+    if isinstance(stamped, str):
+        kind = stamped.strip().lower()
+        if kind in _PROV_KINDS:
+            return kind
     return "grounded" if _subtree_tool_source(component) else "generated"
 
 
@@ -1271,6 +1276,131 @@ def _provenance_footer(component: Dict[str, Any]) -> str:
     )
 
 
+# Component chrome — refine / history / export / share affordances (055 US4+US5)
+
+def _flag_on(env_var: str, default: bool) -> bool:
+    """Live-read a feature flag with ``shared.feature_flags._read`` semantics
+    (same truthy set + stringified default) so the rendered chrome always
+    matches the orchestrator/API gates for the same environment."""
+    return os.getenv(env_var, str(default)).lower() in ("true", "1", "yes")
+
+
+#: Identity prefixes that never take chrome affordances: designer garnish and
+#: layout keys are rebuilt from layout JSON (no restorable ``saved_components``
+#: row), welcome components are ephemeral by contract (data-model.md identity
+#: registry).
+_CHROME_SKIP_ID_PREFIXES = ("dg_", "ly_", "wel_")
+
+_CHROME_BTN_CLS = ("inline-flex items-center gap-1 text-[10px] text-astral-muted/70 "
+                   "hover:text-astral-text transition-colors")
+
+
+def _versions_attr(component: Dict[str, Any]) -> str:
+    """Bounded, escaped ``data-versions`` payload for the history affordance.
+
+    Reads an optional server-attached ``versions`` list on the component dict
+    (the ``artifact_versions.list_versions`` metadata shape). Only
+    whitelisted, length-capped scalar fields survive into the attribute, so a
+    ``versions`` value smuggled in by an agent cannot inject markup or bloat
+    the fragment. Absent/empty history renders no attribute (the client shows
+    an honest empty state).
+    """
+    raw = component.get("versions")
+    if not isinstance(raw, list):
+        return ""
+    entries = []
+    for v in raw[:5]:
+        if not isinstance(v, dict):
+            continue
+        try:
+            no = int(v.get("version_no"))
+        except (TypeError, ValueError):
+            continue
+        entries.append({
+            "version_no": no,
+            "reason": str(v.get("reason") or "")[:32],
+            "created_at": str(v.get("created_at") or "")[:64],
+            "title": str(v.get("title") or "")[:120],
+        })
+    if not entries:
+        return ""
+    return f' data-versions="{_attr(json.dumps(entries))}"'
+
+
+def _component_chrome(component: Dict[str, Any], profile: Any) -> str:
+    """Per-component affordance row (055 US4/US5), appended after the
+    provenance footer inside the identity wrapper.
+
+    Emitted only for identified, non-decorative components on interactive host
+    profiles (``supports_interactivity`` — the same ROTE rule that strips
+    action buttons); a ``None`` profile means a static rendition (exports,
+    share snapshots, legacy call sites) and gets no chrome. Every entry is
+    flag-gated server-side so each off state is byte-identical to pre-055
+    markup: refine + history under FF_COMPONENT_REFINE, the CSV link under
+    FF_ARTIFACT_EXPORT (tables only), share under FF_ARTIFACT_SHARING
+    (fail-closed default off). client.js owns the click behavior
+    (``.astral-refine-btn`` / ``.astral-vhistory-btn`` / ``.astral-export-csv``
+    / ``.astral-share-btn``).
+    """
+    if profile is None or not getattr(profile, "supports_interactivity", True):
+        return ""
+    cid = component.get("component_id")
+    if not cid or str(cid).startswith(_CHROME_SKIP_ID_PREFIXES):
+        return ""
+    ctype = str(component.get("type", "")).strip().lower()
+    if ctype in _PROV_SKIP_TYPES:
+        return ""
+    parts = []
+    if _flag_on("FF_COMPONENT_REFINE", True):
+        parts.append(
+            f'<button type="button" class="astral-refine-btn {_CHROME_BTN_CLS}" '
+            f'title="Refine this component with an instruction">'
+            f'<span aria-hidden="true">✎</span> refine</button>')
+        parts.append(
+            f'<button type="button" class="astral-vhistory-btn {_CHROME_BTN_CLS}"'
+            f'{_versions_attr(component)} title="Version history">'
+            f'<span aria-hidden="true">⟲</span> history</button>')
+    if ctype == "table" and _flag_on("FF_ARTIFACT_EXPORT", True):
+        href = "/api/export/component/" + quote(str(cid), safe="") + ".csv"
+        parts.append(
+            f'<a class="astral-export-csv {_CHROME_BTN_CLS}" href="{_attr(href)}" '
+            f'title="Download the full table as CSV">'
+            f'<span aria-hidden="true">⬇</span> csv</a>')
+    if _flag_on("FF_ARTIFACT_SHARING", False):
+        parts.append(
+            f'<button type="button" class="astral-share-btn {_CHROME_BTN_CLS}" '
+            f'data-share-scope="component" '
+            f'title="Create a revocable read-only share link">'
+            f'<span aria-hidden="true">↗</span> share</button>')
+    if not parts:
+        return ""
+    return ('<div class="astral-component-chrome mt-0.5 flex justify-end gap-3">'
+            + "".join(parts) + "</div>")
+
+
+def _workspace_flag_attrs(profile: Any) -> str:
+    """US5 data-flag attributes on the canvas root for the client's toolbar.
+
+    The server is the only party that knows the export/share flags, so it
+    stamps them here (``data-astral-export`` / ``data-astral-share``) and
+    client.js builds the canvas toolbar from them. Stamped only for
+    interactive, non-watch/voice host profiles so static renditions (exports,
+    share snapshots, profile-less legacy calls) keep the bare wrapper
+    byte-identical.
+    """
+    if profile is None or not getattr(profile, "supports_interactivity", True):
+        return ""
+    dtype = getattr(getattr(profile, "device_type", None), "value", "")
+    if dtype in ("watch", "voice"):
+        return ""
+    attrs = ""
+    if _flag_on("FF_ARTIFACT_EXPORT", True):
+        attrs += ' data-astral-export="1"'
+    if _flag_on("FF_ARTIFACT_SHARING", False):
+        attrs += ' data-astral-share="1"'
+    return attrs
+
+
 def render_component_fragment(component: Dict[str, Any], profile: Any = None) -> str:
     """Render one top-level workspace component wrapped in its identity anchor.
 
@@ -1280,7 +1410,9 @@ def render_component_fragment(component: Dict[str, Any], profile: Any = None) ->
 
     A subtle provenance footer is appended inside the wrapper — skipped on
     space/audio-constrained surfaces (watch/voice) given the ``profile``, and
-    when FF_PROVENANCE_SURFACING is off.
+    when FF_PROVENANCE_SURFACING is off. The 055 refine/history/export/share
+    chrome row follows it (:func:`_component_chrome` — flag- and
+    interactivity-gated, so legacy contexts stay byte-identical).
     """
     if not isinstance(component, dict):
         return ""
@@ -1289,6 +1421,7 @@ def render_component_fragment(component: Dict[str, Any], profile: Any = None) ->
     dtype = getattr(getattr(profile, "device_type", None), "value", "")
     if dtype not in ("watch", "voice"):
         inner += _provenance_footer(component)
+        inner += _component_chrome(component, profile)
     if not cid:
         return inner
     # WCAG-by-construction — wrap each top-level component as a labelled ARIA
@@ -1307,7 +1440,95 @@ def render_workspace(components: List[Dict[str, Any]], profile: Any = None) -> s
 
     Used for canvas-targeted full renders (re-hydration, timeline views,
     device re-adapt) so every top-level component remains an upsert target.
-    Markup is identical to :func:`render` except for the wrappers.
+    Markup is identical to :func:`render` except for the wrappers and the
+    055 US5 export/share data-flags on the root
+    (:func:`_workspace_flag_attrs` — absent for static/non-interactive
+    renditions and when the flags are off).
     """
     inner = "".join(render_component_fragment(c, profile) for c in (components or []) if isinstance(c, dict))
-    return f'<div class="dynamic-renderer space-y-3">{inner}</div>'
+    return f'<div class="dynamic-renderer space-y-3"{_workspace_flag_attrs(profile)}>{inner}</div>'
+
+
+# Standalone export document (055 US5, T043 — the render half)
+
+# A deliberately small, self-contained stylesheet for exported documents:
+# light/print-friendly, readable tables/cards/lists, dead interactive chrome
+# suppressed, and chart placeholders surfaced as their accessible text.
+_EXPORT_CSS = (
+    ":root{color-scheme:light}"
+    "body{margin:0;background:#f8fafc;color:#1e293b;"
+    "font:15px/1.55 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}"
+    ".export-head,main,.export-foot{max-width:60rem;margin:0 auto;padding:0 1.25rem}"
+    ".export-head{padding-top:2rem}"
+    ".export-head h1{margin:0 0 .25rem;font-size:1.5rem;color:#0f172a}"
+    ".export-meta{margin:0;color:#64748b;font-size:.8rem}"
+    "main{padding-top:1rem;padding-bottom:1rem}"
+    ".dynamic-renderer>*{margin:0 0 1rem}"
+    "h1,h2,h3,h4{color:#0f172a;margin:.25rem 0}"
+    "p{margin:.25rem 0}"
+    "table{border-collapse:collapse;width:100%;font-size:.85rem}"
+    "th,td{border:1px solid #e2e8f0;padding:.4rem .6rem;text-align:left;vertical-align:top}"
+    "thead th{background:#f1f5f9}"
+    ".astral-card,.astral-kv,.astral-timeline,.astral-rating,.astral-hero,"
+    ".astral-alert,.astral-metric,.audio-component,.astral-download-card"
+    "{border:1px solid #e2e8f0;border-radius:.5rem;padding:1rem;background:#fff}"
+    ".astral-table-wrap{border:1px solid #e2e8f0;border-radius:.5rem;background:#fff;overflow-x:auto}"
+    ".astral-table-wrap>div:first-child{padding:.5rem .75rem;border-bottom:1px solid #e2e8f0;font-weight:600}"
+    "pre{background:#0f172a;color:#4ade80;padding:.75rem;border-radius:.5rem;"
+    "overflow-x:auto;font-size:.8rem}"
+    "code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}"
+    "ul,ol{padding-left:1.25rem}"
+    "dl{display:grid;grid-template-columns:repeat(auto-fill,minmax(12rem,1fr));gap:.75rem;margin:0}"
+    "dt{font-size:.7rem;text-transform:uppercase;letter-spacing:.05em;color:#64748b}"
+    "dd{margin:0;font-weight:600}"
+    "hr{border:0;border-top:1px solid #e2e8f0;margin:1rem 0}"
+    "a{color:#4f46e5}"
+    "img{max-width:100%}"
+    ".astral-badge{display:inline-flex;gap:.25rem;padding:.1rem .5rem;"
+    "border:1px solid #cbd5e1;border-radius:999px;font-size:.7rem}"
+    ".astral-provenance{display:flex;justify-content:flex-end;font-size:.65rem;"
+    "color:#64748b;margin-top:.25rem}"
+    ".astral-provenance--grounded{color:#15803d}"
+    ".astral-provenance--estimated{color:#a16207}"
+    ".astral-chart{border:1px dashed #cbd5e1;border-radius:.5rem;padding:.75rem;"
+    "color:#475569;font-size:.85rem;min-height:0!important}"
+    ".astral-chart::before{content:attr(aria-label)}"
+    ".astral-sr-only{display:block;font-size:.75rem;color:#64748b;margin-top:.25rem}"
+    "button,.astral-pagination,.astral-component-chrome,.astral-skeleton{display:none!important}"
+    ".export-foot{border-top:1px solid #e2e8f0;color:#64748b;font-size:.75rem;"
+    "padding-top:.75rem;padding-bottom:2rem;margin-top:1rem}"
+)
+
+
+def render_export_document(components_html: str, title: str,
+                           provenance_note: str, generated_at: Any) -> str:
+    """Wrap rendered component HTML in a SELF-CONTAINED export document
+    (055 US5, T043 — the body of ``GET /api/export/canvas/{chat_id}.html``).
+
+    Returns a complete standalone page with an inline stylesheet only — no
+    scripts, no WebSocket, no external asset URLs — so the saved file opens
+    offline. Charts should be pre-degraded by the caller (the ROTE
+    chart→table fallback ladder via a chart-less profile); any chart
+    placeholder that slips through still reads as its accessible text (the
+    stylesheet surfaces the ``aria-label`` + sr-only data summary instead of
+    the empty Plotly mount). Interactive chrome (buttons, pagination,
+    skeletons, the 055 affordance row) is display-suppressed.
+
+    ``components_html`` is trusted renderer output (escape-by-default
+    upstream — pass ``render_workspace(...)``/``render(...)`` results only);
+    ``title``, ``provenance_note`` and ``generated_at`` are escaped here. An
+    empty ``provenance_note`` omits its line; a falsy ``generated_at`` omits
+    the date from the footer.
+    """
+    note_html = (f'<p class="export-meta">{esc(provenance_note)}</p>'
+                 if provenance_note else "")
+    stamp = f"Generated {esc(generated_at)} by AstralDeep" if generated_at else "Generated by AstralDeep"
+    return (
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f'<title>{esc(title)}</title><style>{_EXPORT_CSS}</style></head><body>'
+        f'<header class="export-head"><h1>{esc(title)}</h1>{note_html}</header>'
+        f'<main>{components_html or ""}</main>'
+        f'<footer class="export-foot">{stamp}</footer>'
+        '</body></html>'
+    )

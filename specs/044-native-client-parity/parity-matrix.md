@@ -12,7 +12,8 @@ SC-001/SC-002). Disposition vocabulary per [data-model.md §3](data-model.md).
 Legend: ✅ native · ≈ native-equivalent · ⤵ server-substituted · ▫ degraded (labeled
 placeholder) · ∅ ignored (deliberate, logged) · 🌐 web-only (Constitution XII v2.3.1 carve-out).
 `※` = changed by this feature (target state shown); in the three Apple columns `※` marks
-cells introduced by feature 051. iOS and macOS share one frame table by design
+cells introduced by feature 051. `★` = changed by feature 055 (uniform artifacts — target
+state shown; dispositions land with the 055 PR). iOS and macOS share one frame table by design
 (`ClientDispositions.macos.frames == ios.frames`), so their Table A cells are identical.
 
 ## A. Server→client frame types (47)
@@ -50,21 +51,21 @@ cells introduced by feature 051. iOS and macOS share one frame table by design
 | `stream_list` | ✅ | ∅ (logged — existing) | ∅ ※(logged) | ∅ ※ | ∅ ※ | ∅ ※ | no native surface |
 | `stream_data` | ✅ | ✅ | ✅ | ✅ ※ | ✅ ※ | ∅ ※(no live-stream nodes on the wrist) | |
 | `stream_error` | ✅ | ✅ | ✅ | ✅ ※ | ✅ ※ | ✅ ※ | |
-| `component_saved` | ✅ | ∅ ※(logged) | ∅ ※(logged) | ∅ ※ | ∅ ※ | ∅ ※ | acks for web workspace verbs |
-| `component_save_error` | ✅ | ∅ ※(logged) | ∅ ※(logged) | ∅ ※ | ∅ ※ | ∅ ※ | |
-| `saved_components_list` | ✅ | ∅ ※(logged) | ∅ ※(logged) | ∅ ※ | ∅ ※ | ∅ ※ | |
-| `component_deleted` | ✅ | ∅ ※(logged) | ∅ ※(logged) | ∅ ※ | ∅ ※ | ∅ ※ | |
-| `combine_status` | ✅ | ∅ ※(logged) | ∅ ※(logged) | ∅ ※ | ∅ ※ | ∅ ※ | |
-| `combine_error` | ✅ | ∅ ※(logged) | ∅ ※(logged) | ∅ ※ | ∅ ※ | ∅ ※ | |
-| `components_combined` | ✅ | ∅ ※(logged) | ∅ ※(logged) | ∅ ※ | ∅ ※ | ∅ ※ | |
-| `components_condensed` | ✅ | ∅ ※(logged) | ∅ ※(logged) | ∅ ※ | ∅ ※ | ∅ ※ | |
+| `component_saved` | ✅ | ✅ ★(status surface) | ✅ ★(status surface) | ✅ ★ | ✅ ★ | ∅ ★(workspace verbs are larger-screen affordances) | 055 US3 promotion (was web-only acks) |
+| `component_save_error` | ✅ | ✅ ★(status surface) | ✅ ★(status surface) | ✅ ★ | ✅ ★ | ∅ ★(carve-out) | 055 US3 promotion |
+| `saved_components_list` | ✅ | ✅ ★(saved-components refresh) | ✅ ★(refresh) | ✅ ★ | ✅ ★ | ∅ ★(carve-out) | 055 US3 promotion |
+| `component_deleted` | ✅ | ✅ ★(identity-keyed remove) | ✅ ★(identity-keyed remove) | ✅ ★ | ✅ ★ | ∅ ★(carve-out) | 055 US3 promotion |
+| `combine_status` | ✅ | ✅ ★(status surface) | ✅ ★(status surface) | ✅ ★ | ✅ ★ | ∅ ★(carve-out) | 055 US3 promotion |
+| `combine_error` | ✅ | ✅ ★(status surface) | ✅ ★(status surface) | ✅ ★ | ✅ ★ | ∅ ★(carve-out) | 055 US3 promotion |
+| `components_combined` | ✅ | ✅ ★(apply result + remove consumed) | ✅ ★(same) | ✅ ★ | ✅ ★ | ∅ ★(carve-out) | 055 US3 promotion |
+| `components_condensed` | ✅ | ✅ ★(apply result + remove consumed) | ✅ ★(same) | ✅ ★ | ✅ ★ | ∅ ★(carve-out) | 055 US3 promotion |
 | `agent_permissions` | ✅ | ✅ | ✅ | ∅ ※(web verb acks; natives re-discover) | ∅ ※(same) | ∅ ※(same) | native agents screens |
 | `agent_permissions_updated` | ✅ | ✅ | ✅ | ∅ ※(web verb acks; natives re-discover) | ∅ ※(same) | ∅ ※(same) | |
 | `llm_config_ack` | ✅ | ∅ ※(logged) | ∅ ※(logged) | ∅ ※ | ∅ ※ | ∅ ※ | natives use LLM surface round-trip |
 | `llm_usage_report` | ✅ | ∅ ※(logged) | ∅ ※(logged) | ∅ ※ | ∅ ※ | ∅ ※ | |
 | `audit_append` | ✅ | ∅ ※(logged) | ∅ ※(logged) | ∅ ※(audit via REST) | ∅ ※(audit via REST) | ∅ ※ | natives fetch audit via REST |
 | `agent_creation_progress` | ✅ | ∅ ※(logged) | ∅ ※(logged) | ∅ ※ | ∅ ※ | ∅ ※ | draft cards carry state in-chat |
-| `notification` | ∅ ※(logged→toast optional) | ✅ ※(toast) | ✅ ※(toast) | ✅ ※ | ✅ ※ | ∅ ※(speech covers deliveries) | newly catalogued (R1) |
+| `notification` | ∅ ※(logged→toast optional) | ✅ ※(toast) | ✅ ※(toast) | ✅ ※ | ✅ ※ | ✅ ★(brief status line + spoken via on-device TTS) | newly catalogued (R1); watch promoted ∅→✅ by 055 so background completions reach the wrist |
 | `error` (3 shapes + `code:internal` ※) | ✅ ※(toast added) | ✅ ※(banner+turn fail) | ✅ ※(banner+turn fail) | ✅ ※ | ✅ ※ | ✅ ※ | R2 |
 
 ## B. Component vocabulary (35)
@@ -117,6 +118,11 @@ guard: `ManifestDriftTests` asserts `Dispositions.swift` matches `ui_protocol.js
 | Voice dictation input ※ | n/a | n/a | n/a | n/a | n/a | ✅ ※(system dictation into chat) |
 | Spoken rendition output ※ | n/a | n/a | n/a | n/a | n/a | ✅ ※(server `speech` field + on-device TTS) |
 | Watch degradation guarantees ※ | n/a | n/a | n/a | n/a | n/a | ✅ ※(FR-032 sweep test: every manifest type yields readable output) |
+| `ui_stream_data`/`stream_subscribed` `component_id` additive field ★ | ✅ ★(keys streamed node by identity from first frame) | ✅ ★(same keying rule) | ✅ ★(typed decode + keying rule) | ✅ ★(dynamic read + keying rule) | ✅ ★(same) | ∅ ★(status-text treatment unchanged; terminal `ui_upsert` carries streamed content) |
+| `component_refine` / `component_restore` accept actions ★ | ✅ ★(component chrome affordance: refine prompt + history restore) | ≈ ★(context menu — refine only; no native frame carries the version list, so restore is a web-only affordance) | ≈ ★(overflow menu — refine only, same restore carve-out) | ≈ ★(context menu — refine only) | ≈ ★(context menu — refine only) | ∅ ★(declared carve-out: no affordance; server refuses honestly if received) |
+| `provenance` component field render ★ | ✅ ★(existing footer, field-driven) | ✅ ★(compact badge in component chrome) | ✅ ★(compact badge) | ✅ ★(compact badge) | ✅ ★(compact badge) | ▫ ★(inherited via text degradation) |
+| Artifact export: table CSV + canvas HTML (FF_ARTIFACT_EXPORT) ★ | ✅ ★(component-footer CSV link + canvas-toolbar export; authed fetch → download) | ✅ ★(context menu → system browser, session-authed) | ✅ ★(overflow menu → authed DownloadManager fetch) | ✅ ★(context-menu CSV + canvas Export pill → system browser) | ✅ ★(same as iOS) | ∅ ★(carve-out: no export affordance on the wrist) |
+| Share links: mint/copy (FF_ARTIFACT_SHARING, default OFF) ★ | ✅ ★(component + canvas share buttons, server-stamped flag-gated; link copied to clipboard) | ∅ ★(deliberate: natives ship export-only per T045; REST is client-agnostic) | ∅ ★(same) | ∅ ★(same) | ∅ ★(same) | ∅ ★(carve-out) |
 
 **Evidence**: captured in [verification/results.md](verification/results.md) (live run
 2026-07-01) — per-scenario outcomes across web (Chromium), the Windows app (native Qt), and

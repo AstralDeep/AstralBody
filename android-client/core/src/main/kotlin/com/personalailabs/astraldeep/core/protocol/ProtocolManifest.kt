@@ -62,15 +62,16 @@ object ProtocolManifest {
             "stream_list" to IGNORED,
             "stream_data" to HANDLED,
             "stream_error" to HANDLED,
-            // workspace component verbs (web workspace acks; app canvas is ui_* driven)
-            "component_saved" to IGNORED,
-            "component_save_error" to IGNORED,
-            "saved_components_list" to IGNORED,
-            "component_deleted" to IGNORED,
-            "combine_status" to IGNORED,
-            "combine_error" to IGNORED,
-            "components_combined" to IGNORED,
-            "components_condensed" to IGNORED,
+            // workspace component verbs (055 US3: identity-keyed canvas
+            // reconcile + status surfaces; previously web-only acks)
+            "component_saved" to HANDLED,
+            "component_save_error" to HANDLED,
+            "saved_components_list" to HANDLED,
+            "component_deleted" to HANDLED,
+            "combine_status" to HANDLED,
+            "combine_error" to HANDLED,
+            "components_combined" to HANDLED,
+            "components_condensed" to HANDLED,
             // permissions (capability lives in the native Agents screen)
             "agent_permissions" to IGNORED,
             "agent_permissions_updated" to IGNORED,

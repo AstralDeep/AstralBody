@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from shared.feature_flags import flags
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,6 +35,10 @@ class BackgroundTask:
     chat_id: str
     user_id: str
     status: TaskStatus = TaskStatus.QUEUED
+    # 055 bg-continuity: what kind of work this is and a short user-facing
+    # label (derived from the originating message) for cross-device frames.
+    kind: str = "async_chat"
+    title: str = ""
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: Optional[datetime] = None
     asyncio_task: Optional[asyncio.Task] = None
@@ -112,6 +118,33 @@ class BackgroundTaskManager:
     def __init__(self):
         self._tasks: Dict[str, BackgroundTask] = {}
         self._lock = asyncio.Lock()
+        # 055 bg-continuity: optional durable write-through + completion fan,
+        # bound by the orchestrator once its DB handle exists. Unbound, the
+        # manager stays memory-only with watcher-only notification as before.
+        self._db = None
+        self._on_complete = None
+
+    def bind(self, *, db=None, on_complete=None):
+        """Wire the durable task store and the orchestrator's completion fan
+        (055 bg-continuity). Both optional; existing behavior when unbound."""
+        if db is not None:
+            self._db = db
+        if on_complete is not None:
+            self._on_complete = on_complete
+
+    def _record(self, query: str, params):
+        """Fire-and-forget durable bookkeeping (055 bg-continuity). Fail-open
+        by design — task execution never blocks on (or fails with) it."""
+        if self._db is None or not flags.is_enabled("bg_continuity"):
+            return
+
+        async def _write():
+            try:
+                await self._db.aexecute(query, params)
+            except Exception:
+                logger.debug("background_task bookkeeping failed", exc_info=True)
+
+        asyncio.create_task(_write())
 
     async def submit(
         self,
@@ -119,6 +152,8 @@ class BackgroundTaskManager:
         user_id: str,
         coro_factory,
         *args,
+        kind: str = "async_chat",
+        title: str = "",
         **kwargs,
     ) -> BackgroundTask:
         """Create a background task and start executing it.
@@ -127,6 +162,8 @@ class BackgroundTaskManager:
             chat_id: The chat session ID
             user_id: The authenticated user ID
             coro_factory: Async callable that takes (virtual_ws, *args, **kwargs)
+            kind: Task kind for the durable record (055 bg-continuity)
+            title: Short user-facing label for cross-device task frames
         """
         async with self._lock:
             # Capacity check
@@ -141,8 +178,16 @@ class BackgroundTaskManager:
                 chat_id=chat_id,
                 user_id=user_id,
                 status=TaskStatus.QUEUED,
+                kind=kind,
+                title=title,
             )
             self._tasks[task_id] = bg_task
+
+        self._record(
+            "INSERT INTO background_task (task_id, user_id, chat_id, kind, status, title) "
+            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (task_id) DO NOTHING",
+            (task_id, user_id, chat_id, kind, bg_task.status.value, title),
+        )
 
         vws = VirtualWebSocket(bg_task)
         atask = asyncio.create_task(self._run_task(bg_task, vws, coro_factory, *args, **kwargs))
@@ -180,13 +225,59 @@ class BackgroundTaskManager:
                 "completed_at": bg_task.completed_at.isoformat() if bg_task.completed_at else None,
             },
         }
-        # Watchers are WS objects that we can send to
+        summary = self._summary_from_outputs(bg_task)
+        # 055 bg-continuity: the orchestrator fan reaches EVERY socket of the
+        # user — the originator may be long gone. Watchers still get the frame
+        # (clients de-dupe by task_id), covering the fan-failure case too.
+        fanned = 0
+        if self._on_complete is not None and flags.is_enabled("bg_continuity"):
+            notification["payload"]["summary"] = summary
+            try:
+                fanned = int(await self._on_complete(bg_task, notification) or 0)
+            except Exception:
+                logger.debug("completion fan failed for task %s", bg_task.task_id, exc_info=True)
+        # Watchers are WS objects that we can send to. send_text — FastAPI's
+        # send_json would re-encode the already-dumped string and clients
+        # would receive (and drop) a JSON string literal.
         for ws in bg_task.watchers:
             try:
-                await ws.send_json(json.dumps(notification))
+                await ws.send_text(json.dumps(notification))
             except Exception:
                 logger.debug("Failed to notify watcher for task %s", bg_task.task_id, exc_info=True)
         bg_task.watchers.clear()
+        self._record(
+            "INSERT INTO background_task (task_id, user_id, chat_id, kind, status, title, summary, completed_at, notified) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (task_id) DO UPDATE SET "
+            "status = EXCLUDED.status, summary = EXCLUDED.summary, "
+            "completed_at = EXCLUDED.completed_at, notified = EXCLUDED.notified",
+            (bg_task.task_id, bg_task.user_id, bg_task.chat_id, bg_task.kind,
+             bg_task.status.value, bg_task.title, summary, bg_task.completed_at,
+             fanned > 0),
+        )
+
+    @staticmethod
+    def _summary_from_outputs(bg_task: BackgroundTask) -> str:
+        """One-line completion summary: the last narrative/status text the
+        turn captured (mirrors ``run_scheduled_turn``), else the last error."""
+        summary = ""
+        for out in bg_task.outputs:
+            if not isinstance(out, dict):
+                continue
+            if out.get("type") == "ui_render" and out.get("target") == "chat":
+                for comp in out.get("components") or []:
+                    content = comp.get("content") if isinstance(comp, dict) else None
+                    if isinstance(content, str) and content.strip():
+                        summary = content.strip()
+                        break
+                continue
+            txt = out.get("text") or out.get("message")
+            if not txt and isinstance(out.get("payload"), dict):
+                txt = out["payload"].get("text") or out["payload"].get("message")
+            if isinstance(txt, str) and txt.strip():
+                summary = txt.strip()
+        if not summary and bg_task.errors:
+            summary = str(bg_task.errors[-1])
+        return " ".join(summary.split())[:200]
 
     async def cancel(self, task_id: str) -> bool:
         """Cancel a running background task."""

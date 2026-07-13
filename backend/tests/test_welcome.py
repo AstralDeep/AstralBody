@@ -55,8 +55,15 @@ def test_buttons_dispatch_standard_chat_message_action():
 
 
 def test_welcome_components_carry_no_workspace_identity():
+    # 055 US1: welcome components now carry EPHEMERAL wel_ identities (so
+    # clients can purge them at turn start) — the ephemerality invariant is
+    # that any identity present is wel_-namespaced, which the workspace layer
+    # structurally refuses to persist (see test_workspace_wel_guard.py).
     for node in _walk(welcome_components()):
-        assert "component_id" not in node, "welcome is ephemeral — never persisted"
+        cid = node.get("component_id")
+        if cid is not None:
+            assert str(cid).startswith("wel_"), \
+                f"non-ephemeral welcome identity: {cid!r}"
 
 
 def test_voice_profile_gets_readable_text():

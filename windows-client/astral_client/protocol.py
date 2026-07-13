@@ -76,6 +76,11 @@ class OrchestratorClient(QObject):
         self.url = url
         self.token = token
         self.device = device or device_caps()
+        # register_ui session id. The app points this at the ACTIVE CHAT id so
+        # a reconnect's re-register resumes that chat's fan-out + background-
+        # task replay server-side (feature 055); "win-client" is the no-chat
+        # default this client has always sent.
+        self.session_id: str = "win-client"
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._ws = None
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -156,20 +161,25 @@ class OrchestratorClient(QObject):
             remaining -= step
         return self._should_reconnect()
 
+    def _register_frame(self) -> dict:
+        """The register_ui handshake frame, rebuilt per (re)connect so
+        ``session_id`` reflects the chat that was open when the drop happened."""
+        return {
+            "type": "register_ui",
+            "token": self.token,
+            "capabilities": ["render", "stream"],
+            "session_id": self.session_id,
+            "device": self.device,
+            "resumed": False,
+        }
+
     async def _main(self) -> None:
         self._safe_status("connecting")
         async with websockets.connect(self.url, max_size=16 * 1024 * 1024,
                                       ping_interval=20) as ws:
             self._ws = ws
             self._had_session = True
-            await ws.send(json.dumps({
-                "type": "register_ui",
-                "token": self.token,
-                "capabilities": ["render", "stream"],
-                "session_id": "win-client",
-                "device": self.device,
-                "resumed": False,
-            }))
+            await ws.send(json.dumps(self._register_frame()))
             await self._finish_open(ws)
             async for raw in ws:
                 if self._stop:

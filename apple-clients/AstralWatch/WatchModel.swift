@@ -339,7 +339,11 @@ final class WatchModel {
         case "ui_upsert":
             let ops = frame.upsertOps
             guard !ops.isEmpty else { return }
-            canvas = Canvas.apply(canvas, ops)
+            // 055 uniform rule: the watch has no turn state, so the ephemeral
+            // welcome (`wel_` identities) is purged whenever ops land — turn
+            // content must never render under a retained welcome (the empty
+            // blanking render was always dropped by the guard above).
+            canvas = Canvas.apply(canvas.dropWelcome(), ops)
             speaker.speak(frame.speech)
         case "ui_stream_data":
             if let text = frame.streamComponents.first?.textContent {
@@ -361,6 +365,21 @@ final class WatchModel {
         case "error", "stream_error":
             errorBanner = frame.errorMessage
             statusText = nil
+        case "notification":
+            // 055 background-task continuity (audit item 7): a completion that
+            // happened elsewhere reaches the wrist as a brief status line and
+            // is spoken through the same TTS path as delivery speech.
+            let titled = [frame.payload["title"]?.stringValue, frame.payload["body"]?.stringValue]
+                .compactMap { $0?.isEmpty == false ? $0 : nil }.joined(separator: ": ")
+            let message = titled.isEmpty ? (frame.payload["message"]?.stringValue ?? "") : titled
+            guard !message.isEmpty else { return }
+            statusText = message
+            speaker.speak(AstralSpeech(ssml: "", text: message))
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                guard let self, self.statusText == message else { return }
+                self.statusText = nil   // brief: clear unless something replaced it
+            }
         case "auth_required":
             Task { await self.handleAuthRequired() }
         default:

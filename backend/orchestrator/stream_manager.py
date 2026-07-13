@@ -61,12 +61,16 @@ import hashlib
 import json
 import logging
 import random
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import (
     Any, Awaitable, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING,
 )
+
+from orchestrator.workspace import fingerprint as workspace_fingerprint
+from shared.feature_flags import flags
 
 if TYPE_CHECKING:  # pragma: no cover
     from fastapi import WebSocket
@@ -165,7 +169,9 @@ class StreamSubscription:
     agent_id: str
     params: Dict[str, Any]
     params_hash: str
-    component_id: str  # equals stream_id; convenience accessor
+    # 055 US2: workspace rule-2 fingerprint when FF_STREAM_ARTIFACTS bridged
+    # this stream at subscribe; equals stream_id when unbridged (legacy).
+    component_id: str
     subscribers: List["WebSocket"] = field(default_factory=list)
     created_at: float = field(default_factory=time.monotonic)
     last_chunk_at: Optional[float] = None
@@ -189,6 +195,20 @@ class StreamSubscription:
     delivered_count: int = 0
     dropped_count: int = 0
 
+    # 055 US2: newest chunk carrying component content (heartbeats/empty
+    # deltas never overwrite it) — the orchestrator's persist-on-terminal
+    # payload. Only ever set on bridged subscriptions; never persisted here.
+    retained_chunk: Optional[StreamChunk] = field(default=None, repr=False)
+    # Clients dedup on monotonic seq keyed by stream_id, but each agent RUN
+    # restarts seq near 0 — so retry/dormant-wake re-dispatches must offset
+    # inbound seqs above the previous high-water or every recovered frame is
+    # silently dropped until the new run catches up.
+    max_seq_seen: int = 0
+    seq_offset: int = 0
+    # Set by the orchestrator's persist-on-terminal so the in-band wrapper
+    # and the manager's terminal hook can both fire without double-writing.
+    persist_done: bool = False
+
     # Per-tool metadata snapshot (so we don't have to look it up on every chunk)
     max_chunk_bytes: int = DEFAULT_MAX_CHUNK_BYTES
     max_fps: int = DEFAULT_MAX_FPS
@@ -197,6 +217,12 @@ class StreamSubscription:
     @property
     def key(self) -> StreamKey:
         return (self.user_id, self.chat_id, self.tool_name, self.params_hash)
+
+    @property
+    def bridged_component_id(self) -> Optional[str]:
+        """Workspace identity assigned by the 055 bridge, or None when
+        unbridged — unbridged frames must stay byte-identical to pre-055."""
+        return self.component_id if self.component_id != self.stream_id else None
 
 
 # =============================================================================
@@ -257,6 +283,103 @@ def classify_error(code: str) -> ErrorClass:
     explicitly enumerated and never auto-retried (security carve-out).
     """
     return _ERROR_CLASSIFICATION.get(code, "transient")
+
+
+#: A line-leading list marker ("* ", "- ", "3. ") — its "*" is a bullet, not
+#: an emphasis opener, and a boundary before any item content would flash the
+#: bare marker as literal text (webrender/sanitize.py _LIST_START).
+_LIST_MARKER = re.compile(r"\s*(?:[-*]|\d+\.)[ \t]+")
+
+
+def _inline_safe_len(line: str) -> int:
+    """Last safe whitespace boundary within one (partial) line: the offset
+    just past the last whitespace reached with every inline ``**``/``*``/
+    backtick/``[label](target`` span closed. Pure function; conservative —
+    an ambiguous trailing token is simply held."""
+    marker = _LIST_MARKER.match(line)
+    content_start = marker.end() if marker else 0
+    bold = italic = code = False
+    link_depth = 0
+    in_target = False        # inside the (...) of [label](target)
+    pending_target = False   # "]" just closed the label; "(" opens the target
+    safe = 0
+    i, n = 0, len(line)
+    while i < n:
+        ch = line[i]
+        if pending_target:
+            pending_target = False
+            if ch == "(":
+                in_target = True
+                i += 1
+                continue
+        # No backslash-escape rule: the renderer (webrender/sanitize.py
+        # inline_md) has none, and the scanner must mirror what will RENDER —
+        # honoring escapes here would ship a "\`" the renderer treats as a
+        # live backtick.
+        if ch == "`":
+            code = not code
+            i += 1
+            continue
+        if code:
+            i += 1
+            continue
+        if in_target:
+            if ch == ")":
+                in_target = False
+            i += 1
+            continue
+        if ch == "*":
+            run = 1
+            while i + run < n and line[i + run] == "*":
+                run += 1
+            if i >= content_start:
+                if (run // 2) % 2:
+                    bold = not bold
+                if run % 2:
+                    italic = not italic
+            i += run
+            continue
+        if ch == "[":
+            link_depth += 1
+        elif ch == "]" and link_depth:
+            link_depth -= 1
+            if not link_depth:
+                pending_target = True
+        elif ch.isspace() and i > content_start and not (bold or italic or link_depth):
+            safe = i + 1
+        i += 1
+    return safe
+
+
+def markdown_safe_prefix_len(text: str) -> int:
+    """Length of the longest prefix of ``text`` safe to ship as an incremental
+    narrative frame (055 research D5, spec FR-013).
+
+    Safe = ends at a whitespace boundary outside every unclosed ``**``/``*``/
+    backtick (incl. ``` fence)/``[link(`` span, so no frame ever renders a
+    dangling markup token. A completed line outside a fence is always safe:
+    the renderer applies inline spans per line (webrender/sanitize.py), so a
+    finished line's rendering can never change as text is appended. Returns 0
+    while no boundary exists yet — the caller flushes the held tail on the
+    terminal chunk. Monotonic under appended text: a boundary once safe stays
+    safe (frames are cumulative and must never shrink).
+    """
+    safe = 0
+    fence = False
+    pos = 0
+    lines = text.split("\n")
+    for line in lines[:-1]:
+        pos += len(line) + 1
+        if line.strip().startswith("```"):
+            fence = not fence
+        if not fence:
+            safe = pos
+    tail = lines[-1]
+    if not fence and not tail.lstrip().startswith("```"):
+        tail_safe = _inline_safe_len(tail)
+        if tail_safe:
+            safe = pos + tail_safe
+    return safe
 
 
 # =============================================================================
@@ -343,6 +466,27 @@ class StreamManager:
         self._sweep_task: Optional[asyncio.Task] = None
         self._shutdown = False
 
+        # 055 US2 (FR-011): awaited with the subscription at EVERY terminal
+        # transition — including the out-of-band ones no agent frame reaches
+        # (retry exhaustion, agent_end while dormant, dormant TTL eviction) —
+        # so the orchestrator's persist-on-terminal misses none. The manager
+        # itself stays storage-free.
+        self.terminal_hook: Optional[Callable[[StreamSubscription], Awaitable[None]]] = None
+
+    async def _fire_terminal_hook(self, sub: StreamSubscription) -> None:
+        """Invoke the orchestrator's terminal hook, never letting it break
+        stream teardown (persistence is fail-open by design)."""
+        if self.terminal_hook is None:
+            return
+        try:
+            await self.terminal_hook(sub)
+        except Exception:
+            logger.exception(
+                "stream_artifacts.terminal_hook_failed stream=%s component=%s "
+                "agent=%s tool=%s chat=%s user=%s",
+                sub.stream_id, sub.bridged_component_id, sub.agent_id,
+                sub.tool_name, sub.chat_id, sub.user_id)
+
     # ------------------------------------------------------------------
     # Lifecycle: subscribe / attach / unsubscribe / detach / resume
     # ------------------------------------------------------------------
@@ -384,7 +528,7 @@ class StreamManager:
 
         # 2. Chat ownership
         if self._validate_chat_ownership is not None:
-            if not self._validate_chat_ownership(ws, user_id, chat_id):
+            if not await self._validate_chat_ownership(ws, user_id, chat_id):
                 raise ValueError(f"chat {chat_id!r} is not owned by this user")
 
         # 3. Param size cap
@@ -413,6 +557,12 @@ class StreamManager:
                     f"subscribe({existing.stream_id}): attached additional "
                     f"ws (subscribers={len(existing.subscribers)})"
                 )
+                # 055 late-join: the attaching socket missed every prior
+                # frame — replay the retained chunk so it renders current
+                # state, not a blank placeholder. Bridged-only (retention is
+                # bridged-only), so unbridged attach stays send-free,
+                # byte-identical to pre-055.
+                await self.replay_retained(ws, existing.stream_id)
             return existing.stream_id, True
 
         # --- US4 (T063): dormant-wake attach path -------------------------
@@ -464,7 +614,10 @@ class StreamManager:
             agent_id=agent_id,
             params=params,
             params_hash=ph,
-            component_id=stream_id,
+            component_id=(
+                workspace_fingerprint(agent_id, tool_name, params)
+                if flags.is_enabled("stream_artifacts") else stream_id
+            ),
             subscribers=[ws],
             state=StreamState.STARTING,
             max_chunk_bytes=max_chunk_bytes,
@@ -543,7 +696,7 @@ class StreamManager:
             # Send terminal chunk to the requesting ws (unsubscribe ack)
             terminal = StreamChunk(
                 stream_id=target_sub.stream_id,
-                seq=target_sub.delivered_count + 1,
+                seq=target_sub.max_seq_seen + 1,
                 components=[],
                 terminal=True,
             )
@@ -552,6 +705,10 @@ class StreamManager:
             except Exception:
                 pass
             self._teardown_subscription(target_sub, StreamState.STOPPED, reason="unsubscribe")
+            # An indefinite stream's only success-terminal is user-initiated:
+            # what streamed is what persists (FR-011); deleting the persisted
+            # card is a separate, explicit workspace verb.
+            await self._fire_terminal_hook(target_sub)
 
     async def detach(self, ws: "WebSocket") -> None:
         """Called by the orchestrator on WebSocket disconnect (US2 T040).
@@ -664,9 +821,14 @@ class StreamManager:
 
     async def _send_chunk_to_ws(
         self, sub: StreamSubscription, ws: "WebSocket", chunk: StreamChunk,
+        include_html: bool = False,
     ) -> None:
         """Send a single chunk to a single ws (used by unsubscribe ack and
-        per-subscriber error chunks in US4)."""
+        per-subscriber error chunks in US4). ``include_html`` server-renders
+        the components exactly like the fan-out path — the late-join replay
+        needs it so web clients (which render from ``html``) can paint the
+        frame; acks/error chunks omit the key so their frames stay
+        byte-identical to pre-055."""
         adapted_components = chunk.components
         if chunk.components and self._rote is not None:
             try:
@@ -683,6 +845,19 @@ class StreamManager:
             "terminal": chunk.terminal,
             "error": chunk.error,
         }
+        if include_html:
+            chunk_html = None
+            if adapted_components:
+                try:
+                    from webrender import render_for_target, target_for_profile
+                    profile = self._rote.get_profile(ws) if self._rote is not None else None
+                    chunk_html = render_for_target(
+                        target_for_profile(profile), adapted_components, profile)
+                except Exception:
+                    logger.exception("webrender: failed to render stream chunk")
+            wire_msg["html"] = chunk_html
+        if sub.bridged_component_id is not None:
+            wire_msg["component_id"] = sub.bridged_component_id
         await self._send_to_ws(ws, json.dumps(wire_msg))
 
     async def resume(self, ws: "WebSocket", user_id: str, chat_id: str) -> List[Tuple[str, str]]:
@@ -736,6 +911,9 @@ class StreamManager:
                 sub.send_in_progress = False
                 sub.delivered_count = 0
                 sub.dropped_count = 0
+                # The woken agent run restarts seq near 0, but the client that
+                # watched the pre-dormant run still holds the old high-water.
+                sub.seq_offset = sub.max_seq_seen
 
                 # Re-register in active
                 self._active[sub.key] = sub
@@ -762,7 +940,7 @@ class StreamManager:
                         # Transition to FAILED + send error chunk
                         err_chunk = StreamChunk(
                             stream_id=sub.stream_id,
-                            seq=1,
+                            seq=sub.max_seq_seen + 1,
                             components=[],
                             error={
                                 "code": "upstream_unavailable",
@@ -782,6 +960,7 @@ class StreamManager:
                         self._teardown_subscription(
                             sub, StreamState.FAILED, reason="resume_dispatch_failed",
                         )
+                        await self._fire_terminal_hook(sub)
                         continue
 
                 resumed.append((sub.stream_id, sub.tool_name))
@@ -797,6 +976,79 @@ class StreamManager:
             self._dormant.pop(outer_key, None)
 
         return resumed
+
+    async def attach_to_chat(
+        self, ws: "WebSocket", user_id: str, chat_id: str,
+    ) -> List[Tuple[str, str]]:
+        """Attach ``ws`` to every ACTIVE subscription of ``(user_id, chat_id)``.
+
+        055 late-join: ``resume()`` only covers DORMANT streams, so a socket
+        loading a chat whose streams are kept ACTIVE by the user's other
+        sockets would otherwise never receive chunks. Attach-only — the agent
+        run is already live, nothing is re-dispatched. Returns
+        ``(stream_id, tool_name)`` for each newly attached subscription so
+        the orchestrator can send the matching ``stream_subscribed`` acks
+        (mirrors ``resume()``).
+        """
+        session = self._get_user_session(ws)
+        if session is None or session.get("sub") != user_id:
+            logger.warning(
+                f"attach_to_chat called with mismatched user/session for {user_id}"
+            )
+            return []
+        attached: List[Tuple[str, str]] = []
+        for sub in self._active.values():
+            if sub.user_id != user_id or sub.chat_id != chat_id:
+                continue
+            if ws in sub.subscribers:
+                continue
+            sub.subscribers.append(ws)
+            attached.append((sub.stream_id, sub.tool_name))
+            logger.info(
+                f"attach_to_chat({sub.stream_id}): attached loading ws "
+                f"(subscribers={len(sub.subscribers)})"
+            )
+        return attached
+
+    async def replay_retained(self, ws: "WebSocket", stream_id: str) -> None:
+        """Re-deliver the retained content chunk to ONE just-attached socket
+        so it shows the stream's current state instead of a blank placeholder
+        (055 late-join). Bridged-only by construction — retention itself is
+        bridged-only. The chunk keeps its stored seq: the joining socket has
+        no seq state for this stream so it accepts, while an already-caught-up
+        socket's dedup drops the duplicate. Fail-open: a lost replay degrades
+        to waiting for the next live chunk.
+        """
+        sub = self.subscription_for_stream(stream_id)
+        if sub is None or sub.bridged_component_id is None or sub.retained_chunk is None:
+            return
+        try:
+            await self._send_chunk_to_ws(sub, ws, sub.retained_chunk, include_html=True)
+        except Exception:
+            logger.debug(f"replay_retained failed for {stream_id}", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # 055 US2: lookups for the orchestrator's stream_subscribed builders
+    # and persist-on-terminal wrapper
+    # ------------------------------------------------------------------
+
+    def subscription_for_stream(self, stream_id: str) -> Optional[StreamSubscription]:
+        """Look up a subscription by stream_id — active first, then dormant."""
+        for sub in self._active.values():
+            if sub.stream_id == stream_id:
+                return sub
+        for entries in self._dormant.values():
+            for sub in entries.values():
+                if sub.stream_id == stream_id:
+                    return sub
+        return None
+
+    def component_id_for(self, stream_id: str) -> Optional[str]:
+        """Bridged workspace identity for a stream, or None when unbridged
+        (flag off) or unknown — ``stream_subscribed`` carries it only when
+        non-None so legacy acks stay byte-identical."""
+        sub = self.subscription_for_stream(stream_id)
+        return sub.bridged_component_id if sub is not None else None
 
     # ------------------------------------------------------------------
     # Inbound from agent
@@ -863,16 +1115,22 @@ class StreamManager:
             sub.state = StreamState.ACTIVE
 
         # Wrap the inbound message into our internal StreamChunk shape so the
-        # send loop has a stable type.
+        # send loop has a stable type. seq is offset past the previous run's
+        # high-water after a retry/wake re-dispatch (see StreamSubscription).
+        effective_seq = int(getattr(msg, "seq", 0) or 0) + sub.seq_offset
         chunk = StreamChunk(
             stream_id=sub.stream_id,
-            seq=getattr(msg, "seq", 0),
+            seq=effective_seq,
             components=list(getattr(msg, "components", []) or []),
             raw=getattr(msg, "raw", None),
             error=None,
             terminal=bool(getattr(msg, "terminal", False)),
         )
+        sub.max_seq_seen = max(sub.max_seq_seen, effective_seq)
         sub.last_chunk_at = time.monotonic()
+
+        if chunk.components and sub.bridged_component_id is not None:
+            sub.retained_chunk = chunk
 
         # Last-write-wins: any previously-queued chunk is overwritten.
         if sub.coalesce_slot is not None:
@@ -941,7 +1199,7 @@ class StreamManager:
         next_retry_ms = int((time.time() + backoff_seconds) * 1000)
         chunk = StreamChunk(
             stream_id=sub.stream_id,
-            seq=sub.delivered_count + 1,
+            seq=sub.max_seq_seen + 1,
             components=[],
             error={
                 "code": error_code,
@@ -982,6 +1240,9 @@ class StreamManager:
         sub.state = StreamState.STARTING
         sub.next_retry_at = None
         sub._retry_handle = None
+        # The fresh agent run restarts seq near 0 — continue above the old
+        # high-water so client dedup (keyed on stream_id) keeps accepting.
+        sub.seq_offset = sub.max_seq_seen
 
         if self._agent_dispatcher is None:
             return
@@ -1015,7 +1276,7 @@ class StreamManager:
 
         chunk = StreamChunk(
             stream_id=sub.stream_id,
-            seq=sub.delivered_count + 1,
+            seq=sub.max_seq_seen + 1,
             components=[],
             error={
                 "code": error_code,
@@ -1029,6 +1290,7 @@ class StreamManager:
         # Cancel the agent-side stream if still tracked
         await self._cancel_on_agent(sub)
         self._teardown_subscription(sub, StreamState.FAILED, reason=error_code)
+        await self._fire_terminal_hook(sub)
 
     async def handle_agent_end(self, msg: Any) -> None:
         """Receive a ``ToolStreamEnd`` from an agent. Mark the subscription
@@ -1040,6 +1302,10 @@ class StreamManager:
         request_id = getattr(msg, "request_id", "")
         key = self._request_to_key.get(request_id)
         if key is None:
+            # Unroutable by design for DORMANT/RECONNECTING streams — both
+            # transitions pop the request mapping (and dormancy cancels the
+            # agent run); abandoned retained content is persisted by the
+            # dormant-TTL terminal hook instead.
             return
         sub = self._active.get(key)
         if sub is None:
@@ -1048,7 +1314,7 @@ class StreamManager:
         # stream is done.
         terminal_chunk = StreamChunk(
             stream_id=sub.stream_id,
-            seq=sub.delivered_count + 1,
+            seq=sub.max_seq_seen + 1,
             components=[],
             terminal=True,
         )
@@ -1056,6 +1322,7 @@ class StreamManager:
         await self._send_chunk_to_subscribers(sub, terminal_chunk)
         # Clean up
         self._teardown_subscription(sub, StreamState.STOPPED, reason="agent_end")
+        await self._fire_terminal_hook(sub)
 
     # ------------------------------------------------------------------
     # Send loop (US1)
@@ -1201,6 +1468,8 @@ class StreamManager:
                     "terminal": chunk.terminal,
                     "error": chunk.error,
                 }
+                if sub.bridged_component_id is not None:
+                    wire_msg["component_id"] = sub.bridged_component_id
                 await self._send_to_ws(ws, json.dumps(wire_msg))
                 sub.delivered_count += 1
             except Exception as e:  # pragma: no cover
@@ -1296,6 +1565,13 @@ class StreamManager:
                 if (now - sub.created_at) > DORMANT_TTL_SECONDS:
                     entries.pop(inner_key, None)
                     evicted += 1
+                    # Abandonment is a terminal state too (055 FR-011): give
+                    # the persist hook its shot at the retained content before
+                    # the record is dropped. Sweep is sync — schedule it.
+                    sub.state = StreamState.STOPPED
+                    sub.state_reason = "dormant_ttl"
+                    if self.terminal_hook is not None:
+                        asyncio.create_task(self._fire_terminal_hook(sub))
             if not entries:
                 self._dormant.pop(outer_key, None)
         if evicted > 0:

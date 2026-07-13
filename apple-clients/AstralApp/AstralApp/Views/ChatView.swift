@@ -77,6 +77,7 @@ private struct CanvasArea: View {
     @Environment(AppModel.self) var model
     @Environment(ThemeStore.self) var theme
     @State private var showTimeline = false
+    @State private var refineTarget: RefineTarget?
     private var p: AstralPalette { theme.palette }
 
     private var canvasItems: [(key: String, comp: AstralComponent)] {
@@ -108,7 +109,11 @@ private struct CanvasArea: View {
                                 // SwiftUI identity (resetting tabs/collapsibles
                                 // and scroll anchors — FR-013).
                                 ForEach(canvasItems, id: \.key) { item in
-                                    ComponentView(component: item.comp)
+                                    // 055 US4/US5 chrome: provenance badge +
+                                    // refine/export context menu (top-level only).
+                                    ComponentChrome(component: item.comp,
+                                                    interactive: !model.isViewingHistory,
+                                                    onRefine: { refineTarget = $0 })
                                 }
                             }
                             .padding(16)
@@ -117,9 +122,19 @@ private struct CanvasArea: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                if !model.canvasHistory.isEmpty && !model.isViewingHistory {
-                    TimelinePill(count: model.canvasHistory.count) { showTimeline = true }
-                        .padding(12)
+                if !model.isViewingHistory {
+                    HStack(spacing: 8) {
+                        // 055 US5 (T045): canvas HTML export, opened in the
+                        // system browser (session-authed route).
+                        if !model.visibleCanvas.isEmpty, !model.showSkeleton,
+                           let exportURL = model.exportCanvasURL() {
+                            CanvasExportPill(url: exportURL)
+                        }
+                        if !model.canvasHistory.isEmpty {
+                            TimelinePill(count: model.canvasHistory.count) { showTimeline = true }
+                        }
+                    }
+                    .padding(12)
                 }
             }
         }
@@ -130,6 +145,29 @@ private struct CanvasArea: View {
                 showTimeline = false
             }
         }
+        .sheet(item: $refineTarget) { target in
+            RefineSheet(target: target)
+        }
+    }
+}
+
+private struct CanvasExportPill: View {
+    @Environment(ThemeStore.self) var theme
+    let url: URL
+    private var p: AstralPalette { theme.palette }
+    var body: some View {
+        Link(destination: url) {
+            HStack(spacing: 6) {
+                Image(systemName: "square.and.arrow.up").font(.caption2)
+                Text("Export").font(.caption.weight(.medium))
+            }
+            .foregroundStyle(p.text)
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .background(p.surface.opacity(0.92), in: Capsule())
+            .overlay(Capsule().stroke(p.border))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Export this canvas as HTML")
     }
 }
 

@@ -140,7 +140,9 @@ class TestBackgroundTaskManager:
         notifications = []
 
         class FakeWS:
-            async def send_json(self, data):
+            # 055: watcher notification uses send_text (send_json would
+            # double-encode over a real FastAPI socket).
+            async def send_text(self, data):
                 notifications.append(json.loads(data))
 
         async def dummy(vws, **kw):

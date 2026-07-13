@@ -63,6 +63,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.window.core.layout.WindowWidthSizeClass
 import com.personalailabs.astraldeep.app.R
+import com.personalailabs.astraldeep.app.render.CanvasChrome
 import com.personalailabs.astraldeep.app.render.CanvasHost
 import com.personalailabs.astraldeep.app.render.MarkdownText
 import com.personalailabs.astraldeep.app.render.Renderer
@@ -193,7 +194,19 @@ private fun CanvasArea(
             when {
                 state.showSkeleton -> SkeletonCanvas(Modifier.fillMaxSize())
                 state.visibleCanvas.isEmpty() -> EmptyCanvasHint(Modifier.fillMaxSize())
-                else -> CanvasHost(components = state.visibleCanvas, renderer = renderer, modifier = Modifier.fillMaxSize())
+                else ->
+                    CanvasHost(
+                        components = state.visibleCanvas,
+                        renderer = renderer,
+                        modifier = Modifier.fillMaxSize(),
+                        // Refine pauses on ANY read-only view — the server timeline
+                        // (mutationsLocked) and the client-side canvas snapshots.
+                        chrome =
+                            CanvasChrome(
+                                chatId = state.activeChatId,
+                                mutationsLocked = state.mutationsLocked || state.isViewingHistory,
+                            ),
+                    )
             }
 
             // Timeline entry point — only when previous canvases exist and we're live.
