@@ -914,8 +914,7 @@ class AppViewModel(
      * selection) — the subscribe-ack placeholder guard, so a device joining
      * mid-stream never blanks retained content under the same identity (055).
      */
-    private fun canvasIds(s: UiState): Set<String> =
-        (if (s.pendingReplace) s.pendingCanvas else s.canvas).mapNotNullTo(HashSet()) { it.id }
+    private fun canvasIds(s: UiState): Set<String> = (if (s.pendingReplace) s.pendingCanvas else s.canvas).mapNotNullTo(HashSet()) { it.id }
 
     /** Route streaming/patch ops to the buffer (mid-replace-turn) or live canvas. */
     private fun applyCanvasOps(
