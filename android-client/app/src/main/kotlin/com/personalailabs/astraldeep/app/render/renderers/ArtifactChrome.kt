@@ -39,12 +39,11 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.net.URLEncoder
 
-/**
- * Feature 055 — the shared per-component chrome rendered under every top-level
- * canvas component (the Android twin of the web component footer): a compact
- * provenance badge (T036, wire-contract §6) and an overflow menu carrying the
- * Refine affordance (T040, `component_refine`) and the export entries (T045).
- */
+// Feature 055 — the shared per-component chrome rendered under every
+// top-level canvas component (the Android twin of the web component footer):
+// a compact provenance badge (T036, wire-contract §6) and an overflow menu
+// carrying the Refine affordance (T040, `component_refine`) and the export
+// entries (T045).
 
 /** The three server-stamped trust marks (wire-contract §6). */
 enum class Provenance(
