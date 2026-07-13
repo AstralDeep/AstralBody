@@ -71,7 +71,7 @@
 - [x] T024 [P] [US2] Android: add `componentId` to `Inbound.UiStreamData`/`StreamSubscribed` in `android-client/core/**/Wire.kt` + `Messages.kt`; `Streaming.kt` keys node by `componentId ?: "stream-<id>"` from first frame; tests in core test target (keying rule, seq dedup still on stream_id, no double-render on terminal upsert)
 - [x] T025 [P] [US2] Apple `apple-clients/AstralCore/Sources/AstralCore/Transport/Streaming.swift`: same keying rule (payload read is dynamic); tests in AstralCoreTests (keying + no-double-render)
 - [x] T026 [P] [US2] Windows `windows-client/astral_client/streaming.py`: same keying rule; tests in `windows-client/tests/test_streaming_bridge.py`
-- [ ] T027 [US2] Live verification per quickstart.md §US2 (web + one native simultaneously; kill-mid-stream; reload) — evidence under `evidence/us2/`
+- [x] T027 [US2] Live verification per quickstart.md §US2 (web + one native simultaneously; kill-mid-stream; reload) — evidence under `evidence/us2/`
 
 **Checkpoint**: US2 shippable — SC-003/SC-004 measurable.
 
@@ -107,7 +107,7 @@
 - [x] T038 [US4] `component_refine` + `component_restore` handlers in `backend/orchestrator/orchestrator.py` beside `component_action` (≈7599): full gate sequence (timeline guard, security flags, per-user permission on source agent/tool, 054 LLM gate, audit), bounded same-type-validated LLM edit, version archive before overwrite, force-upsert onto the same id, `ui_upsert` fan; behind `FF_COMPONENT_REFINE`; integration tests in `backend/tests/test_component_refine.py` (gates, refusal paths, version cycle, restore audit)
 - [x] T039 [P] [US4] Web refine/restore affordance in `backend/webrender/renderer.py` component chrome + `client.js` (instruction prompt → `component_refine` ui_event; history list → restore); stripped on non-interactive hosts by existing ROTE rule
 - [x] T040 [P] [US4] Native refine affordances: Windows context menu, Android overflow, Apple context menu → same ui_events; per-client tests (watch: none — declared carve-out)
-- [ ] T041 [US4] Live verification per quickstart.md §US4 (refine + restore on web and one native; provenance distinct on all six targets; timeline + unconfigured-LLM refusals) — evidence under `evidence/us4/`
+- [x] T041 [US4] Live verification per quickstart.md §US4 (refine + restore on web and one native; provenance distinct on all six targets; timeline + unconfigured-LLM refusals) — evidence under `evidence/us4/`
 
 **Checkpoint**: US4 shippable — SC-006/SC-007 measurable.
 
@@ -123,7 +123,7 @@
 - [x] T043 [US5] Export endpoints in `backend/orchestrator/api.py` behind `FF_ARTIFACT_EXPORT`: `GET /api/export/component/{id}.csv` (ownership check; full-data re-invoke via the component_action pipeline when paginated; formula-injection guard; `?stored_only=1` fallback) and `GET /api/export/canvas/{chat_id}.html` (materialized layouts via `_canvas_components`, standalone document wrapper added in `backend/webrender/renderer.py`, charts degraded, provenance + date stamped); tests in `backend/tests/test_artifact_export.py`
 - [x] T044 [US5] Share endpoints in `backend/orchestrator/api.py` behind `FF_ARTIFACT_SHARING`: `POST /api/share`, `GET /api/share`, `DELETE /api/share/{id}`, public `GET /share/{token}` with noindex/no-store/no-referrer/CSP headers per contracts/rest-endpoints.md; tests in `backend/tests/test_share_routes.py` (unauth serve, revoke-immediate, flag-off 404, header assertions)
 - [x] T045 [P] [US5] Client affordances: web component-footer/canvas-toolbar export+share entries (`client.js` + `renderer.py`); Windows/Android/Apple menu entries opening the export URLs via system browser; parity-matrix rows (watch: none — carve-out)
-- [ ] T046 [US5] Live verification per quickstart.md §US5 (incognito open, revoke, PHI fixture refusal, offline HTML open) — evidence under `evidence/us5/`
+- [x] T046 [US5] Live verification per quickstart.md §US5 (incognito open, revoke, PHI fixture refusal, offline HTML open) — evidence under `evidence/us5/`
 
 **Checkpoint**: US5 shippable — SC-008 measurable.
 
