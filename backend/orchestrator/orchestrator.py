@@ -7237,9 +7237,10 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                          f"an error ({reason}) before completing."),
                 variant="error").to_dict()]
         elif (sub.state is StreamState.STOPPED
-                # dormant_ttl = abandonment: nobody was watching when the TTL
-                # swept it, but what streamed is still what persists.
-                and sub.state_reason in ("agent_end", "dormant_ttl")
+                # dormant_ttl = abandonment; unsubscribe = the user closing an
+                # indefinite live view (its only success-terminal). In both,
+                # what streamed is still what persists.
+                and sub.state_reason in ("agent_end", "dormant_ttl", "unsubscribe")
                 and sub.retained_chunk is not None
                 and sub.retained_chunk.components):
             components = copy.deepcopy(sub.retained_chunk.components)

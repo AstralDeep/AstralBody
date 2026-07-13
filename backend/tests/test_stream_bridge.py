@@ -425,3 +425,13 @@ class TestTerminalHook:
         mgr._sweep_dormant_ttl()
         await asyncio.sleep(0.05)  # hook is scheduled from the sync sweep
         assert seen == [(stream_id, "stopped", "dormant_ttl")]
+
+    async def test_unsubscribe_fires_hook_as_success_terminal(self):
+        mgr, deps = _make_manager()
+        hook, seen = self._hook()
+        mgr.terminal_hook = hook
+        ws, stream_id = await _subscribed(mgr, deps)
+        await mgr.handle_agent_chunk(_chunk(stream_id, 1, [{"type": "metric"}]))
+        await asyncio.sleep(0.01)
+        await mgr.unsubscribe(ws, stream_id)
+        assert seen == [(stream_id, "stopped", "unsubscribe")]

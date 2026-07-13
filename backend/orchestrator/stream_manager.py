@@ -686,7 +686,7 @@ class StreamManager:
             # Send terminal chunk to the requesting ws (unsubscribe ack)
             terminal = StreamChunk(
                 stream_id=target_sub.stream_id,
-                seq=target_sub.delivered_count + 1,
+                seq=target_sub.max_seq_seen + 1,
                 components=[],
                 terminal=True,
             )
@@ -695,6 +695,10 @@ class StreamManager:
             except Exception:
                 pass
             self._teardown_subscription(target_sub, StreamState.STOPPED, reason="unsubscribe")
+            # An indefinite stream's only success-terminal is user-initiated:
+            # what streamed is what persists (FR-011); deleting the persisted
+            # card is a separate, explicit workspace verb.
+            await self._fire_terminal_hook(target_sub)
 
     async def detach(self, ws: "WebSocket") -> None:
         """Called by the orchestrator on WebSocket disconnect (US2 T040).
