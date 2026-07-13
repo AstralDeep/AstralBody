@@ -112,7 +112,9 @@ public struct ClientDispositions: Sendable {
     public static let watch = ClientDispositions(
         client: "watch",
         frames: frames(
-            extraHandled: [],
+            // 055 background-task continuity: a completion notification
+            // reaches the wrist as a brief status line + spoken rendition.
+            extraHandled: ["notification"],
             extraIgnored: [
                 "agent_creation_progress": "no drafting UX on the wrist",
                 "agent_list": "agent management happens on phone/desktop/web",
@@ -126,7 +128,6 @@ public struct ClientDispositions: Sendable {
                 "components_combined": "workspace verbs are larger-screen affordances (055 carve-out)",
                 "components_condensed": "workspace verbs are larger-screen affordances (055 carve-out)",
                 "history_list": "recents come from REST (bounded list)",
-                "notification": "no toast surface on the wrist; speech covers deliveries",
                 "saved_components_list": "workspace verbs are larger-screen affordances (055 carve-out)",
                 "stream_data": "no live-stream nodes on the wrist",
                 "stream_subscribed": "no live-stream nodes on the wrist",

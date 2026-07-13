@@ -1,9 +1,10 @@
 """Feature 055 — idempotent schema deltas (Constitution IX).
 
-component_version (US4 refine/restore history) and share_grant (US5 snapshot
-share links) are additive, guarded, inert while their flags are off, and safe
-to re-run. Rollback: DROP TABLE IF EXISTS component_version / share_grant
-(documented in specs/055-uniform-artifacts/data-model.md).
+component_version (US4 refine/restore history), share_grant (US5 snapshot
+share links), and background_task (bg-continuity durable task records) are
+additive, guarded, inert while their flags are off, and safe to re-run.
+Rollback: DROP TABLE IF EXISTS component_version / share_grant /
+background_task (documented in specs/055-uniform-artifacts/data-model.md).
 """
 from __future__ import annotations
 
@@ -63,7 +64,7 @@ def _index_exists(db, name: str) -> bool:
 
 def test_schema_revision_bumped():
     from shared.database import SCHEMA_REVISION
-    assert SCHEMA_REVISION == "055.001"
+    assert SCHEMA_REVISION == "055.002"
 
 
 def test_component_version_table_and_index(db):
@@ -83,7 +84,16 @@ def test_share_grant_table_and_index(db):
     assert _index_exists(db, "idx_share_grant_owner")
 
 
+def test_background_task_table_and_index(db):
+    assert _table_exists(db, "background_task")
+    for col in ("task_id", "user_id", "chat_id", "kind", "status", "title",
+                "summary", "created_at", "completed_at", "notified"):
+        assert _column_exists(db, "background_task", col), col
+    assert _index_exists(db, "idx_background_task_user")
+
+
 def test_init_db_reruns_idempotently(db):
     db._init_db()  # second run must not raise or duplicate
     assert _table_exists(db, "component_version")
     assert _table_exists(db, "share_grant")
+    assert _table_exists(db, "background_task")

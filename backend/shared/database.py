@@ -15,7 +15,9 @@ logger = logging.getLogger('Database')
 # 055.001: + component_version (refine/restore history), + share_grant
 #          (snapshot share links) — both additive, inert while their flags
 #          are off (FF_COMPONENT_REFINE / FF_ARTIFACT_SHARING)
-SCHEMA_REVISION = '055.001'
+# 055.002: + background_task (durable cross-device task records) — additive,
+#          inert while FF_BG_CONTINUITY is off
+SCHEMA_REVISION = '055.002'
 
 _POOLS: Dict[str, dict] = {}
 _POOLS_LOCK = threading.Lock()
@@ -1280,6 +1282,30 @@ class Database:
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_share_grant_owner
             ON share_grant (user_id, created_at DESC)
+        ''')
+
+        # ── Feature 055 (bg continuity): durable background-task records ────
+        # Write-through bookkeeping from BackgroundTaskManager (fail-open)
+        # that powers reconnect/late-join replay; `notified` flips TRUE once a
+        # completion frame reached (or was replayed to) a client.
+        # Rollback: DROP TABLE IF EXISTS background_task;
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS background_task (
+                task_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                chat_id TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'async_chat',
+                status TEXT NOT NULL,
+                title TEXT,
+                summary TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                completed_at TIMESTAMPTZ,
+                notified BOOLEAN NOT NULL DEFAULT FALSE
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_background_task_user
+            ON background_task (user_id, created_at DESC)
         ''')
 
         # ── Feature 029: agent catalog migrations (data-model.md) ───────────

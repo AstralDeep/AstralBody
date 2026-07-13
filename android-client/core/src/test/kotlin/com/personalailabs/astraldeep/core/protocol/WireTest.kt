@@ -209,6 +209,7 @@ class WireTest {
     fun decodes_task_started_and_completed_payload_shape() {
         val started = assertIs<Inbound.TaskStarted>(Wire.decode("""{"type":"task_started","payload":{"task_id":"t1","chat_id":"c1","status":"queued"}}"""))
         assertEquals("t1", started.taskId)
+        assertEquals("c1", started.chatId)
         val done = assertIs<Inbound.TaskCompleted>(Wire.decode("""{"type":"task_completed","payload":{"task_id":"t1","chat_id":"c1","status":"completed"}}"""))
         assertEquals("t1", done.taskId)
         assertEquals("c1", done.chatId)
@@ -216,7 +217,9 @@ class WireTest {
 
     @Test
     fun decodes_task_frames_flat_shape() {
-        assertEquals("t2", assertIs<Inbound.TaskStarted>(Wire.decode("""{"type":"task_started","task_id":"t2"}""")).taskId)
+        val started = assertIs<Inbound.TaskStarted>(Wire.decode("""{"type":"task_started","task_id":"t2"}"""))
+        assertEquals("t2", started.taskId)
+        assertEquals(null, started.chatId)
         val done = assertIs<Inbound.TaskCompleted>(Wire.decode("""{"type":"task_completed","task_id":"t2","chat_id":"c2"}"""))
         assertEquals("t2", done.taskId)
         assertEquals("c2", done.chatId)
@@ -231,6 +234,7 @@ class WireTest {
         assertEquals("Daily brief", r.title)
         assertEquals("Ready", r.body)
         assertEquals("info", r.level)
+        assertEquals("c1", r.chatId)
     }
 
     @Test

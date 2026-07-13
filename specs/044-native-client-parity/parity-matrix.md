@@ -65,7 +65,7 @@ state shown; dispositions land with the 055 PR). iOS and macOS share one frame t
 | `llm_usage_report` | ✅ | ∅ ※(logged) | ∅ ※(logged) | ∅ ※ | ∅ ※ | ∅ ※ | |
 | `audit_append` | ✅ | ∅ ※(logged) | ∅ ※(logged) | ∅ ※(audit via REST) | ∅ ※(audit via REST) | ∅ ※ | natives fetch audit via REST |
 | `agent_creation_progress` | ✅ | ∅ ※(logged) | ∅ ※(logged) | ∅ ※ | ∅ ※ | ∅ ※ | draft cards carry state in-chat |
-| `notification` | ∅ ※(logged→toast optional) | ✅ ※(toast) | ✅ ※(toast) | ✅ ※ | ✅ ※ | ∅ ※(speech covers deliveries) | newly catalogued (R1) |
+| `notification` | ∅ ※(logged→toast optional) | ✅ ※(toast) | ✅ ※(toast) | ✅ ※ | ✅ ※ | ✅ ★(brief status line + spoken via on-device TTS) | newly catalogued (R1); watch promoted ∅→✅ by 055 so background completions reach the wrist |
 | `error` (3 shapes + `code:internal` ※) | ✅ ※(toast added) | ✅ ※(banner+turn fail) | ✅ ※(banner+turn fail) | ✅ ※ | ✅ ※ | ✅ ※ | R2 |
 
 ## B. Component vocabulary (35)

@@ -477,6 +477,13 @@
         // A turn that ends with no canvas output (text-only answer, error,
         // cancellation) must still clear the query-start skeleton.
         if (data.status === "done" || data.status === "idle") hideSkeleton();
+        if (data.status === "processing_async") {
+          // Background dispatch ack (055): status text only — never the turn
+          // lock (no skeleton), so the user can keep chatting or switch chats.
+          hideSkeleton();
+          setStatus("Running in background…");
+          break;
+        }
         setStatus({ idle: "", thinking: "Thinking…", executing: "Working…", done: "" }[data.status] || "");
         break;
       case "chat_step": renderStep(data.step); break;
@@ -522,6 +529,44 @@
       case "notification": // scheduler push (feature 044 parity matrix)
         showToast((data.title ? data.title + ": " : "") + (data.body || ""), data.level === "error" ? "error" : "info");
         break;
+      case "task_started": { // 055: background dispatch accepted (any device)
+        var tsp = data.payload || {};
+        addTaskChip(tsp.task_id, tsp.chat_id, tsp.title);
+        showToast("Running in background — you will be notified when it finishes.", "info");
+        break;
+      }
+      case "task_completed": { // 055: background task finished (any device)
+        var tcp = data.payload || {};
+        if (tcp.task_id) {
+          if (bgTaskDone[tcp.task_id]) break; // watcher + fan-out duplicate
+          bgTaskDone[tcp.task_id] = true;
+          removeTaskChip(tcp.task_id);
+        }
+        var tcFail = tcp.status === "failed";
+        var tcMsg = tcp.summary || ("Background task " + (tcp.status || "completed"));
+        if (tcp.chat_id && tcp.chat_id === activeChatId) {
+          showToast(tcMsg, tcFail ? "error" : "info");
+          // Pull the narrative/canvas the task persisted while detached.
+          action("load_chat", { chat_id: tcp.chat_id });
+        } else if (tcp.chat_id) {
+          showToast(tcMsg + " — tap to open", tcFail ? "error" : "info", function () {
+            action("load_chat", { chat_id: tcp.chat_id }); // recents-click path
+            closeHistoryOverlay();
+          });
+        } else {
+          showToast(tcMsg, tcFail ? "error" : "info");
+        }
+        break;
+      }
+      case "tool_progress": { // long-running job update (fan-out is chat-scoped)
+        var tpChat = data.session_id || data.chat_id;
+        if (tpChat && activeChatId && tpChat !== activeChatId) break;
+        if (data.terminal) { setStatus(""); break; } // outcome lands as a persisted upsert
+        var tpText = data.message || ((data.tool_name || "job") + " running…");
+        if (typeof data.percentage === "number") tpText += " (" + Math.round(data.percentage) + "%)";
+        setStatus(tpText);
+        break;
+      }
       case "rote_config": // ROTE's device verdict drives the shell layout
         applyDeviceProfile(data.device_profile && data.device_profile.device_type);
         break;
@@ -540,7 +585,9 @@
   }
 
   var toastHost = null;
-  function showToast(message, kind) {
+  /** onTap (optional) makes the toast a tap-to-open affordance (055
+   *  background completions); tappable toasts linger longer. */
+  function showToast(message, kind, onTap) {
     if (!message) return;
     if (!toastHost) {
       toastHost = document.createElement("div");
@@ -554,8 +601,18 @@
     t.style.cssText = "padding:10px 14px;border-radius:8px;font-size:13px;color:#fff;box-shadow:0 4px 14px rgba(0,0,0,.4);"
       + (kind === "error" ? "background:#7f1d1d;border:1px solid #b91c1c;" : "background:#1e293b;border:1px solid #334155;");
     t.textContent = message;
+    if (onTap) {
+      t.style.cursor = "pointer";
+      t.setAttribute("role", "button");
+      t.tabIndex = 0;
+      var fire = function () { if (t.parentNode) t.parentNode.removeChild(t); onTap(); };
+      t.addEventListener("click", fire);
+      t.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fire(); }
+      });
+    }
     toastHost.appendChild(t);
-    setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, 6000);
+    setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, onTap ? 12000 : 6000);
   }
 
   function escapeText(s) { var d = document.createElement("div"); d.textContent = s == null ? "" : String(s); return d.innerHTML; }
@@ -605,9 +662,13 @@
         return { attachment_id: a.attachment_id, filename: a.filename, category: a.category };
       });
     }
+    if (bgArmed) payload.async_mode = true; // one-shot background-run arming (055)
     send({ type: "ui_event", action: "chat_message", session_id: activeChatId || undefined, payload: payload });
     purgeWelcome(); // 055 uniform rule: welcome never survives the first send
-    showSkeleton(); // optimistic loading state until the first canvas content
+    // Async turns never lock the composer: no skeleton — the processing_async
+    // ack drives the status line instead.
+    if (bgArmed) setBgArmed(false);
+    else showSkeleton(); // optimistic loading state until the first canvas content
     if (typeof clearStagedAttachments === "function") clearStagedAttachments();
   }
 
@@ -1156,6 +1217,77 @@
     e.target.value = "";  // allow re-selecting the same file later
   });
 
+  // ---- 055 cross-device continuity: background-run arming + task chips ----
+  // The composer toggle next to the paperclip arms async_mode for the NEXT
+  // send only; sendChat reads bgArmed via hoisting (same contract as the
+  // attachment helpers above it) and disarms after the message goes out.
+  var bgBtn = document.getElementById("astral-bg-btn");
+  var bgArmed = false;
+  function setBgArmed(on) {
+    bgArmed = !!on;
+    if (!bgBtn) return;
+    bgBtn.setAttribute("aria-pressed", bgArmed ? "true" : "false");
+    // Armed look via the runtime theme tokens — this file styles its own
+    // dynamic chrome inline (see showToast/openChromePop).
+    bgBtn.style.cssText = bgArmed
+      ? "color:rgb(var(--astral-primary));border-color:rgb(var(--astral-primary) / .7);background:rgb(var(--astral-primary) / .15);"
+      : "";
+  }
+  if (bgBtn) bgBtn.addEventListener("click", function () { setBgArmed(!bgArmed); });
+
+  // One slim chip per running background task (keyed by task_id, cleared by
+  // its task_completed). Lives at the top of the composer so it survives chat
+  // switches; tapping a chip opens the task's chat.
+  var bgTaskChips = {};  // task_id → chip element
+  var bgTaskDone = {};   // task_id → true (dedupes watcher + fan-out copies)
+  var bgTaskHost = null;
+  function bgTaskHostEl() {
+    if (!bgTaskHost && form) {
+      bgTaskHost = document.createElement("div");
+      bgTaskHost.id = "astral-bgtasks";
+      bgTaskHost.style.cssText = "display:none;flex-wrap:wrap;gap:6px;";
+      form.insertBefore(bgTaskHost, form.firstChild);
+    }
+    return bgTaskHost;
+  }
+  function syncBgTaskHost() {
+    if (bgTaskHost) bgTaskHost.style.display = bgTaskHost.children.length ? "flex" : "none";
+  }
+  function addTaskChip(taskId, chatId, title) {
+    if (!taskId || bgTaskChips[taskId] || bgTaskDone[taskId]) return;
+    var host = bgTaskHostEl();
+    if (!host) return;
+    var chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "astral-chip";
+    chip.style.cursor = "pointer";
+    chip.title = "Open the chat running this task";
+    var dot = document.createElement("span");
+    dot.style.cssText = "width:7px;height:7px;border-radius:9999px;background:rgb(var(--astral-primary));flex:none;";
+    chip.appendChild(dot);
+    var label = document.createElement("span");
+    label.className = "astral-chip-name";
+    label.textContent = "Background task running" + (title ? " — " + title : "…");
+    chip.appendChild(label);
+    if (chatId) chip.addEventListener("click", function () {
+      if (chatId !== activeChatId) action("load_chat", { chat_id: chatId });
+      closeHistoryOverlay();
+    });
+    host.appendChild(chip);
+    bgTaskChips[taskId] = chip;
+    syncBgTaskHost();
+  }
+  function removeTaskChip(taskId) {
+    var chip = bgTaskChips[taskId];
+    if (chip && chip.parentNode) chip.parentNode.removeChild(chip);
+    delete bgTaskChips[taskId];
+    syncBgTaskHost();
+    // Don't leave the dispatch-time status text stranded once nothing runs.
+    var any = false;
+    for (var k in bgTaskChips) { any = true; break; }
+    if (!any && statusEl && statusEl.textContent === "Running in background…") setStatus("");
+  }
+
   // Chrome runtime: settings menu, modal surfaces, generic [data-ui-action]
   // delegation, and the tour step-runner. Server renders all chrome HTML
   // (webrender/chrome/); this block is plumbing only.
@@ -1470,6 +1602,10 @@
              resumed: firstConnect ? serverResumed : true });
       firstConnect = false;
       action("get_history", {});
+      // Re-attach to still-running background tasks: watch_task re-registers
+      // this socket as a watcher and answers task_completed immediately when
+      // the task finished while the socket was down.
+      for (var tid in bgTaskChips) action("watch_task", { task_id: tid });
       var qp = new URLSearchParams(location.search).get("chat");
       if (qp) setTimeout(function () { action("load_chat", { chat_id: qp }); }, 500);
     };

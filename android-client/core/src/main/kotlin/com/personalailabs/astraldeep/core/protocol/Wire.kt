@@ -122,7 +122,10 @@ object Wire {
             }
             // Task frames nest their fields under `payload` (older emitters were flat).
             "task_started" ->
-                Inbound.TaskStarted(root.obj("payload")?.str("task_id") ?: root.str("task_id"))
+                Inbound.TaskStarted(
+                    taskId = root.obj("payload")?.str("task_id") ?: root.str("task_id"),
+                    chatId = root.obj("payload")?.str("chat_id") ?: root.str("chat_id"),
+                )
             "task_completed" ->
                 Inbound.TaskCompleted(
                     taskId = root.obj("payload")?.str("task_id") ?: root.str("task_id"),
@@ -133,6 +136,7 @@ object Wire {
                     title = root.str("title"),
                     body = root.str("body"),
                     level = root.str("level"),
+                    chatId = root.str("chat_id"),
                 )
             // Stored preferences at boot ({preferences:{theme:{…}}}); the app folds
             // `theme` into the live palette (US5 restyle).

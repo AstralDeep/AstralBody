@@ -749,6 +749,12 @@ class Orchestrator:
         data_dir = os.path.join(backend_dir, 'data')
         self.history = HistoryManager(data_dir=data_dir)
 
+        # 055 bg-continuity: durable task records + a completion fan that
+        # reaches every socket of the user (the originator may be gone). The
+        # manager itself is constructed above, before the DB exists.
+        self.async_task_manager.bind(
+            db=self.history.db, on_complete=self._fan_task_completed)
+
         # Feature 054: persisted per-user + system LLM configuration store
         # (user_llm_config / system_llm_config tables; Fernet under
         # CREDENTIAL_ENCRYPTION_KEY with the shared dev key-file fallback).
@@ -1475,6 +1481,28 @@ class Orchestrator:
                                 "first-run LLM dialog push failed (refusals "
                                 "still enforce the gate)", exc_info=True)
 
+                    # 055 bg-continuity: a reconnecting client that carries its
+                    # active chat id (RegisterUI.session_id) resumes that
+                    # chat's server context without waiting for a load_chat —
+                    # active-chat marker (which also suppresses the welcome
+                    # canvas below), stream subscriptions, and a replay of any
+                    # in-flight background task. Ownership-validated; an
+                    # invalid/foreign id is ignored silently (register still
+                    # succeeds).
+                    if msg.session_id and flags.is_enabled("bg_continuity"):
+                        try:
+                            owned = await self.history.db.afetch_one(
+                                "SELECT id FROM chats WHERE id = ? AND user_id = ?",
+                                (msg.session_id, user_id))
+                            if owned:
+                                self._ws_active_chat[id(websocket)] = msg.session_id
+                                await self._resume_chat_streams(
+                                    websocket, user_id, msg.session_id)
+                                await self._replay_chat_task(websocket, msg.session_id)
+                        except Exception:
+                            logger.debug("register_ui chat resume failed (non-fatal)",
+                                         exc_info=True)
+
                     # Initial canvas: server-driven welcome examples when this
                     # socket has no chat to resume — ordinary astralprims
                     # components over the normal ui_render path (Constitution
@@ -1501,6 +1529,12 @@ class Orchestrator:
                         await _dash_task
                     except Exception:
                         logger.warning("register_ui dashboard delivery failed", exc_info=True)
+
+                    # 055 bg-continuity late-connect catch-up: in-flight tasks
+                    # replay as task_started; completed-but-unnotified ones as
+                    # task_completed (marked notified after delivery).
+                    if flags.is_enabled("bg_continuity"):
+                        await self._replay_user_tasks(websocket, user_id)
                     logger.info(
                         "perf register_ui.total duration_ms=%d user=%s",
                         int((time.monotonic() - _register_started) * 1000), user_id)
@@ -1969,74 +2003,15 @@ class Orchestrator:
                         except Exception:
                             logger.exception("workspace re-hydration failed for chat %s", chat_id)
 
-                        # 001-tool-stream-ui (US3 T054): after chat_loaded
-                        # is sent, resume any DORMANT streams for this chat.
-                        # Each resumed stream gets a stream_subscribed reply
-                        # so the frontend re-registers it in pushStreamsRef
-                        # and starts merging chunks again.
-                        if self.stream_manager is not None:
-                            try:
-                                resumed = await self.stream_manager.resume(
-                                    websocket, user_id, chat_id,
-                                )
-                                for resumed_stream_id, resumed_tool_name in resumed:
-                                    cfg = self._streamable_tools.get(resumed_tool_name, {})
-                                    resumed_ack = {
-                                        "type": "stream_subscribed",
-                                        "stream_id": resumed_stream_id,
-                                        "tool_name": resumed_tool_name,
-                                        "agent_id": cfg.get("agent_id", ""),
-                                        "session_id": chat_id,
-                                        "max_fps": cfg.get("max_fps", 30),
-                                        "min_fps": cfg.get("min_fps", 5),
-                                        "attached": False,
-                                    }
-                                    # 055 US2: keep the resumed placeholder on
-                                    # its workspace identity (wire-contract §2).
-                                    resumed_cid = self.stream_manager.component_id_for(
-                                        resumed_stream_id)
-                                    if resumed_cid is not None:
-                                        resumed_ack["component_id"] = resumed_cid
-                                    await self._safe_send(websocket, json.dumps(resumed_ack))
-                            except Exception as e:
-                                logger.warning(f"stream_manager.resume failed: {e}")
+                        # Stream re-attachment (dormant resume + active-stream
+                        # attach) — shared with the register_ui session resume
+                        # (055 bg-continuity).
+                        await self._resume_chat_streams(websocket, user_id, chat_id)
 
-                        # 055 late-join: resume() above only revives DORMANT
-                        # streams. Streams kept ACTIVE by the user's other
-                        # sockets need this socket attached too, plus a
-                        # replay of the retained chunk so the canvas shows
-                        # current state instead of a blank placeholder.
-                        # Rides FF_STREAM_ARTIFACTS — flag off keeps
-                        # load_chat's frames byte-identical to pre-055.
-                        if (self.stream_manager is not None
-                                and flags.is_enabled("stream_artifacts")):
-                            try:
-                                attached_subs = await self.stream_manager.attach_to_chat(
-                                    websocket, user_id, chat_id,
-                                )
-                                for att_stream_id, att_tool_name in attached_subs:
-                                    cfg = self._streamable_tools.get(att_tool_name, {})
-                                    att_ack = {
-                                        "type": "stream_subscribed",
-                                        "stream_id": att_stream_id,
-                                        "tool_name": att_tool_name,
-                                        "agent_id": cfg.get("agent_id", ""),
-                                        "session_id": chat_id,
-                                        "max_fps": cfg.get("max_fps", 30),
-                                        "min_fps": cfg.get("min_fps", 5),
-                                        "attached": True,
-                                    }
-                                    att_cid = self.stream_manager.component_id_for(
-                                        att_stream_id)
-                                    if att_cid is not None:
-                                        att_ack["component_id"] = att_cid
-                                    await self._safe_send(websocket, json.dumps(att_ack))
-                                    # Ack first: clients key the placeholder
-                                    # off it before the replay frame fills it.
-                                    await self.stream_manager.replay_retained(
-                                        websocket, att_stream_id)
-                            except Exception as e:
-                                logger.warning(f"stream_manager.attach_to_chat failed: {e}")
+                        # 055 bg-continuity: a chat with a live background run
+                        # shows the running state to the joining device.
+                        if flags.is_enabled("bg_continuity"):
+                            await self._replay_chat_task(websocket, chat_id)
                     else:
                         await self.send_ui_render(websocket, [
                             Alert(message="Chat not found", variant="error").to_dict()
@@ -3115,14 +3090,19 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 attachments=atts,
             )
 
+        uid = user_id or self._get_user_id(websocket)
+        # Short user-facing label for cross-device task frames (055).
+        title = " ".join((display_message or message or "").split())[:60]
         bg_task = await self.async_task_manager.submit(
             chat_id=chat_id,
-            user_id=user_id or self._get_user_id(websocket),
+            user_id=uid,
             coro_factory=_run_in_background,
+            kind="async_chat",
+            title=title,
             msg=message,
             cid=chat_id,
             display=display_message,
-            uid=user_id or self._get_user_id(websocket),
+            uid=uid,
             draft=draft_agent_id,
             tools=selected_tools,
             atts=attachments,
@@ -3131,14 +3111,21 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # Register the submitting websocket as a watcher
         bg_task.watchers.append(websocket)
 
-        await self._safe_send(websocket, json.dumps({
+        started = {
             "type": "task_started",
             "payload": {
                 "task_id": bg_task.task_id,
                 "chat_id": chat_id,
                 "status": "queued",
             },
-        }))
+        }
+        if flags.is_enabled("bg_continuity"):
+            # 055: the start signal reaches every device of the user, not just
+            # the originating socket (title labels it on non-chat surfaces).
+            started["payload"]["title"] = title
+            await self._send_to_user_sockets(uid, started)
+        else:
+            await self._safe_send(websocket, json.dumps(started))
 
         # Send loading state so UI knows the query was accepted
         await self._safe_send(websocket, json.dumps({
@@ -3199,6 +3186,16 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 "no system LLM credential configured — scheduled turn not run")
 
         target_chat = chat_id or f"scheduled-{user_id}"
+        if not chat_id and flags.is_enabled("bg_continuity"):
+            # 055: nothing else creates the fallback chat, and
+            # history.add_message silently drops writes to a missing chat —
+            # the whole run's output would be lost. Fallback only: an explicit
+            # target_chat_id must already exist (chat ids are globally keyed,
+            # so creating one here could collide with another user's chat).
+            if not await asyncio.to_thread(
+                    self.history.get_chat, target_chat, user_id=user_id):
+                await asyncio.to_thread(
+                    self.history.create_chat, target_chat, user_id=user_id)
         bg = BackgroundTask(
             task_id=(correlation_id or "sched")[:8],
             chat_id=target_chat,
@@ -3262,6 +3259,171 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             "notify_user.delivered",
             extra={"user_id": user_id, "sockets": sent, "kind": payload.get("type")},
         )
+
+    async def _send_to_user_sockets(self, user_id: str, frame: Dict[str, Any]) -> int:
+        """Deliver one frame to EVERY connected socket authenticated as
+        ``user_id`` (055 bg-continuity — multi-device fan, chat-agnostic).
+        Returns the number of sockets reached."""
+        try:
+            data = json.dumps(frame)
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("_send_to_user_sockets: unserializable frame", exc_info=True)
+            return 0
+        sent = 0
+        for ws, claims in list(self.ui_sessions.items()):
+            if (claims or {}).get("sub") != user_id:
+                continue
+            try:
+                if await self._safe_send(ws, data):
+                    sent += 1
+            except Exception:  # pragma: no cover - per-socket best-effort
+                logger.debug("_send_to_user_sockets: send failed", exc_info=True)
+        return sent
+
+    async def _fan_task_completed(self, bg_task, frame: Dict[str, Any]) -> int:
+        """BackgroundTaskManager completion hook (055 bg-continuity): the
+        task_completed frame reaches every socket of the user — the
+        originating socket may be long gone. Returns the delivered count so
+        the manager can persist ``notified``."""
+        return await self._send_to_user_sockets(bg_task.user_id, frame)
+
+    def _task_started_frame(self, bg_task) -> Dict[str, Any]:
+        """A task_started replay frame for an in-flight background task."""
+        return {
+            "type": "task_started",
+            "payload": {
+                "task_id": bg_task.task_id,
+                "chat_id": bg_task.chat_id,
+                "status": bg_task.status.value,
+                "title": bg_task.title,
+                "replay": True,
+            },
+        }
+
+    async def _replay_user_tasks(self, websocket, user_id: str):
+        """055 bg-continuity late-connect catch-up: in-flight tasks replay as
+        task_started; completed-but-unnotified rows replay as task_completed
+        and are marked notified. Fail-open — never breaks registration."""
+        from orchestrator.async_tasks import TaskStatus
+        try:
+            for t in await self.async_task_manager.list_for_user(user_id):
+                if t.status not in (TaskStatus.QUEUED, TaskStatus.RUNNING):
+                    continue
+                await self._safe_send(websocket, json.dumps(self._task_started_frame(t)))
+            rows = await self.history.db.afetch_all(
+                "SELECT task_id, chat_id, status, summary, completed_at "
+                "FROM background_task WHERE user_id = ? AND notified = FALSE "
+                "AND status IN ('completed', 'failed', 'cancelled') "
+                "ORDER BY created_at DESC LIMIT 20", (user_id,))
+            for r in rows:
+                completed_at = r.get("completed_at")
+                await self._safe_send(websocket, json.dumps({
+                    "type": "task_completed",
+                    "payload": {
+                        "task_id": r["task_id"],
+                        "chat_id": r["chat_id"],
+                        "status": r["status"],
+                        "completed_at": completed_at.isoformat() if completed_at else None,
+                        "summary": r.get("summary") or "",
+                        "replay": True,
+                    },
+                }))
+            if rows:
+                ph = ", ".join(["?"] * len(rows))
+                await self.history.db.aexecute(
+                    f"UPDATE background_task SET notified = TRUE WHERE task_id IN ({ph})",
+                    tuple(r["task_id"] for r in rows))
+        except Exception:
+            logger.debug("background-task replay failed (non-fatal)", exc_info=True)
+
+    async def _replay_chat_task(self, websocket, chat_id: str):
+        """055 bg-continuity: a socket joining a chat with a live background
+        run shows the running state immediately (processing_async + a
+        task_started replay)."""
+        try:
+            t = await self.async_task_manager.get_active_for_chat(chat_id)
+            if t is None:
+                return
+            await self._safe_send(websocket, json.dumps({
+                "type": "chat_status",
+                "status": "processing_async",
+                "message": f"Query running in background (task {t.task_id})",
+            }))
+            await self._safe_send(websocket, json.dumps(self._task_started_frame(t)))
+        except Exception:
+            logger.debug("active-task replay failed (non-fatal)", exc_info=True)
+
+    async def _resume_chat_streams(self, websocket, user_id: str, chat_id: str):
+        """Re-attach a socket to a chat's push streams. Shared by load_chat
+        and the register_ui session resume (055 bg-continuity).
+
+        001-tool-stream-ui (US3 T054): resume any DORMANT streams for this
+        chat. Each resumed stream gets a stream_subscribed reply so the
+        frontend re-registers it in pushStreamsRef and starts merging chunks
+        again."""
+        if self.stream_manager is not None:
+            try:
+                resumed = await self.stream_manager.resume(
+                    websocket, user_id, chat_id,
+                )
+                for resumed_stream_id, resumed_tool_name in resumed:
+                    cfg = self._streamable_tools.get(resumed_tool_name, {})
+                    resumed_ack = {
+                        "type": "stream_subscribed",
+                        "stream_id": resumed_stream_id,
+                        "tool_name": resumed_tool_name,
+                        "agent_id": cfg.get("agent_id", ""),
+                        "session_id": chat_id,
+                        "max_fps": cfg.get("max_fps", 30),
+                        "min_fps": cfg.get("min_fps", 5),
+                        "attached": False,
+                    }
+                    # 055 US2: keep the resumed placeholder on
+                    # its workspace identity (wire-contract §2).
+                    resumed_cid = self.stream_manager.component_id_for(
+                        resumed_stream_id)
+                    if resumed_cid is not None:
+                        resumed_ack["component_id"] = resumed_cid
+                    await self._safe_send(websocket, json.dumps(resumed_ack))
+            except Exception as e:
+                logger.warning(f"stream_manager.resume failed: {e}")
+
+        # 055 late-join: resume() above only revives DORMANT
+        # streams. Streams kept ACTIVE by the user's other
+        # sockets need this socket attached too, plus a
+        # replay of the retained chunk so the canvas shows
+        # current state instead of a blank placeholder.
+        # Rides FF_STREAM_ARTIFACTS — flag off keeps
+        # load_chat's frames byte-identical to pre-055.
+        if (self.stream_manager is not None
+                and flags.is_enabled("stream_artifacts")):
+            try:
+                attached_subs = await self.stream_manager.attach_to_chat(
+                    websocket, user_id, chat_id,
+                )
+                for att_stream_id, att_tool_name in attached_subs:
+                    cfg = self._streamable_tools.get(att_tool_name, {})
+                    att_ack = {
+                        "type": "stream_subscribed",
+                        "stream_id": att_stream_id,
+                        "tool_name": att_tool_name,
+                        "agent_id": cfg.get("agent_id", ""),
+                        "session_id": chat_id,
+                        "max_fps": cfg.get("max_fps", 30),
+                        "min_fps": cfg.get("min_fps", 5),
+                        "attached": True,
+                    }
+                    att_cid = self.stream_manager.component_id_for(
+                        att_stream_id)
+                    if att_cid is not None:
+                        att_ack["component_id"] = att_cid
+                    await self._safe_send(websocket, json.dumps(att_ack))
+                    # Ack first: clients key the placeholder
+                    # off it before the replay frame fills it.
+                    await self.stream_manager.replay_retained(
+                        websocket, att_stream_id)
+            except Exception as e:
+                logger.warning(f"stream_manager.attach_to_chat failed: {e}")
 
     async def _attach_turn_attachments(self, websocket, message, chat_id, user_id, turn_message_id, attachments):
         """Feature 031: validate, link, and surface this turn's attachments.
@@ -4625,11 +4787,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     _narrative_span.__exit__(None, None, None)
 
                     # Signal that processing is complete
-                    await self._safe_send(websocket, json.dumps({
-                        "type": "chat_status",
-                        "status": "done",
-                        "message": ""
-                    }))
+                    await self._send_chat_status(websocket, "done")
                     # 055 US3: native-origin turns get their coalesced designer
                     # pass here — after done, before the handler returns.
                     await self._design_turn_post_done(
@@ -4665,11 +4823,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                         ]).to_dict()
                     ], target="chat")
 
-                await self._safe_send(websocket, json.dumps({
-                    "type": "chat_status",
-                    "status": "done",
-                    "message": ""
-                }))
+                await self._send_chat_status(websocket, "done")
                 # 055 US3: the max-turns exit is also a completed turn.
                 await self._design_turn_post_done(
                     websocket, chat_id, user_id, message, _turn_canvas_components)
@@ -4705,24 +4859,16 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                         await self.send_ui_render(websocket, [
                             Alert(message="Auto-fix could not resolve the schema issue. Try refining the agent.", variant="warning").to_dict()
                         ])
-                    await self._safe_send(websocket, json.dumps({
-                        "type": "chat_status", "status": "done", "message": ""
-                    }))
+                    await self._send_chat_status(websocket, "done")
                 except Exception as fix_err:
                     logger.warning(f"Auto-fix for schema error failed: {fix_err}")
-                    await self._safe_send(websocket, json.dumps({
-                        "type": "chat_status", "status": "done", "message": ""
-                    }))
+                    await self._send_chat_status(websocket, "done")
                     await self.send_ui_render(websocket, [
                         Alert(message=f"Tool schema error and auto-fix failed: {error_text}", variant="error", title="Error").to_dict()
                     ])
             else:
                 # Clear the 'thinking' spinner so the UI doesn't hang
-                await self._safe_send(websocket, json.dumps({
-                    "type": "chat_status",
-                    "status": "done",
-                    "message": ""
-                }))
+                await self._send_chat_status(websocket, "done")
                 # Show a user-friendly error message
                 if "424" in error_text or "Failed Dependency" in error_text or "Repository Not Found" in error_text:
                     error_text = ("The LLM server cannot find the configured model. "
@@ -7764,6 +7910,39 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             logger.debug(f"Failed to send message (connection likely closed): {e}")
             return False
 
+    def _vws_fan_targets(self, websocket) -> List[Any]:
+        """Real sockets that must mirror a VirtualWebSocket-bound chat frame
+        (055 bg-continuity): the task-owner's sockets active on the task's
+        chat. Empty for real sockets (no double delivery), when
+        FF_BG_CONTINUITY is off, or when the background task carries no
+        user+chat identity (e.g. bare handshake/test tasks)."""
+        from orchestrator.async_tasks import VirtualWebSocket
+        if not isinstance(websocket, VirtualWebSocket):
+            return []
+        if not flags.is_enabled("bg_continuity"):
+            return []
+        task = getattr(websocket, "task", None)
+        user_id = getattr(task, "user_id", None)
+        chat_id = getattr(task, "chat_id", None)
+        if not user_id or not chat_id:
+            return []
+        # The executing socket never fans to itself (a registered
+        # VirtualWebSocket would otherwise recurse).
+        return [ws for ws in self._sockets_on_chat(user_id, chat_id)
+                if ws is not websocket]
+
+    async def _send_chat_status(self, websocket, status: str, message: str = ""):
+        """Send a chat_status frame; a VirtualWebSocket-bound frame also fans
+        to the user's real sockets on the task's chat (055 bg-continuity) so
+        background turns surface their terminal state on every device."""
+        data = json.dumps({"type": "chat_status", "status": status, "message": message})
+        await self._safe_send(websocket, data)
+        for ws in self._vws_fan_targets(websocket):
+            try:
+                await self._safe_send(ws, data)
+            except Exception:  # pragma: no cover - per-socket best-effort
+                logger.debug("vws chat_status fan failed", exc_info=True)
+
     async def _broadcast_user_history(self):
         """Send each connected UI client their own user's recent chat history.
 
@@ -9032,6 +9211,20 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 logger.debug("watch_speech unavailable for ui_render", exc_info=True)
         msg = UIRender(components=adapted, target=target, html=html, speech=speech)
         await self._safe_send(websocket, msg.to_json())
+        # 055 bg-continuity: a background (VirtualWebSocket) turn's chat-rail
+        # narrative also reaches the user's real sockets on that chat, each
+        # re-adapted per device (rich canvas components already fan through
+        # the workspace upsert path). Real-socket sends fan nowhere — checked
+        # inline so the method stays self-contained for them (DB-free tests
+        # bind it standalone).
+        if target == "chat":
+            from orchestrator.async_tasks import VirtualWebSocket
+            if isinstance(websocket, VirtualWebSocket):
+                for ws in self._vws_fan_targets(websocket):
+                    try:
+                        await self.send_ui_render(ws, components, target="chat", speak=speak)
+                    except Exception:  # pragma: no cover - per-socket best-effort
+                        logger.debug("vws chat-rail fan failed", exc_info=True)
 
     async def _shell_token_for_request(self, request):
         """Feature 026: access token for the web shell's WS register_ui handshake.

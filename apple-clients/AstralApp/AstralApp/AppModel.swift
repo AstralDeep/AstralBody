@@ -429,11 +429,18 @@ final class AppModel: NSObject {
         }
     }
 
-    private func handle(_ event: WSEvent) async {
+    /// Internal (not private) so XCTests can drive connection events.
+    func handle(_ event: WSEvent) async {
         switch event {
         case .connected:
             connected = true
             everConnected = true
+            // 055 continuity: register_ui resumed the server session, but the
+            // server replays no turn frames on register — re-issue load_chat
+            // so anything that finished while this socket was down (background
+            // task, another device) re-hydrates the narrative and canvas.
+            // No-op on first connect: activeChatId is never persisted.
+            refreshActiveChat()
         case .disconnected:
             connected = false
             turnActive = false
@@ -515,18 +522,36 @@ final class AppModel: NSObject {
             let label = (head + pct).isEmpty ? "Working…" : head + pct
             stepTrail = trailUpsert(stepTrail, "• \(label)")
         case "task_started":
-            statusText = "Working in the background…"
-            asyncDetached = true
+            if frameTargetsActiveChat(frame) {
+                statusText = "Working in the background…"
+                asyncDetached = true
+            } else {
+                bannerIsError = false
+                errorBanner = "Background task started in another chat"
+            }
         case "task_completed":
-            commitTurn()
-            bannerIsError = false
-            errorBanner = "Background task finished"
+            if frameTargetsActiveChat(frame) {
+                commitTurn()
+                bannerIsError = false
+                errorBanner = "Background task finished"
+                // The task ran detached — its output landed server-side, not
+                // in this socket's turn frames. Reload to pick it up.
+                refreshActiveChat()
+            } else {
+                bannerIsError = false
+                errorBanner = "Background task finished in another chat"
+            }
         case "notification":
             let text = [frame.payload["title"]?.stringValue, frame.payload["body"]?.stringValue]
                 .compactMap { $0?.isEmpty == false ? $0 : nil }.joined(separator: ": ")
             if !text.isEmpty {
                 bannerIsError = frame.payload["level"]?.stringValue == "error"
                 errorBanner = text
+            }
+            // 055 continuity: a delivery into the OPEN chat refreshes it in
+            // place (scheduled-run output persists to history server-side).
+            if let chatId = nestedChatId(frame), chatId == activeChatId {
+                refreshActiveChat()
             }
         // 055 (US3): the eight workspace verb acks, promoted ignored → handled
         // (wire-contract §4). The server's follow-up ui_upsert/ui_render
@@ -566,6 +591,21 @@ final class AppModel: NSObject {
 
     private func nestedChatId(_ frame: InboundFrame) -> String? {
         frame.payload["payload"]?["chat_id"]?.stringValue ?? frame.payload["chat_id"]?.stringValue
+    }
+
+    /// 055 cross-device continuity: does a background-task frame concern the
+    /// chat currently open? A frame with no chat id targets the issuing
+    /// socket (pre-fan-out servers) and counts as ours.
+    private func frameTargetsActiveChat(_ frame: InboundFrame) -> Bool {
+        guard let chatId = nestedChatId(frame), !chatId.isEmpty else { return true }
+        return chatId == activeChatId
+    }
+
+    /// Re-issue load_chat for the open chat so the narrative and canvas pick
+    /// up content produced off this socket (background task, another device).
+    private func refreshActiveChat() {
+        guard let chatId = activeChatId, !chatId.isEmpty else { return }
+        sendEvent("load_chat", .object(["chat_id": .string(chatId)]))
     }
 
     private func reduceUiRender(_ frame: InboundFrame) {

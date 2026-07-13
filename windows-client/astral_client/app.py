@@ -122,6 +122,14 @@ def replacement_ops(msg: dict) -> list:
     return ops
 
 
+def frame_chat_id(msg: dict) -> Optional[str]:
+    """The chat a background push frame belongs to. Task frames
+    (``task_started``/``task_completed``) carry it under ``payload``; scheduler
+    ``notification`` frames carry it at the top level; absent on legacy frames."""
+    cid = (msg.get("payload") or {}).get("chat_id") or msg.get("chat_id")
+    return str(cid) if cid else None
+
+
 #: ui_event actions handled entirely in-app (never sent to the server, so they
 #: never produce a server ``chrome_surface`` re-render) — a surface's
 #: load-timeout bound is NOT armed for them (which would wrongly fire and wipe
@@ -1487,6 +1495,9 @@ class MainWindow(QMainWindow):
         self._user_prefs: dict = {}
         # Feature 044 (US4): staged chat attachments (chip records) for the turn.
         self._attachments: List[dict] = []
+        # Feature 055: tap-to-open target for a background-completion banner —
+        # a click loads this chat instead of just dismissing (None = dismiss).
+        self._banner_chat: Optional[str] = None
 
         ctx = RenderContext(emit=self._emit, download=self._download,
                             apply_theme=self._apply_theme_pref)
@@ -1672,7 +1683,11 @@ class MainWindow(QMainWindow):
         # (FR-019), not a silent no-op.
 
     # --- banner (connection state / errors / notices) ------------------- #
-    def _show_banner(self, text: str, kind: str = "info") -> None:
+    def _show_banner(self, text: str, kind: str = "info",
+                     chat_id: Optional[str] = None) -> None:
+        # Every banner (re)sets the tap-to-open target, so a plain notice can
+        # never inherit a stale chat link from an earlier task banner (055).
+        self._banner_chat = chat_id
         color = {
             "error": T.VARIANT_COLORS["error"][0],
             "warning": T.VARIANT_COLORS["warning"][0],
@@ -1685,14 +1700,21 @@ class MainWindow(QMainWindow):
         self._banner.setVisible(True)
 
     def _hide_banner(self) -> None:
+        self._banner_chat = None
         self._banner.setVisible(False)
         self._banner.setText("")
 
     def _on_banner_clicked(self) -> None:
-        """Banner click: cancel an in-flight startup sign-in, else dismiss."""
+        """Banner click: cancel an in-flight startup sign-in, open a linked
+        chat (055 background-task tap-to-open), else dismiss."""
         if self._login_active:
             self.cancel_login()
+            self._hide_banner()
+            return
+        chat = self._banner_chat
         self._hide_banner()
+        if chat:
+            self._load_chat(chat)
 
     def _set_composer_enabled(self, enabled: bool) -> None:
         """Enable/disable the message input + Send button (feature 044 FR-007 —
@@ -1705,9 +1727,16 @@ class MainWindow(QMainWindow):
         )
 
     # --- chrome actions -------------------------------------------------- #
+    def _set_active_chat(self, chat_id: Optional[str]) -> None:
+        """Single write point for the active chat: the canvas ctx follows it,
+        and the transport's register session_id tracks it so a reconnect's
+        re-register resumes this chat's fan-out + task replay (feature 055)."""
+        self.active_chat = chat_id
+        self.canvas.ctx.chat_id = chat_id
+        self.client.session_id = chat_id or "win-client"
+
     def _new_chat(self) -> None:
-        self.active_chat = None
-        self.canvas.ctx.chat_id = None
+        self._set_active_chat(None)
         self.rail.clear()
         self.rail.show_empty_hint()
         self.canvas.set_components([])
@@ -2179,6 +2208,13 @@ class MainWindow(QMainWindow):
             # Pull chrome state so the native dialogs + CTA are accurate.
             self.client.send_event("discover_agents", {})
             self.client.send_event("get_history", {})
+            if self.active_chat:
+                # 055: re-hydrate the chat that was open when the connection
+                # dropped, picking up narrative/canvas changes (and replayed
+                # background-task state) that landed while this device was
+                # away. Only a REconnect can get here with a chat open — the
+                # first connect precedes any chat.
+                self._load_chat(self.active_chat)
         elif s.startswith("auth_required"):
             self._begin_silent_refresh()
 
@@ -2254,6 +2290,9 @@ class MainWindow(QMainWindow):
         self.client = OrchestratorClient(
             self._url, token, device_caps(supported_types=native_types())
         )
+        # The rebuilt transport keeps registering with the open chat's id so
+        # the server resumes that chat's fan-out + task replay (055).
+        self.client.session_id = self.active_chat or "win-client"
         self.client.message.connect(self._on_message)
         self.client.status.connect(self._on_status)
         self.client.start()
@@ -2426,14 +2465,12 @@ class MainWindow(QMainWindow):
         elif t == "saved_components_list":
             self._refresh_saved_components(msg.get("components") or [])
         elif t == "chat_created":
-            self.active_chat = (msg.get("payload") or {}).get(
-                "chat_id"
-            ) or self.active_chat
-            self.canvas.ctx.chat_id = self.active_chat
+            self._set_active_chat(
+                (msg.get("payload") or {}).get("chat_id") or self.active_chat
+            )
         elif t == "chat_loaded":
             chat = msg.get("chat") or {}
-            self.active_chat = chat.get("id") or self.active_chat
-            self.canvas.ctx.chat_id = self.active_chat
+            self._set_active_chat(chat.get("id") or self.active_chat)
             self._replay_transcript(chat)
         elif t == "agent_list":
             self._agents = msg.get("agents") or []
@@ -2487,8 +2524,18 @@ class MainWindow(QMainWindow):
         elif t == "notification":
             title = msg.get("title") or ""
             body = msg.get("body") or ""
-            self._show_banner(f"{title}: {body}" if title else body,
-                              "error" if msg.get("level") == "error" else "info")
+            text = f"{title}: {body}" if title else body
+            kind = "error" if msg.get("level") == "error" else "info"
+            chat = frame_chat_id(msg)
+            if chat and chat == self.active_chat:
+                # 055: the notification targets the OPEN chat (e.g. a job that
+                # started on another device finished here) — reload it so the
+                # narrative + canvas refresh without user action.
+                self._show_banner(text, kind)
+                self._load_chat(chat)
+            else:
+                # Another (or no) chat: the banner carries a tap-to-open link.
+                self._show_banner(text, kind, chat_id=chat)
         elif t == "user_message_acked":
             self._set_turn_active(True)
             self.topbar.set_status("Working…", T.VARIANT_COLORS["accent"][0])
@@ -2502,10 +2549,29 @@ class MainWindow(QMainWindow):
                      or msg.get("message") or "working")
             self.topbar.set_status(str(label), T.VARIANT_COLORS["accent"][0])
         elif t == "task_started":
-            self._show_banner("Working on this in the background…")
+            chat = frame_chat_id(msg)
+            if chat and chat != self.active_chat:
+                # 055: a task began in a DIFFERENT chat (e.g. on another
+                # device) — an unobtrusive status notice, never a banner over
+                # this conversation.
+                self.topbar.set_status(
+                    "Background task running in another chat", T.MUTED)
+            else:
+                self._show_banner("Working on this in the background…")
         elif t == "task_completed":
             self._set_turn_active(False)
-            self._show_banner("Background task finished.")
+            chat = frame_chat_id(msg)
+            if chat and chat != self.active_chat:
+                # 055: finished elsewhere — tap-to-open toast, no canvas hijack.
+                self._show_banner(
+                    "Background task finished in another chat — click to open.",
+                    chat_id=chat)
+            else:
+                self._show_banner("Background task finished.")
+                if chat:
+                    # 055: the finished task's chat is on screen — reload it so
+                    # the narrative + canvas refresh without user action.
+                    self._load_chat(chat)
         elif t == "workspace_timeline_mode":
             self._timeline_mode = bool(msg.get("active") or msg.get("on"))
             # The canvas mirrors the flag: refine is disabled in its context

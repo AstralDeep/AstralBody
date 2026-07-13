@@ -204,7 +204,9 @@ async def test_async_mode_render_sequences_before_task_completed(env, monkeypatc
     watcher_frames = []
 
     class _Watcher:
-        async def send_json(self, data):
+        # 055: watcher notification arrives via send_text (encoding fix —
+        # send_json would double-encode over a real FastAPI socket).
+        async def send_text(self, data):
             watcher_frames.append((json.loads(data), len(_canvas_renders(ws))))
 
     ws.task.watchers.append(_Watcher())

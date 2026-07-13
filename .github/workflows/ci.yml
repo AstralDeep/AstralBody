@@ -201,6 +201,7 @@ jobs:
             -e FF_COMPONENT_REFINE=0 \
             -e FF_ARTIFACT_EXPORT=0 \
             -e FF_ARTIFACT_SHARING=0 \
+            -e FF_BG_CONTINUITY=0 \
             -w /app/backend --entrypoint bash astraldeep:ci \
             -c "python -m pytest -q -m 'not integration' && python -m pytest audit/tests llm_config/tests orchestrator/tests onboarding/tests personalization/tests scheduler/tests dreaming/tests verification/tests -q && python -m pytest tests/perf/concurrent_surfaces.py -q"
 

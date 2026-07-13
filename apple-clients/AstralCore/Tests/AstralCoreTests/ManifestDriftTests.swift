@@ -71,6 +71,14 @@ final class ManifestDriftTests: XCTestCase {
         }
     }
 
+    func testWatchHandlesNotificationForBackgroundContinuity() {
+        // 055 background-task continuity: a completion notification must reach
+        // the wrist. There is no watch test target to pin the reduce, so this
+        // pins the disposition — a regression to .ignored would silently drop
+        // background completions on the watch again.
+        XCTAssertEqual(ClientDispositions.watch.frames["notification"], .handled)
+    }
+
     func testWatchNativeSetIsWithinProfileVocabulary() {
         // The watch renders natively exactly what the watch ROTE profile can
         // emit — charts/tables/code are degraded server-side and must NOT be

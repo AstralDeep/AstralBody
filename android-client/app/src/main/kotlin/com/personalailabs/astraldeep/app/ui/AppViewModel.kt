@@ -196,8 +196,13 @@ class AppViewModel(
         session =
             viewModelScope.launch {
                 launch {
-                    client.stream(token, device, _state.value.activeChatId).collect { msg ->
-                        _state.value = reduce(_state.value, msg)
+                    client.stream(token, device) { _state.value.activeChatId }.collect { msg ->
+                        val before = _state.value
+                        _state.value = reduce(before, msg)
+                        // Cross-device continuity (audit item 12): a background
+                        // result landing in the OPEN chat re-issues load_chat so
+                        // narrative + canvas refresh without a manual reopen.
+                        continuityReloadTarget(before, msg)?.let(::requestChatRefresh)
                     }
                 }
                 launch {
@@ -217,7 +222,13 @@ class AppViewModel(
                                         historyLoading = false,
                                         auditLoading = false,
                                     )
-                                ConnectionState.Connected -> cur.copy(connection = c, everConnected = true)
+                                ConnectionState.Connected -> {
+                                    // (Re)registered with a chat open: re-issue
+                                    // load_chat to pull in anything delivered
+                                    // while this socket was down (continuity).
+                                    cur.activeChatId?.let(::requestChatRefresh)
+                                    cur.copy(connection = c, everConnected = true)
+                                }
                                 else -> cur.copy(connection = c)
                             }
                     }
@@ -499,8 +510,13 @@ class AppViewModel(
     }
 
     fun openChat(chatId: String) {
-        sendEvent("load_chat", buildJsonObject { put("chat_id", chatId) })
+        requestChatRefresh(chatId)
         _state.value = _state.value.copy(screen = Screen.Chat, viewingIndex = null)
+    }
+
+    /** Re-issue load_chat — the chat_loaded + trailing ui_render(canvas) rehydrate everything. */
+    private fun requestChatRefresh(chatId: String) {
+        sendEvent("load_chat", buildJsonObject { put("chat_id", chatId) })
     }
 
     /** Enable/disable a single tool of an agent (REST per-(tool,kind) write), then refresh. */
@@ -765,11 +781,23 @@ class AppViewModel(
             is Inbound.ToolProgress ->
                 s.copy(stepTrail = trailUpsert(s.stepTrail, "• ${msg.label}"))
             // The turn detached into a background task: keep the turn alive but let
-            // the UI relax — results will arrive when the task completes.
+            // the UI relax — results will arrive when the task completes. A task in
+            // ANOTHER chat (started on another device, audit item 12) must not touch
+            // this chat's turn state — unobtrusive banner only. A null chat_id
+            // (legacy flat frame) is treated as the open chat, as before.
             is Inbound.TaskStarted ->
-                s.copy(statusText = "Working in the background…", asyncDetached = true)
+                if (forOpenChat(msg.chatId, s)) {
+                    s.copy(statusText = "Working in the background…", asyncDetached = true)
+                } else {
+                    s.copy(banner = "Background task started in another chat", bannerKind = "info")
+                }
             is Inbound.TaskCompleted ->
-                commitTurn(s).copy(banner = "Background task finished", bannerKind = "info")
+                if (forOpenChat(msg.chatId, s)) {
+                    commitTurn(s).copy(banner = "Background task finished", bannerKind = "info")
+                } else {
+                    // The banner layer has no tap action — point at History instead.
+                    s.copy(banner = "Background task finished in another chat — open it from History", bannerKind = "info")
+                }
             is Inbound.Notification -> {
                 val text =
                     listOfNotNull(
@@ -823,6 +851,34 @@ class AppViewModel(
                 s
             }
             else -> s
+        }
+
+    /**
+     * A task frame targets the open chat. Foreign only when BOTH ids are known
+     * and differ — a null frame chat_id (legacy flat shape) and a not-yet-acked
+     * `activeChatId` (first turn) both count as ours, mirroring the UiUpsert
+     * drop guard.
+     */
+    private fun forOpenChat(
+        chatId: String?,
+        s: UiState,
+    ): Boolean = chatId == null || s.activeChatId == null || chatId == s.activeChatId
+
+    /**
+     * The chat to re-issue load_chat for after folding [msg] — a background task
+     * or scheduler notification that landed in the OPEN chat refreshes it in
+     * place (cross-device continuity, audit item 12); anything else (a different
+     * chat, or no chat named) reloads nothing. Pure → unit-tested; the send
+     * itself happens in [start]'s collect loop.
+     */
+    internal fun continuityReloadTarget(
+        s: UiState,
+        msg: Inbound,
+    ): String? =
+        when (msg) {
+            is Inbound.TaskCompleted -> msg.chatId?.takeIf { it == s.activeChatId }
+            is Inbound.Notification -> msg.chatId?.takeIf { it == s.activeChatId }
+            else -> null
         }
 
     /** Web-parity step line: ✓ completed · ✗ errored · • otherwise, then the name. */

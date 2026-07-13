@@ -142,13 +142,21 @@ sealed interface Inbound {
     data class ToolProgress(val label: String) : Inbound
 
     /** The turn detached into a background task (`task_started`). */
-    data class TaskStarted(val taskId: String?) : Inbound
+    data class TaskStarted(val taskId: String?, val chatId: String? = null) : Inbound
 
     /** A background task finished (`task_completed`). */
     data class TaskCompleted(val taskId: String?, val chatId: String?) : Inbound
 
-    /** A scheduler/system push (`notification`, feature 044). */
-    data class Notification(val title: String?, val body: String?, val level: String?) : Inbound
+    /**
+     * A scheduler/system push (`notification`, feature 044). [chatId] names the
+     * chat the job wrote into (055 continuity — the open chat reloads on it).
+     */
+    data class Notification(
+        val title: String?,
+        val body: String?,
+        val level: String?,
+        val chatId: String? = null,
+    ) : Inbound
 
     /**
      * Boot/refresh of stored user preferences (`user_preferences`, feature 044).

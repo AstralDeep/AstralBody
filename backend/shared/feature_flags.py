@@ -131,6 +131,14 @@ class FeatureFlags:
             # mint, hashed tokens, revocable). FAIL CLOSED — default OFF until
             # the operator deliberately enables public serving.
             "artifact_sharing": self._read("FF_ARTIFACT_SHARING", False),
+            # 055 cross-device background-task continuity: task_started/
+            # task_completed fan to every socket of the user; background
+            # (VirtualWebSocket) turns mirror their chat-rail narrative +
+            # terminal chat_status to real sockets on the chat; register_ui
+            # session resume + durable background_task replay; the scheduled
+            # fallback chat is created before the turn. Kill switch — OFF
+            # restores originator-only frames byte-identically. Default ON.
+            "bg_continuity": self._read("FF_BG_CONTINUITY", True),
         }
 
     @staticmethod
