@@ -79,6 +79,26 @@ class WireTest {
         assertEquals(3, r.seq)
         assertEquals(false, r.terminal)
         assertEquals(1, r.components.size)
+        // No component_id on the wire (legacy/narrative stream) — null, never a default.
+        assertEquals(null, r.componentId)
+    }
+
+    @Test
+    fun decodes_stream_component_id_additive_field() {
+        val data =
+            assertIs<Inbound.UiStreamData>(
+                Wire.decode(
+                    """{"type":"ui_stream_data","stream_id":"s1","seq":1,"components":[{"type":"text"}],"component_id":"wc_abc"}""",
+                ),
+            )
+        assertEquals("wc_abc", data.componentId)
+        val sub =
+            assertIs<Inbound.StreamSubscribed>(
+                Wire.decode("""{"type":"stream_subscribed","stream_id":"s1","tool_name":"ticker","component_id":"wc_abc"}"""),
+            )
+        assertEquals("wc_abc", sub.componentId)
+        val bare = assertIs<Inbound.StreamSubscribed>(Wire.decode("""{"type":"stream_subscribed","stream_id":"s1","tool_name":"ticker"}"""))
+        assertEquals(null, bare.componentId)
     }
 
     @Test

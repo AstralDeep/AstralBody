@@ -1,7 +1,8 @@
 /* Thin server-driven UI client.
  * The orchestrator renders astralprims primitives to HTML (ROTE-adapted) and
  * pushes it over the WebSocket protocol. This client inserts the
- * server-rendered `html`, merges streamed chunks by stream_id, initializes
+ * server-rendered `html`, merges streamed chunks (keyed by component_id when
+ * bridged to a workspace identity, else stream_id), initializes
  * Plotly charts, and posts user actions back as {type:"ui_event", action, payload}.
  * No build step. */
 (function () {
@@ -286,6 +287,19 @@
   // Each op targets [data-component-id]: replace the node in place when it
   // exists (no flicker, neighbors untouched), append when new, remove on op
   // 'remove'. Side effects (Plotly/theme) re-run on inserted subtrees only.
+  function componentSelector(id) {
+    return '[data-component-id="' + (window.CSS && CSS.escape ? CSS.escape(id) : id) + '"]';
+  }
+  function ensureRenderer() {
+    var renderer = canvas.querySelector(".dynamic-renderer");
+    if (!renderer) {
+      renderer = document.createElement("div");
+      renderer.className = "dynamic-renderer space-y-3";
+      canvas.innerHTML = "";
+      canvas.appendChild(renderer);
+    }
+    return renderer;
+  }
   function applyUpsert(msg) {
     if (msg.chat_id && activeChatId && msg.chat_id !== activeChatId) return;
     if (timelineMode) {
@@ -295,18 +309,11 @@
     hideSkeleton(); // first canvas content of the turn
     var ops = msg.ops || [];
     if (ops.length) hideCanvasEmpty(); // content is arriving on the canvas
-    var renderer = canvas.querySelector(".dynamic-renderer");
-    if (!renderer) {
-      renderer = document.createElement("div");
-      renderer.className = "dynamic-renderer space-y-3";
-      canvas.innerHTML = "";
-      canvas.appendChild(renderer);
-    }
+    var renderer = ensureRenderer();
     for (var i = 0; i < ops.length; i++) {
       var op = ops[i];
       if (!op || !op.component_id) continue;
-      var sel = '[data-component-id="' + (window.CSS && CSS.escape ? CSS.escape(op.component_id) : op.component_id) + '"]';
-      var node = canvas.querySelector(sel);
+      var node = canvas.querySelector(componentSelector(op.component_id));
       if (op.op === "remove") {
         if (node) node.parentNode.removeChild(node);
         continue;
@@ -322,15 +329,32 @@
     }
   }
 
+  // Plotly keeps per-node state and handlers; purge a node's charts before it
+  // is replaced. The bundle is lazy-loaded (052) — nothing to purge before it
+  // exists.
+  function purgeCharts(node) {
+    if (!node || typeof Plotly === "undefined") return;
+    var els = node.querySelectorAll(".astral-chart");
+    for (var i = 0; i < els.length; i++) {
+      if (els[i].dataset.rendered) { try { Plotly.purge(els[i]); } catch (e) {} }
+    }
+  }
+
   // ---- streaming merge: replace-or-append a per-stream node keyed by stream_id ----
+  // Frames carrying component_id (055 stream→artifact bridge, wire-contract
+  // §2) are keyed by [data-component-id] from the FIRST frame instead — no
+  // stream-<id> node ever exists for them — so the terminal persist ui_upsert
+  // replaces the same node in place rather than double-rendering.
+  var streamChartPlot = {}; // stream_id → last chart re-plot ms (interim ≤1/s)
   function mergeStream(msg) {
-    var id = "stream-" + msg.stream_id;
-    var node = document.getElementById(id);
     var htmlStr = msg.html || "";
     if (msg.error) {
       htmlStr = '<div class="text-xs text-red-400 border border-red-500/20 rounded p-2">' +
         escapeText(msg.error.message || "stream error") + "</div>";
     }
+    if (msg.component_id) { mergeKeyedStream(msg, htmlStr); return; }
+    var id = "stream-" + msg.stream_id;
+    var node = document.getElementById(id);
     if (!htmlStr && !msg.terminal) return;
     hideSkeleton(); // streamed canvas content counts as the first component
     if (node) { node.innerHTML = htmlStr; processSideEffects(node); }
@@ -339,6 +363,35 @@
       node = document.createElement("div"); node.id = id; node.innerHTML = htmlStr;
       canvas.appendChild(node); processSideEffects(node);
     }
+  }
+  function mergeKeyedStream(msg, htmlStr) {
+    if (msg.terminal) delete streamChartPlot[msg.stream_id];
+    else if (htmlStr.indexOf("astral-chart") !== -1) {
+      // Chart-bearing interim frames re-plot at most once per second per
+      // stream (leak/flicker guard); the terminal frame always renders.
+      var now = Date.now();
+      if (now - (streamChartPlot[msg.stream_id] || 0) < 1000) return;
+      streamChartPlot[msg.stream_id] = now;
+    }
+    if (!htmlStr) return; // empty terminal: keep the last content for the persist upsert
+    hideSkeleton(); // streamed canvas content counts as the first component
+    var node = canvas.querySelector(componentSelector(msg.component_id));
+    var holder = document.createElement("div");
+    holder.innerHTML = htmlStr;
+    var fresh = holder.firstElementChild;
+    if (!fresh) return;
+    if (holder.children.length > 1 ||
+        fresh.getAttribute("data-component-id") !== msg.component_id) {
+      // Client-built error html (and any fragment the server did not wrap)
+      // still needs the identity anchor or later frames would append copies.
+      fresh = document.createElement("div");
+      fresh.setAttribute("data-component-id", msg.component_id);
+      while (holder.firstChild) fresh.appendChild(holder.firstChild);
+    }
+    purgeCharts(node);
+    if (node) node.replaceWith(fresh);
+    else { hideCanvasEmpty(); ensureRenderer().appendChild(fresh); }
+    processSideEffects(fresh);
   }
 
   // ---- incoming messages ----
@@ -389,6 +442,22 @@
         if (data.seq <= last) return; streamSeq[data.stream_id] = data.seq;
         mergeStream(data);
         if (data.terminal) delete streamSeq[data.stream_id];
+        break;
+      }
+      case "stream_subscribed": {
+        // component_id-bridged streams get a keyed placeholder (wire-contract
+        // §2) so the first frame and the terminal persist upsert replace it
+        // in place; legacy subscriptions need no node until data arrives.
+        if (!data.component_id) break;
+        if (data.session_id && activeChatId && data.session_id !== activeChatId) break;
+        if (canvas.querySelector(componentSelector(data.component_id))) break;
+        hideSkeleton(); hideCanvasEmpty();
+        var ph = document.createElement("div");
+        ph.setAttribute("data-component-id", data.component_id);
+        ph.innerHTML = '<div class="astral-skeleton" role="status" aria-busy="true">'
+          + '<span class="sr-only">Loading…</span>'
+          + '<div class="astral-skeleton-line h-20 w-full"></div></div>';
+        ensureRenderer().appendChild(ph);
         break;
       }
       case "chrome_render": // server-rendered chrome regions
@@ -553,6 +622,7 @@
     activeChatId = null;
     timelineMode = false;
     streamSeq = {};
+    streamChartPlot = {};
     stepEls = {};
     hideSkeleton();
     chat.innerHTML = "";

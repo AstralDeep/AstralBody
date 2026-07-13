@@ -57,8 +57,10 @@ object Wire {
                     terminal = root.bool("terminal") ?: false,
                     error = errorFromJson(root.obj("error")),
                     toolName = root.str("tool_name"),
+                    componentId = root.str("component_id"),
                 )
-            "stream_subscribed" -> Inbound.StreamSubscribed(root.str("stream_id"), root.str("tool_name"))
+            "stream_subscribed" ->
+                Inbound.StreamSubscribed(root.str("stream_id"), root.str("tool_name"), root.str("component_id"))
             "stream_error" -> {
                 val payload = root.obj("payload")
                 Inbound.StreamErrorMsg(

@@ -2,6 +2,8 @@ package com.personalailabs.astraldeep.core.streaming
 
 import com.personalailabs.astraldeep.core.protocol.Inbound
 import com.personalailabs.astraldeep.core.protocol.StreamError
+import com.personalailabs.astraldeep.core.sdui.Canvas
+import com.personalailabs.astraldeep.core.sdui.CanvasOp
 import com.personalailabs.astraldeep.core.sdui.Component
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
@@ -19,7 +21,8 @@ private fun frame(
     terminal: Boolean = false,
     error: StreamError? = null,
     toolName: String? = null,
-) = Inbound.UiStreamData(streamId, sessionId, seq, components, terminal, error, toolName)
+    componentId: String? = null,
+) = Inbound.UiStreamData(streamId, sessionId, seq, components, terminal, error, toolName, componentId)
 
 class StreamingTest {
     @Test
@@ -97,5 +100,42 @@ class StreamingTest {
         val ops = streamErrorOps(Inbound.StreamErrorMsg("stream_subscribe", "chatA", "s1", null, StreamError("blocked", "no")))
         assertEquals(streamNodeId("s1"), ops[0].componentId)
         assertEquals("alert", ops[0].component?.type)
+    }
+
+    // ---- 055 stream→artifact bridge: component_id keying (wire-contract §2) ----
+
+    @Test
+    fun bridged_frame_keyed_by_component_id_not_stream_node() {
+        val ops = streamFrameToOps(frame(componentId = "wc_abc"), null, mutableMapOf())
+        assertEquals("wc_abc", ops[0].componentId)
+        assertEquals("wc_abc", ops[0].component?.id)
+    }
+
+    @Test
+    fun bridged_subscribe_ack_keyed_by_component_id() {
+        val ops = subscribeAckOps(Inbound.StreamSubscribed("s1", "ticker", "wc_abc"))
+        assertEquals("wc_abc", ops[0].componentId)
+    }
+
+    @Test
+    fun bridged_seq_dedupe_still_keyed_on_stream_id() {
+        val seq = mutableMapOf<String, Int>()
+        assertTrue(streamFrameToOps(frame(seq = 1, componentId = "wc_abc"), null, seq).isNotEmpty())
+        assertEquals(1, seq["s1"])
+        assertTrue("wc_abc" !in seq)
+        assertTrue(streamFrameToOps(frame(seq = 1, componentId = "wc_abc"), null, seq).isEmpty())
+    }
+
+    @Test
+    fun terminal_persist_upsert_replaces_bridged_node_no_double_render() {
+        val seq = mutableMapOf<String, Int>()
+        var canvas = Canvas.apply(emptyList(), subscribeAckOps(Inbound.StreamSubscribed("s1", "ticker", "wc_abc")))
+        canvas = Canvas.apply(canvas, streamFrameToOps(frame(seq = 1, componentId = "wc_abc"), null, seq))
+        canvas = Canvas.apply(canvas, streamFrameToOps(frame(seq = 2, terminal = true, componentId = "wc_abc"), null, seq))
+        // The server's terminal persist ui_upsert under the same identity.
+        canvas = Canvas.apply(canvas, listOf(CanvasOp("upsert", "wc_abc", comp("card").copy(id = "wc_abc"))))
+        assertEquals(1, canvas.size)
+        assertEquals("card", canvas[0].type)
+        assertTrue(canvas.none { it.id?.startsWith(STREAM_NODE_PREFIX) == true })
     }
 }

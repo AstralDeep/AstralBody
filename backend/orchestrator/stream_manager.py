@@ -61,12 +61,16 @@ import hashlib
 import json
 import logging
 import random
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import (
     Any, Awaitable, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING,
 )
+
+from orchestrator.workspace import fingerprint as workspace_fingerprint
+from shared.feature_flags import flags
 
 if TYPE_CHECKING:  # pragma: no cover
     from fastapi import WebSocket
@@ -165,7 +169,9 @@ class StreamSubscription:
     agent_id: str
     params: Dict[str, Any]
     params_hash: str
-    component_id: str  # equals stream_id; convenience accessor
+    # 055 US2: workspace rule-2 fingerprint when FF_STREAM_ARTIFACTS bridged
+    # this stream at subscribe; equals stream_id when unbridged (legacy).
+    component_id: str
     subscribers: List["WebSocket"] = field(default_factory=list)
     created_at: float = field(default_factory=time.monotonic)
     last_chunk_at: Optional[float] = None
@@ -189,6 +195,11 @@ class StreamSubscription:
     delivered_count: int = 0
     dropped_count: int = 0
 
+    # 055 US2: newest chunk carrying component content (heartbeats/empty
+    # deltas never overwrite it) — the orchestrator's persist-on-terminal
+    # payload. Only ever set on bridged subscriptions; never persisted here.
+    retained_chunk: Optional[StreamChunk] = field(default=None, repr=False)
+
     # Per-tool metadata snapshot (so we don't have to look it up on every chunk)
     max_chunk_bytes: int = DEFAULT_MAX_CHUNK_BYTES
     max_fps: int = DEFAULT_MAX_FPS
@@ -197,6 +208,12 @@ class StreamSubscription:
     @property
     def key(self) -> StreamKey:
         return (self.user_id, self.chat_id, self.tool_name, self.params_hash)
+
+    @property
+    def bridged_component_id(self) -> Optional[str]:
+        """Workspace identity assigned by the 055 bridge, or None when
+        unbridged — unbridged frames must stay byte-identical to pre-055."""
+        return self.component_id if self.component_id != self.stream_id else None
 
 
 # =============================================================================
@@ -257,6 +274,102 @@ def classify_error(code: str) -> ErrorClass:
     explicitly enumerated and never auto-retried (security carve-out).
     """
     return _ERROR_CLASSIFICATION.get(code, "transient")
+
+
+#: A line-leading list marker ("* ", "- ", "3. ") — its "*" is a bullet, not
+#: an emphasis opener, and a boundary before any item content would flash the
+#: bare marker as literal text (webrender/sanitize.py _LIST_START).
+_LIST_MARKER = re.compile(r"\s*(?:[-*]|\d+\.)[ \t]+")
+
+
+def _inline_safe_len(line: str) -> int:
+    """Last safe whitespace boundary within one (partial) line: the offset
+    just past the last whitespace reached with every inline ``**``/``*``/
+    backtick/``[label](target`` span closed. Pure function; conservative —
+    an ambiguous trailing token is simply held."""
+    marker = _LIST_MARKER.match(line)
+    content_start = marker.end() if marker else 0
+    bold = italic = code = False
+    link_depth = 0
+    in_target = False        # inside the (...) of [label](target)
+    pending_target = False   # "]" just closed the label; "(" opens the target
+    safe = 0
+    i, n = 0, len(line)
+    while i < n:
+        ch = line[i]
+        if pending_target:
+            pending_target = False
+            if ch == "(":
+                in_target = True
+                i += 1
+                continue
+        if ch == "\\" and not code:
+            i += 2
+            continue
+        if ch == "`":
+            code = not code
+            i += 1
+            continue
+        if code:
+            i += 1
+            continue
+        if in_target:
+            if ch == ")":
+                in_target = False
+            i += 1
+            continue
+        if ch == "*":
+            run = 1
+            while i + run < n and line[i + run] == "*":
+                run += 1
+            if i >= content_start:
+                if (run // 2) % 2:
+                    bold = not bold
+                if run % 2:
+                    italic = not italic
+            i += run
+            continue
+        if ch == "[":
+            link_depth += 1
+        elif ch == "]" and link_depth:
+            link_depth -= 1
+            if not link_depth:
+                pending_target = True
+        elif ch.isspace() and i > content_start and not (bold or italic or link_depth):
+            safe = i + 1
+        i += 1
+    return safe
+
+
+def markdown_safe_prefix_len(text: str) -> int:
+    """Length of the longest prefix of ``text`` safe to ship as an incremental
+    narrative frame (055 research D5, spec FR-013).
+
+    Safe = ends at a whitespace boundary outside every unclosed ``**``/``*``/
+    backtick (incl. ``` fence)/``[link(`` span, so no frame ever renders a
+    dangling markup token. A completed line outside a fence is always safe:
+    the renderer applies inline spans per line (webrender/sanitize.py), so a
+    finished line's rendering can never change as text is appended. Returns 0
+    while no boundary exists yet — the caller flushes the held tail on the
+    terminal chunk. Monotonic under appended text: a boundary once safe stays
+    safe (frames are cumulative and must never shrink).
+    """
+    safe = 0
+    fence = False
+    pos = 0
+    lines = text.split("\n")
+    for line in lines[:-1]:
+        pos += len(line) + 1
+        if line.strip().startswith("```"):
+            fence = not fence
+        if not fence:
+            safe = pos
+    tail = lines[-1]
+    if not fence and not tail.lstrip().startswith("```"):
+        tail_safe = _inline_safe_len(tail)
+        if tail_safe:
+            safe = pos + tail_safe
+    return safe
 
 
 # =============================================================================
@@ -464,7 +577,10 @@ class StreamManager:
             agent_id=agent_id,
             params=params,
             params_hash=ph,
-            component_id=stream_id,
+            component_id=(
+                workspace_fingerprint(agent_id, tool_name, params)
+                if flags.is_enabled("stream_artifacts") else stream_id
+            ),
             subscribers=[ws],
             state=StreamState.STARTING,
             max_chunk_bytes=max_chunk_bytes,
@@ -683,6 +799,8 @@ class StreamManager:
             "terminal": chunk.terminal,
             "error": chunk.error,
         }
+        if sub.bridged_component_id is not None:
+            wire_msg["component_id"] = sub.bridged_component_id
         await self._send_to_ws(ws, json.dumps(wire_msg))
 
     async def resume(self, ws: "WebSocket", user_id: str, chat_id: str) -> List[Tuple[str, str]]:
@@ -799,6 +917,29 @@ class StreamManager:
         return resumed
 
     # ------------------------------------------------------------------
+    # 055 US2: lookups for the orchestrator's stream_subscribed builders
+    # and persist-on-terminal wrapper
+    # ------------------------------------------------------------------
+
+    def subscription_for_stream(self, stream_id: str) -> Optional[StreamSubscription]:
+        """Look up a subscription by stream_id — active first, then dormant."""
+        for sub in self._active.values():
+            if sub.stream_id == stream_id:
+                return sub
+        for entries in self._dormant.values():
+            for sub in entries.values():
+                if sub.stream_id == stream_id:
+                    return sub
+        return None
+
+    def component_id_for(self, stream_id: str) -> Optional[str]:
+        """Bridged workspace identity for a stream, or None when unbridged
+        (flag off) or unknown — ``stream_subscribed`` carries it only when
+        non-None so legacy acks stay byte-identical."""
+        sub = self.subscription_for_stream(stream_id)
+        return sub.bridged_component_id if sub is not None else None
+
+    # ------------------------------------------------------------------
     # Inbound from agent
     # ------------------------------------------------------------------
 
@@ -873,6 +1014,9 @@ class StreamManager:
             terminal=bool(getattr(msg, "terminal", False)),
         )
         sub.last_chunk_at = time.monotonic()
+
+        if chunk.components and sub.bridged_component_id is not None:
+            sub.retained_chunk = chunk
 
         # Last-write-wins: any previously-queued chunk is overwritten.
         if sub.coalesce_slot is not None:
@@ -1201,6 +1345,8 @@ class StreamManager:
                     "terminal": chunk.terminal,
                     "error": chunk.error,
                 }
+                if sub.bridged_component_id is not None:
+                    wire_msg["component_id"] = sub.bridged_component_id
                 await self._send_to_ws(ws, json.dumps(wire_msg))
                 sub.delivered_count += 1
             except Exception as e:  # pragma: no cover

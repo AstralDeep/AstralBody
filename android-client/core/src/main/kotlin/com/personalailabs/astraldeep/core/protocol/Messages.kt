@@ -78,9 +78,15 @@ sealed interface Inbound {
         val terminal: Boolean,
         val error: StreamError?,
         val toolName: String?,
+        /** 055 additive field — workspace identity when the stream is bridged; absent on legacy streams. */
+        val componentId: String? = null,
     ) : Inbound
 
-    data class StreamSubscribed(val streamId: String?, val toolName: String?) : Inbound
+    data class StreamSubscribed(
+        val streamId: String?,
+        val toolName: String?,
+        val componentId: String? = null,
+    ) : Inbound
 
     data class StreamErrorMsg(
         val requestAction: String?,

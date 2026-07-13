@@ -59,7 +59,7 @@ from rote.rote import ROTE
 from shared.feature_flags import flags
 from shared.llm_text import strip_reasoning_markup
 from shared.perf import perf_span
-from orchestrator.stream_manager import StreamManager
+from orchestrator.stream_manager import StreamManager, markdown_safe_prefix_len
 
 load_dotenv(override=False)
 
@@ -190,11 +190,31 @@ _LEAKED_TOOL_CALL_PATTERNS = [
     # standalone <｜DSML｜invoke ...></｜DSML｜invoke> blocks.
     re.compile(r"<｜DSML｜tool_calls>.*?</｜DSML｜tool_calls>", re.DOTALL),
     re.compile(r"<｜DSML｜invoke[^>]*>.*?</｜DSML｜invoke>", re.DOTALL),
+    # 055 (D6) — XML-ish pseudo-call syntax observed live: a tool name glued
+    # onto <arg_key>/<arg_value> trains (`update_component<arg_key>…`).
+    # The composite (name + closed pairs) must run before the nameless pair
+    # pattern so the name prefix is removed with its train; a truncated train
+    # (opener never closed) strips to end-of-text — everything after it is
+    # protocol syntax, not prose.
+    re.compile(
+        r"[A-Za-z_][A-Za-z0-9_]*\s*(?:<arg_key>.*?</arg_key>\s*(?:<arg_value>.*?</arg_value>)?\s*)+",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(r"<arg_(?:key|value)>.*?</arg_(?:key|value)>", re.IGNORECASE | re.DOTALL),
+    re.compile(
+        r"(?:[A-Za-z_][A-Za-z0-9_]*\s*)?<arg_(?:key|value)>.*$",
+        re.IGNORECASE | re.DOTALL,
+    ),
     # Stray dangling open tags with no close
     re.compile(r"<\|?tool_call\|?>", re.IGNORECASE),
     re.compile(r"<\|tool_calls_section_(?:begin|end)\|>", re.IGNORECASE),
     re.compile(r"\[/?TOOL_CALLS\]", re.IGNORECASE),
     re.compile(r"</?｜DSML｜[^>]*>"),
+    re.compile(r"</?arg_(?:key|value)>", re.IGNORECASE),
+    # 055 (D6) — NAME@true attribute trains riding alongside the pseudo-calls
+    # (`NEW_PAGE@true`). Anchored on a boolean so addresses like a@b.com
+    # survive.
+    re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*@(?:true|false)\b", re.IGNORECASE),
 ]
 
 
@@ -253,6 +273,63 @@ class ToolDiagnostic(NamedTuple):
     reason: Optional[str]
 
 
+def _strip_toolcall_leakage(content: str) -> str:
+    """Remove leaked tool-call markup from model-authored text (055 D6).
+
+    Shared by the final-text sanitizer, the chat narrative, the canvas
+    doc-card promotion, and the round-summary path. Returns the stripped
+    text (possibly empty) — each caller owns its honest fallback.
+    """
+    cleaned = content or ""
+    for pat in _LEAKED_TOOL_CALL_PATTERNS:
+        cleaned = pat.sub("", cleaned)
+    return cleaned.strip()
+
+
+# 055 (D6): honest fallback when stripping empties a model response — the
+# user gets a short actionable line instead of an empty bubble/card; the raw
+# payload goes to the diagnostic log only, never the render surface.
+_LEAK_FALLBACK_TEXT = (
+    "The AI model's response contained only tool-call markup, so there is "
+    "nothing to show for this turn. Please try again."
+)
+
+
+def _log_stripped_empty(surface: str, chat_id: Optional[str], raw: str) -> None:
+    logger.warning(
+        "toolcall_leak.stripped_empty surface=%s chat=%s raw=%r",
+        surface, chat_id, raw[:500],
+    )
+
+
+def _tag_source(comp, agent_id, tool_name, tool_params=None, correlation_id=None):
+    """Recursively tag a component dict and all nested children with source
+    metadata (055 US2: hoisted from handle_chat_message so the stream
+    persist-on-terminal path stamps identical provenance).
+
+    `tool_params` is only tagged on the top-level node — the auto-subscribe
+    path reads it there to replay the same arguments on `stream_subscribe`.
+
+    Feature 004: `correlation_id` is the audit-log id of the originating
+    tool dispatch. When present, every component (including nested children)
+    carries it so the frontend can scope user feedback to the originating
+    dispatch.
+    """
+    if not isinstance(comp, dict):
+        return
+    comp["_source_agent"] = agent_id
+    comp["_source_tool"] = tool_name
+    if tool_params is not None:
+        comp["_source_params"] = tool_params
+    if correlation_id is not None:
+        comp["_source_correlation_id"] = correlation_id
+    for key in ("content", "children"):
+        nested = comp.get(key)
+        if isinstance(nested, list):
+            for child in nested:
+                _tag_source(child, agent_id, tool_name, correlation_id=correlation_id)
+
+
 def _sanitize_text_response(content: str) -> str:
     """Strip leaked tool-call tokens from a text response.
 
@@ -269,10 +346,7 @@ def _sanitize_text_response(content: str) -> str:
     """
     if not content:
         return content
-    cleaned = content
-    for pat in _LEAKED_TOOL_CALL_PATTERNS:
-        cleaned = pat.sub("", cleaned)
-    cleaned = cleaned.strip()
+    cleaned = _strip_toolcall_leakage(content)
     if not cleaned:
         return (
             "No agents are currently enabled, so I can't run that for you. "
@@ -1091,6 +1165,10 @@ class Orchestrator:
             # never send these messages so the branches are never taken.
             elif isinstance(msg, ToolStreamData) and flags.is_enabled("tool_streaming"):
                 if self.stream_manager is not None:
+                    # 055 US2: capture the bridged subscription BEFORE the
+                    # frame is processed — an error chunk can resolve the
+                    # stream terminally, tearing the record down.
+                    sub = self._bridged_stream_subscription(msg.stream_id)
                     try:
                         await self.stream_manager.handle_agent_chunk(msg)
                     except NotImplementedError:
@@ -1101,9 +1179,12 @@ class Orchestrator:
                             f"ToolStreamData received but stream_manager handler "
                             f"not yet implemented (stream_id={msg.stream_id})"
                         )
+                    if sub is not None:
+                        await self._persist_stream_terminal(sub)
 
             elif isinstance(msg, ToolStreamEnd) and flags.is_enabled("tool_streaming"):
                 if self.stream_manager is not None:
+                    sub = self._bridged_stream_subscription(msg.stream_id)
                     try:
                         await self.stream_manager.handle_agent_end(msg)
                     except NotImplementedError:
@@ -1111,6 +1192,8 @@ class Orchestrator:
                             f"ToolStreamEnd received but stream_manager handler "
                             f"not yet implemented (stream_id={msg.stream_id})"
                         )
+                    if sub is not None:
+                        await self._persist_stream_terminal(sub)
 
         except Exception as e:
             logger.error(f"Error handling agent message: {e}")
@@ -1800,7 +1883,7 @@ class Orchestrator:
                                 )
                                 for resumed_stream_id, resumed_tool_name in resumed:
                                     cfg = self._streamable_tools.get(resumed_tool_name, {})
-                                    await self._safe_send(websocket, json.dumps({
+                                    resumed_ack = {
                                         "type": "stream_subscribed",
                                         "stream_id": resumed_stream_id,
                                         "tool_name": resumed_tool_name,
@@ -1809,7 +1892,14 @@ class Orchestrator:
                                         "max_fps": cfg.get("max_fps", 30),
                                         "min_fps": cfg.get("min_fps", 5),
                                         "attached": False,
-                                    }))
+                                    }
+                                    # 055 US2: keep the resumed placeholder on
+                                    # its workspace identity (wire-contract §2).
+                                    resumed_cid = self.stream_manager.component_id_for(
+                                        resumed_stream_id)
+                                    if resumed_cid is not None:
+                                        resumed_ack["component_id"] = resumed_cid
+                                    await self._safe_send(websocket, json.dumps(resumed_ack))
                             except Exception as e:
                                 logger.warning(f"stream_manager.resume failed: {e}")
                     else:
@@ -3999,33 +4089,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                             "final answer now without calling more tools.")})
                         tools_desc = []
 
-                    # Collect tool UI components and tag each (recursively) with source metadata
-                    def _tag_source(comp, agent_id, tool_name, tool_params=None, correlation_id=None):
-                        """Recursively tag a component dict and all nested children.
-
-                        `tool_params` is only tagged on the top-level node — the
-                        frontend auto-subscribe path reads it there to replay the
-                        same arguments on `stream_subscribe`.
-
-                        Feature 004: `correlation_id` is the audit-log id of the
-                        originating tool dispatch. When present, every component
-                        (including nested children) carries it so the frontend
-                        can scope user feedback to the originating dispatch.
-                        """
-                        if not isinstance(comp, dict):
-                            return
-                        comp["_source_agent"] = agent_id
-                        comp["_source_tool"] = tool_name
-                        if tool_params is not None:
-                            comp["_source_params"] = tool_params
-                        if correlation_id is not None:
-                            comp["_source_correlation_id"] = correlation_id
-                        for key in ("content", "children"):
-                            nested = comp.get(key)
-                            if isinstance(nested, list):
-                                for child in nested:
-                                    _tag_source(child, agent_id, tool_name, correlation_id=correlation_id)
-
+                    # Collect tool UI components and tag each (recursively)
+                    # with source metadata (module-level _tag_source).
                     tool_ui_components = []
                     for i_tc, res in enumerate(tool_results):
                         if res and res.ui_components and not res.error:
@@ -4342,7 +4407,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                                     Text(content="The full write-up is on the canvas.",
                                          variant="caption").to_dict()]
                             else:
-                                chat_core = self._chat_narrative(content)
+                                chat_core = self._chat_narrative(content, chat_id=chat_id)
                             final_ops = await self._send_or_replace_components(
                                 websocket, parsed_components, chat_id, user_id=user_id
                             ) or []
@@ -4371,7 +4436,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                                 Text(content="The full write-up is on the canvas.",
                                      variant="caption").to_dict()]
                         else:
-                            chat_core = self._chat_narrative(content)
+                            chat_core = self._chat_narrative(content, chat_id=chat_id)
                         response_components = (list(leak_alerts) + chat_core
                                                + [self._provenance_caption(_tools_ran)])
                         # Feature 030: text-only turns for a never-configured
@@ -4954,7 +5019,10 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         response (no UI frames); ``content`` ⇒ progressively emit the
         narrative as ``ui_stream_data`` frames scoped to ``chat_id``
         (JSON/fence-shaped output stays silent — it is a component payload the
-        final render must deliver whole). Returns a response object shaped
+        final render must deliver whole). Frames are held back to the last
+        safe markdown boundary so none ships a dangling ``**``/``*``/backtick/
+        ``[`` token (055 FR-013); end-of-stream flushes the full text before
+        the terminal clear. Returns a response object shaped
         like the non-streamed one; any failure propagates so the caller
         retries the call non-streaming (contracts/narrative-streaming.md).
         """
@@ -4979,6 +5047,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         stream_id = "narrative-" + _uuid.uuid4().hex[:12]
         seq = 0
         emitted = False
+        sent_len = 0
         last_emit = 0.0
         try:
             while True:
@@ -5023,12 +5092,25 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                             mode = "silent" if head[0] in "{[`" else "content"
                     if mode == "content" and (
                             not emitted or time.monotonic() - last_emit >= 0.15):
-                        await self._emit_narrative_frame(
-                            websocket, chat_id, stream_id, seq,
-                            "".join(content_parts), terminal=False)
-                        seq += 1
-                        emitted = True
-                        last_emit = time.monotonic()
+                        cumulative = "".join(content_parts)
+                        safe_len = markdown_safe_prefix_len(cumulative)
+                        if safe_len > sent_len:
+                            await self._emit_narrative_frame(
+                                websocket, chat_id, stream_id, seq,
+                                cumulative[:safe_len], terminal=False)
+                            seq += 1
+                            emitted = True
+                            sent_len = safe_len
+                            last_emit = time.monotonic()
+            if mode == "content":
+                # Terminal flush: ship the tail held past the last safe
+                # boundary before the clearing frame (055 FR-013).
+                full = "".join(content_parts)
+                if len(full) > sent_len:
+                    await self._emit_narrative_frame(
+                        websocket, chat_id, stream_id, seq, full, terminal=False)
+                    seq += 1
+                    emitted = True
             if emitted:
                 await self._emit_narrative_frame(
                     websocket, chat_id, stream_id, seq, "", terminal=True)
@@ -5394,8 +5476,11 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     usage=usage, outcome="success",
                 )
 
-            summary_text = strip_reasoning_markup(response.choices[0].message.content or "")
-            summary_text = summary_text.strip()
+            raw_summary = strip_reasoning_markup(response.choices[0].message.content or "").strip()
+            summary_text = _strip_toolcall_leakage(raw_summary)
+            if raw_summary and not summary_text:
+                _log_stripped_empty("tool_summary", chat_id, raw_summary)
+                summary_text = _LEAK_FALLBACK_TEXT
 
             if summary_text:
                 # Feature 029 (FR-027): contextual title over the constant
@@ -5732,6 +5817,11 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             return MCPResponse(error={"message": msg, "retryable": True},
                                ui_components=[alert.to_dict()])
 
+        # 055 US2: the LLM-authored params as written, captured before
+        # path-mapping / credential injection mutate `args` — the stream
+        # bridge identity must fingerprint what `_source_params` will carry.
+        stream_params = dict(args)
+
         # Feature 027 — orchestrator meta-tools dispatch before the agent
         # gates (the pseudo-agent has no scopes/credentials; ownership and
         # approval gates live inside the handler — contracts/agentic-creation.md).
@@ -6063,6 +6153,11 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 "tool_name": tool_name,
             }
 
+        # 055 US2: a push-streamable tool also streams — subscribe this
+        # user's sockets on the chat before the one-shot dispatch (fail-open).
+        await self._auto_subscribe_stream_artifacts(
+            websocket, chat_id, user_id, tool_name, stream_params)
+
         # Audit: record the tool dispatch (in_progress → success/failure)
         from audit.hooks import ToolDispatchAudit
         claims = self.ui_sessions.get(websocket) if websocket is not None else None
@@ -6249,6 +6344,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 prepared.append((idx, tc, tool_name, agent_id, None, _arg_err()))
                 continue
 
+            # 055 US2: LLM-authored params as written (see execute_single_tool).
+            stream_params = dict(args)
+
             if chat_id:
                 args = await asyncio.to_thread(
                     self._map_file_paths, chat_id, args, user_id=user_id)
@@ -6302,6 +6400,10 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     return MCPResponse(error={"message": f"No agent for {tn}"})
                 prepared.append((idx, tc, tool_name, agent_id, None, _no_agent()))
                 continue
+
+            # 055 US2: streaming-capable tools in a parallel wave subscribe too.
+            await self._auto_subscribe_stream_artifacts(
+                websocket, chat_id, user_id, tool_name, stream_params)
 
             prepared.append((idx, tc, tool_name, agent_id, args, None))
 
@@ -6953,6 +7055,150 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         except Exception as e:
             logger.warning(f"_cancel_stream_request failed: {e}")
 
+    async def _auto_subscribe_stream_artifacts(
+        self, websocket, chat_id: Optional[str], user_id: Optional[str],
+        tool_name: str, params: Dict[str, Any],
+    ) -> None:
+        """055 US2 (FR-009/FR-010): server-side subscription at streaming-tool
+        dispatch.
+
+        No client sends ``stream_subscribe`` unprompted (research D4), so a
+        push-streamable tool dispatched from chat would stream to nobody.
+        Subscribe the originating socket and every co-viewing socket of the
+        chat here; the client ``stream_subscribe`` action stays valid for
+        reattach (wire-contract §2). Called AFTER the dispatch gates pass, so
+        no additional permission checks. Fail-open — any refusal leaves the
+        turn on today's terminal-only delivery.
+        """
+        if websocket is None or not chat_id or not user_id:
+            return
+        if (self.stream_manager is None
+                or not flags.is_enabled("stream_artifacts")
+                or not flags.is_enabled("tool_streaming")):
+            return
+        tool_cfg = self._streamable_tools.get(tool_name)
+        if not tool_cfg or tool_cfg.get("kind") != "push":
+            return
+        agent_id = tool_cfg["agent_id"]
+        # The subscription identity must fingerprint the same params the
+        # one-shot component is `_source_params`-stamped with — never the
+        # injected private keys.
+        clean_params = {k: v for k, v in params.items()
+                        if not (isinstance(k, str) and k.startswith("_"))}
+        # Originating socket first: it creates the subscription (dispatching
+        # the streaming run to the agent); co-viewers attach (FR-009a dedup).
+        targets = [websocket] + [
+            ws for ws in self._sockets_on_chat(user_id, chat_id)
+            if ws is not websocket
+        ]
+        for ws in targets:
+            try:
+                stream_id, attached = await self.stream_manager.subscribe(
+                    ws=ws, user_id=user_id, chat_id=chat_id,
+                    tool_name=tool_name, agent_id=agent_id,
+                    params=clean_params, tool_metadata=tool_cfg,
+                )
+            except Exception as e:
+                logger.info(
+                    "stream auto-subscribe skipped (tool=%s): %s", tool_name, e)
+                continue
+            reply = {
+                "type": "stream_subscribed",
+                "stream_id": stream_id,
+                "tool_name": tool_name,
+                "agent_id": agent_id,
+                "session_id": chat_id,
+                "max_fps": tool_cfg.get("max_fps", 30),
+                "min_fps": tool_cfg.get("min_fps", 5),
+                "attached": attached,
+            }
+            cid = self.stream_manager.component_id_for(stream_id)
+            if cid is not None:
+                reply["component_id"] = cid
+            await self._safe_send(ws, json.dumps(reply))
+
+    def _bridged_stream_subscription(self, stream_id: str):
+        """The live bridged subscription for ``stream_id``, or None (flag off,
+        unbridged legacy stream, or unknown id).
+
+        Captured BEFORE the stream manager processes a chunk/end frame:
+        terminal processing tears the record down, and the persist wrapper
+        still needs its retention + identity afterwards.
+        """
+        if self.stream_manager is None or not flags.is_enabled("stream_artifacts"):
+            return None
+        sub = self.stream_manager.subscription_for_stream(stream_id)
+        if sub is None or sub.bridged_component_id is None:
+            return None
+        return sub
+
+    async def _persist_stream_terminal(self, sub) -> None:
+        """055 US2 (FR-011): persist a bridged stream's terminal state as a
+        normal workspace component under the identity every frame carried.
+
+        Natural completion (``agent_end``) persists the retained last
+        content-bearing chunk; a FAILED resolution persists an honest
+        failed-state Alert under the SAME identity so reload shows the truth
+        instead of silently dropping what the user watched. Non-terminal
+        states (active/reconnecting/dormant) are left alone. Fail-open:
+        persistence failures degrade to today's ephemeral behavior.
+        """
+        import copy
+        from orchestrator.stream_manager import StreamState
+        cid = sub.bridged_component_id
+        if cid is None:
+            return
+        if sub.state is StreamState.FAILED:
+            reason = (sub.state_reason or "error").replace("_", " ")
+            components = [Alert(
+                message=(f"The live stream from '{sub.tool_name}' ended with "
+                         f"an error ({reason}) before completing."),
+                variant="error").to_dict()]
+        elif (sub.state is StreamState.STOPPED
+                and sub.state_reason == "agent_end"
+                and sub.retained_chunk is not None
+                and sub.retained_chunk.components):
+            components = copy.deepcopy(sub.retained_chunk.components)
+        else:
+            return
+        for comp in components:
+            if isinstance(comp, dict):
+                # The agent SDK stamps every top-level id with the stream id;
+                # dropping it here keeps the stream-scoped id from ever being
+                # resolved as an author identity.
+                if str(comp.get("id", "")).startswith("stream-"):
+                    comp.pop("id", None)
+                _tag_source(comp, sub.agent_id, sub.tool_name,
+                            tool_params=sub.params)
+        chat_id, user_id = sub.chat_id, sub.user_id
+        try:
+            ops = await self.workspace.aupsert(
+                chat_id, user_id, components, force_component_id=cid)
+        except Exception:
+            logger.exception(
+                "stream persist failed (stream=%s chat=%s)", sub.stream_id, chat_id)
+            return
+        if not ops:
+            return
+        try:
+            await self.send_ui_upsert(None, chat_id, user_id, ops)
+        except Exception:
+            logger.debug("stream persist upsert fan failed", exc_info=True)
+        try:
+            await self.workspace.asnapshot(chat_id, user_id, cause="stream")
+        except Exception:
+            logger.debug("stream persist snapshot failed", exc_info=True)
+        try:
+            from audit.hooks import record_workspace_event
+            for op in ops:
+                asyncio.create_task(record_workspace_event(
+                    user_id=user_id,
+                    action="component_updated" if not op.get("created") else "component_added",
+                    chat_id=chat_id, component_id=op.get("component_id"),
+                ))
+        except Exception:
+            logger.debug("workspace audit failed", exc_info=True)
+
     def _tool_security_blocked(self, agent_id: Optional[str], tool_name: str) -> bool:
         """True when a hard security-flag block is set for (agent, tool).
 
@@ -7067,7 +7313,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # the FR-009a `attached` flag so the client knows whether this was a
         # fresh subscribe or an attach to an existing deduplicated stream.
         cfg = self._streamable_tools.get(tool_name, {})
-        await self._safe_send(websocket, json.dumps({
+        reply = {
             "type": "stream_subscribed",
             "stream_id": stream_id,
             "tool_name": tool_name,
@@ -7076,7 +7322,13 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             "max_fps": cfg.get("max_fps", 30),
             "min_fps": cfg.get("min_fps", 5),
             "attached": attached,
-        }))
+        }
+        # 055 US2: bridged streams carry the workspace identity from the ack
+        # onward so the client keys the placeholder by it (wire-contract §2).
+        cid = self.stream_manager.component_id_for(stream_id)
+        if cid is not None:
+            reply["component_id"] = cid
+        await self._safe_send(websocket, json.dumps(reply))
 
     async def _handle_push_stream_unsubscribe(
         self, websocket, session_id: Optional[str], payload: Dict, user_id: str
@@ -7364,14 +7616,17 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     return heading[:80]
         return default
 
-    def _chat_narrative(self, content: str) -> List[Dict]:
+    def _chat_narrative(self, content: str, chat_id: Optional[str] = None) -> List[Dict]:
         """Feature 029 (FR-027): the final-turn chat-panel narrative.
 
         Replaces the constant ``Card(title="Analysis")``: short plain answers
         render as bare markdown (no card chrome); longer ones get a card with
         a title derived from the response itself.
         """
-        text = (content or "").strip()
+        text = _strip_toolcall_leakage(content)
+        if not text and (content or "").strip():
+            _log_stripped_empty("chat_narrative", chat_id, content)
+            text = _LEAK_FALLBACK_TEXT
         if len(text) <= 280 and "\n\n" not in text and not text.startswith("#"):
             return [Text(content=text, variant="markdown").to_dict()]
         return [
@@ -8420,11 +8675,15 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         no workspace identity at all.
         """
         import hashlib
-        m = re.search(r"(?m)^#{1,6}\s+(.+)$", content or "")
+        text = _strip_toolcall_leakage(content)
+        if not text and (content or "").strip():
+            _log_stripped_empty("doc_card", chat_id, content)
+            text = _LEAK_FALLBACK_TEXT
+        m = re.search(r"(?m)^#{1,6}\s+(.+)$", text)
         title = (m.group(1).strip()[:120] if m else "Document")
         digest = hashlib.sha1(f"{chat_id}|{title}".encode("utf-8")).hexdigest()[:12]
         return Card(id=f"doc_{digest}", title=title, content=[
-            Text(content=content, variant="markdown"),
+            Text(content=text, variant="markdown"),
         ]).to_dict()
 
     @staticmethod

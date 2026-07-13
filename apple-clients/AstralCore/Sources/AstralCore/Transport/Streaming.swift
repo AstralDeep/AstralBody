@@ -3,6 +3,9 @@
 // component list by identity (upsert-in-place / remove); the stream helpers turn
 // a `ui_stream_data` / `stream_*` frame into canvas ops keyed by a synthetic
 // `stream-<id>` node (per-stream seq dedupe, session filter, terminal forget).
+// Feature 055 (US2): a frame carrying `component_id` (a workspace-bridged
+// stream) keys the node by that identity from the FIRST frame instead — the
+// terminal persist `ui_upsert` then replaces it in place (wire-contract §2).
 import Foundation
 
 public extension AstralComponent {
@@ -56,9 +59,13 @@ public let streamNodePrefix = "stream-"
 
 func streamNodeId(_ streamId: String) -> String { "\(streamNodePrefix)\(streamId)" }
 
-private func nodeKey(streamId: String?, toolName: String?) -> (node: String, key: String)? {
-    if let streamId { return (streamNodeId(streamId), streamId) }
-    if let toolName { return ("\(streamNodePrefix)tool-\(toolName)", "tool:\(toolName)") }
+/// `componentId` (055) overrides the node — never the dedupe key, which stays
+/// on `stream_id` — so a bridged stream never grows a `stream-<id>` twin.
+private func nodeKey(streamId: String?, toolName: String?,
+                     componentId: String? = nil) -> (node: String, key: String)? {
+    let identity = componentId.flatMap { $0.isEmpty ? nil : $0 }
+    if let streamId { return (identity ?? streamNodeId(streamId), streamId) }
+    if let toolName { return (identity ?? "\(streamNodePrefix)tool-\(toolName)", "tool:\(toolName)") }
     return nil
 }
 
@@ -88,7 +95,9 @@ public func streamFrameToOps(_ frame: InboundFrame, activeChat: String?,
                              seqState: inout [String: Int]) -> [UpsertOp] {
     let streamId = frame.payload["stream_id"]?.stringValue
     let toolName = frame.payload["tool_name"]?.stringValue
-    guard let (node, key) = nodeKey(streamId: streamId, toolName: toolName) else { return [] }
+    let componentId = frame.payload["component_id"]?.stringValue
+    guard let (node, key) = nodeKey(streamId: streamId, toolName: toolName,
+                                    componentId: componentId) else { return [] }
 
     let session = frame.payload["session_id"]?.stringValue
     if let session, let activeChat, session != activeChat { return [] }
@@ -116,7 +125,9 @@ public func streamFrameToOps(_ frame: InboundFrame, activeChat: String?,
 public func subscribeAckOps(_ frame: InboundFrame) -> [UpsertOp] {
     let streamId = frame.payload["stream_id"]?.stringValue
     let toolName = frame.payload["tool_name"]?.stringValue
-    guard let (node, _) = nodeKey(streamId: streamId, toolName: toolName) else { return [] }
+    let componentId = frame.payload["component_id"]?.stringValue
+    guard let (node, _) = nodeKey(streamId: streamId, toolName: toolName,
+                                  componentId: componentId) else { return [] }
     let tool = toolName ?? "tool"
     let comp = AstralComponent(type: "text", raw: .object([
         "type": .string("text"), "component_id": .string(node),
