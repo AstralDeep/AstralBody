@@ -51,7 +51,6 @@ def _get_database():
         pass
     # The orchestrator stores its singleton on app.state in production. For
     # in-process tool calls we accept a lazily-resolved global.
-    global _RESOLVED_DB
     if _RESOLVED_DB is not None:
         return _RESOLVED_DB
     raise RuntimeError(
