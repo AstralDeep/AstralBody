@@ -198,9 +198,20 @@ class WorkspaceManager:
     def resolve_identity(self, comp: Dict[str, Any]) -> str:
         """Compute (and stamp) the stable component_id for one component."""
         existing = comp.get("component_id")
+        if existing and str(existing).startswith("wel_"):
+            # 055 US1: wel_ is the EPHEMERAL welcome-canvas namespace — such
+            # components must never persist. If one somehow reaches the
+            # workspace (an agent echoing a welcome id), the identity is
+            # discarded and the component resolves as if unidentified.
+            logger.warning("workspace: refused ephemeral wel_ identity %r", existing)
+            comp.pop("component_id", None)
+            existing = None
         if existing:
             return existing
         author_id = comp.get("id")
+        if author_id and str(author_id).startswith("wel_"):
+            logger.warning("workspace: refused ephemeral wel_ author id %r", author_id)
+            author_id = None
         if author_id:
             author_id = str(author_id)
             # An author echoing back a workspace identity (the system prompt

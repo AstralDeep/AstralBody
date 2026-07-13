@@ -49,10 +49,22 @@ class ComponentAdapter:
     # Capability fallback ladder
 
     @classmethod
+    def _carry_identity(cls, src: Dict, out: Dict) -> Dict:
+        """Copy identity fields onto a rebuilt/substituted component (055 US1):
+        a degraded component must stay addressable — clients key canvases and
+        purge welcome content by ``component_id ?? id``, and upsert morphs
+        target the same identity."""
+        for key in ("id", "component_id"):
+            if comp_val := src.get(key):
+                out.setdefault(key, comp_val)
+        return out
+
+    @classmethod
     def _degrade_unsupported(cls, comp: Dict, supported) -> Dict:
         """Render ``comp`` as a type the target supports, substituting down the
         fallback ladder when its own type is unsupported. Recurses so a
-        supported container with an unsupported child still degrades. Pure."""
+        supported container with an unsupported child still degrades. Pure.
+        Identity fields survive substitution (_carry_identity)."""
         if not isinstance(comp, dict):
             return comp
         ctype = str(comp.get("type", "")).strip().lower()
@@ -60,20 +72,22 @@ class ComponentAdapter:
         if target == ctype:
             return cls._degrade_children(comp, supported)
         if target == "text":
-            return {"type": "text",
-                    "content": cls._extract_text(comp) or str(comp.get("title") or ""),
-                    "variant": "body"}
+            return cls._carry_identity(comp, {
+                "type": "text",
+                "content": cls._extract_text(comp) or str(comp.get("title") or ""),
+                "variant": "body"})
         if target == "list":
-            return cls._to_list(comp)
+            return cls._carry_identity(comp, cls._to_list(comp))
         if target == "table":
-            return cls._to_table(comp, supported)
+            return cls._carry_identity(comp, cls._to_table(comp, supported))
         if target in ("container", "card"):
             wrapped = {"type": target,
                        "content": comp.get("content") or comp.get("children") or []}
             if comp.get("title"):
                 wrapped["title"] = comp["title"]
-            return cls._degrade_children(wrapped, supported)
-        return {"type": "text", "content": cls._extract_text(comp) or "", "variant": "body"}
+            return cls._carry_identity(comp, cls._degrade_children(wrapped, supported))
+        return cls._carry_identity(
+            comp, {"type": "text", "content": cls._extract_text(comp) or "", "variant": "body"})
 
     @classmethod
     def _degrade_children(cls, comp: Dict, supported) -> Dict:
@@ -253,7 +267,20 @@ class ComponentAdapter:
 
     @classmethod
     def _adapt_component(cls, comp: Dict, profile: DeviceProfile) -> Optional[Dict]:
-        """Adapt a single component dict. Returns None to remove the component."""
+        """Adapt a single component dict. Returns None to remove the component.
+
+        Identity fields survive every per-type rebuild (055 US1): a chart
+        condensed to a metric, a collapsible flattened to a card, etc. must
+        stay addressable — clients key canvases (and purge wel_ welcome
+        components) by ``component_id ?? id`` and upsert morphs target it.
+        """
+        result = cls._adapt_component_typed(comp, profile)
+        if isinstance(result, dict) and result is not comp and isinstance(comp, dict):
+            cls._carry_identity(comp, result)
+        return result
+
+    @classmethod
+    def _adapt_component_typed(cls, comp: Dict, profile: DeviceProfile) -> Optional[Dict]:
         if not isinstance(comp, dict):
             return comp
 
@@ -406,8 +433,10 @@ class ComponentAdapter:
             c for c in (cls._adapt_component(ch, profile) for ch in children) if c is not None
         ]
         if capped <= 1:
-            # Collapse to a container
-            return {"type": "container", "children": adapted_children}
+            # Collapse to a container — identity survives (055 US1: the watch
+            # purges wel_ welcome components by id, and upsert morphs need the
+            # collapsed grid to stay addressable).
+            return cls._carry_identity(comp, {"type": "container", "children": adapted_children})
         return {**comp, "columns": capped, "children": adapted_children}
 
     @classmethod

@@ -105,6 +105,32 @@ class FeatureFlags:
             # + four enforcement invariants live in orchestrator/delegation.py.
             # See specs/048-recursive-delegation-chains/.
             "recursive_delegation": self._read("FF_RECURSIVE_DELEGATION", False),
+            # 055-uniform-artifacts US1: welcome components carry wel_
+            # identities and clients purge them locally at turn start; the
+            # turn-start welcome-blanking ui_render (which killed client
+            # skeletons one RTT after send) is no longer sent. OFF restores
+            # the legacy id-less welcome + blanking frame byte-for-byte.
+            # Default ON (bug fix). See specs/055-uniform-artifacts/.
+            "first_turn_contract": self._read("FF_FIRST_TURN_CONTRACT", True),
+            # 055 US2: bridge push-streams to workspace component identities
+            # (component_id on ui_stream_data/stream_subscribed frames; the
+            # final streamed state persists as a normal workspace component).
+            # Fail-open — OFF = today's ephemeral stream-<id> behavior. Default ON.
+            "stream_artifacts": self._read("FF_STREAM_ARTIFACTS", True),
+            # 055 US3: the adaptive designer runs regardless of originating
+            # device; native sockets receive a materialized designed canvas
+            # after turn end. OFF restores the native skip tuple. Default ON.
+            "designer_all_devices": self._read("FF_DESIGNER_ALL_DEVICES", True),
+            # 055 US4: component-scoped refine/restore verbs + bounded
+            # per-component version history. OFF = affordances absent and the
+            # actions refuse honestly. Default ON.
+            "component_refine": self._read("FF_COMPONENT_REFINE", True),
+            # 055 US5: authed CSV/HTML export endpoints. Default ON.
+            "artifact_export": self._read("FF_ARTIFACT_EXPORT", True),
+            # 055 US5: PUBLIC read-only snapshot share links (PHI-gated at
+            # mint, hashed tokens, revocable). FAIL CLOSED — default OFF until
+            # the operator deliberately enables public serving.
+            "artifact_sharing": self._read("FF_ARTIFACT_SHARING", False),
         }
 
     @staticmethod

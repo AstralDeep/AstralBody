@@ -1492,13 +1492,7 @@ class Orchestrator:
                     user_message = msg.payload.get("message", "")
                     chat_id = msg.session_id or msg.payload.get("chat_id")
                     draft_agent_id = msg.payload.get("draft_agent_id")
-                    # Leaving the welcome canvas: blank it so flat ui_upsert
-                    # appends start from an empty canvas on every target.
-                    if self._ws_welcome.pop(id(websocket), None):
-                        try:
-                            await self.send_ui_render(websocket, [])
-                        except Exception:
-                            pass
+                    await self._retire_welcome_canvas(websocket)
                     # Feature 013 / FR-018, FR-024: in-chat tool picker
                     # selection narrows the orchestrator's tool list. None
                     # / absent ≡ no narrowing (existing default behavior).
@@ -4122,6 +4116,14 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                             await self.send_ui_render(websocket, [
                                 Alert(message="All available tools are restricted by your permission settings. Please update your agent permissions.", variant="warning").to_dict()
                             ], target="chat")
+                            # 055 US1: this break used to exit the loop without
+                            # a terminal chat_status, leaving client loading
+                            # states (skeletons) stuck until disconnect.
+                            await self._safe_send(websocket, json.dumps({
+                                "type": "chat_status",
+                                "status": "done",
+                                "message": ""
+                            }))
                             break
 
                     # Update task state and track tool calls
@@ -8092,6 +8094,24 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             }
         comp.update(source)
         return comp
+
+    async def _retire_welcome_canvas(self, websocket):
+        """First chat_message from a welcome-showing socket: pop the flag.
+
+        055 FF_FIRST_TURN_CONTRACT (on): clients purge the wel_-identified
+        welcome components locally at turn start, so no frame is sent — the
+        legacy blanking ``ui_render []`` reached the client one RTT after
+        send and destroyed its optimistic loading skeleton (US1 root cause).
+        Flag off restores the legacy blanking frame byte-for-byte. The
+        ``_ws_welcome`` bookkeeping pops either way (the
+        enable_recommended_agents welcome refresh keys on it).
+        """
+        if self._ws_welcome.pop(id(websocket), None):
+            if not flags.is_enabled("first_turn_contract"):
+                try:
+                    await self.send_ui_render(websocket, [])
+                except Exception:
+                    pass
 
     async def send_ui_render(self, websocket, components: List, target: str = "canvas",
                              speak: bool = True):

@@ -6,10 +6,33 @@ normal ``ui_render`` path (no shell HTML, no client-specific code). The
 example buttons dispatch the standard ``chat_message`` ui_event action, so
 they work on any client that can press a button and degrade to readable text
 on voice profiles.
+
+Feature 055 (US1, FF_FIRST_TURN_CONTRACT): every welcome component carries a
+stable identity in the ephemeral ``wel_`` namespace — BOTH ``id`` and
+``component_id`` set to the same value, because the web identity wrapper keys
+on ``component_id`` while native canvases read ``component_id ?? id``. Clients
+purge ``wel_``-identified components from their canvas state at turn start
+(replacing the server-side blanking frame that killed loading skeletons).
+Welcome components are still never workspace-persisted: the workspace layer
+refuses ``wel_`` identities outright.
 """
+import re
 from typing import Any, Dict, List
 
 from astralprims import Button, Card, Grids, Hero, Text
+from shared.feature_flags import flags
+
+
+def _slug(title: str) -> str:
+    """Deterministic ascii slug from an example title (emoji dropped)."""
+    return "_".join(re.findall(r"[a-z0-9]+", title.lower())) or "example"
+
+
+def _stamp(comp: Dict[str, Any], ident: str) -> Dict[str, Any]:
+    """Stamp a wel_ identity on a rendered welcome dict (id + component_id)."""
+    comp["id"] = ident
+    comp["component_id"] = ident
+    return comp
 
 #: (title, caption, query) — one tile per example. Queries are aimed at the
 #: post-029 agent catalog: connectors dashboards, weather, web_research,
@@ -102,4 +125,26 @@ def welcome_components(tools_available: bool = True) -> List[Dict[str, Any]]:
     rendered = [c.to_dict() for c in tree]
     if not tools_available:
         rendered.insert(1, enable_agents_card())
+    if flags.is_enabled("first_turn_contract"):
+        _stamp_welcome_tree(rendered)
     return rendered
+
+
+def _stamp_welcome_tree(rendered: List[Dict[str, Any]]) -> None:
+    """Assign wel_ identities in place: top-level components own the purge
+    contract; example cards inside the grid get per-example ids too so any
+    future targeted ops (and tests) can address them individually."""
+    for comp in rendered:
+        ctype = comp.get("type")
+        if ctype == "hero":
+            _stamp(comp, "wel_hero")
+        elif ctype == "grid":
+            _stamp(comp, "wel_examples")
+            for child in comp.get("children") or []:
+                title = child.get("title") or ""
+                if isinstance(child, dict) and title:
+                    _stamp(child, f"wel_ex_{_slug(title)}")
+        elif ctype == "text":
+            _stamp(comp, "wel_hint")
+        elif ctype == "card":  # the enable-agents consent card
+            _stamp(comp, "wel_enable")
