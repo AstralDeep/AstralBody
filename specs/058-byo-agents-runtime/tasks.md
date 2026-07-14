@@ -26,7 +26,7 @@ description: "Task list for feature 058 — BYO client-side agents runtime, host
 - [X] T006 [US1] **Code-delivery seam** (was 057 T013, FR-004): after `generate_code`, package the 3-file bundle and push `agent_bundle_deliver` over the owner tunnel; do NOT call `start_draft_agent` (Popen) for byo agents; on inward register call `user_agents.go_live` (status='live', stamp constitution_version, insert agent_ownership row) — `backend/orchestrator/agent_lifecycle.py` + `agentic_creation.py`
 - [ ] T007 [US1] **Self-test relocation** (was 057 T013b, G1/SC-002): any pre-delivery self-test is ephemeral/torn-down orchestrator sandbox OR host-side with the result reported back — never a persistent server-side agent — `backend/orchestrator/agent_lifecycle.py`
 - [ ] T008 [US1] **Codegen target** (was 057 T016): generated bundle is self-contained for the desktop-host runtime (not the backend `shared` package) OR the host ships a compatible shim — `backend/orchestrator/agent_generator.py` + `windows-client`
-- [ ] T009 [US1] **Minimal one-shot authoring path** (was 057 T014): deliberate entry, `origin='byo_client'`, `create_draft` → existing static gates → `generate_code` → deliver; register the `user_agent` row + stamp `AGENT_CONSTITUTION_VERSION` + mark validated (full 5-phase is Phase 4) — `agentic_creation.py`
+- [X] T009 [US1] **Minimal one-shot authoring path** (was 057 T014): deliberate entry, `origin='byo_client'`, `create_draft` → existing static gates → `generate_code` → deliver; register the `user_agent` row + stamp `AGENT_CONSTITUTION_VERSION` + mark validated (full 5-phase is Phase 4) — `agentic_creation.py`
 - [X] T010 [P] [US1] Integration test (was 057 T007, U1): owner-tunnel register → dispatch through the existing gate stack → **assert the audit row attributes the action to the owning human** → disconnect → honest-offline — `backend/tests/test_byo_tunnel.py`
 - [ ] T011 [US1] SC-002 guard/test: assert **zero user-agent processes on the orchestrator host** after go-live — `backend/tests/test_byo_offserver.py`
 
@@ -42,7 +42,7 @@ description: "Task list for feature 058 — BYO client-side agents runtime, host
 
 ## Phase 4: Guided authoring UX (US2)
 
-- [ ] T016 [US2] Wire the 057 Analyze gate **pre-generation** (was 057 T027, FR-003): call `agent_analyze.check` immediately before `generate_code`; on fail do not generate + do not advance; re-run on revision + revalidation — `agentic_creation.py`
+- [X] T016 [US2] Wire the 057 Analyze gate **pre-generation** (was 057 T027, FR-003): call `agent_analyze.check` immediately before `generate_code`; on fail do not generate + do not advance; re-run on revision + revalidation — `agentic_creation.py`
 - [ ] T017 [US2] 5-phase authoring state machine over `draft_agents` (was 057 T028) — `backend/orchestrator/agent_authoring.py`
 - [ ] T018 [US2] `agent_authoring` chrome surface (was 057 T029, FR-005): `backend/webrender/chrome/surfaces/authoring.py` exporting BOTH `render()` (web) and `components()` (native); register in `surfaces/__init__.py`; `chrome_author_*` phase handlers; assistant-drafted + editable artifacts (per 057 `contracts/authoring-surface.md`)
 - [ ] T019 [US2] Hard-gate handlers (was 057 T030): `chrome_author_clarify` + `chrome_author_analyze` decline to advance with plain-language notices; `chrome_author_generate` reachable only post-Analyze-pass
