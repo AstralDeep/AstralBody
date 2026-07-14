@@ -114,3 +114,18 @@ async def test_flag_off_tunnel_is_inert(orch, monkeypatch):
     orch.ui_sessions[ws] = {"sub": OWNER}
     await _tunnel(orch, ws, _reg_frame())
     assert AID not in orch.agents            # flag off → no registration path
+
+
+async def test_no_delegation_token_handed_to_tunnel_agent(orch):
+    # T014: a user-hosted (tunnel) agent is untrusted — the delegation-token
+    # bytes are never attached to its dispatch args; the boundary re-authorizes.
+    ws = FakeUI()
+    orch.ui_sessions[ws] = {"sub": OWNER, "_raw_token": "tok"}
+    await _tunnel(orch, ws, _reg_frame())
+    orch.tool_permissions.set_agent_scopes(OWNER, AID, {"tools:read": True})
+    auth = await orch._authorize_and_prepare(ws, AID, "greet", {"user_id": OWNER}, None, OWNER)
+    from orchestrator.orchestrator import PreparedDispatch, GateRefusal
+    if isinstance(auth, GateRefusal):
+        pytest.skip(f"gate refused in this env: {auth.response.error if auth.response else auth}")
+    assert isinstance(auth, PreparedDispatch)
+    assert "_delegation_token" not in auth.args

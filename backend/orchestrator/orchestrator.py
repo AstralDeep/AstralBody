@@ -6654,6 +6654,17 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # The delegation token constrains what the agent can do even if it's compromised
         delegation_token: Optional[str] = None
         hop_correlation_id: Optional[str] = None
+        # 058 (no secrets to untrusted agents): a user-hosted (tunnel) agent is
+        # untrusted — never hand it the delegation-token BYTES, and never run the
+        # flat delegation-required gate against it. The orchestrator re-authorizes
+        # every one of its tool calls at the boundary (is_tool_allowed + the full
+        # gate stack), so it never needs to hold a token; withholding it removes a
+        # forgeable-authority surface (research D2). Its per-(user,callee) ECIES
+        # credentials are still injected (encrypted; only the agent boundary
+        # decrypts). Hop provenance still mints/audits below — only the token
+        # hand-off to the agent is suppressed.
+        from shared.local_transport import TunnelSocket
+        _untrusted_tunnel_agent = isinstance(self.agents.get(agent_id), TunnelSocket)
         if user_id and agent_id and parent_token is not None:
             # 056 US1 (FR-001/FR-002): a chained hop NEVER reuses the parent's
             # token and never falls back to the flat exchange — it acts under
@@ -6664,8 +6675,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             if isinstance(minted, GateRefusal):
                 return minted
             delegation_token, hop_correlation_id = minted
-            args["_delegation_token"] = delegation_token
-        elif user_id and agent_id:
+            if not _untrusted_tunnel_agent:
+                args["_delegation_token"] = delegation_token
+        elif user_id and agent_id and not _untrusted_tunnel_agent:
             delegation_token = await self._get_delegation_token(websocket, agent_id, user_id)
             if delegation_token:
                 args["_delegation_token"] = delegation_token

@@ -37,7 +37,7 @@ description: "Task list for feature 058 — BYO client-side agents runtime, host
 ## Phase 3: Boundary hardening completion (US3)
 
 - [ ] T013 [US3] **Per-owner ingress bound** (was 057 T021, FR-017/SC-008): rate + in-flight-frame cap on user-agent tunnels (extend `concurrency_cap`/`ChainBudget`), scoped to external user-agent sockets only — `orchestrator.py`
-- [ ] T014 [US3] **No secrets to untrusted agents** (was 057 T022): do not attach `_delegation_token` bytes / per-user secrets on the direct dispatch path for user-hosted agents (mirror the 054 in-process-only rule) — `orchestrator.py`
+- [X] T014 [US3] **No secrets to untrusted agents** (was 057 T022): do not attach `_delegation_token` bytes / per-user secrets on the direct dispatch path for user-hosted agents (mirror the 054 in-process-only rule) — `orchestrator.py`
 - [ ] T015 [P] [US3] **Transport adversarial suite** (was 057 T018 remainder): forged identity/token over the tunnel, undeclared-tool, flood, offline — each denied fail-closed + audited — extend `backend/tests/test_byo_boundary_adversarial.py`
 
 ## Phase 4: Guided authoring UX (US2)
