@@ -160,20 +160,20 @@ Setup → Foundational → **US1** (Phase A, MVP) → **US3** (Phase B, boundary
 
 ---
 
+## Phase 8: Polish & Cross-Cutting Concerns
+
+- [ ] T043 [P] Update `CLAUDE.md` (Recent Changes + Active Technologies) for feature 057
+- [ ] T044 [P] `docs/`: production enablement note for `FF_BYO_AGENTS` + desktop-host packaging (Windows client-supervised child process; macOS direct-download gating)
+- [ ] T045 Full backend `pytest` (both invocations) + `ruff` + diff coverage-gate; smoke (healthz/readyz) with `FF_BYO_AGENTS` **on** and **off** (assert flag-off is byte-identical to today — FR-029)
+- [ ] T046 [P] Audit completeness pass: confirm every user-agent action AND denial emits an audited row (`delegation`/`agent_tool_call` classes), including the boundary refusals
+
+---
+
 ## Phase 9: Cresco edge-mesh transport (Mode 2 — DEFERRED, FR-032)
 
 **Deferred**: implemented only when a broader cross-device/edge-compute mesh initiative is greenlit. Built against the T008 transport seam; owner-binding + delegation + boundary re-verification are unchanged.
 
 - [ ] T047 [DEFERRED] Cresco Mode-2 transport adapter: route agent frames via a user/operator-run **external** Cresco fabric through the feature-050 Python `wsapi` bridge (reuse `backend/agents/cresco/` wsapi client posture); no JVM/broker in the product image; the desktop participates in the fabric. Gated on a Constitution-V decision if any client-bundled JVM is contemplated (per T000 posture (b)). References `specs/050-cresco-integration-decision/`.
-
----
-
-## Phase 8: Polish & Cross-Cutting Concerns
-
-- [ ] T043 [P] Update `CLAUDE.md` (Recent Changes + Active Technologies) for feature 057
-- [ ] T044 [P] `docs/`: production enablement note for `FF_BYO_AGENTS` + desktop-host packaging (Windows in-process; macOS direct-download gating)
-- [ ] T045 Full backend `pytest` (both invocations) + `ruff` + diff coverage-gate; smoke (healthz/readyz) with `FF_BYO_AGENTS` **on** and **off** (assert flag-off is byte-identical to today — FR-029)
-- [ ] T046 [P] Audit completeness pass: confirm every user-agent action AND denial emits an audited row (`delegation`/`agent_tool_call` classes), including the boundary refusals
 
 ---
 
