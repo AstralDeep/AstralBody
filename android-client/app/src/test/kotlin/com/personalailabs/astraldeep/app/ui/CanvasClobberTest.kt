@@ -8,19 +8,24 @@ import com.personalailabs.astraldeep.core.sdui.Component
 import kotlinx.serialization.json.JsonObject
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 /**
- * Feature 044 T025 (FR-013) — canvas convergence contract.
+ * Feature 044 T025 (FR-013), revised by the 055 live-op rule — canvas
+ * convergence contract.
  *
- * The server owns two canvas channels: `ui_upsert` is the incremental
- * add/morph/remove-by-id channel, and an out-of-turn full `ui_render(target=canvas)`
+ * The server owns two canvas channels. `ui_upsert` is the incremental
+ * add/morph/remove-by-id channel and applies to the LIVE canvas immediately —
+ * even mid-turn — so the originating device renders partial output exactly like
+ * co-viewing devices (no accumulate-then-commit divergence), and the first live
+ * op clears the query skeleton. An out-of-turn full `ui_render(target=canvas)`
  * is the AUTHORITATIVE complete canvas — a wholesale replace (components absent
- * from the frame are removed; an empty frame clears the canvas). The backend
- * full-render guarantee ensures those frames always carry the complete live set,
- * so replace never loses a legitimately-live component. This matches the web
- * reference (setHTML replace) and the Windows twin. The real "clobber" the fix
- * targets is the IN-TURN mix of upserts + overlay renders, which is buffered and
- * merged by identity so nothing is lost before the turn commits.
+ * from the frame are removed; an empty frame clears the canvas). The one
+ * mid-turn hazard 044 still buffers is the FULL render: an authoritative
+ * replace landing mid-accumulation would clobber the live canvas, so in-turn
+ * renders buffer and win per identity at `done` — the committed state always
+ * equals what the user is looking at when the turn ends.
  */
 class CanvasClobberTest {
     private val vm = AppViewModel(OrchestratorClient("ws://localhost:9/ws"), AstralRest("http://localhost:9"))
@@ -61,15 +66,60 @@ class CanvasClobberTest {
     }
 
     @Test
-    fun in_turn_upserts_and_overlay_renders_accumulate_then_commit() {
-        // During a replacing turn, upserts + additive overlay renders buffer into
-        // pendingCanvas by identity — nothing is clobbered mid-turn (the actual fix).
-        var s = UiState(turnActive = true, pendingReplace = true)
+    fun in_turn_upsert_applies_live_and_clears_the_skeleton() {
+        // The originating device shows partial output the moment it arrives —
+        // identical to a co-viewing device — instead of buffering until done.
+        var s = vm.armTurn(UiState())
+        assertTrue(s.showSkeleton)
         s = vm.reduce(s, Inbound.UiUpsert(chatId = null, ops = listOf(CanvasOp("upsert", "A", comp("A")))))
-        s = vm.reduce(s, Inbound.UiRender(target = "canvas", components = listOf(comp("B"))))
+        assertEquals(listOf("A"), s.visibleCanvas.map { it.id })
+        assertTrue(s.pendingCanvas.isEmpty())
+        // First canvas content of the turn hides the skeleton (web parity).
+        assertFalse(s.showSkeleton)
+    }
+
+    @Test
+    fun in_turn_full_render_stays_buffered_and_wins_at_done() {
+        var s = vm.armTurn(UiState())
+        s = vm.reduce(s, Inbound.UiUpsert(chatId = null, ops = listOf(CanvasOp("upsert", "A", comp("A", "card")))))
+        s = vm.reduce(s, Inbound.UiRender(target = "canvas", components = listOf(comp("A", "alert"), comp("B"))))
+        // The render is invisible mid-turn (the actual clobber hazard)…
+        assertEquals(listOf("A"), s.canvas.map { it.id })
+        assertEquals("card", s.canvas.single().type)
         assertEquals(listOf("A", "B"), s.pendingCanvas.map { it.id })
-        // chat_status done commits the buffered canvas.
+        // …and commits at done, winning per identity; live-only components survive.
         s = vm.reduce(s, Inbound.ChatStatus(status = "done", message = null))
         assertEquals(listOf("A", "B"), s.canvas.map { it.id })
+        assertEquals("alert", s.canvas.first().type)
+        assertFalse(s.pendingReplace)
+    }
+
+    @Test
+    fun ops_only_turn_commits_the_live_canvas_no_double_apply() {
+        // No full render this turn: the live canvas (which already carries the
+        // applied upserts) IS the committed state, and the pre-turn canvas is
+        // what the timeline archives.
+        var s = vm.armTurn(UiState(canvas = listOf(comp("old")), canvasLabel = "before"))
+        s = vm.reduce(s, Inbound.UiUpsert(chatId = null, ops = listOf(CanvasOp("upsert", "A", comp("A")))))
+        assertEquals(listOf("old", "A"), s.visibleCanvas.map { it.id })
+        s = vm.reduce(s, Inbound.ChatStatus(status = "done", message = null))
+        assertEquals(listOf("old", "A"), s.canvas.map { it.id })
+        assertEquals(listOf(listOf("old")), s.canvasHistory.map { snap -> snap.components.map { it.id } })
+        assertEquals("before", s.canvasHistory.single().label)
+        assertFalse(s.pendingReplace)
+    }
+
+    @Test
+    fun mid_turn_stream_ops_go_live_and_the_join_guard_reads_the_live_canvas() {
+        var s = vm.armTurn(UiState())
+        // Retained content lands under identity wc_abc via a live in-turn upsert…
+        s = vm.reduce(s, Inbound.UiUpsert(chatId = null, ops = listOf(CanvasOp("upsert", "wc_abc", comp("wc_abc", "card")))))
+        assertFalse(s.showSkeleton)
+        // …so a mid-stream join ack for the same identity must NOT blank it: the
+        // existing-ids guard reads the LIVE canvas (what the user sees), not the
+        // render buffer.
+        s = vm.reduce(s, Inbound.StreamSubscribed("s1", "ticker", "wc_abc"))
+        assertEquals(listOf("wc_abc"), s.canvas.map { it.id })
+        assertEquals("card", s.canvas.single().type)
     }
 }

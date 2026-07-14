@@ -91,14 +91,16 @@ Semantics:
 - Rollout caveat: pre-055 native binaries ignore the field and may show a
   transient duplicate on terminal until updated (all first-party clients ship
   in the same PR).
-- **Declared divergence (originating native device, mid-turn)**: Android/Apple
-  buffer in-turn canvas ops (accumulate-then-commit, pinned by
-  `CanvasClobberTest` + twins), so on the DEVICE THAT SENT the turn, stream
-  frames land in the pending canvas and become visible at `chat_status done` —
-  the user sees skeleton → final state, not progressive fill. Web, Windows,
-  and every co-viewing device render frames live. Accepted trade-off: the
-  in-turn buffer is what prevents mid-turn canvas clobber (044); revisiting it
-  is out of 055's scope.
+- **Originating-device live fill (divergence RETIRED post-merge)**: the 044
+  accumulate-then-commit rule originally buffered ALL in-turn ops on the
+  originating native, so co-viewing devices rendered partial output before
+  the device that asked (observed live and reported). The rule is now split:
+  identity-keyed `ui_upsert`/stream OPS apply IMMEDIATELY to the visible
+  canvas even mid-turn (morph-in-place — the same thing co-viewers do), while
+  full `ui_render` REPLACES remain buffered until commit (the actual clobber
+  hazard 044 guards). At `done`, a buffered render still wins; with none, the
+  live canvas is the committed state. `CanvasClobberTest` + twins pin the new
+  rule.
 
 ## 3. Accept actions (US4, `FF_COMPONENT_REFINE`)
 

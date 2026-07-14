@@ -38,6 +38,7 @@ os.environ["USE_MOCK_AUTH"] = "true"
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+import orchestrator.web_auth as web_auth  # noqa: E402
 from orchestrator.api import share_router  # noqa: E402
 from orchestrator.artifact_share import (  # noqa: E402
     ShareGrantStore,
@@ -321,7 +322,74 @@ def test_empty_canvas_is_404(client, orch, user, sharing_on):
     assert _mint(client, user, scope="canvas", component_id=None).status_code == 404
 
 
-def test_api_routes_require_auth(client, user, sharing_on):
+def _no_session(monkeypatch):
+    """No astral_session cookie resolves (real deployments without a login)."""
+    async def _none(request):
+        return None
+    monkeypatch.setattr(web_auth, "ensure_session", _none)
+
+
+def test_api_routes_require_auth(client, user, sharing_on, monkeypatch):
+    _no_session(monkeypatch)
     assert client.post("/api/share", json={"chat_id": CHAT_ID, "scope": "canvas"}).status_code == 401
     assert client.get("/api/share").status_code == 401
     assert client.delete("/api/share/1").status_code == 401
+
+
+def test_unauthenticated_browser_navigation_redirects(client, sharing_on, monkeypatch):
+    """GET navigation (Accept prefers text/html) with no session: 302 to
+    login; non-GET stays 401 even when the browser asks for HTML."""
+    _no_session(monkeypatch)
+    accept = {"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
+    r = client.get("/api/share", headers=accept, follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"] == "/auth/login?next=%2Fapi%2Fshare"
+    r = client.post("/api/share", json={"chat_id": CHAT_ID, "scope": "canvas"},
+                    headers=accept, follow_redirects=False)
+    assert r.status_code == 401
+
+
+def test_cookie_session_mock_mode_mints_and_lists(db, client, sharing_on):
+    """No Authorization header at all — the astral_session cookie path
+    (USE_MOCK_AUTH=true makes ensure_session return the test_user session)."""
+    r = client.post("/api/share", json={"chat_id": CHAT_ID, "scope": "component",
+                                        "component_id": "wc_shared"})
+    try:
+        assert r.status_code == 201
+        minted_id = r.json()["id"]
+        rows = _grant_rows(db, "test_user")
+        assert minted_id in [row["id"] for row in rows]
+        listed = client.get("/api/share")
+        assert listed.status_code == 200
+        assert minted_id in [s["id"] for s in listed.json()["shares"]]
+    finally:
+        # Delete only this grant — test_user may hold real rows in the shared
+        # dev container.
+        if r.status_code == 201:
+            db.execute("DELETE FROM share_grant WHERE id = ?", (r.json()["id"],))
+
+
+def test_cookie_session_real_mode_mints(db, client, user, sharing_on, monkeypatch):
+    """Non-mock: the faked session's access token flows through the SAME JWKS
+    verification path as a Bearer token (test_download_auth.py pattern)."""
+    monkeypatch.setenv("USE_MOCK_AUTH", "false")
+    monkeypatch.setenv("KEYCLOAK_AUTHORITY", "https://idp.example/realms/astral")
+    monkeypatch.setenv("KEYCLOAK_CLIENT_ID", "astral-frontend")
+
+    async def _sess(request):
+        return {"access_token": "signed.jwt.token", "refresh_token": "",
+                "sub": user, "created_at": 0, "resumed": True, "sid": "s"}
+    monkeypatch.setattr(web_auth, "ensure_session", _sess)
+
+    async def _jwks(url, token=None):
+        return {"keys": [{"kid": "k"}]}
+    monkeypatch.setattr("shared.jwks_cache.get_jwks", _jwks)
+    monkeypatch.setattr(
+        "jose.jwt.decode",
+        lambda token, key, **kw: {"sub": user, "azp": "astral-frontend"},
+    )
+
+    r = client.post("/api/share", json={"chat_id": CHAT_ID, "scope": "component",
+                                        "component_id": "wc_shared"})
+    assert r.status_code == 201
+    assert _grant_rows(db, user)[0]["id"] == r.json()["id"]

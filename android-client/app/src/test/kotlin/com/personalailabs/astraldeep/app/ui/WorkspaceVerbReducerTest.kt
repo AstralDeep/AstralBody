@@ -91,18 +91,19 @@ class WorkspaceVerbReducerTest {
     }
 
     @Test
-    fun mid_turn_verb_acks_route_to_the_pending_buffer() {
-        // A verb ack landing mid replacing-turn reconciles the buffered canvas
-        // (same routing as every canvas op), never the committed one.
+    fun mid_turn_verb_acks_apply_to_the_live_canvas() {
+        // A verb ack landing mid replacing-turn reconciles the LIVE canvas —
+        // the same 055 live routing as every identity-keyed op — never the
+        // buffered full render awaiting commit.
         val s0 =
             UiState(
                 turnActive = true,
                 pendingReplace = true,
                 pendingCanvas = listOf(comp("A"), comp("B")),
-                canvas = listOf(comp("Z")),
+                canvas = listOf(comp("Z"), comp("A")),
             )
         val s = vm.reduce(s0, Inbound.ComponentDeleted("A"))
-        assertEquals(listOf("B"), s.pendingCanvas.map { it.id })
         assertEquals(listOf("Z"), s.canvas.map { it.id })
+        assertEquals(listOf("A", "B"), s.pendingCanvas.map { it.id })
     }
 }

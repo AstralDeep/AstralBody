@@ -1,10 +1,11 @@
 // Feature 051 — the iOS/macOS app model: a faithful port of the Android
 // `AppViewModel`. System-browser PKCE sign-in, WS session with the ios/macos
 // device profile, and the full server-driven reduce: the "commit-on-done"
-// canvas lifecycle (a replacing turn buffers ops into `pendingCanvas` and swaps
-// them in on `chat_status done`, pushing the prior canvas onto the timeline),
-// server-owned chrome (`chrome_menu`/`chrome_surface`), agents/audit/history
-// surfaces, streaming nodes, attachments, and live theming.
+// canvas lifecycle (a replacing turn buffers full `ui_render` replaces into
+// `pendingCanvas` and swaps them in on `chat_status done`, pushing the prior
+// canvas onto the timeline, while identity-keyed ops morph the visible canvas
+// live), server-owned chrome (`chrome_menu`/`chrome_surface`), agents/audit/
+// history surfaces, streaming nodes, attachments, and live theming.
 import Foundation
 import SwiftUI
 import AuthenticationServices
@@ -89,6 +90,9 @@ final class AppModel: NSObject {
     var pendingCanvas: [AstralComponent] = []
     var turnActive = false
     var pendingReplace = false
+    /// Set by the first live canvas op of an armed turn — clears the skeleton
+    /// while the turn stays active (web parity: first canvas content hides it).
+    var liveOpsThisTurn = false
     var canvasLabel = ""
     var pendingLabel = ""
     var canvasHistory: [CanvasSnapshot] = []
@@ -130,7 +134,7 @@ final class AppModel: NSObject {
         return canvas
     }
     var isViewingHistory: Bool { viewingIndex != nil }
-    var showSkeleton: Bool { pendingReplace && viewingIndex == nil }
+    var showSkeleton: Bool { pendingReplace && !liveOpsThisTurn && viewingIndex == nil }
     var mutationsLocked: Bool { timelineReadOnly }
 
     // MARK: session plumbing (never read by views — not observation-tracked)
@@ -471,6 +475,7 @@ final class AppModel: NSObject {
             turnActive = true
             pendingReplace = true
             pendingCanvas = []
+            liveOpsThisTurn = false
         case "chat_loaded":
             reduceChatLoaded(frame)
         case "chat_status":
@@ -485,10 +490,10 @@ final class AppModel: NSObject {
             applyCanvasOps(streamFrameToOps(frame, activeChat: activeChatId, seqState: &seqState))
         case "stream_subscribed":
             // 055 mid-stream join: load_chat may already have re-hydrated the
-            // streamed component — the placeholder must not blank it. Guard
-            // against the same list applyCanvasOps would mutate.
-            let held = pendingReplace ? pendingCanvas : canvas
-            applyCanvasOps(subscribeAckOps(frame, existingIds: Set(held.compactMap(\.componentId))))
+            // streamed component — the placeholder must not blank it. Ops go
+            // live to the visible canvas even mid-turn, so its ids are the
+            // guard source (the same list applyCanvasOps mutates).
+            applyCanvasOps(subscribeAckOps(frame, existingIds: Set(canvas.compactMap(\.componentId))))
         case "stream_error":
             applyCanvasOps(streamErrorOps(frame))
         case "chrome_menu":
@@ -641,12 +646,7 @@ final class AppModel: NSObject {
             }
         }
         let canvasOps = ops.filter { !isDocCard($0.componentId) && !isSkeleton($0.component) }
-        if canvasOps.isEmpty { return }
-        if pendingReplace {
-            pendingCanvas = Canvas.apply(pendingCanvas, canvasOps)
-        } else {
-            canvas = Canvas.apply(canvas, canvasOps)
-        }
+        applyCanvasOps(canvasOps)
     }
 
     private func reduceChatLoaded(_ frame: InboundFrame) {
@@ -738,8 +738,9 @@ final class AppModel: NSObject {
             return
         }
         if pendingCanvas.isEmpty {
-            // Text-only turn keeps the canvas — minus any welcome that
-            // resurrected mid-turn (055: `wel_` never survives a turn).
+            // No buffered render — the live canvas (already carrying any ops
+            // applied mid-turn) IS the committed state, minus any welcome
+            // that resurrected mid-turn (055: `wel_` never survives a turn).
             canvas = canvas.dropWelcome()
             turnActive = false; pendingReplace = false; statusText = nil
             stepTrail = []; asyncDetached = false
@@ -760,12 +761,19 @@ final class AppModel: NSObject {
         stepTrail = []; asyncDetached = false
     }
 
+    /// Identity-keyed ops morph the VISIBLE canvas immediately, even while a
+    /// replacing turn is armed — only full `ui_render` replaces buffer (the
+    /// mid-turn clobber hazard 044 guards against). A buffered render still
+    /// wins at commit, so mid-turn ops mirror into it and the committed state
+    /// stays what it would have been under accumulate-then-commit.
     private func applyCanvasOps(_ ops: [UpsertOp]) {
         if ops.isEmpty { return }
+        canvas = Canvas.apply(canvas, ops)
         if pendingReplace {
-            pendingCanvas = Canvas.apply(pendingCanvas, ops)
-        } else {
-            canvas = Canvas.apply(canvas, ops)
+            liveOpsThisTurn = true
+            if !pendingCanvas.isEmpty {
+                pendingCanvas = Canvas.apply(pendingCanvas, ops)
+            }
         }
     }
 
@@ -883,6 +891,7 @@ final class AppModel: NSObject {
         turnActive = true
         pendingReplace = true
         pendingCanvas = []
+        liveOpsThisTurn = false
         // 055 uniform rule: purge the ephemeral welcome (`wel_` identities)
         // from the committed canvas at turn start — the server no longer
         // sends the blanking `ui_render []` (wire-contract §1).
@@ -922,6 +931,7 @@ final class AppModel: NSObject {
             turnActive = true
             pendingReplace = true
             pendingCanvas = []
+            liveOpsThisTurn = false
             canvas = canvas.dropWelcome()   // 055: same turn-start purge as sendChat
             viewingIndex = nil
             errorBanner = nil

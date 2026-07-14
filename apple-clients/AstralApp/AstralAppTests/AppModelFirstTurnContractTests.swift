@@ -4,8 +4,10 @@
 // committed canvas in the same mutation that arms `pendingReplace` (sendChat
 // AND the sendEvent chat_message path) and keeps `wel_` out of every
 // canvas-history archive (commitTurn). The purge is unconditional — with the
-// server flag off the welcome ships id-less and nothing matches. The pinned
-// commit-on-done lifecycle is otherwise untouched (regression pinned below).
+// server flag off the welcome ships id-less and nothing matches. Under the
+// live-op rule only full `ui_render` replaces buffer mid-turn (identity-keyed
+// ops apply to the visible canvas immediately — AppModelLiveCanvasTests), so
+// the commit-on-done regressions below drive a buffered render.
 import XCTest
 import AstralCore
 @testable import AstralDeep
@@ -15,6 +17,7 @@ final class AppModelFirstTurnContractTests: XCTestCase {
 
     private let doneStatus = #"{"type":"chat_status","status":"done"}"#
     private let resultUpsert = #"{"type":"ui_upsert","ops":[{"op":"upsert","component_id":"wc_result","component":{"type":"card","component_id":"wc_result","title":"Result"}}]}"#
+    private let resultRender = #"{"type":"ui_render","target":"canvas","components":[{"type":"card","component_id":"wc_result","title":"Result"}]}"#
 
     private func component(_ fields: [String: JSONValue]) -> AstralComponent {
         AstralComponent(json: .object(fields))!
@@ -76,7 +79,7 @@ final class AppModelFirstTurnContractTests: XCTestCase {
         // A welcome resurrecting mid-turn (reconnect re-register) must still
         // never reach the timeline.
         model.canvas = [welcomeHero, workspaceCard]
-        reduce(model, resultUpsert)   // buffers into pendingCanvas
+        reduce(model, resultRender)   // buffers into pendingCanvas
         reduce(model, doneStatus)     // commit
         XCTAssertEqual(model.canvasHistory.count, 1)
         XCTAssertEqual(model.canvasHistory[0].components.map(\.componentId), ["wc_abc123"])
@@ -88,7 +91,7 @@ final class AppModelFirstTurnContractTests: XCTestCase {
         model.canvas = [welcomeHero, welcomeExamples]
         model.sendChat("first")
         model.canvas = [welcomeHero]   // resurrected mid-turn
-        reduce(model, resultUpsert)
+        reduce(model, resultRender)
         reduce(model, doneStatus)
         XCTAssertTrue(model.canvasHistory.isEmpty)   // welcome-only ⇒ no snapshot
         XCTAssertEqual(model.canvas.map(\.componentId), ["wc_result"])
@@ -106,13 +109,23 @@ final class AppModelFirstTurnContractTests: XCTestCase {
         XCTAssertTrue(model.canvasHistory.isEmpty)
     }
 
+    func testUpsertOnlyTurnDropsWelcomeAtCommit() {
+        let model = AppModel()
+        model.sendChat("just a question")
+        model.canvas = [welcomeHero, workspaceCard]   // resurrected mid-turn
+        reduce(model, resultUpsert)   // live op — no buffered render
+        reduce(model, doneStatus)     // live canvas commits, welcome dropped
+        XCTAssertEqual(model.canvas.map(\.componentId), ["wc_abc123", "wc_result"])
+        XCTAssertTrue(model.canvasHistory.isEmpty)
+    }
+
     // MARK: pinned lifecycle unchanged for non-welcome canvases
 
     func testCommitStillArchivesAPlainCanvas() {
         let model = AppModel()
         model.canvas = [workspaceCard]
         model.sendChat("next")
-        reduce(model, resultUpsert)
+        reduce(model, resultRender)
         reduce(model, doneStatus)
         XCTAssertEqual(model.canvasHistory.count, 1)
         XCTAssertEqual(model.canvasHistory[0].components, [workspaceCard])

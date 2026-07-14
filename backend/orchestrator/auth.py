@@ -421,6 +421,71 @@ async def require_download_user_id(
     return await require_user_id(request, payload)
 
 
+async def get_web_or_bearer_user_payload(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+):
+    """Auth for browser-openable REST routes (055 export/share management):
+    Bearer/``?token=`` first (unchanged contract), then the ``astral_session``
+    cookie — native clients open export URLs in the system browser and web
+    users can middle-click/new-tab, and a browser navigation sends only the
+    feature-028 session cookie.
+
+    The cookie session's access token is validated through the exact same
+    JWT path as a Bearer token (:func:`get_current_user_payload`, mock/JWKS),
+    which also sets ``request.state.audit_claims`` for audit attribution.
+    With neither credential, a browser NAVIGATION (GET whose Accept prefers
+    text/html) is 302-redirected to login with a validated ``next=`` of
+    path+query — the same construction as ``web_auth.shell_gate`` — instead
+    of dead-ending on 401 JSON; API callers keep today's 401.
+    """
+    has_token = bool(credentials) or bool(request.query_params.get("token"))
+    if has_token or request.method == "OPTIONS":
+        # Existing behavior, including the OPTIONS short-circuit.
+        return await get_current_user_payload(request, credentials)
+
+    # Lazy import to avoid an import cycle at module load.
+    from orchestrator.web_auth import _validate_next, ensure_session
+    try:
+        session = await ensure_session(request)
+    except Exception as e:
+        logger.warning(f"Cookie-session resolution failed: {e}")
+        session = None
+    access_token = (session or {}).get("access_token", "")
+    if access_token:
+        cookie_credentials = HTTPAuthorizationCredentials(
+            scheme="Bearer", credentials=access_token
+        )
+        return await get_current_user_payload(request, cookie_credentials)
+
+    accept = request.headers.get("accept", "")
+    prefers_html = accept.split(",")[0].strip().lower().startswith("text/html")
+    if request.method == "GET" and prefers_html:
+        path = request.url.path or "/"
+        query = ("?" + str(request.url.query)) if request.url.query else ""
+        from urllib.parse import quote
+        raise HTTPException(
+            status_code=status.HTTP_302_FOUND,
+            detail="Login required",
+            headers={"Location":
+                     f"/auth/login?next={quote(_validate_next(path + query), safe='')}"},
+        )
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Not authenticated",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+async def require_user_id_or_web_session(
+    request: Request,
+    payload: dict = Depends(get_web_or_bearer_user_payload),
+) -> str:
+    """:func:`require_user_id` that also accepts the feature-028 web session
+    cookie (browser navigations / same-origin fetches without a Bearer)."""
+    return await require_user_id(request, payload)
+
+
 def _extract_roles(user_data: dict) -> list:
     logger.debug(f"Extracting roles from user_data: {json.dumps(user_data, indent=2)}")
     roles = user_data.get("realm_access", {}).get("roles", [])
