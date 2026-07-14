@@ -8,12 +8,10 @@ target agent's private key.
 Ciphertext format (base64url-encoded, prefixed with "e2e:"):
     e2e:<base64url(eph_pub_65B | salt_16B | nonce_12B | ciphertext | tag_16B)>
 
-Also contains shared JWK utilities used by both delegation.py and base_agent.py.
+Also contains the shared JWK utility (build_jwk) used by base_agent.py.
 """
 import os
 import base64
-import hashlib
-import json
 import logging
 from typing import Tuple
 
@@ -56,17 +54,6 @@ def build_jwk(public_key: ec.EllipticCurvePublicKey) -> dict:
         "x": base64.urlsafe_b64encode(x_bytes).rstrip(b"=").decode(),
         "y": base64.urlsafe_b64encode(y_bytes).rstrip(b"=").decode(),
     }
-
-
-def compute_jwk_thumbprint(jwk: dict) -> str:
-    """Compute the JWK Thumbprint (RFC 7638) — base64url(SHA-256(canonical JWK))."""
-    canonical = json.dumps(
-        {"crv": jwk["crv"], "kty": jwk["kty"], "x": jwk["x"], "y": jwk["y"]},
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    digest = hashlib.sha256(canonical.encode()).digest()
-    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
 
 
 def ec_public_key_from_jwk(jwk: dict) -> ec.EllipticCurvePublicKey:

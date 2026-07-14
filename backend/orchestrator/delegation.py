@@ -18,15 +18,11 @@ import json
 import hmac
 import hashlib
 import base64
-import uuid
 import logging
 from typing import Optional, Dict, List
 
 import aiohttp
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.backends import default_backend
 
-from shared.crypto import build_jwk, compute_jwk_thumbprint
 
 logger = logging.getLogger("DelegationService")
 
@@ -55,104 +51,12 @@ class DelegationService:
         )
         self.mock_auth = os.getenv("USE_MOCK_AUTH", "false").lower() == "true"
 
-        # RFC 9449 DPoP: Generate ephemeral EC P-256 key pair for
-        # cryptographic binding of delegation tokens to this Orchestrator instance.
-        self._dpop_private_key = ec.generate_private_key(
-            ec.SECP256R1(), default_backend()
-        )
-        self._dpop_public_key = self._dpop_private_key.public_key()
-        self._dpop_jwk = build_jwk(self._dpop_public_key)
-        self._dpop_thumbprint = compute_jwk_thumbprint(self._dpop_jwk)
-
         if self.mock_auth:
-            logger.info("DelegationService running in MOCK mode (DPoP enabled)")
+            logger.info("DelegationService running in MOCK mode")
         else:
             logger.info(
-                f"DelegationService configured for Keycloak: {self.authority} (DPoP enabled)"
+                f"DelegationService configured for Keycloak: {self.authority}"
             )
-
-    # -----------------------------------------------------------------
-    # RFC 9449 DPoP — Demonstrating Proof of Possession
-    # -----------------------------------------------------------------
-    # JWK utilities (build_jwk, compute_jwk_thumbprint) are in shared.crypto
-
-    def _create_dpop_proof(
-        self, htm: str, htu: str, access_token: Optional[str] = None
-    ) -> str:
-        """Create a DPoP proof JWT per RFC 9449 §4.
-
-        Args:
-            htm: HTTP method (e.g. "POST", "GET").
-            htu: HTTP target URI of the request.
-            access_token: If provided, the access token hash (ath) is included
-                          for token-bound proof verification.
-
-        Returns:
-            A compact-serialized DPoP proof JWT (ES256-signed).
-        """
-        header = {
-            "typ": "dpop+jwt",
-            "alg": "ES256",
-            "jwk": self._dpop_jwk,
-        }
-        payload = {
-            "jti": str(uuid.uuid4()),
-            "htm": htm,
-            "htu": htu,
-            "iat": int(time.time()),
-        }
-        if access_token:
-            # RFC 9449 §4.2: ath = base64url(SHA-256(access_token))
-            ath_digest = hashlib.sha256(access_token.encode()).digest()
-            payload["ath"] = base64.urlsafe_b64encode(ath_digest).rstrip(b"=").decode()
-
-        # Sign with the ephemeral private key using ES256
-        header_b64 = (
-            base64.urlsafe_b64encode(json.dumps(header).encode())
-            .rstrip(b"=")
-            .decode()
-        )
-        payload_b64 = (
-            base64.urlsafe_b64encode(json.dumps(payload).encode())
-            .rstrip(b"=")
-            .decode()
-        )
-        signing_input = f"{header_b64}.{payload_b64}".encode()
-
-        from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
-        from cryptography.hazmat.primitives.hashes import SHA256
-        from cryptography.hazmat.primitives.asymmetric import ec as ec_module
-
-        der_sig = self._dpop_private_key.sign(
-            signing_input, ec_module.ECDSA(SHA256())
-        )
-        r, s = decode_dss_signature(der_sig)
-        # Convert to fixed-width R||S format (32 bytes each for P-256)
-        r_bytes = r.to_bytes(32, byteorder="big")
-        s_bytes = s.to_bytes(32, byteorder="big")
-        sig_b64 = (
-            base64.urlsafe_b64encode(r_bytes + s_bytes).rstrip(b"=").decode()
-        )
-
-        return f"{header_b64}.{payload_b64}.{sig_b64}"
-
-    def get_dpop_proof_for_request(
-        self, method: str, url: str, access_token: str
-    ) -> str:
-        """Generate a DPoP proof for presenting a delegation token to an agent.
-
-        This proof demonstrates that the Orchestrator possesses the private key
-        bound to the delegation token's ``cnf.jkt`` claim.
-
-        Args:
-            method: HTTP method of the request (e.g. "GET", "POST").
-            url: Target URL of the request.
-            access_token: The delegation token being presented.
-
-        Returns:
-            A DPoP proof JWT string to include as a ``DPoP`` header.
-        """
-        return self._create_dpop_proof(method, url, access_token)
 
     async def exchange_token_for_agent(
         self,
@@ -234,23 +138,15 @@ class DelegationService:
             f"{len(allowed_tools)} allowed tool(s) (scope='{combined_scopes}')"
         )
 
-        # RFC 9449: bind the resulting token to the orchestrator's key with a
-        # DPoP proof. This requires the Keycloak clients to be configured for
-        # DPoP-bound access tokens; a deployment whose realm was NOT set up for
-        # DPoP rejects the DPoP-bearing exchange (surfaces as a terse
-        # "Invalid token"). Gated so an operator can turn it off without a code
-        # change: DELEGATION_DPOP=false omits the DPoP header. Default: on
-        # (unchanged behavior). The 056 orchestrator-mediated enforcement does
-        # not depend on Keycloak-side DPoP binding — the mediation point is
-        # minter+verifier — so disabling it is safe when the realm lacks DPoP.
-        exchange_headers: Dict[str, str] = {}
-        if os.getenv("DELEGATION_DPOP", "true").strip().lower() in ("1", "true", "yes", "on"):
-            exchange_headers["DPoP"] = self._create_dpop_proof("POST", token_url)
-
+        # The delegated token is bearer, not sender-constrained. DPoP was
+        # retired: it required the Keycloak clients to be configured for
+        # DPoP-bound tokens (which broke the non-DPoP login flow on the shared
+        # astral-frontend client), and the orchestrator-mediated enforcement
+        # (minter+verifier at the mediation point) never depended on it.
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    token_url, data=form_data, headers=exchange_headers
+                    token_url, data=form_data
                 ) as resp:
                     body = await resp.json()
                     if resp.status != 200:
@@ -316,7 +212,6 @@ class DelegationService:
             "azp": self.client_id or "astral-frontend",
             "realm_access": {"roles": ["user"]},
             "delegation": True,  # Custom flag for easy identification
-            "cnf": {"jkt": self._dpop_thumbprint},  # RFC 9449 §6: DPoP binding
         }
 
         # Create a simple mock JWT (not cryptographically secure — dev only)
@@ -340,17 +235,16 @@ class DelegationService:
 
         logger.info(
             f"Mock delegation token created for agent '{agent_id}' "
-            f"with {len(allowed_tools)} tools (DPoP-bound)"
+            f"with {len(allowed_tools)} tools"
         )
 
         return {
             "access_token": mock_token,
-            "token_type": "DPoP",
+            "token_type": "Bearer",
             "expires_in": 300,
             "scope": combined_scopes,
             "issued_token_type": TOKEN_TYPE_ACCESS,
             "agent_id": agent_id,
-            "dpop_bound": True,
         }
 
     @staticmethod
@@ -419,7 +313,7 @@ class DelegationService:
 # for the hash-chained audit. Gated by FF_RECURSIVE_DELEGATION (default off,
 # fail-closed): with the flag off, callers use the single-hop path unchanged.
 # See specs/048-recursive-delegation-chains/. No new runtime dependency
-# (Constitution V) -- nested `act` rides the existing JWT/DPoP construction.
+# (Constitution V) -- nested `act` rides the existing JWT construction.
 
 # Configurable maximum chain depth (small by default). Depth 0 == the legacy
 # single-hop token; each child mint increments by one. Depth N allows N hops.
@@ -585,7 +479,7 @@ def mint_child_delegation(parent: dict, child_agent_id: str,
     The child: carries ``attenuate_scopes(parent, requested)`` (a subset of the
     parent's scopes); nests the parent's ``act`` chain under its own actor claim
     so the path back to the human ``sub`` is complete; inherits the human
-    ``sub``, ``aud``, ``iss`` and DPoP ``cnf`` binding (audience never widened);
+    ``sub``, ``aud`` and ``iss`` (audience never widened);
     caps ``exp`` at the parent's (a child never outlives its parent); and sets
     depth = parent depth + 1, refusing beyond the maximum with
     ``DelegationDepthExceeded`` (fail-closed).
@@ -628,8 +522,6 @@ def mint_child_delegation(parent: dict, child_agent_id: str,
         DELEGATION_DEPTH_CLAIM: child_depth,
         MAX_DEPTH_CLAIM: max_depth,
     }
-    if "cnf" in parent:
-        child["cnf"] = parent["cnf"]              # RFC 9449 DPoP binding carried
     return child
 
 
