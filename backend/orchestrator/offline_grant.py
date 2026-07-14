@@ -104,6 +104,36 @@ class OfflineGrantStore:
             return False
         return True
 
+    def latest_valid_for(self, user_id: str, agent_id: Optional[str] = None) -> Optional[str]:
+        """Most recent unrevoked, unexpired grant id for the user.
+
+        Prefers a grant captured for ``agent_id`` when one exists, else falls
+        back to the user's newest valid grant of any agent. Returns only the
+        id — token bytes never leave this class. Used by 056's
+        ``MachineTurnAuthority`` so machine-turn classes without an explicit
+        job-linked grant (parser replay, draft self-tests) can still derive
+        authority from the user's standing consent, and skip fail-closed when
+        none exists.
+        """
+        now = _now_ms()
+        if agent_id:
+            row = self.db.fetch_one(
+                """SELECT id FROM user_offline_grant
+                   WHERE user_id = ? AND agent_id = ?
+                     AND revoked_at IS NULL AND expires_at > ?
+                   ORDER BY issued_at DESC LIMIT 1""",
+                (user_id, agent_id, now),
+            )
+            if row:
+                return dict(row)["id"]
+        row = self.db.fetch_one(
+            """SELECT id FROM user_offline_grant
+               WHERE user_id = ? AND revoked_at IS NULL AND expires_at > ?
+               ORDER BY issued_at DESC LIMIT 1""",
+            (user_id, now),
+        )
+        return dict(row)["id"] if row else None
+
     async def mint_access_token(self, grant_id: str) -> str:
         """Exchange the stored refresh token for a fresh access token at Keycloak.
 

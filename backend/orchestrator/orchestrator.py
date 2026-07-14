@@ -613,6 +613,30 @@ def _native_canvas_components(components) -> List[Dict[str, Any]]:
     return out
 
 
+class PreparedDispatch(NamedTuple):
+    """Outcome of ``Orchestrator._authorize_and_prepare`` when every gate
+    allows the call (056 US3). Carries the fully prepared arguments (path
+    mapping, credential/LLM-credential injection, policy rewrites, delegation
+    token, cap job id) so the caller only has to dispatch and deliver."""
+    args: Dict[str, Any]
+    stream_params: Dict[str, Any]
+    cap_job_id: Optional[str]
+    delegation_token: Optional[str]
+
+
+class GateRefusal(NamedTuple):
+    """Outcome of ``Orchestrator._authorize_and_prepare`` when a gate denies
+    the call (056 US3). ``response`` is the refusal the dispatch path must
+    return; ``render_components`` are the alert dicts the caller renders (may
+    differ from ``response.ui_components`` — e.g. the no-agent and
+    delegation-required refusals render an alert the response doesn't carry;
+    hook blocks render nothing). ``render_target`` preserves each gate's
+    historical ``send_ui_render`` target (None = default)."""
+    response: MCPResponse
+    render_components: Optional[List[Dict[str, Any]]] = None
+    render_target: Optional[str] = None
+
+
 class Orchestrator:
     def __init__(self):
         # 020-async-queries: background task manager for async chat processing
@@ -6101,6 +6125,356 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             logger.debug("mint_action_token failed", exc_info=True)
             return None
 
+    async def _authorize_and_prepare(
+        self, websocket, agent_id: Optional[str], tool_name: str, args: Dict,
+        chat_id: str = None, user_id: str = None, *,
+        stream_params: Optional[Dict] = None,
+        parent_token: Optional[Dict[str, Any]] = None,
+        initiating_agent_id: Optional[str] = None,
+    ):
+        """Run the FULL single-path gate stack once (056 US3, FR-017/SC-006).
+
+        Shared by ``execute_single_tool``, ``execute_parallel_tools``, and
+        every chained hop (which re-enters ``execute_single_tool``), so a
+        violating call is refused identically on every dispatch path. Applies,
+        in the single path's historical order: the system security-flag block,
+        the per-user tool permission gate, the deterministic policy engine,
+        the taint/data-flow sink gate, the intent-alignment supervisor + HITL,
+        file-path mapping, per-(user, callee) credential injection, LLM
+        credential surfacing (054), the disabled-tool diagnosis gate, the
+        no-agent check, the RFC 8693 delegation-token mint (fail-closed in
+        production posture), the PRE_TOOL_USE hook, the concurrency cap, and
+        the 055 stream auto-subscribe.
+
+        Returns :class:`PreparedDispatch` on allow or :class:`GateRefusal` on
+        any deny — gate logic only, no UI delivery: each caller renders the
+        refusal per its own delivery model (immediate for the single path,
+        batched for the parallel path), keeping wire behavior byte-identical.
+
+        ``parent_token`` (056 US1, wired by the chained-hop seam) switches the
+        delegation step from the flat single-hop exchange to a child mint;
+        ``initiating_agent_id`` additionally charges the initiating agent's
+        concurrency slot on long-running hops (FR-019).
+        """
+        if stream_params is None:
+            stream_params = dict(args)
+
+        # System-level security block (proactive security review)
+        agent_flags = self.security_flags.get(agent_id, {}) if agent_id else {}
+        if agent_id and tool_name in agent_flags and agent_flags[tool_name].get("blocked"):
+            reason = agent_flags[tool_name].get("reason", "Security threat detected")
+            err_msg = f"Tool '{tool_name}' is system-blocked: {reason}"
+            logger.warning(f"Security block: agent={agent_id} tool={tool_name}")
+            alert = Alert(message=err_msg, variant="error")
+            return GateRefusal(
+                response=MCPResponse(
+                    error={"message": err_msg, "retryable": False},
+                    ui_components=[alert.to_dict()]),
+                render_components=[alert.to_dict()],
+                render_target="chat")
+
+        # Permission enforcement gate (RFC 8693 delegation)
+        if user_id and agent_id and not await asyncio.to_thread(
+                self.tool_permissions.is_tool_allowed, user_id, agent_id, tool_name):
+            err_msg = f"Tool '{tool_name}' is restricted for this agent. Update permissions in the sidebar to enable it."
+            logger.warning(f"Permission denied: user={user_id} agent={agent_id} tool={tool_name}")
+            alert = Alert(message=err_msg, variant="warning")
+            return GateRefusal(
+                response=MCPResponse(
+                    error={"message": err_msg, "retryable": False},
+                    ui_components=[alert.to_dict()]),
+                render_components=[alert.to_dict()])
+
+        # Deterministic pre-action policy engine — an ordered, fail-closed rule
+        # chain (data, admin-extensible via POLICY_RULES) on top of the
+        # permission gate. Default OFF + no seed rules ⇒ purely additive.
+        # deny/confirm block the call; rewrite redacts args before execution.
+        if user_id:
+            from orchestrator import policy
+            if policy.policy_enabled():
+                try:
+                    decision = policy.evaluate_policy(
+                        policy.load_rules(),
+                        {"tool": tool_name, "agent": agent_id, "user_id": user_id,
+                         "roles": self._policy_roles(websocket), "args": args})
+                except Exception:
+                    logger.debug("policy: evaluation failed — allowing", exc_info=True)
+                    decision = policy.PolicyDecision()
+                # A require_token rule demands a valid single-use transaction
+                # token bound to (agent, user, tool, hash(args)). Fail-closed —
+                # missing/tampered/expired/replayed ⇒ deny.
+                if decision.effect == policy.REQUIRE_TOKEN:
+                    from orchestrator import transaction_token as _txn
+                    token = args.get("_txn_token") if isinstance(args, dict) else None
+                    ok_tok, why = _txn.verify_and_consume(
+                        _txn.default_store(), token, agent_id or "", user_id,
+                        tool_name, args)
+                    if not ok_tok:
+                        msg = decision.reason or (
+                            f"'{tool_name}' needs a valid one-time authorization "
+                            f"token ({why}).")
+                        logger.warning("policy.require_token user=%s tool=%s rule=%s reason=%s",
+                                       user_id, tool_name, decision.rule_id, why)
+                        alert = Alert(message=msg, variant="warning")
+                        return GateRefusal(
+                            response=MCPResponse(
+                                error={"message": msg, "retryable": False},
+                                ui_components=[alert.to_dict()]),
+                            render_components=[alert.to_dict()])
+                elif decision.effect in (policy.DENY, policy.CONFIRM):
+                    msg = decision.reason or (
+                        f"'{tool_name}' needs confirmation before it can run."
+                        if decision.effect == policy.CONFIRM
+                        else f"'{tool_name}' was blocked by an access policy.")
+                    logger.warning("policy.%s user=%s tool=%s rule=%s",
+                                   decision.effect, user_id, tool_name, decision.rule_id)
+                    alert = Alert(message=msg, variant="warning")
+                    return GateRefusal(
+                        response=MCPResponse(
+                            error={"message": msg, "retryable": False},
+                            ui_components=[alert.to_dict()]),
+                        render_components=[alert.to_dict()])
+                if decision.args is not None:
+                    args = decision.args  # rewritten (e.g. a secret arg redacted)
+                    # The streaming twin must dispatch the SAME redacted args —
+                    # auto-subscribe with the pre-rewrite capture would hand
+                    # the agent the secret the rule just removed.
+                    stream_params = dict(args)
+                # Never forward a consumed authorization token to the agent.
+                if isinstance(args, dict) and "_txn_token" in args:
+                    args = {k: v for k, v in args.items() if k != "_txn_token"}
+
+        # Value-level taint/data-flow gate. If this call is a write/egress SINK
+        # and its arguments carry untrusted-tainted values (effective trust =
+        # min over data ancestors, recorded from prior untrusted-source outputs
+        # — survives multi-hop laundering), refuse it. Flag-gated (default OFF)
+        # + fail-open: unknown values are trusted, so a call with only
+        # constants/user intent always passes.
+        if user_id:
+            from orchestrator import taint as _taint
+            if _taint.taint_enabled() and _taint.is_sink(agent_id, tool_name):
+                tracker = self._taint_tracker(chat_id)
+                trust = tracker.effective_trust_of_args(args)
+                if _taint.check_flow(trust) == "deny":
+                    msg = (f"'{tool_name}' was blocked: it would send untrusted "
+                           f"data (from a web/third-party source) into a "
+                           f"write/egress action.")
+                    logger.warning("taint.deny user=%s tool=%s agent=%s trust=%s",
+                                   user_id, tool_name, agent_id, _taint.trust_name(trust))
+                    alert = Alert(message=msg, variant="warning")
+                    return GateRefusal(
+                        response=MCPResponse(
+                            error={"message": msg, "retryable": False},
+                            ui_components=[alert.to_dict()]),
+                        render_components=[alert.to_dict()])
+
+        # Intent-alignment supervisor (C-S5) + high-risk human-in-the-loop
+        # (C-S11). Both default OFF and fail-open: when on, a destructive tool
+        # the user never asked for, or a risky (egress/irreversible/cross-
+        # principal/tainted) call, is held for confirmation instead of running.
+        if user_id and agent_id:
+            from orchestrator import supervisor as _sup
+            if _sup.supervisor_enabled():
+                request_text = getattr(self, "_active_request", {}).get(chat_id, "")
+                if not _sup.intent_aligned(request_text, tool_name):
+                    msg = (f"'{tool_name}' looks like a destructive action you "
+                           f"didn't ask for — please confirm before it runs.")
+                    logger.warning("supervisor.escalate user=%s tool=%s", user_id, tool_name)
+                    alert = Alert(message=msg, variant="warning")
+                    return GateRefusal(
+                        response=MCPResponse(
+                            error={"message": msg, "retryable": False},
+                            ui_components=[alert.to_dict()]),
+                        render_components=[alert.to_dict()])
+            from orchestrator import hitl as _hitl
+            if _hitl.hitl_enabled():
+                trust = "trusted"
+                try:
+                    from orchestrator import taint as _tnt
+                    if _tnt.taint_enabled():
+                        trust = _tnt.trust_name(
+                            self._taint_tracker(chat_id).effective_trust_of_args(args))
+                except Exception:
+                    trust = "trusted"
+                risks = _hitl.assess_risk(tool_name, args, actor_principal=user_id, trust=trust)
+                if _hitl.requires_confirmation(risks):
+                    req = _hitl.confirmation_request(tool_name, risks)
+                    logger.warning("hitl.confirm user=%s tool=%s risks=%s", user_id, tool_name, risks)
+                    alert = Alert(message=req.summary, variant="warning")
+                    return GateRefusal(
+                        response=MCPResponse(
+                            error={"message": req.summary, "retryable": False},
+                            ui_components=[alert.to_dict()]),
+                        render_components=[alert.to_dict()])
+
+        # Map file paths if chat_id provided
+        if chat_id:
+            args = await asyncio.to_thread(
+                self._map_file_paths, chat_id, args, user_id=user_id)
+            args["session_id"] = chat_id
+            if user_id:
+                args["user_id"] = user_id
+
+        # Inject per-user credentials (E2E encrypted — only agent can decrypt)
+        if user_id and agent_id:
+            creds = self.credential_manager.get_agent_credentials_encrypted(user_id, agent_id)
+            if creds:
+                args["_credentials"] = creds
+                args["_credentials_encrypted"] = True
+
+        # Feature 054: surface the resolved LLM credentials for THIS call's
+        # context so agent-side LLM tools can run (they no longer have any
+        # env fallback): the caller's persisted record on a user socket,
+        # the admin system record on system-context turns. The kwarg name
+        # ``_session_llm_credentials`` is kept for agent-side compatibility.
+        _llm_ctx_user = self._llm_context_user_id(websocket)
+        if _llm_ctx_user is None:
+            _llm_cfg = await self._llm_store.get_system()
+        else:
+            _llm_cfg = await self._llm_store.get(_llm_ctx_user)
+        if _llm_cfg is not None:
+            args["_session_llm_credentials"] = {
+                "OPENAI_API_KEY": _llm_cfg.api_key,
+                "OPENAI_BASE_URL": _llm_cfg.base_url,
+                "LLM_MODEL": _llm_cfg.model,
+            }
+
+        # 5th gate (015): when no `agent_id` was resolved via `tool_to_agent` —
+        # which happens because the tool was filtered out at chat-time tool-list
+        # construction — see whether the tool actually EXISTS on a registered
+        # agent and surface a friendly disabled-tool alert. This catches the
+        # case where the model emitted a call for a tool the user disabled in
+        # the picker (or whose owning agent they disabled wholesale).
+        if not agent_id and tool_name:
+            owner = self._find_tool_owner(tool_name)
+            if owner is not None:
+                diag = await asyncio.to_thread(
+                    self._diagnose_disabled_tool, tool_name, user_id, chat_id)
+                alert = self._alert_for_disabled_tool(diag, tool_name)
+                logger.info(
+                    "Dispatch blocked by disabled-tool gate: tool=%s owner=%s status=%s user=%s chat=%s",
+                    tool_name, owner, diag.status.value, user_id, chat_id,
+                )
+                return GateRefusal(
+                    response=MCPResponse(
+                        error={"message": alert.message, "retryable": False},
+                        ui_components=[alert.to_dict()]),
+                    render_components=[alert.to_dict()],
+                    render_target="chat")
+
+        if not agent_id or (
+            agent_id not in self.agents
+            and agent_id not in self.a2a_clients
+            and agent_id not in self.local_agents
+        ):
+            err_msg = f"No agent available for tool '{tool_name}'"
+            return GateRefusal(
+                response=MCPResponse(error={"message": err_msg}),
+                render_components=[Alert(message=err_msg, variant="error").to_dict()],
+                render_target="chat")
+
+        # RFC 8693 delegation: generate a scoped token excluding system-blocked tools
+        # The delegation token constrains what the agent can do even if it's compromised
+        delegation_token: Optional[str] = None
+        if user_id and agent_id:
+            delegation_token = await self._get_delegation_token(websocket, agent_id, user_id)
+            if delegation_token:
+                args["_delegation_token"] = delegation_token
+            elif self._delegation_required():
+                # Feature 030 / Constitution VII: agents MUST act under RFC
+                # 8693 delegated tokens. The walkthrough found the deployed
+                # realm missing the tools:* client scopes — every exchange
+                # failed invalid_scope and dispatch silently proceeded
+                # UNSCOPED. Production posture now fails closed with an
+                # actionable operator message; development keeps the
+                # fail-open behavior (warned once per agent) so local stacks
+                # without a fully configured realm still work.
+                err_msg = (
+                    "Tool execution is disabled: delegated authorization "
+                    "(RFC 8693 token exchange) is unavailable for agent "
+                    f"'{agent_id}'. An operator must register the tools:* "
+                    "client scopes on the identity provider (see "
+                    "docs/keycloak-realm-settings.md), or set "
+                    "DELEGATION_REQUIRED=false to accept unscoped dispatch."
+                )
+                logger.error(
+                    "Delegation required but unavailable: agent=%s user=%s — refusing dispatch",
+                    agent_id, user_id,
+                )
+                return GateRefusal(
+                    response=MCPResponse(error={"message": err_msg, "retryable": False}),
+                    render_components=[Alert(message=err_msg, variant="error").to_dict()],
+                    render_target="chat")
+
+        # Hook: PRE_TOOL_USE — allows handlers to block or modify tool args
+        if flags.is_enabled("hook_system"):
+            hook_ctx = HookContext(
+                event=HookEvent.PRE_TOOL_USE,
+                user_id=user_id or "",
+                agent_id=agent_id or "",
+                tool_name=tool_name,
+                tool_args=args,
+            )
+            hook_resp = await self.hooks.emit(hook_ctx)
+            if hook_resp.action == "block":
+                err_msg = f"Tool '{tool_name}' blocked by hook: {hook_resp.reason or 'no reason given'}"
+                logger.info(f"Hook blocked tool: {tool_name}")
+                return GateRefusal(
+                    response=MCPResponse(error={"message": err_msg, "retryable": False}))
+            if hook_resp.action == "modify" and hook_resp.modified_args:
+                args = hook_resp.modified_args
+
+        # 015-external-ai-agents: concurrency cap for long-running tools (FR-026).
+        # Acquired here so a 4th concurrent attempt is rejected without ever
+        # touching the upstream service. Released either on dispatch error
+        # (below) or by the terminal-phase ToolProgress handler.
+        cap_job_id: Optional[str] = None
+        if user_id and agent_id and self._is_long_running_tool(agent_id, tool_name):
+            cap_job_id = f"cap_{tool_name}_{_uuid.uuid4().hex[:8]}"
+            acquired = await self.concurrency_cap.acquire(user_id, agent_id, cap_job_id)
+            if not acquired:
+                inflight = self.concurrency_cap.inflight_jobs(user_id, agent_id)
+                max_n = self.concurrency_cap.max_per_user_agent
+                err_msg = (
+                    f"You already have {max_n} jobs running on '{agent_id}'. "
+                    f"Wait for one to finish or cancel one before starting another. "
+                    f"(Running: {', '.join(inflight)})"
+                )
+                logger.info(
+                    "ConcurrencyCap rejected dispatch: user=%s agent=%s tool=%s",
+                    user_id, agent_id, tool_name,
+                )
+                alert = Alert(message=err_msg, variant="warning")
+                return GateRefusal(
+                    response=MCPResponse(
+                        error={"message": err_msg, "retryable": False},
+                        ui_components=[alert.to_dict()]),
+                    render_components=[alert.to_dict()],
+                    render_target="chat")
+            args["_cap_job_id"] = cap_job_id
+            self._pending_cap_entries[cap_job_id] = (user_id, agent_id)
+            # Remember the chat this long-running job belongs to so its progress
+            # and final result are delivered to (and persisted in) that chat for
+            # any client that returns to it later (014/015 + 028).
+            self._job_context[cap_job_id] = {
+                "user_id": user_id,
+                "agent_id": agent_id,
+                "chat_id": chat_id,
+                "tool_name": tool_name,
+            }
+
+        # 055 US2: a push-streamable tool also streams — subscribe this
+        # user's sockets on the chat before the one-shot dispatch (fail-open).
+        await self._auto_subscribe_stream_artifacts(
+            websocket, chat_id, user_id, tool_name, stream_params)
+
+        return PreparedDispatch(
+            args=args,
+            stream_params=stream_params,
+            cap_job_id=cap_job_id,
+            delegation_token=delegation_token,
+        )
+
     async def execute_single_tool(self, websocket, tool_call, tool_to_agent: Dict, chat_id: str = None, user_id: str = None, tool_to_unqualified: Optional[Dict[str, str]] = None) -> Optional[MCPResponse]:
         """Execute a single tool call and render its UI components. Returns the Result object."""
         # The LLM may have emitted a qualified name (e.g. "forecaster-1__submit_dataset")
@@ -6179,299 +6553,23 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 self, tool_name, args, user_id=user_id, chat_id=chat_id, websocket=websocket
             )
 
-        # System-level security block (proactive security review)
-        agent_flags = self.security_flags.get(agent_id, {}) if agent_id else {}
-        if agent_id and tool_name in agent_flags and agent_flags[tool_name].get("blocked"):
-            reason = agent_flags[tool_name].get("reason", "Security threat detected")
-            err_msg = f"Tool '{tool_name}' is system-blocked: {reason}"
-            logger.warning(f"Security block: agent={agent_id} tool={tool_name}")
-            alert = Alert(message=err_msg, variant="error")
-            await self.send_ui_render(websocket, [alert.to_dict()], target="chat")
-            return MCPResponse(
-                error={"message": err_msg, "retryable": False},
-                ui_components=[alert.to_dict()]
-            )
-
-        # Permission enforcement gate (RFC 8693 delegation)
-        if user_id and agent_id and not await asyncio.to_thread(
-                self.tool_permissions.is_tool_allowed, user_id, agent_id, tool_name):
-            err_msg = f"Tool '{tool_name}' is restricted for this agent. Update permissions in the sidebar to enable it."
-            logger.warning(f"Permission denied: user={user_id} agent={agent_id} tool={tool_name}")
-            alert = Alert(message=err_msg, variant="warning")
-            await self.send_ui_render(websocket, [alert.to_dict()])
-            return MCPResponse(
-                error={"message": err_msg, "retryable": False},
-                ui_components=[alert.to_dict()]
-            )
-
-        # Deterministic pre-action policy engine — an ordered, fail-closed rule
-        # chain (data, admin-extensible via POLICY_RULES) on top of the
-        # permission gate. Default OFF + no seed rules ⇒ purely additive.
-        # deny/confirm block the call; rewrite redacts args before execution.
-        if user_id:
-            from orchestrator import policy
-            if policy.policy_enabled():
-                try:
-                    decision = policy.evaluate_policy(
-                        policy.load_rules(),
-                        {"tool": tool_name, "agent": agent_id, "user_id": user_id,
-                         "roles": self._policy_roles(websocket), "args": args})
-                except Exception:
-                    logger.debug("policy: evaluation failed — allowing", exc_info=True)
-                    decision = policy.PolicyDecision()
-                # A require_token rule demands a valid single-use transaction
-                # token bound to (agent, user, tool, hash(args)). Fail-closed —
-                # missing/tampered/expired/replayed ⇒ deny.
-                if decision.effect == policy.REQUIRE_TOKEN:
-                    from orchestrator import transaction_token as _txn
-                    token = args.get("_txn_token") if isinstance(args, dict) else None
-                    ok_tok, why = _txn.verify_and_consume(
-                        _txn.default_store(), token, agent_id or "", user_id,
-                        tool_name, args)
-                    if not ok_tok:
-                        msg = decision.reason or (
-                            f"'{tool_name}' needs a valid one-time authorization "
-                            f"token ({why}).")
-                        logger.warning("policy.require_token user=%s tool=%s rule=%s reason=%s",
-                                       user_id, tool_name, decision.rule_id, why)
-                        alert = Alert(message=msg, variant="warning")
-                        await self.send_ui_render(websocket, [alert.to_dict()])
-                        return MCPResponse(error={"message": msg, "retryable": False},
-                                           ui_components=[alert.to_dict()])
-                elif decision.effect in (policy.DENY, policy.CONFIRM):
-                    msg = decision.reason or (
-                        f"'{tool_name}' needs confirmation before it can run."
-                        if decision.effect == policy.CONFIRM
-                        else f"'{tool_name}' was blocked by an access policy.")
-                    logger.warning("policy.%s user=%s tool=%s rule=%s",
-                                   decision.effect, user_id, tool_name, decision.rule_id)
-                    alert = Alert(message=msg, variant="warning")
-                    await self.send_ui_render(websocket, [alert.to_dict()])
-                    return MCPResponse(error={"message": msg, "retryable": False},
-                                       ui_components=[alert.to_dict()])
-                if decision.args is not None:
-                    args = decision.args  # rewritten (e.g. a secret arg redacted)
-                    # The streaming twin must dispatch the SAME redacted args —
-                    # auto-subscribe with the pre-rewrite capture would hand
-                    # the agent the secret the rule just removed.
-                    stream_params = dict(args)
-                # Never forward a consumed authorization token to the agent.
-                if isinstance(args, dict) and "_txn_token" in args:
-                    args = {k: v for k, v in args.items() if k != "_txn_token"}
-
-        # Value-level taint/data-flow gate. If this call is a write/egress SINK
-        # and its arguments carry untrusted-tainted values (effective trust =
-        # min over data ancestors, recorded from prior untrusted-source outputs
-        # — survives multi-hop laundering), refuse it. Flag-gated (default OFF)
-        # + fail-open: unknown values are trusted, so a call with only
-        # constants/user intent always passes.
-        if user_id:
-            from orchestrator import taint as _taint
-            if _taint.taint_enabled() and _taint.is_sink(agent_id, tool_name):
-                tracker = self._taint_tracker(chat_id)
-                trust = tracker.effective_trust_of_args(args)
-                if _taint.check_flow(trust) == "deny":
-                    msg = (f"'{tool_name}' was blocked: it would send untrusted "
-                           f"data (from a web/third-party source) into a "
-                           f"write/egress action.")
-                    logger.warning("taint.deny user=%s tool=%s agent=%s trust=%s",
-                                   user_id, tool_name, agent_id, _taint.trust_name(trust))
-                    alert = Alert(message=msg, variant="warning")
-                    await self.send_ui_render(websocket, [alert.to_dict()])
-                    return MCPResponse(error={"message": msg, "retryable": False},
-                                       ui_components=[alert.to_dict()])
-
-        # Intent-alignment supervisor (C-S5) + high-risk human-in-the-loop
-        # (C-S11). Both default OFF and fail-open: when on, a destructive tool
-        # the user never asked for, or a risky (egress/irreversible/cross-
-        # principal/tainted) call, is held for confirmation instead of running.
-        if user_id and agent_id:
-            from orchestrator import supervisor as _sup
-            if _sup.supervisor_enabled():
-                request_text = getattr(self, "_active_request", {}).get(chat_id, "")
-                if not _sup.intent_aligned(request_text, tool_name):
-                    msg = (f"'{tool_name}' looks like a destructive action you "
-                           f"didn't ask for — please confirm before it runs.")
-                    logger.warning("supervisor.escalate user=%s tool=%s", user_id, tool_name)
-                    alert = Alert(message=msg, variant="warning")
-                    await self.send_ui_render(websocket, [alert.to_dict()])
-                    return MCPResponse(error={"message": msg, "retryable": False},
-                                       ui_components=[alert.to_dict()])
-            from orchestrator import hitl as _hitl
-            if _hitl.hitl_enabled():
-                trust = "trusted"
-                try:
-                    from orchestrator import taint as _tnt
-                    if _tnt.taint_enabled():
-                        trust = _tnt.trust_name(
-                            self._taint_tracker(chat_id).effective_trust_of_args(args))
-                except Exception:
-                    trust = "trusted"
-                risks = _hitl.assess_risk(tool_name, args, actor_principal=user_id, trust=trust)
-                if _hitl.requires_confirmation(risks):
-                    req = _hitl.confirmation_request(tool_name, risks)
-                    logger.warning("hitl.confirm user=%s tool=%s risks=%s", user_id, tool_name, risks)
-                    alert = Alert(message=req.summary, variant="warning")
-                    await self.send_ui_render(websocket, [alert.to_dict()])
-                    return MCPResponse(error={"message": req.summary, "retryable": False},
-                                       ui_components=[alert.to_dict()])
-
-        # Map file paths if chat_id provided
-        if chat_id:
-            args = await asyncio.to_thread(
-                self._map_file_paths, chat_id, args, user_id=user_id)
-            args["session_id"] = chat_id
-            if user_id:
-                args["user_id"] = user_id
-
-        # Inject per-user credentials (E2E encrypted — only agent can decrypt)
-        if user_id and agent_id:
-            creds = self.credential_manager.get_agent_credentials_encrypted(user_id, agent_id)
-            if creds:
-                args["_credentials"] = creds
-                args["_credentials_encrypted"] = True
-
-        # Feature 054: surface the resolved LLM credentials for THIS call's
-        # context so agent-side LLM tools can run (they no longer have any
-        # env fallback): the caller's persisted record on a user socket,
-        # the admin system record on system-context turns. The kwarg name
-        # ``_session_llm_credentials`` is kept for agent-side compatibility.
-        _llm_ctx_user = self._llm_context_user_id(websocket)
-        if _llm_ctx_user is None:
-            _llm_cfg = await self._llm_store.get_system()
-        else:
-            _llm_cfg = await self._llm_store.get(_llm_ctx_user)
-        if _llm_cfg is not None:
-            args["_session_llm_credentials"] = {
-                "OPENAI_API_KEY": _llm_cfg.api_key,
-                "OPENAI_BASE_URL": _llm_cfg.base_url,
-                "LLM_MODEL": _llm_cfg.model,
-            }
-
-        # 5th gate (015): when no `agent_id` was resolved via `tool_to_agent` —
-        # which happens because the tool was filtered out at chat-time tool-list
-        # construction — see whether the tool actually EXISTS on a registered
-        # agent and surface a friendly disabled-tool alert. This catches the
-        # case where the model emitted a call for a tool the user disabled in
-        # the picker (or whose owning agent they disabled wholesale).
-        if not agent_id and tool_name:
-            owner = self._find_tool_owner(tool_name)
-            if owner is not None:
-                diag = await asyncio.to_thread(
-                    self._diagnose_disabled_tool, tool_name, user_id, chat_id)
-                alert = self._alert_for_disabled_tool(diag, tool_name)
-                logger.info(
-                    "Dispatch blocked by disabled-tool gate: tool=%s owner=%s status=%s user=%s chat=%s",
-                    tool_name, owner, diag.status.value, user_id, chat_id,
-                )
-                await self.send_ui_render(websocket, [alert.to_dict()], target="chat")
-                return MCPResponse(
-                    error={"message": alert.message, "retryable": False},
-                    ui_components=[alert.to_dict()],
-                )
-
-        if not agent_id or (
-            agent_id not in self.agents
-            and agent_id not in self.a2a_clients
-            and agent_id not in self.local_agents
-        ):
-            err_msg = f"No agent available for tool '{tool_name}'"
-            await self.send_ui_render(websocket, [
-                Alert(message=err_msg, variant="error").to_dict()
-            ], target="chat")
-            return MCPResponse(error={"message": err_msg})
-
-        # RFC 8693 delegation: generate a scoped token excluding system-blocked tools
-        # The delegation token constrains what the agent can do even if it's compromised
-        if user_id and agent_id:
-            delegation_token = await self._get_delegation_token(websocket, agent_id, user_id)
-            if delegation_token:
-                args["_delegation_token"] = delegation_token
-            elif self._delegation_required():
-                # Feature 030 / Constitution VII: agents MUST act under RFC
-                # 8693 delegated tokens. The walkthrough found the deployed
-                # realm missing the tools:* client scopes — every exchange
-                # failed invalid_scope and dispatch silently proceeded
-                # UNSCOPED. Production posture now fails closed with an
-                # actionable operator message; development keeps the
-                # fail-open behavior (warned once per agent) so local stacks
-                # without a fully configured realm still work.
-                err_msg = (
-                    "Tool execution is disabled: delegated authorization "
-                    "(RFC 8693 token exchange) is unavailable for agent "
-                    f"'{agent_id}'. An operator must register the tools:* "
-                    "client scopes on the identity provider (see "
-                    "docs/keycloak-realm-settings.md), or set "
-                    "DELEGATION_REQUIRED=false to accept unscoped dispatch."
-                )
-                logger.error(
-                    "Delegation required but unavailable: agent=%s user=%s — refusing dispatch",
-                    agent_id, user_id,
-                )
-                await self.send_ui_render(websocket, [
-                    Alert(message=err_msg, variant="error").to_dict()
-                ], target="chat")
-                return MCPResponse(error={"message": err_msg, "retryable": False})
-
-        # Hook: PRE_TOOL_USE — allows handlers to block or modify tool args
-        if flags.is_enabled("hook_system"):
-            hook_ctx = HookContext(
-                event=HookEvent.PRE_TOOL_USE,
-                user_id=user_id or "",
-                agent_id=agent_id or "",
-                tool_name=tool_name,
-                tool_args=args,
-            )
-            hook_resp = await self.hooks.emit(hook_ctx)
-            if hook_resp.action == "block":
-                err_msg = f"Tool '{tool_name}' blocked by hook: {hook_resp.reason or 'no reason given'}"
-                logger.info(f"Hook blocked tool: {tool_name}")
-                return MCPResponse(error={"message": err_msg, "retryable": False})
-            if hook_resp.action == "modify" and hook_resp.modified_args:
-                args = hook_resp.modified_args
-
-        # 015-external-ai-agents: concurrency cap for long-running tools (FR-026).
-        # Acquired here so a 4th concurrent attempt is rejected without ever
-        # touching the upstream service. Released either on dispatch error
-        # (below) or by the terminal-phase ToolProgress handler.
-        cap_job_id: Optional[str] = None
-        if user_id and agent_id and self._is_long_running_tool(agent_id, tool_name):
-            cap_job_id = f"cap_{tool_name}_{_uuid.uuid4().hex[:8]}"
-            acquired = await self.concurrency_cap.acquire(user_id, agent_id, cap_job_id)
-            if not acquired:
-                inflight = self.concurrency_cap.inflight_jobs(user_id, agent_id)
-                max_n = self.concurrency_cap.max_per_user_agent
-                err_msg = (
-                    f"You already have {max_n} jobs running on '{agent_id}'. "
-                    f"Wait for one to finish or cancel one before starting another. "
-                    f"(Running: {', '.join(inflight)})"
-                )
-                logger.info(
-                    "ConcurrencyCap rejected dispatch: user=%s agent=%s tool=%s",
-                    user_id, agent_id, tool_name,
-                )
-                alert = Alert(message=err_msg, variant="warning")
-                await self.send_ui_render(websocket, [alert.to_dict()], target="chat")
-                return MCPResponse(
-                    error={"message": err_msg, "retryable": False},
-                    ui_components=[alert.to_dict()],
-                )
-            args["_cap_job_id"] = cap_job_id
-            self._pending_cap_entries[cap_job_id] = (user_id, agent_id)
-            # Remember the chat this long-running job belongs to so its progress
-            # and final result are delivered to (and persisted in) that chat for
-            # any client that returns to it later (014/015 + 028).
-            self._job_context[cap_job_id] = {
-                "user_id": user_id,
-                "agent_id": agent_id,
-                "chat_id": chat_id,
-                "tool_name": tool_name,
-            }
-
-        # 055 US2: a push-streamable tool also streams — subscribe this
-        # user's sockets on the chat before the one-shot dispatch (fail-open).
-        await self._auto_subscribe_stream_artifacts(
-            websocket, chat_id, user_id, tool_name, stream_params)
+        # 056 US3 (FR-017): the FULL gate stack runs in the shared authorizer
+        # so single, parallel, and chained dispatch refuse identically. Gate
+        # logic lives there; this path keeps its immediate per-call delivery.
+        auth = await self._authorize_and_prepare(
+            websocket, agent_id, tool_name, args, chat_id, user_id,
+            stream_params=stream_params)
+        if isinstance(auth, GateRefusal):
+            if auth.render_components:
+                if auth.render_target:
+                    await self.send_ui_render(
+                        websocket, auth.render_components, target=auth.render_target)
+                else:
+                    await self.send_ui_render(websocket, auth.render_components)
+            return auth.response
+        args = auth.args
+        stream_params = auth.stream_params
+        cap_job_id = auth.cap_job_id
 
         # Audit: record the tool dispatch (in_progress → success/failure)
         from audit.hooks import ToolDispatchAudit

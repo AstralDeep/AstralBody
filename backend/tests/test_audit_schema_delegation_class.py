@@ -1,0 +1,60 @@
+"""T001 (056-delegated-agent-chaining): the ``delegation`` audit event class.
+
+Hop provenance records (``delegation.hop.mint`` / ``delegation.hop.enforce``)
+ride the hash-chained audit log under a dedicated ``delegation`` event class
+so a full chain is reconstructable from the log alone (FR-026). These tests
+pin the class into ``EVENT_CLASSES`` and confirm the validator still rejects
+unknown classes.
+"""
+from datetime import datetime, timezone
+
+import pytest
+from pydantic import ValidationError
+
+from audit.schemas import EVENT_CLASSES, AuditEventCreate
+
+
+def _event(**overrides):
+    base = dict(
+        actor_user_id="user-1",
+        auth_principal="agent:web-research-1",
+        agent_id="summarizer-1",
+        event_class="delegation",
+        action_type="delegation.hop.mint",
+        description="child delegation minted for chained hop",
+        correlation_id="corr-1",
+        outcome="in_progress",
+        started_at=datetime.now(timezone.utc),
+    )
+    base.update(overrides)
+    return AuditEventCreate(**base)
+
+
+def test_delegation_in_event_classes():
+    assert "delegation" in EVENT_CLASSES
+
+
+def test_delegation_event_validates():
+    ev = _event()
+    assert ev.event_class == "delegation"
+    assert ev.action_type == "delegation.hop.mint"
+
+
+def test_delegation_enforce_pair_validates():
+    ev = _event(
+        action_type="delegation.hop.enforce",
+        outcome="failure",
+        outcome_detail="empty_intersection",
+        inputs_meta={
+            "parent_actor": "agent:web-research-1",
+            "delegation_depth": 1,
+            "requested_scopes": ["tool:summarize_text"],
+            "granted_scopes": [],
+        },
+    )
+    assert ev.outcome_detail == "empty_intersection"
+
+
+def test_unknown_event_class_still_rejected():
+    with pytest.raises(ValidationError):
+        _event(event_class="not_a_real_class")
