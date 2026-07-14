@@ -9,7 +9,7 @@
   PASS — payload never entered the planner's context
 
 == 3. Hierarchical progress rides EXISTING chat_status frames ==
-  frame types emitted: {'chat_status', 'audit_append'}
+  frame types emitted: {'audit_append', 'chat_status'}
   sample: ['Program A — running', 'Program B — running', 'Program C — running']
   unmanifested (new) frame types: NONE
   PASS — progress rides existing frames; every client renders it unchanged

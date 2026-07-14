@@ -110,16 +110,30 @@ handler.
 
 ## 4. Shared gate authorizer — dispatch-path parity (US3, D5, FR-017)
 
-Extract the gate sequence (steps 1–9 above) into:
+Extract the gate sequence (steps 1–9 above) into the gate stack. As
+implemented this is TWO functions:
 
 ```python
-async def _authorize_and_prepare(self, websocket, agent_id, tool_name, args,
-                                 chat_id, user_id, *, parent_token=None):
-    """Run the full gate stack once. Returns (prepared_args, cap_job_id,
-    delegation_token) on allow, or a refusal MCPResponse on any deny. Used by
-    BOTH execute_single_tool and execute_parallel_tools (and therefore by every
-    chained hop). parent_token, when present, triggers the child mint (§2)."""
+async def _run_gate_stack(self, websocket, agent_id, tool_name, args, chat_id,
+                          user_id, *, stream_params=None, parent_token=None,
+                          initiating_agent_id=None):
+    """Run the full gate stack once. Returns a PreparedDispatch NamedTuple
+    (args, stream_params, cap_job_id, delegation_token, hop_correlation_id) on
+    allow, or a GateRefusal NamedTuple (response, render_components,
+    render_target, hop_audited) on any deny. parent_token triggers the child
+    mint (§2); initiating_agent_id dual-charges the hop's cap slot (§5)."""
+
+async def _authorize_and_prepare(self, ...same signature...):
+    """Thin SC-002 wrapper over _run_gate_stack: when a HOP (parent_token set)
+    is refused by any gate that fires BEFORE the delegation step (security
+    flag, permission/opt-out, policy, taint, supervisor, HITL, cap), emit a
+    delegation.hop.mint failure record so 100% of gate-violating hops carry
+    audit evidence. Direct dispatch is unchanged (no hop record)."""
 ```
+
+Both `execute_single_tool` and `execute_parallel_tools` call
+`_authorize_and_prepare`; the mint/enforce refusals inside `_mint_child_for_hop`
+set `hop_audited=True` so the wrapper does not double-record them.
 
 - `execute_parallel_tools` (`orchestrator.py:6209`) replaces its partial inline
   prepare loop (`6220-6304` — which today applies ONLY creds/security/permission/
@@ -151,17 +165,32 @@ hop failure. Both slots are released on the hop's terminal `ToolProgress`
 
 ## 6. Sub-task decomposition (US4, D10, FR-020/FR-021/FR-023)
 
-- Spawn: `BackgroundTask` + `VirtualWebSocket` (`async_tasks.py:29-105`), fresh
-  context, child authority derived from the turn root (§2), a per-subtree slice
-  of the `ChainBudget` (D9).
+Implemented as `orchestrator/subtasks.py` with the `delegate_subtasks`
+meta-tool (`__subtasks__` pseudo-agent, injected only under
+`FF_RECURSIVE_DELEGATION`). The dispatch site computes `_parent_tools` from the
+turn's tool map so a sub-task may use only tools the parent turn offered (never
+a superset). Bounds: 2–5 sub-tasks, `DIGEST_CAP=1200`, `SUBTASK_TIMEOUT_S=90`,
+each slice `max_hops // n`.
+
+- Spawn: `BackgroundTask` + `VirtualWebSocket` (`async_tasks.py`), fresh
+  context, a per-subtree slice of the `ChainBudget` (D9).
+- **Authority (drift from the draft)**: a sub-task runs under the **same root**
+  as the parent, not a minted child of it — `subtasks._run_one` copies the
+  parent session claims onto the isolated `VirtualWebSocket`
+  (`orch.ui_sessions[vws] = dict(parent_claims)`), so each dispatch inside it
+  does the normal flat root exchange keyed to the same human principal, and
+  only *hops started inside the sub-task* mint attenuated children (§2).
 - Return: a bounded, provenance-tagged **digest** (never a raw transcript);
   scanned by the MAS defense (§7) before entering the parent/planner context.
-- Global budget: `ChainBudget` (data-model.md) bounds cumulative depth, total hop
-  count, and wall clock across the whole tree; exhaustion → honest partial results
-  + audited `budget_stop`.
-- Orphans: parent-ended / socket-gone / budget-exhausted sub-tasks are cancelled
-  via `BackgroundTaskManager.cancel` (`async_tasks.py:191-198`) and audited; their
-  partial `outputs` are discarded, never attached to a later turn.
+- Global budget: `ChainBudget` bounds cumulative depth, total hop count, and
+  wall clock across the whole tree; exhaustion → honest partial results + an
+  audited `delegation.subtask.budget_stop`.
+- Orphans: parent-ended / socket-gone / budget-exhausted sub-tasks are
+  cancelled by plain `asyncio` task cancellation in `handle_meta_tool` (the
+  sub-task `BackgroundTask` is constructed directly, not via
+  `BackgroundTaskManager`) and their partial `outputs` are **cleared**
+  (`task.outputs.clear()`), never attached to a later turn; the cancellation is
+  audited (`delegation.subtask.{cancelled,orphaned}`).
 
 ## 7. MAS payload scan enforcement on hops (US4, D11, FR-007)
 

@@ -117,6 +117,38 @@ async def test_quarantine_does_not_tear_down_the_session(orch, captured):
 
 
 @pytest.mark.asyncio
+async def test_poison_in_ui_components_is_quarantined(orch, captured):
+    """Both channels are scanned: a marker in ui_components (with a clean
+    result) must still quarantine — the initiating agent sees neither."""
+    async def _dispatch(ws, agent_id, tool_name, args, max_retries=None):
+        return MCPResponse(result={"summary": "clean"},
+                           ui_components=[{"type": "text", "content": POISON}])
+
+    now = int(time.time())
+    parent = {"sub": "u1", "act": {"sub": "agent:initiator-1"},
+              "scope": "tools:read tool:peer_tool", "iss": "mock-astral-delegation",
+              "aud": "svc", "iat": now, "exp": now + 300, "delegation": True}
+    ui_ws = MagicMock()
+    ui_ws.machine_claims = None
+    orch._register_dispatch_context(
+        "req-parent", "initiator-1",
+        {"user_id": "u1", "session_id": "c1",
+         "_delegation_token": dg.encode_delegation_payload(parent)}, ui_ws)
+    orch._execute_with_retry = _dispatch
+    ws = SimpleNamespace(_hop_futures={})
+    fut = asyncio.get_running_loop().create_future()
+    ws._hop_futures["hop-1"] = fut
+    await orch._handle_agent_hop_request(ws, AgentHopRequest(
+        request_id="hop-1", parent_request_id="req-parent",
+        initiator_agent_id="initiator-1", callee_agent_id="callee-1",
+        tool_name="peer_tool", arguments={}))
+    resp = await asyncio.wait_for(fut, timeout=2)
+    assert resp.error is not None
+    assert "quarantined" in resp.error["message"]
+    assert resp.result is None and resp.ui_components is None
+
+
+@pytest.mark.asyncio
 async def test_scanner_failure_fails_open(orch, captured, monkeypatch):
     """A broken scanner must not break dispatch (fail-open, logged)."""
     from orchestrator import mas_defense

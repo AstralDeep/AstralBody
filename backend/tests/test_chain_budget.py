@@ -91,6 +91,34 @@ def test_budget_is_per_turn_not_global():
     assert b.charge(1) is None  # the other turn is unaffected
 
 
+def test_global_budget_recreated_when_exhausted():
+    """A chat-less (chat_id=None) budget has no turn boundary to reset on, so
+    an exhausted _global budget must be recreated rather than refusing every
+    chat-less hop forever."""
+    o = MagicMock()
+    o._chain_budgets = {}
+    o._chain_budget_for = types.MethodType(Orchestrator._chain_budget_for, o)
+    first = o._chain_budget_for(None)
+    # Exhaust it (wall clock 0 makes exhausted() true immediately after use).
+    first.wall_clock_s = 0.0
+    assert first.exhausted() is not None
+    second = o._chain_budget_for(None)
+    assert second is not first          # recreated
+    assert second.exhausted() is None   # fresh window
+
+
+def test_chat_keyed_budget_not_recreated_while_live():
+    """A live chat-keyed budget is NOT silently recreated mid-turn (only the
+    turn-start pop resets it)."""
+    o = MagicMock()
+    o._chain_budgets = {}
+    o._chain_budget_for = types.MethodType(Orchestrator._chain_budget_for, o)
+    first = o._chain_budget_for("c1")
+    first.wall_clock_s = 0.0  # exhausted, but chat-keyed
+    second = o._chain_budget_for("c1")
+    assert second is first  # same object — the turn owns its reset
+
+
 def test_new_turn_resets_the_budget():
     o = MagicMock()
     o._chain_budgets = {}

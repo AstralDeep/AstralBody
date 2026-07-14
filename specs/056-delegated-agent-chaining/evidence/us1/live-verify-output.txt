@@ -4,8 +4,8 @@ in-process agents registered: ['connectors-1', 'dice-roller-1', 'general-1', 'jo
 summarize_url returned in 3.5s; error=True
    (summary step: No LLM credentials are configured, so the text could not be summarized. Configur )
 
-== audit rows for u-live-747ad770: 14 ==
-  [agent_tool_call ] tool.summarize_url.start     outcome=in_progress principal=u-live-747ad770
+== audit rows for u-live-c61ad461: 14 ==
+  [agent_tool_call ] tool.summarize_url.start     outcome=in_progress principal=u-live-c61ad461
   [delegation      ] delegation.hop.mint          outcome=in_progress principal=agent:web-research-1
   [delegation      ] delegation.hop.enforce       outcome=success     principal=agent:web-research-1
   [agent_tool_call ] tool.fetch_page.start        outcome=in_progress principal=agent:summarizer-1
@@ -18,10 +18,10 @@ summarize_url returned in 3.5s; error=True
   [delegation      ] delegation.hop.enforce       outcome=success     principal=agent:web-research-1
   [agent_tool_call ] tool.fetch_page.start        outcome=in_progress principal=agent:summarizer-1
   [agent_tool_call ] tool.fetch_page.end          outcome=success     principal=agent:summarizer-1
-  [agent_tool_call ] tool.summarize_url.end       outcome=failure     principal=u-live-747ad770
+  [agent_tool_call ] tool.summarize_url.end       outcome=failure     principal=u-live-c61ad461
 
 == the hop's attenuated child authority (from the audit record) ==
-  human authorizer : u-live-747ad770
+  human authorizer : u-live-c61ad461
   acting agent     : agent:web-research-1
   parent actor     : agent:summarizer-1
   actor chain      : ['agent:web-research-1', 'agent:summarizer-1']

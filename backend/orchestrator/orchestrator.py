@@ -6899,14 +6899,19 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
     _MAX_PARALLEL_CONCURRENCY = 10
 
     def _chain_budget_for(self, chat_id: Optional[str]):
-        """The turn's global chain budget (056 FR-021), lazily created and
-        reset at each turn start. Bounds cumulative depth, total hop count,
-        and wall clock across ALL nesting in the turn (interactive or
-        machine)."""
+        """The turn's global chain budget (056 FR-021), lazily created. Bounds
+        cumulative depth, total hop count, and wall clock across ALL nesting in
+        the turn (interactive or machine).
+
+        Chat-keyed budgets reset at each turn start (``handle_chat_message``
+        pops ``chat_id``). A chat-less dispatch (``chat_id`` None) has no turn
+        boundary to reset on, so its shared ``_global`` budget is recreated
+        once it exhausts — otherwise a single process would refuse every
+        chat-less hop forever after the first wall-clock window elapses."""
         from orchestrator.chain_authority import ChainBudget
         key = chat_id or "_global"
         budget = self._chain_budgets.get(key)
-        if budget is None:
+        if budget is None or (chat_id is None and budget.exhausted()):
             budget = ChainBudget(turn_id=f"turn_{_uuid.uuid4().hex[:8]}", chat_id=chat_id)
             self._chain_budgets[key] = budget
         return budget
@@ -7094,10 +7099,14 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         orchestrator's OWN dispatch record (never agent-supplied), charges the
         turn's global chain budget, and re-enters ``execute_single_tool`` so
         the hop passes the FULL single-path gate stack under a freshly minted
-        child delegation. Every refusal is per-call, honest, and audited —
-        the initiating agent's session is never torn down (FR-028). Reserved
-        ``__``-pseudo-agent ids are refused before dispatch, so the meta-tool
-        exemption is structurally unavailable to hops (FR-003/FR-018).
+        child delegation. Every refusal is per-call and honest (an error
+        ``MCPResponse``, never a teardown — FR-028); refusals that carry a
+        resolvable authority (a mint/enforce/budget/reserved-callee refusal)
+        are also audited to the hash chain, while the two pre-authority
+        refusals — an unknown/spoofed parent and the flag-off inert path —
+        are log-only (there is no derivable principal to attribute them to).
+        Reserved ``__``-pseudo-agent ids are refused before dispatch, so the
+        meta-tool exemption is structurally unavailable to hops (FR-003/FR-018).
         """
         from orchestrator import delegation as _dg
         hop_id = msg.request_id or ""
@@ -7210,8 +7219,14 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         if resp.error is not None:
             return resp
         try:
-            payload = resp.result if resp.result is not None else resp.ui_components
-            findings = mas_defense.scan_message(payload)
+            # Scan BOTH channels the hop delivers upstream (result AND
+            # ui_components) — _deliver_hop_response forwards both, so a marker
+            # in either reaches the initiating agent's context.
+            findings = []
+            if resp.result is not None:
+                findings += mas_defense.scan_message(resp.result)
+            if resp.ui_components:
+                findings += mas_defense.scan_message(resp.ui_components)
         except Exception:  # pragma: no cover — scanner is pure/stdlib
             logger.debug("hop payload scan failed — delivering", exc_info=True)
             return resp

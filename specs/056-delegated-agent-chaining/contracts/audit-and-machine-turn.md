@@ -19,15 +19,29 @@ Emitted through the existing `Recorder` so it is hash-chained (`chain_hmac`,
 single path already emits, `audit/hooks.py:247-298`), sharing one
 `correlation_id` with the turn's tool-call pair:
 
-| action_type | when | outcome |
+| action_type | when | outcome (as implemented) |
 |-------------|------|---------|
-| `delegation.hop.mint` | child minted (or refused pre-dispatch) | `in_progress` / `failure` (`empty_intersection`, `depth_exceeded`, `revoked`) |
-| `delegation.hop.enforce` | `authorize_chained_tool_call` verdict | `success` / `failure` (`out_of_scope`, `tampered_chain`, `over_depth`, `expired`) |
+| `delegation.hop.mint` | child minted, refused pre-dispatch, OR any gate refused a hop (the SC-002 auditing wrapper on `_authorize_and_prepare`) | `in_progress` / `failure`. `outcome_detail`: `depth_exceeded`, `empty_intersection`, `budget_stop:<reason>`, `reserved_callee`, or the raw gate-refusal message (e.g. "Tool 'x' is restricted for this agent") |
+| `delegation.hop.enforce` | `authorize_chained_tool_call` verdict, or a MAS quarantine | `success` / `failure`. `outcome_detail` is the raw reason string from `authorize_chained_tool_call` — e.g. `"delegation token expired"`, `"actor chain is broken or incomplete"`, `"tool 'x' outside delegated scope for […]"` — or `"quarantined: injection markers …"` |
 
-`inputs_meta` carries `{parent_actor, acting_agent, human_authorizer,
-delegation_depth, actor_chain, requested_scopes, granted_scopes}` — **never** the
-token bytes (FR-028). `actor_user_id = human authorizer`, `auth_principal =
-acting agent`, per `delegation_chain_audit_record` (delegation.py:658-660).
+> **Implementation note (drift from the plan-time draft above)**: the detail
+> strings are the *human-readable reasons the code actually emits*, not the enum
+> codes this contract first proposed (`revoked`/`out_of_scope`/`tampered_chain`/
+> `over_depth`/`expired` are NOT used). Query `audit_events.outcome_detail` by
+> substring, not exact enum. The two pre-authority refusals (unknown/spoofed
+> parent, flag-off inert path) are log-only — there is no derivable principal to
+> attribute them to.
+
+`inputs_meta` carries `{parent_actor, acting_agent, delegation_depth,
+actor_chain}` plus conditional `requested_scopes`/`granted_scopes` (sorted,
+truncated to 16) — **never** the token bytes (FR-028). The human authorizer is
+`actor_user_id` (a top-level column, NOT in `inputs_meta`); `auth_principal =
+acting agent`, per `delegation_chain_audit_record` (delegation.py) resolved in
+`_record_hop_audit`.
+
+**Sub-task lifecycle** (US4, same `delegation` class, `auth_principal =
+agent:__subtasks__`): action types `delegation.subtask.{spawned, completed,
+failed, timeout, cancelled, quarantined, budget_stop, orphaned}`.
 
 **Reconstruction (SC-003)**: reading `audit_events` filtered by `correlation_id`
 recovers each hop's `actor_chain`, reconstructing human→agent→sub-agent→tool;
@@ -71,24 +85,34 @@ async def derive(self, *, user_id, agent_id, consented_scopes,
 ```
 
 Steps (reusing existing pieces):
-1. `OfflineGrantStore.is_valid(grant_id)` (`offline_grant.py:97-105`) — revoked/
+0. (as implemented) when no explicit `grant_id` is passed, resolve the user's
+   latest valid grant via `OfflineGrantStore.latest_valid_for(user_id,
+   agent_id)` — this is what lets parser replay and self-tests ride a standing
+   consent with no job-linked grant.
+1. `OfflineGrantStore.is_valid(grant_id)` (`offline_grant.py`) — revoked/
    expired ⇒ `AuthoritySkip` (FR-013).
-2. `OfflineGrantStore.mint_access_token(grant_id)` (`offline_grant.py:107`) —
+2. `OfflineGrantStore.mint_access_token(grant_id)` (`offline_grant.py`) —
    fresh token per run; Keycloak-side revocation ⇒ `AuthoritySkip`.
-3. `_intersect_scopes(consented, current)` (`scheduler/runner.py:29-31`) narrowed
+3. `_intersect_scopes(consented, current)` (`scheduler/runner.py`) narrowed
    to the user's CURRENT grants — never wider than either (FR-012).
-4. Return the root; the turn threads it into `handle_chat_message`, so real-agent
-   dispatch runs delegated in production and any further hop mints children off it
-   (FR-015, one authority model / two roots).
+4. Return the root; the turn threads it into `handle_chat_message` (bound to
+   the virtual socket by `Orchestrator._bind_machine_turn`), so real-agent
+   dispatch runs delegated in production and any further hop mints children off
+   it (FR-015, one authority model / two roots).
 
-**Consumers** (the three machine-turn classes at one seam):
-- Scheduled runs: `scheduler/runner.py:run_job` (`:88`) → `run_scheduled_turn`
-  (`orchestrator.py:2923`), which today **drops** the minted token
-  (`orchestrator.py:2946-2949`, `:2980`). Thread the root through.
-- Parser replay: `attachment_autoparse.auto_continue_after_go_live`
-  (`attachment_autoparse.py:87-146`).
-- Draft self-tests: `agentic_creation._self_test_draft`
-  (`agentic_creation.py:323-350`).
+**Consumers** (the three machine-turn classes at the one shared seam
+`Orchestrator.derive_machine_authority`):
+- Scheduled runs: `scheduler/runner.py:run_job` → `run_scheduled_turn`, which
+  now **threads** the derived `MachineAuthority` (was: dropped the token). An
+  `AuthoritySkip` here records `skipped_auth`, pauses, and notifies (see §3).
+- Parser replay: `attachment_autoparse.auto_continue_after_go_live`.
+- Draft self-tests: `agentic_creation._self_test_draft`.
+
+> **Implementation note**: only the scheduler treats an `AuthoritySkip` as a
+> recorded-and-notified pause. Parser replay and self-tests instead run the
+> turn **unbound** on a skip (no record, no notification); production then
+> refuses their real-agent dispatches at the delegation gate — the same
+> fail-closed outcome, reached by a different path.
 
 **Flag gate**: the scheduler class stays dark behind `FF_SCHEDULER_EXECUTION`
 (default off, `feature_flags.py:47`; loop gated at `orchestrator.py:8765-8787`)
@@ -103,14 +127,26 @@ into a single actionable notification, not one per firing (spec Edge Case
 
 ## 4. Consent capture (US2, FR-011, D8)
 
-An explicit, scoped, durable capture step wherever machine authority is created:
-- Scheduling consent card (`schedule_decision` ui_event via `scheduling_chat`,
-  `orchestrator.py:5758-5764`) — records the granted scopes, the durable
-  (365-day-capped) nature, and the revocation path, then calls the existing but
-  **currently-uncalled** `OfflineGrantStore.capture(user_id, refresh_token,
-  agent_id)` (`offline_grant.py:64`) using the session refresh token
-  (`session_store.py:207`), and links `grant_id` via `set_grant`
-  (`scheduler/store.py:71-74`). Today `offline_grant_id` is hardcoded `None`
+An explicit, scoped, durable capture step at the chat scheduling consent card
+(`schedule_decision` ui_event → `scheduling_chat.handle_decision`):
+`scheduling_chat._capture_consent` records the granted scopes, the durable
+(365-day-capped) nature, and the revocation path, then calls the previously
+**uncalled** `OfflineGrantStore.capture(user_id, refresh_token, agent_id)`
+using the session refresh token from
+`WebSessionStore.latest_refresh_token_for(user_id)`, and links the returned
+`grant_id` by passing it **directly to `store.create_job(offline_grant_id=…)`**
+(the plan's `set_grant` helper does not exist; the real update method
+`set_offline_grant` is not used by this path). An `schedule.consent_captured`
+audit action records the capture. Capture failure is fail-open on the job,
+fail-closed on the authority (grant stays `None`).
+
+> **Scope note (drift)**: consent capture ships on the *chat* consent-card path
+> only. The REST job-creation path (`scheduler/api.py`) still creates jobs with
+> `offline_grant_id=None`, so REST-created agent jobs pause `skipped_auth` on
+> first run until re-confirmed — fail-closed, but narrower than "wherever
+> machine authority is created."
+
+Historically `offline_grant_id` was hardcoded `None`
   (`scheduling_chat.py:295`, `scheduler/api.py:120`).
 - No durable consent is created implicitly (FR-011): capture happens only at this
   explicit confirmation step.
