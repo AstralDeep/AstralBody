@@ -234,13 +234,23 @@ class DelegationService:
             f"{len(allowed_tools)} allowed tool(s) (scope='{combined_scopes}')"
         )
 
-        # RFC 9449: Include DPoP proof header to bind the resulting token
-        dpop_proof = self._create_dpop_proof("POST", token_url)
+        # RFC 9449: bind the resulting token to the orchestrator's key with a
+        # DPoP proof. This requires the Keycloak clients to be configured for
+        # DPoP-bound access tokens; a deployment whose realm was NOT set up for
+        # DPoP rejects the DPoP-bearing exchange (surfaces as a terse
+        # "Invalid token"). Gated so an operator can turn it off without a code
+        # change: DELEGATION_DPOP=false omits the DPoP header. Default: on
+        # (unchanged behavior). The 056 orchestrator-mediated enforcement does
+        # not depend on Keycloak-side DPoP binding — the mediation point is
+        # minter+verifier — so disabling it is safe when the realm lacks DPoP.
+        exchange_headers: Dict[str, str] = {}
+        if os.getenv("DELEGATION_DPOP", "true").strip().lower() in ("1", "true", "yes", "on"):
+            exchange_headers["DPoP"] = self._create_dpop_proof("POST", token_url)
 
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    token_url, data=form_data, headers={"DPoP": dpop_proof}
+                    token_url, data=form_data, headers=exchange_headers
                 ) as resp:
                     body = await resp.json()
                     if resp.status != 200:
