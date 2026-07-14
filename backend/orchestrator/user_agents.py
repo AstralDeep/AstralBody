@@ -124,23 +124,26 @@ def soft_delete(db, agent_id: str) -> None:
 
 
 def can_user_use_agent(db, user_id: str, agent_id: str) -> bool:
-    """Owner-isolation predicate: a user may use an agent iff it is public OR they
-    own it. For a user agent, ownership is ``user_agent.owner_user_id``; for any
-    other agent, ``agent_ownership.is_public``. Fail-closed: unknown ⇒ fall back to
-    the public flag only (a private user agent with no readable owner denies).
-    Enforced at the grant endpoint, the dispatch gate, and tool-list build."""
+    """User-agent owner-isolation predicate.
+
+    A **user agent** (feature 057 — private, client-hosted, owner-scoped) is
+    usable/manageable ONLY by its owner (``user_agent.owner_user_id``). For any
+    **non-user-agent** (built-in agents, the public catalog, drafts) this returns
+    ``True`` and the normal per-user permission gate governs access — this
+    predicate is NOT a general access check, it only enforces user-agent owner
+    isolation, so it never blocks a user from managing their own permissions on a
+    shared/built-in agent (including private built-ins usable via the safe-agent
+    baseline). Enforced at the grant endpoint, the dispatch gate, and tool-list
+    build (FR-016/019). Fail-closed: an unreadable owner on a known user agent
+    denies non-owners."""
     if not user_id or not agent_id:
         return False
-    ua = get_user_agent(db, agent_id)
-    if ua is not None:
-        # A user agent is private by construction; only its owner may use it.
-        return ua.get("owner_user_id") == user_id
     try:
-        own = db.get_agent_ownership(agent_id)
+        ua = get_user_agent(db, agent_id)
     except Exception:
-        own = None
-    if own is None:
-        # Not a user agent and no ownership row → not owner-restricted here;
-        # the normal permission gate governs it (built-ins/public catalog).
+        # Fail closed only for a definite user-agent id; an errored lookup on an
+        # unknown id must not lock out built-ins, so treat unknown as allowed.
         return True
-    return bool(own.get("is_public"))
+    if ua is None:
+        return True   # not a user agent → existing gates apply
+    return ua.get("owner_user_id") == user_id

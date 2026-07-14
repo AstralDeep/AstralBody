@@ -62,7 +62,7 @@ Setup → Foundational → **US1** (Phase A, MVP) → **US3** (Phase B, boundary
 
 - [ ] T008 [US1] Direct-tunnel **agent-frame transport** behind a small **transport-adapter seam** (so Mode 2 can be added without touching owner-binding/dispatch, FR-032): unwrap an `agent_tunnel {frame}` envelope on the client's authenticated connection and feed `handle_agent_message` via a `.send`-shaped adapter (LoopbackSocket pattern), in `backend/orchestrator/orchestrator.py` (per `contracts/agent-tunnel.md`)
 - [ ] T009 [US1] **Owner-binding** at `RegisterAgent` over an owner tunnel: resolve owner from `ui_sessions[ws].sub` (never from the card); refuse unless `user_agent.owner_user_id == sub` AND `status ∈ {validated, live}` AND `revalidation_required == FALSE`; store an owner-scoped registry keyed `(owner_sub, agent_id)`; supersede a stale socket on reconnect — in `orchestrator.py`; add the additive owner-auth field to `RegisterAgent` in `backend/shared/protocol.py`
-- [ ] T010 [US1] **Owner==user tool-list visibility** filter in `_collect_eligible` so a private user agent is invisible to non-owners independent of scope rows (FR-019, scenario 4), in `backend/orchestrator/orchestrator.py`
+- [X] T010 [US1] **Owner==user tool-list visibility** filter in `_collect_eligible` so a private user agent is invisible to non-owners independent of scope rows (FR-019, scenario 4), in `backend/orchestrator/orchestrator.py`
 - [ ] T011 [US1] **Honest-offline**: on tunnel disconnect deregister `(owner_sub, agent_id)` + emit `agent_offline`; short-circuit dispatch of an offline user agent to a prompt honest-offline `MCPResponse` (replace the `agent_urls` reconnect fallback for user agents), in `orchestrator.py`
 - [ ] T012 [US1] Add the UI-facing `agent_offline` / `host_status` frame to `backend/shared/ui_protocol.json` + a liveness heartbeat so drops are caught within seconds (SC-005)
 - [ ] T013 [US1] **Code-delivery seam**: after `generate_code`, package the 3-file bundle and push `agent_bundle_deliver` over the owner tunnel; **do NOT** call `start_draft_agent` (Popen) for byo agents; on inward register set `status='live'`, stamp `constitution_version`, insert the `agent_ownership` row — in `backend/orchestrator/agent_lifecycle.py` + `agentic_creation.py` (per `contracts/user-agent-registry.md`)
@@ -84,12 +84,12 @@ Setup → Foundational → **US1** (Phase A, MVP) → **US3** (Phase B, boundary
 
 ### Tests for User Story 3
 
-- [ ] T018 [P] [US3] Adversarial boundary suite in `backend/tests/test_byo_boundary_adversarial.py`: out-of-scope tool, cross-user data reference, forged identity/token, the `set_agent_permissions` grant-hole probe, and a flood — each denied fail-closed + audited (SC-003/SC-008)
+- [~] T018 [P] [US3] Adversarial boundary suite [PARTIAL: isolation + grant-hole done+verified; forged-identity/flood/offline land with the tunnel tasks] in `backend/tests/test_byo_boundary_adversarial.py`: out-of-scope tool, cross-user data reference, forged identity/token, the `set_agent_permissions` grant-hole probe, and a flood — each denied fail-closed + audited (SC-003/SC-008)
 
 ### Implementation for User Story 3
 
-- [ ] T019 [US3] **Close the pre-existing grant hole**: enforce `can_user_use_agent` at the grant endpoint `set_agent_permissions` in `backend/orchestrator/api.py` (refuse a non-owner granting themselves scopes on a private agent)
-- [ ] T020 [US3] Enforce `can_user_use_agent` inside the **dispatch permission gate** (`_authorize_and_prepare`/`is_tool_allowed` path) in `backend/orchestrator/orchestrator.py` — defense in depth so a crafted request can't bypass the UI list
+- [X] T019 [US3] **Close the pre-existing grant hole**: enforce `can_user_use_agent` at the grant endpoint `set_agent_permissions` in `backend/orchestrator/api.py` (refuse a non-owner granting themselves scopes on a private agent)
+- [X] T020 [US3] Enforce `can_user_use_agent` inside the **dispatch permission gate** (`_authorize_and_prepare`/`is_tool_allowed` path) in `backend/orchestrator/orchestrator.py` — defense in depth so a crafted request can't bypass the UI list
 - [ ] T021 [US3] **Per-owner ingress bound**: a rate + in-flight-frame cap on user-agent tunnels (extend `backend/orchestrator/concurrency_cap.py` / `chain_authority.ChainBudget`), scoped to externally-connected user-agent sockets only (never throttling in-process built-ins/legit chains), wired in `handle_agent_message`
 - [ ] T022 [US3] **No secrets to untrusted agents**: do not attach `_delegation_token` bytes or per-user secrets on the direct dispatch path for user-hosted agents (mirror the 054 in-process-only credential rule) in `backend/orchestrator/orchestrator.py`
 - [ ] T023 [US3] **Owner-namespaced identity** + registration collision refusal (built-in/public/reserved `__*`/other-user ids) in `register_agent`; add owner-token binding **alongside** `AGENT_API_KEY` in `backend/orchestrator/auth.py`

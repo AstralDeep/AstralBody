@@ -297,6 +297,17 @@ class ToolPermissionManager:
         self, user_id: str, agent_id: str, tool_name: str, required_scope: str
     ) -> bool:
         """Resolve a tool decision against the database (unmemoized)."""
+        # 0. Feature 057 — user-agent owner isolation (FR-016/019, defense in
+        # depth for both dispatch and tool-list build). A user-created agent is
+        # private to its owner; a non-owner can neither list nor dispatch its
+        # tools, INDEPENDENT of any (stray) scope row. can_user_use_agent returns
+        # True for every non-user-agent, so built-ins/public are unaffected.
+        try:
+            from orchestrator.user_agents import can_user_use_agent
+            if not can_user_use_agent(self.db, user_id, agent_id):
+                return False
+        except Exception:
+            logger.debug("user-agent isolation check failed (allowing normal resolution)", exc_info=True)
         # 1. Per-(tool, kind) row takes priority
         kind_row = self.db.fetch_one(
             """SELECT enabled FROM tool_overrides
