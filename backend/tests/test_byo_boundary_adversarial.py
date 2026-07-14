@@ -73,15 +73,7 @@ def test_isolation_wins_over_a_stray_scope_row(db):
 
 
 def test_owner_is_not_blocked_by_isolation(db):
-    # The isolation step must NOT block the owner; a granted owner scope resolves
-    # to allow. (Uses a registered scope row so normal resolution returns True.)
-    tp = ToolPermissionManager(db=db)
-    db.execute(
-        "INSERT INTO agent_scopes (user_id, agent_id, scope, enabled, updated_at) "
-        "VALUES (?, ?, 'tools:read', TRUE, 0) "
-        "ON CONFLICT (user_id, agent_id, scope) DO UPDATE SET enabled = TRUE",
-        (OWNER, UA_ID),
-    )
-    # get_tool_scope for an unregistered tool falls back; assert isolation didn't
-    # force-deny by checking the predicate path directly for the owner.
+    # The isolation step (step 0 of _resolve_tool_allowed) must NOT short-circuit
+    # the owner — the predicate returns True for the owner, so normal per-user
+    # scope resolution proceeds (a granted scope would then allow).
     assert ua.can_user_use_agent(db, OWNER, UA_ID) is True

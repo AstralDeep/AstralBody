@@ -20,6 +20,8 @@ description: "Task list for feature 057 — bring-your-own client-side agents"
 
 Setup → Foundational → **US1** (Phase A, MVP) → **US3** (Phase B, boundary hardening — land before any production enablement) → **US2** (Phase C, guided authoring) → **US4** (Phase D, parity) → **US5** (Phase E, lifecycle) → Polish.
 
+> **⚑ Scope split (2026-07-14).** Feature 057 SHIPS the **foundation + security core** — the verifiable, server-side slice: T001–T006 (schema/flag/constitution/loader/registry/predicate), T024–T026 (Analyze gate), and T010/T019/T020 (owner-isolation + the pre-existing grant-hole fix), all verified in-container. The **runtime/transport/host/authoring-UX/lifecycle/polish** tasks (the rest, unchecked below) require a **live desktop client** to build + verify and have been **migrated to feature 058** (`specs/058-byo-agents-runtime/`). The unchecked tasks below remain here as the design record; their implementation lives in 058.
+
 ---
 
 ## Phase 0: Transport Decision (gates US1 transport tasks T008–T016)
