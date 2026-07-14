@@ -659,6 +659,18 @@ async def set_agent_permissions(
     if not card:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
 
+    # Feature 057 (finding: private-agent grant hole): a caller may manage
+    # permissions only on an agent they are allowed to use. A user-created agent
+    # is private to its owner — without this, another user could grant THEMSELVES
+    # scopes on it and then invoke it, running the owner's device-hosted tool as
+    # themselves (a cross-user break, SC-003). Non-user-agents (built-ins/public)
+    # are unaffected: can_user_use_agent returns True for them.
+    from orchestrator.user_agents import can_user_use_agent
+    if not await asyncio.to_thread(can_user_use_agent, orch.history.db, user_id, agent_id):
+        raise HTTPException(
+            status_code=403,
+            detail=f"You cannot manage permissions for agent '{agent_id}'.")
+
     tool_scope_map = orch.tool_permissions.get_tool_scope_map(agent_id)
     legacy_payload = body.per_tool_permissions is None and (
         body.scopes is not None or body.tool_overrides is not None

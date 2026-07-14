@@ -17,7 +17,7 @@ logger = logging.getLogger('Database')
 #          are off (FF_COMPONENT_REFINE / FF_ARTIFACT_SHARING)
 # 055.002: + background_task (durable cross-device task records) — additive,
 #          inert while FF_BG_CONTINUITY is off
-SCHEMA_REVISION = '055.002'
+SCHEMA_REVISION = '057.001'
 
 _POOLS: Dict[str, dict] = {}
 _POOLS_LOCK = threading.Lock()
@@ -520,6 +520,54 @@ class Database:
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_draft_gap "
             "ON draft_agents (user_id, source_chat_id, gap_fingerprint)"
+        )
+
+        # Feature 057 — bring-your-own client-side agents. Additive authoring
+        # state on drafts (the 5-phase Specify→Clarify→Plan→Tasks→Analyze
+        # journey rides draft_agents; origin gains the value 'byo_client').
+        # Idempotent (Constitution IX); rollback: DROP COLUMN or redeploy prior
+        # image. See specs/057-byo-client-agents/data-model.md.
+        cursor.execute("ALTER TABLE draft_agents ADD COLUMN IF NOT EXISTS phase TEXT")
+        cursor.execute("ALTER TABLE draft_agents ADD COLUMN IF NOT EXISTS clarify_answers TEXT")
+        cursor.execute("ALTER TABLE draft_agents ADD COLUMN IF NOT EXISTS plan_json TEXT")
+        cursor.execute("ALTER TABLE draft_agents ADD COLUMN IF NOT EXISTS analyze_result TEXT")
+        cursor.execute("ALTER TABLE draft_agents ADD COLUMN IF NOT EXISTS constitution_version TEXT")
+        cursor.execute("ALTER TABLE draft_agents ADD COLUMN IF NOT EXISTS host_binding TEXT")
+
+        # Feature 057 — the durable user-agent registry. Distinct from
+        # draft_agents (a transient authoring/codegen artifact) and from
+        # in-memory liveness (socket presence). ``status`` is the durable
+        # lifecycle (authoring|validated|live|disabled); running/offline is
+        # DERIVED from socket presence and never persisted. ``is_public`` is
+        # CHECK-pinned FALSE so privacy-by-construction is structural
+        # (FR-019/020, Constitution K). Canonical owner key is
+        # ``owner_user_id`` (OIDC sub). Rollback: DROP TABLE user_agent.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_agent (
+                agent_id TEXT PRIMARY KEY,
+                owner_user_id TEXT NOT NULL,
+                owner_email TEXT,
+                display_name TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'authoring',
+                declared_tools TEXT NOT NULL DEFAULT '[]',
+                declared_scopes TEXT NOT NULL DEFAULT '[]',
+                declared_egress TEXT,
+                constitution_version TEXT,
+                validated_at BIGINT,
+                revalidation_required BOOLEAN NOT NULL DEFAULT FALSE,
+                draft_id TEXT,
+                host_client_id TEXT,
+                host_session_id TEXT,
+                host_last_seen_at BIGINT,
+                is_public BOOLEAN NOT NULL DEFAULT FALSE CHECK (is_public = FALSE),
+                deleted_at BIGINT,
+                created_at BIGINT,
+                updated_at BIGINT
+            )
+        ''')
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_user_agent_owner "
+            "ON user_agent (owner_user_id)"
         )
 
         # User attachments — chat-message file uploads, user-scoped (feature 002-file-uploads)
@@ -1327,6 +1375,33 @@ class Database:
         self._migrate_tutorial_timeline_target_045(cursor)
 
         self._migrate_backfill_tool_kinds_052(cursor)
+
+        # ── Feature 057: re-validate user agents against a bumped constitution ─
+        self._migrate_revalidate_on_constitution_change_057(cursor)
+
+    def _migrate_revalidate_on_constitution_change_057(self, cursor):
+        """Feature 057 (Constitution L / FR-028): when the agent constitution's
+        MAJOR version advances beyond what a user agent was validated against,
+        mark it ``revalidation_required`` so the boundary fail-closed refuses to
+        route it until it re-passes Analyze. Best-effort: a loader/parse failure
+        skips the sweep (the per-request boundary check is the real gate)."""
+        try:
+            from orchestrator.agent_constitution import AGENT_CONSTITUTION_VERSION
+        except Exception:
+            logger.debug("057 revalidate migration: constitution loader unavailable", exc_info=True)
+            return
+        try:
+            current_major = int(str(AGENT_CONSTITUTION_VERSION).split('.', 1)[0])
+        except (ValueError, AttributeError):
+            return
+        # split_part is Postgres; the stored value is a plain semver string.
+        cursor.execute(
+            "UPDATE user_agent SET revalidation_required = TRUE "
+            "WHERE constitution_version IS NOT NULL "
+            "AND CAST(split_part(constitution_version, '.', 1) AS INTEGER) < %s "
+            "AND revalidation_required = FALSE",
+            (current_major,),
+        )
 
     # Feature 029 identity sets (specs/029-agents-adaptive-ui-ci/baseline.md).
     # Both the declared hyphenated agent ids and the legacy underscore
