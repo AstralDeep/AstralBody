@@ -339,6 +339,17 @@ async def _self_test_draft(orch, draft: Dict[str, Any], user_request: str,
     task = BackgroundTask(task_id=f"selftest-{draft['id'][:8]}", chat_id=test_chat_id,
                           user_id=user_id)
     vws = VirtualWebSocket(task)
+    # 056 US2 (FR-012): a self-test is a machine turn — derive its authority at
+    # the SAME shared seam scheduled runs and parser replays use, so the draft's
+    # tools dispatch delegated under the owner's standing consent in production
+    # instead of being refused fail-closed. An AuthoritySkip is not fatal: the
+    # self-test still runs (unchanged dev behavior) and production refuses its
+    # real-agent dispatches exactly as it does today.
+    from orchestrator.chain_authority import AuthoritySkip
+    authority = await orch.derive_machine_authority(
+        user_id=user_id, agent_id=None, turn_class="draft_self_test")
+    if not isinstance(authority, AuthoritySkip):
+        orch._bind_machine_turn(vws, authority)
     try:
         await asyncio.wait_for(
             orch.handle_chat_message(
@@ -358,6 +369,8 @@ async def _self_test_draft(orch, draft: Dict[str, Any], user_request: str,
         return {"status": "failed", "summary": f"Self-test error: {exc}",
                 "tools_called": [], "errors": [str(exc)[:200]], "evidence": "",
                 "tested_at": int(time.time() * 1000)}
+    finally:
+        orch._unbind_machine_turn(vws)
 
 
 def _redteam_allowed_scopes(draft: Dict[str, Any]) -> List[str]:

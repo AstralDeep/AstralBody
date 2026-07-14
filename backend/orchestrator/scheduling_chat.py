@@ -217,22 +217,86 @@ async def handle_meta_tool(orch, tool_name: str, args: Dict[str, Any], *,
     agent_line = (f"Uses agent: {cleaned['agent_id']} (with only the permissions "
                   "you currently grant it)." if cleaned["agent_id"]
                   else "Runs without agent tools (plain assistant run).")
-    card = Card(title=f"⏰ Schedule proposal: {cleaned['name']}", content=[
+    # 056 US2 (FR-011): approving this card creates DURABLE consent, so the card
+    # must state exactly what is being granted, that it persists, and how to
+    # revoke it. No durable consent is ever created without this explicit step.
+    card_content = [
         Text(content=cleaned["instruction"]),
         Text(content=(f"Runs {human_cadence(cleaned['schedule_kind'], cleaned['schedule_expr'], cleaned['timezone'])}. "
                       f"{agent_line} Results are delivered in-app to this chat. "
                       "Nothing is scheduled until you approve."),
              variant="caption"),
-        Button(label="Create schedule", action="schedule_decision",
+    ]
+    if cleaned["agent_id"]:
+        scope_names = await asyncio.to_thread(
+            orch.tool_permissions.get_agent_scopes, user_id, cleaned["agent_id"])
+        granting = sorted(name for name, on in (scope_names or {}).items() if on)
+        card_content.append(Text(
+            content=("**Approving grants durable consent.** To run on your behalf "
+                     "while you are signed out, this job stores a revocable "
+                     "authorization for "
+                     f"**{cleaned['agent_id']}** limited to: "
+                     f"**{', '.join(granting) if granting else 'no scopes yet'}**. "
+                     "Each run acts under fresh authority narrowed to those scopes "
+                     "AND whatever you allow at that moment — never more. It expires "
+                     "within 365 days, and you can revoke it any time in Settings → "
+                     "Personalization → Schedule; signing out everywhere revokes it too."),
+            variant="markdown"))
+    card_content.extend([
+        Button(label="Approve & create schedule", action="schedule_decision",
                payload={"proposal_id": proposal_id, "decision": "approve"}),
         Button(label="Cancel", action="schedule_decision", variant="secondary",
                payload={"proposal_id": proposal_id, "decision": "discard"}),
-    ]).to_dict()
+    ])
+    card = Card(title=f"⏰ Schedule proposal: {cleaned['name']}",
+                content=card_content).to_dict()
     return MCPResponse(
         result={"status": "proposed", "proposal_id": proposal_id,
                 "message": "Consent card shown — the user must approve before the job exists."},
         ui_components=[card],
     )
+
+
+async def _capture_consent(orch, user_id: str, agent_id: str,
+                          consented: List[str]) -> Optional[str]:
+    """Create the durable offline grant this job will act under (056 FR-011).
+
+    Reads the user's ``offline_access`` refresh token from their live encrypted
+    web session and hands it to :meth:`OfflineGrantStore.capture`, which
+    encrypts it at rest (fail-closed without ``OFFLINE_GRANT_ENC_KEY``) under a
+    hard 365-day cap. Returns the grant id, or ``None`` when no durable consent
+    could be created — the caller then creates the job WITHOUT unattended
+    authority rather than pretending it has some.
+    """
+    try:
+        from orchestrator.offline_grant import OfflineGrantStore
+        from orchestrator.session_store import WebSessionStore
+
+        sessions = WebSessionStore(orch.history.db)
+        refresh_token = await asyncio.to_thread(
+            sessions.latest_refresh_token_for, user_id)
+        if not refresh_token:
+            logger.info("consent_capture: no live session refresh token for user=%s "
+                        "— job created without unattended authority", user_id)
+            return None
+        grants = OfflineGrantStore(orch.history.db)
+        grant_id = await asyncio.to_thread(
+            grants.capture, user_id, refresh_token, agent_id)
+        logger.info("consent_capture: durable grant created user=%s agent=%s "
+                    "grant=%s scopes=%s", user_id, agent_id, grant_id, consented)
+        await _audit(user_id, "schedule.consent_captured",
+                     f"Captured durable offline consent for agent '{agent_id}'",
+                     correlation_id=grant_id,
+                     inputs_meta={"agent_id": agent_id,
+                                  "consented_scopes": consented,
+                                  "grant_id": grant_id,
+                                  "durable_days": 365})
+        return grant_id
+    except Exception as exc:
+        # Fail-closed on the AUTHORITY (no grant), fail-open on the job.
+        logger.warning("consent_capture failed user=%s agent=%s: %s",
+                       user_id, agent_id, exc)
+        return None
 
 
 async def handle_decision(orch, websocket, user_id: str, payload: Dict[str, Any]) -> None:
@@ -283,6 +347,18 @@ async def handle_decision(orch, websocket, user_id: str, payload: Dict[str, Any]
             orch.tool_permissions.get_agent_scopes, user_id, cleaned["agent_id"])
         consented = sorted(s for s, on in current.items() if on)
 
+    # 056 US2 (FR-011/D8): the EXPLICIT durable-consent capture step. The
+    # approval card the user just confirmed named the scopes below, its durable
+    # (365-day-capped) nature, and how to revoke it — so this is the one moment
+    # a durable grant may be created. Nothing is captured implicitly: capture
+    # runs only here, only on approval, and only for a job that actually runs an
+    # agent. A capture failure is NOT fatal — the job is still created, it simply
+    # cannot run unattended (its first run records an authority skip and pauses,
+    # which is the honest fail-closed outcome).
+    grant_id: Optional[str] = None
+    if cleaned["agent_id"]:
+        grant_id = await _capture_consent(orch, user_id, cleaned["agent_id"], consented)
+
     from scheduler.store import ScheduledJobStore
     store = ScheduledJobStore(orch.history.db)
     job = await asyncio.to_thread(
@@ -292,19 +368,27 @@ async def handle_decision(orch, websocket, user_id: str, payload: Dict[str, Any]
         timezone=cleaned["timezone"], consented_scopes=consented,
         agent_id=cleaned["agent_id"], target_chat_id=prop.get("chat_id"),
         next_run_at=next_run,
-        offline_grant_id=None,  # granted later via Settings (consent-capture flow)
+        offline_grant_id=grant_id,  # 056: captured above, no longer always None
     )
     _proposals(orch).pop(proposal_id, None)
     await _audit(user_id, "schedule.create",
                  f"Created scheduled job '{cleaned['name']}' from chat consent",
                  correlation_id=proposal_id, chat_id=prop.get("chat_id"),
                  inputs_meta={"job_id": job["id"], "kind": cleaned["schedule_kind"],
-                              "consented_scopes": consented})
-    logger.info("schedule created from chat: job=%s user=%s name=%r",
-                job["id"], user_id, cleaned["name"])
+                              "consented_scopes": consented,
+                              "durable_consent": bool(grant_id)})
+    logger.info("schedule created from chat: job=%s user=%s name=%r consent=%s",
+                job["id"], user_id, cleaned["name"], bool(grant_id))
 
-    offline_hint = (" To let it run while you are signed out, grant offline access in "
-                    "Settings → Personalization → Schedule." if cleaned["agent_id"] else "")
+    if cleaned["agent_id"] and grant_id:
+        offline_hint = (" It can run while you are signed out; revoke that access "
+                        "any time in Settings → Personalization → Schedule (signing "
+                        "out everywhere also revokes it).")
+    elif cleaned["agent_id"]:
+        offline_hint = (" It cannot run while you are signed out yet — grant offline "
+                        "access in Settings → Personalization → Schedule.")
+    else:
+        offline_hint = ""
     await orch.send_ui_render(websocket, [
         Alert(message=(f"Scheduled '{cleaned['name']}' — runs "
                        f"{human_cadence(cleaned['schedule_kind'], cleaned['schedule_expr'], cleaned['timezone'])}."

@@ -224,6 +224,27 @@ class WebSessionStore:
             return None
         return row
 
+    def latest_refresh_token_for(self, user_id: str) -> Optional[str]:
+        """The live refresh token of the user's newest interactive session.
+
+        056 (D8/FR-011): the explicit consent-capture step needs the user's
+        ``offline_access`` refresh token to create a durable offline grant, and
+        the encrypted web session is where it already lives — so consent
+        capture reads it from here instead of the product ever holding a second
+        copy. Returns ``None`` when the user has no live session (capture then
+        fails closed and nothing durable is created). Token bytes never leave
+        this class except through this deliberate, consent-gated read.
+        """
+        row = self.db.fetch_one(
+            "SELECT sid FROM web_session WHERE user_id = ? AND hard_expires_at > ? "
+            "ORDER BY last_refresh_at DESC LIMIT 1",
+            (user_id, int(time.time())),
+        )
+        if not row:
+            return None
+        session = self.get(dict(row)["sid"])
+        return (session or {}).get("refresh_token") or None
+
     def _record_death(self, sid: str, reason: str) -> None:
         if len(self._death_reasons) > 256:
             self._death_reasons.clear()

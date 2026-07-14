@@ -3193,6 +3193,57 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
         return None
 
+    async def derive_machine_authority(self, *, user_id: str,
+                                       agent_id: Optional[str],
+                                       turn_class: str,
+                                       consented_scopes: Optional[List[str]] = None,
+                                       grant_id: Optional[str] = None):
+        """Derive a machine turn's root authority at the ONE shared seam
+        (056 US2, FR-012). Every machine-turn class — scheduled runs, parser
+        replay, draft self-tests, and any future class — calls this and nothing
+        else, so they cannot drift apart. Returns a ``MachineAuthority`` or an
+        ``AuthoritySkip``; callers bind the former with
+        :meth:`_bind_machine_turn` and honor the latter fail-closed."""
+        from orchestrator.chain_authority import MachineTurnAuthority
+        from orchestrator.offline_grant import OfflineGrantStore
+        grants = getattr(self, "offline_grants", None) or OfflineGrantStore(self.history.db)
+        return await MachineTurnAuthority(self, grants).derive(
+            user_id=user_id, agent_id=agent_id,
+            consented_scopes=consented_scopes, grant_id=grant_id,
+            turn_class=turn_class)
+
+    def _bind_machine_turn(self, vws, authority) -> None:
+        """Bind a machine turn's virtual socket to its consent-derived root
+        authority (056 US2, FR-012/FR-014/FR-015 — the ONE shared seam).
+
+        Two bindings, both deliberate:
+
+        * ``ui_sessions[vws]`` carries the machine claims plus the fresh
+          consent-derived subject token as ``_raw_token``, so the existing RFC
+          8693 exchange (``_get_delegation_token``) mints a properly scoped
+          delegated token for every real-agent dispatch in the turn — the
+          machine turn now acts DELEGATED in production instead of being
+          refused fail-closed for having no session token. Any hop the turn
+          starts mints children off that same root (one authority model, two
+          roots). 055's fan-out already skips VirtualWebSocket entries, so this
+          never counts as a connected device.
+        * ``vws.machine_claims`` is the per-turn audit marker the dispatch path
+          reads, attributing every record to ``machine:<class>`` acting for the
+          owning human (never "legacy"). Cost attribution is untouched: a
+          VirtualWebSocket turn still resolves the SYSTEM LLM credential (054),
+          so who PAID and who AUTHORIZED stay distinct.
+        """
+        claims = authority.machine_claims()
+        try:
+            vws.machine_claims = claims
+        except Exception:  # pragma: no cover — VirtualWebSocket accepts attrs
+            logger.debug("machine claims binding failed", exc_info=True)
+        self.ui_sessions[vws] = {**claims, "_raw_token": authority.access_token}
+
+    def _unbind_machine_turn(self, vws) -> None:
+        """Drop a machine turn's session binding when the turn ends."""
+        self.ui_sessions.pop(vws, None)
+
     async def run_scheduled_turn(
         self,
         *,
@@ -3203,6 +3254,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         access_token: str,
         allowed_scopes: List[str],
         correlation_id: str,
+        authority=None,
     ) -> str:
         """Execute a scheduled job's instruction as a background chat turn (025 T040/T046).
 
@@ -3213,13 +3265,16 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         reconnect (in-app only). Returns a short summary for the completion
         notification.
 
-        Authority: the runner has already minted ``access_token`` from the
-        offline grant and computed ``allowed_scopes`` = consented ∩ current.
-        Execution runs under the user's current scopes — the security ceiling
-        enforced by ``handle_chat_message``. Deep-threading the minted delegated
-        token and narrowing tool execution end-to-end to ``allowed_scopes`` is
-        the explicit scope of the T057 security review before the flag is enabled
-        in production (see specs/030-finish-soul-integration/security-review.md).
+        Authority (056 US2 — the T057-scoped threading, now built): the runner
+        derives a :class:`~orchestrator.chain_authority.MachineAuthority` from
+        the job's durable consent (fresh token per run, scopes narrowed to
+        consented ∩ current) and passes it as ``authority``. It is bound to the
+        turn's virtual socket by :meth:`_bind_machine_turn`, so every
+        real-agent dispatch in the turn runs under a delegated token derived
+        from that consent and every audit row names ``machine:scheduled_job``
+        acting for the owning human. Without an ``authority`` the turn still
+        runs (unchanged legacy behavior), but production posture refuses its
+        real-agent dispatches fail-closed, exactly as before.
         """
         from orchestrator.async_tasks import BackgroundTask, VirtualWebSocket
 
@@ -3259,9 +3314,12 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             user_id=user_id,
         )
         vws = VirtualWebSocket(bg)
+        if authority is not None:
+            self._bind_machine_turn(vws, authority)
         try:
             await self.handle_chat_message(vws, instruction, target_chat, user_id=user_id)
         finally:
+            self._unbind_machine_turn(vws)
             try:
                 await vws.close()
             except Exception:  # pragma: no cover - close is best-effort
