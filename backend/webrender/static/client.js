@@ -1,7 +1,8 @@
 /* Thin server-driven UI client.
  * The orchestrator renders astralprims primitives to HTML (ROTE-adapted) and
  * pushes it over the WebSocket protocol. This client inserts the
- * server-rendered `html`, merges streamed chunks by stream_id, initializes
+ * server-rendered `html`, merges streamed chunks (keyed by component_id when
+ * bridged to a workspace identity, else stream_id), initializes
  * Plotly charts, and posts user actions back as {type:"ui_event", action, payload}.
  * No build step. */
 (function () {
@@ -264,10 +265,41 @@
     if (d && d.parentNode) d.parentNode.removeChild(d);
   }
 
+  // Feature 055 (uniform rule, wire-contract §1): turn start drops the
+  // ephemeral welcome components (identity prefix "wel_") from the canvas.
+  // SELECTIVE removal only — mid-chat the canvas holds client-side workspace
+  // nodes a blanket clear would lose. Unconditional on purpose: when the
+  // server flag is off the welcome arrives id-less, nothing matches, and
+  // this is a no-op.
+  function purgeWelcome() {
+    var nodes = canvas.querySelectorAll('[data-component-id^="wel_"]');
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodes[i].parentNode) nodes[i].parentNode.removeChild(nodes[i]);
+    }
+    // Legacy safety: bare-id welcome nodes sitting directly under the canvas.
+    for (var j = canvas.children.length - 1; j >= 0; j--) {
+      var kid = canvas.children[j];
+      if (kid.id && kid.id.indexOf("wel_") === 0) canvas.removeChild(kid);
+    }
+  }
+
   // ---- workspace upsert morph ----
   // Each op targets [data-component-id]: replace the node in place when it
   // exists (no flicker, neighbors untouched), append when new, remove on op
   // 'remove'. Side effects (Plotly/theme) re-run on inserted subtrees only.
+  function componentSelector(id) {
+    return '[data-component-id="' + (window.CSS && CSS.escape ? CSS.escape(id) : id) + '"]';
+  }
+  function ensureRenderer() {
+    var renderer = canvas.querySelector(".dynamic-renderer");
+    if (!renderer) {
+      renderer = document.createElement("div");
+      renderer.className = "dynamic-renderer space-y-3";
+      canvas.innerHTML = "";
+      canvas.appendChild(renderer);
+    }
+    return renderer;
+  }
   function applyUpsert(msg) {
     if (msg.chat_id && activeChatId && msg.chat_id !== activeChatId) return;
     if (timelineMode) {
@@ -277,18 +309,11 @@
     hideSkeleton(); // first canvas content of the turn
     var ops = msg.ops || [];
     if (ops.length) hideCanvasEmpty(); // content is arriving on the canvas
-    var renderer = canvas.querySelector(".dynamic-renderer");
-    if (!renderer) {
-      renderer = document.createElement("div");
-      renderer.className = "dynamic-renderer space-y-3";
-      canvas.innerHTML = "";
-      canvas.appendChild(renderer);
-    }
+    var renderer = ensureRenderer();
     for (var i = 0; i < ops.length; i++) {
       var op = ops[i];
       if (!op || !op.component_id) continue;
-      var sel = '[data-component-id="' + (window.CSS && CSS.escape ? CSS.escape(op.component_id) : op.component_id) + '"]';
-      var node = canvas.querySelector(sel);
+      var node = canvas.querySelector(componentSelector(op.component_id));
       if (op.op === "remove") {
         if (node) node.parentNode.removeChild(node);
         continue;
@@ -302,17 +327,35 @@
       else renderer.appendChild(fresh);
       processSideEffects(fresh);
     }
+    syncCanvasToolbar(); // last-known flags (full renders refresh them)
+  }
+
+  // Plotly keeps per-node state and handlers; purge a node's charts before it
+  // is replaced. The bundle is lazy-loaded (052) — nothing to purge before it
+  // exists.
+  function purgeCharts(node) {
+    if (!node || typeof Plotly === "undefined") return;
+    var els = node.querySelectorAll(".astral-chart");
+    for (var i = 0; i < els.length; i++) {
+      if (els[i].dataset.rendered) { try { Plotly.purge(els[i]); } catch (e) {} }
+    }
   }
 
   // ---- streaming merge: replace-or-append a per-stream node keyed by stream_id ----
+  // Frames carrying component_id (055 stream→artifact bridge, wire-contract
+  // §2) are keyed by [data-component-id] from the FIRST frame instead — no
+  // stream-<id> node ever exists for them — so the terminal persist ui_upsert
+  // replaces the same node in place rather than double-rendering.
+  var streamChartPlot = {}; // stream_id → last chart re-plot ms (interim ≤1/s)
   function mergeStream(msg) {
-    var id = "stream-" + msg.stream_id;
-    var node = document.getElementById(id);
     var htmlStr = msg.html || "";
     if (msg.error) {
       htmlStr = '<div class="text-xs text-red-400 border border-red-500/20 rounded p-2">' +
         escapeText(msg.error.message || "stream error") + "</div>";
     }
+    if (msg.component_id) { mergeKeyedStream(msg, htmlStr); return; }
+    var id = "stream-" + msg.stream_id;
+    var node = document.getElementById(id);
     if (!htmlStr && !msg.terminal) return;
     hideSkeleton(); // streamed canvas content counts as the first component
     if (node) { node.innerHTML = htmlStr; processSideEffects(node); }
@@ -322,6 +365,35 @@
       canvas.appendChild(node); processSideEffects(node);
     }
   }
+  function mergeKeyedStream(msg, htmlStr) {
+    if (msg.terminal) delete streamChartPlot[msg.stream_id];
+    else if (htmlStr.indexOf("astral-chart") !== -1) {
+      // Chart-bearing interim frames re-plot at most once per second per
+      // stream (leak/flicker guard); the terminal frame always renders.
+      var now = Date.now();
+      if (now - (streamChartPlot[msg.stream_id] || 0) < 1000) return;
+      streamChartPlot[msg.stream_id] = now;
+    }
+    if (!htmlStr) return; // empty terminal: keep the last content for the persist upsert
+    hideSkeleton(); // streamed canvas content counts as the first component
+    var node = canvas.querySelector(componentSelector(msg.component_id));
+    var holder = document.createElement("div");
+    holder.innerHTML = htmlStr;
+    var fresh = holder.firstElementChild;
+    if (!fresh) return;
+    if (holder.children.length > 1 ||
+        fresh.getAttribute("data-component-id") !== msg.component_id) {
+      // Client-built error html (and any fragment the server did not wrap)
+      // still needs the identity anchor or later frames would append copies.
+      fresh = document.createElement("div");
+      fresh.setAttribute("data-component-id", msg.component_id);
+      while (holder.firstChild) fresh.appendChild(holder.firstChild);
+    }
+    purgeCharts(node);
+    if (node) node.replaceWith(fresh);
+    else { hideCanvasEmpty(); ensureRenderer().appendChild(fresh); }
+    processSideEffects(fresh);
+  }
 
   // ---- incoming messages ----
   function onMessage(ev) {
@@ -330,15 +402,26 @@
       case "ui_render":
         if (data.target === "chat") appendChatBubble("assistant", data.html);
         else if (data.target === "history") { var hr = document.getElementById("astral-history"); if (hr) setHTML(hr, data.html); }
-        else { hideSkeleton(); setHTML(canvas, data.html); if (!data.html) showCanvasEmpty(); }
+        else {
+          hideSkeleton(); setHTML(canvas, data.html);
+          // Emptiness comes from the STRUCTURED payload: render_workspace
+          // emits a truthy wrapper div even for zero components (055), so
+          // html truthiness only decides frames without a components array.
+          if (Array.isArray(data.components) ? !data.components.length : !data.html) showCanvasEmpty();
+          readCanvasFlags(); syncCanvasToolbar();
+        }
         break;
       case "ui_upsert": applyUpsert(data); break; // in-place workspace updates
-      case "ui_update": hideSkeleton(); setHTML(canvas, data.html); if (!data.html) showCanvasEmpty(); break;
+      case "ui_update":
+        hideSkeleton(); setHTML(canvas, data.html); if (!data.html) showCanvasEmpty();
+        readCanvasFlags(); syncCanvasToolbar();
+        break;
       case "ui_append": hideSkeleton(); hideCanvasEmpty(); appendHTML(canvas, data.html); break;
       case "workspace_timeline_mode": // read-only history view
         timelineMode = !!data.active;
         if (timelineMode) hideSkeleton();
         setStatus(timelineMode ? "Viewing workspace history (read-only)" : "");
+        syncCanvasToolbar(); // export/share chrome hides in the read-only view
         break;
       case "chat_deleted": // chat removed (possibly from another tab)
         if (data.chat_id && data.chat_id === activeChatId) {
@@ -367,6 +450,22 @@
         if (data.terminal) delete streamSeq[data.stream_id];
         break;
       }
+      case "stream_subscribed": {
+        // component_id-bridged streams get a keyed placeholder (wire-contract
+        // §2) so the first frame and the terminal persist upsert replace it
+        // in place; legacy subscriptions need no node until data arrives.
+        if (!data.component_id) break;
+        if (data.session_id && activeChatId && data.session_id !== activeChatId) break;
+        if (canvas.querySelector(componentSelector(data.component_id))) break;
+        hideSkeleton(); hideCanvasEmpty();
+        var ph = document.createElement("div");
+        ph.setAttribute("data-component-id", data.component_id);
+        ph.innerHTML = '<div class="astral-skeleton" role="status" aria-busy="true">'
+          + '<span class="sr-only">Loading…</span>'
+          + '<div class="astral-skeleton-line h-20 w-full"></div></div>';
+        ensureRenderer().appendChild(ph);
+        break;
+      }
       case "chrome_render": // server-rendered chrome regions
         if (data.region === "modal") setModal(data.html || "");
         else if (data.region === "topbar") {
@@ -378,6 +477,13 @@
         // A turn that ends with no canvas output (text-only answer, error,
         // cancellation) must still clear the query-start skeleton.
         if (data.status === "done" || data.status === "idle") hideSkeleton();
+        if (data.status === "processing_async") {
+          // Background dispatch ack (055): status text only — never the turn
+          // lock (no skeleton), so the user can keep chatting or switch chats.
+          hideSkeleton();
+          setStatus("Running in background…");
+          break;
+        }
         setStatus({ idle: "", thinking: "Thinking…", executing: "Working…", done: "" }[data.status] || "");
         break;
       case "chat_step": renderStep(data.step); break;
@@ -423,6 +529,44 @@
       case "notification": // scheduler push (feature 044 parity matrix)
         showToast((data.title ? data.title + ": " : "") + (data.body || ""), data.level === "error" ? "error" : "info");
         break;
+      case "task_started": { // 055: background dispatch accepted (any device)
+        var tsp = data.payload || {};
+        addTaskChip(tsp.task_id, tsp.chat_id, tsp.title);
+        showToast("Running in background — you will be notified when it finishes.", "info");
+        break;
+      }
+      case "task_completed": { // 055: background task finished (any device)
+        var tcp = data.payload || {};
+        if (tcp.task_id) {
+          if (bgTaskDone[tcp.task_id]) break; // watcher + fan-out duplicate
+          bgTaskDone[tcp.task_id] = true;
+          removeTaskChip(tcp.task_id);
+        }
+        var tcFail = tcp.status === "failed";
+        var tcMsg = tcp.summary || ("Background task " + (tcp.status || "completed"));
+        if (tcp.chat_id && tcp.chat_id === activeChatId) {
+          showToast(tcMsg, tcFail ? "error" : "info");
+          // Pull the narrative/canvas the task persisted while detached.
+          action("load_chat", { chat_id: tcp.chat_id });
+        } else if (tcp.chat_id) {
+          showToast(tcMsg + " — tap to open", tcFail ? "error" : "info", function () {
+            action("load_chat", { chat_id: tcp.chat_id }); // recents-click path
+            closeHistoryOverlay();
+          });
+        } else {
+          showToast(tcMsg, tcFail ? "error" : "info");
+        }
+        break;
+      }
+      case "tool_progress": { // long-running job update (fan-out is chat-scoped)
+        var tpChat = data.session_id || data.chat_id;
+        if (tpChat && activeChatId && tpChat !== activeChatId) break;
+        if (data.terminal) { setStatus(""); break; } // outcome lands as a persisted upsert
+        var tpText = data.message || ((data.tool_name || "job") + " running…");
+        if (typeof data.percentage === "number") tpText += " (" + Math.round(data.percentage) + "%)";
+        setStatus(tpText);
+        break;
+      }
       case "rote_config": // ROTE's device verdict drives the shell layout
         applyDeviceProfile(data.device_profile && data.device_profile.device_type);
         break;
@@ -441,7 +585,9 @@
   }
 
   var toastHost = null;
-  function showToast(message, kind) {
+  /** onTap (optional) makes the toast a tap-to-open affordance (055
+   *  background completions); tappable toasts linger longer. */
+  function showToast(message, kind, onTap) {
     if (!message) return;
     if (!toastHost) {
       toastHost = document.createElement("div");
@@ -455,8 +601,18 @@
     t.style.cssText = "padding:10px 14px;border-radius:8px;font-size:13px;color:#fff;box-shadow:0 4px 14px rgba(0,0,0,.4);"
       + (kind === "error" ? "background:#7f1d1d;border:1px solid #b91c1c;" : "background:#1e293b;border:1px solid #334155;");
     t.textContent = message;
+    if (onTap) {
+      t.style.cursor = "pointer";
+      t.setAttribute("role", "button");
+      t.tabIndex = 0;
+      var fire = function () { if (t.parentNode) t.parentNode.removeChild(t); onTap(); };
+      t.addEventListener("click", fire);
+      t.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fire(); }
+      });
+    }
     toastHost.appendChild(t);
-    setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, 6000);
+    setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, onTap ? 12000 : 6000);
   }
 
   function escapeText(s) { var d = document.createElement("div"); d.textContent = s == null ? "" : String(s); return d.innerHTML; }
@@ -506,8 +662,13 @@
         return { attachment_id: a.attachment_id, filename: a.filename, category: a.category };
       });
     }
+    if (bgArmed) payload.async_mode = true; // one-shot background-run arming (055)
     send({ type: "ui_event", action: "chat_message", session_id: activeChatId || undefined, payload: payload });
-    showSkeleton(); // optimistic loading state until the first canvas content
+    purgeWelcome(); // 055 uniform rule: welcome never survives the first send
+    // Async turns never lock the composer: no skeleton — the processing_async
+    // ack drives the status line instead.
+    if (bgArmed) setBgArmed(false);
+    else showSkeleton(); // optimistic loading state until the first canvas content
     if (typeof clearStagedAttachments === "function") clearStagedAttachments();
   }
 
@@ -528,6 +689,7 @@
     activeChatId = null;
     timelineMode = false;
     streamSeq = {};
+    streamChartPlot = {};
     stepEls = {};
     hideSkeleton();
     chat.innerHTML = "";
@@ -662,6 +824,241 @@
       component_id: paginateComponentId(el), chat_id: activeChatId,
       params: Object.assign({}, ctx.source_params, { limit: size, offset: 0 }) });
   }
+
+  // ---- 055 US4/US5: component chrome (refine / history / export / share) ----
+  // The server renders the affordances (flag-gated, renderer.py
+  // _component_chrome); this block owns their click behavior. The instruction
+  // capture is an inline popover (same idiom as the paperclip menu — the
+  // codebase never uses window.prompt/alert).
+  var chromePop = null;
+  function closeChromePop() {
+    if (chromePop && chromePop.parentNode) chromePop.parentNode.removeChild(chromePop);
+    chromePop = null;
+  }
+  function openChromePop(anchor) {
+    closeChromePop();
+    var row = anchor.parentNode; // the .astral-component-chrome affordance row
+    if (row && !row.style.position) row.style.position = "relative";
+    chromePop = document.createElement("div");
+    chromePop.className = "astral-chrome-pop";
+    chromePop.style.cssText = "position:absolute;right:0;bottom:100%;margin-bottom:6px;z-index:40;"
+      + "min-width:260px;max-width:340px;padding:10px;border-radius:10px;"
+      + "background:rgb(var(--astral-surface,26 30 46));border:1px solid rgba(255,255,255,.12);"
+      + "box-shadow:0 8px 24px rgba(0,0,0,.45);font-size:13px;";
+    (row || document.body).appendChild(chromePop);
+    return chromePop;
+  }
+  function chromePopButton(text, primary) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.textContent = text;
+    b.style.cssText = "font-size:12px;border-radius:8px;padding:4px 10px;cursor:pointer;"
+      + (primary ? "background:rgb(var(--astral-primary,99 102 241));border:0;color:#fff;"
+                 : "background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:inherit;");
+    return b;
+  }
+  function chromeComponentId(el) {
+    var host = el.closest && el.closest("[data-component-id]");
+    return host ? host.getAttribute("data-component-id") : null;
+  }
+
+  function openRefinePrompt(btn) {
+    if (timelineMode) { setStatus("Read-only history view — go back to live to interact."); return; }
+    var cid = chromeComponentId(btn);
+    if (!cid) return;
+    var pop = openChromePop(btn);
+    var label = document.createElement("div");
+    label.textContent = "Describe the change to this component";
+    label.style.cssText = "font-size:12px;margin-bottom:6px;opacity:.8;";
+    var inp = document.createElement("input");
+    inp.type = "text";
+    inp.placeholder = "e.g. add a totals row";
+    inp.style.cssText = "width:100%;box-sizing:border-box;font-size:13px;padding:6px 8px;border-radius:8px;"
+      + "background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:inherit;";
+    var rowEl = document.createElement("div");
+    rowEl.style.cssText = "display:flex;justify-content:flex-end;gap:8px;margin-top:8px;";
+    var cancel = chromePopButton("Cancel", false);
+    var go = chromePopButton("Refine", true);
+    function submit() {
+      var text = (inp.value || "").trim();
+      if (!text) { inp.focus(); return; }
+      action("component_refine", { component_id: cid, instruction: text, chat_id: activeChatId });
+      closeChromePop();
+      showToast("Refining component…", "info");
+    }
+    go.addEventListener("click", submit);
+    cancel.addEventListener("click", closeChromePop);
+    inp.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { e.preventDefault(); submit(); }
+      else if (e.key === "Escape") { e.stopPropagation(); closeChromePop(); }
+    });
+    pop.appendChild(label); pop.appendChild(inp); pop.appendChild(rowEl);
+    rowEl.appendChild(cancel); rowEl.appendChild(go);
+    inp.focus();
+  }
+
+  function openHistoryList(btn) {
+    if (timelineMode) { setStatus("Read-only history view — go back to live to interact."); return; }
+    var cid = chromeComponentId(btn);
+    if (!cid) return;
+    var versions = [];
+    try { versions = JSON.parse(btn.getAttribute("data-versions") || "[]"); } catch (e) {}
+    var pop = openChromePop(btn);
+    var label = document.createElement("div");
+    label.textContent = "Version history";
+    label.style.cssText = "font-size:12px;margin-bottom:6px;opacity:.8;";
+    pop.appendChild(label);
+    if (!versions.length) {
+      var none = document.createElement("div");
+      none.textContent = "No earlier versions yet — refine the component to create one.";
+      none.style.cssText = "font-size:12px;opacity:.6;";
+      pop.appendChild(none);
+      return;
+    }
+    versions.forEach(function (v) {
+      if (!v || v.version_no == null) return;
+      var b = document.createElement("button");
+      b.type = "button";
+      var when = String(v.created_at || "").replace("T", " ").slice(0, 16);
+      b.textContent = "v" + v.version_no
+        + (v.title ? " · " + v.title : "")
+        + (when ? " · " + when : "");
+      b.title = "Restore this version" + (v.reason ? " (archived on " + v.reason + ")" : "");
+      b.style.cssText = "display:block;width:100%;text-align:left;font-size:12px;padding:6px 8px;"
+        + "border-radius:8px;background:transparent;border:0;color:inherit;cursor:pointer;";
+      b.addEventListener("click", function () {
+        action("component_restore", { component_id: cid, version_no: v.version_no, chat_id: activeChatId });
+        closeChromePop();
+        showToast("Restoring version " + v.version_no + "…", "info");
+      });
+      pop.appendChild(b);
+    });
+  }
+
+  // Exports are authenticated downloads: fetch with the bearer token, then
+  // hand the blob to a temporary <a download> (a plain href can't carry auth).
+  function exportDownload(path, filename, appendChat) {
+    var url = path;
+    if (appendChat) {
+      if (!activeChatId) { showToast("Open a chat first — nothing to export yet.", "error"); return; }
+      url += (url.indexOf("?") === -1 ? "?" : "&") + "chat_id=" + encodeURIComponent(activeChatId);
+    }
+    fetch(API_URL + url, { headers: { Authorization: "Bearer " + token }, credentials: "same-origin" })
+      .then(function (r) {
+        if (!r.ok) throw new Error("Export failed (" + r.status + ")");
+        return r.blob();
+      })
+      .then(function (blob) {
+        var a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = filename || "export";
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () {
+          URL.revokeObjectURL(a.href);
+          if (a.parentNode) a.parentNode.removeChild(a);
+        }, 1000);
+      })
+      .catch(function (err) { showToast(String((err && err.message) || err), "error"); });
+  }
+
+  function mintShare(scope, componentId) {
+    if (!activeChatId) { showToast("Open a chat first — nothing to share yet.", "error"); return; }
+    var body = { chat_id: activeChatId, scope: scope };
+    if (componentId) body.component_id = componentId;
+    fetch(API_URL + "/api/share", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify(body),
+    })
+      .then(function (r) {
+        return r.json().then(function (j) { return { ok: r.ok, status: r.status, body: j }; });
+      })
+      .then(function (res) {
+        if (!res.ok) {
+          var msg = res.body && res.body.error === "phi_blocked"
+            ? "Sharing refused: the content matched the PHI gate."
+            : (res.body && (res.body.detail || res.body.error)) || ("Share failed (" + res.status + ")");
+          showToast(msg, "error");
+          return;
+        }
+        var shareUrl = res.body && res.body.share_url;
+        if (!shareUrl) { showToast("Share failed: no link returned.", "error"); return; }
+        var abs = shareUrl.indexOf("http") === 0 ? shareUrl : API_URL + shareUrl;
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(abs).then(
+            function () { showToast("Share link copied to clipboard.", "info"); },
+            function () { showToast("Share link: " + abs, "info"); });
+        } else { showToast("Share link: " + abs, "info"); }
+      })
+      .catch(function () { showToast("Couldn't create the share link.", "error"); });
+  }
+
+  // Canvas toolbar (export page / share page). The server stamps the flag
+  // state as data-astral-export / data-astral-share on the .dynamic-renderer
+  // root of every full canvas render (renderer.py _workspace_flag_attrs);
+  // the toolbar exists only while a flagged renderer is on the canvas.
+  var canvasFlags = { exp: false, share: false };
+  function readCanvasFlags() {
+    var r = canvas.querySelector(".dynamic-renderer");
+    canvasFlags.exp = !!(r && r.getAttribute("data-astral-export"));
+    canvasFlags.share = !!(r && r.getAttribute("data-astral-share"));
+  }
+  function syncCanvasToolbar() {
+    var bar = document.getElementById("astral-canvas-toolbar");
+    var want = (canvasFlags.exp || canvasFlags.share) && !timelineMode
+      && !!canvas.querySelector(".dynamic-renderer");
+    if (!want) {
+      if (bar && bar.parentNode) bar.parentNode.removeChild(bar);
+      return;
+    }
+    if (bar) return; // already up
+    bar = document.createElement("div");
+    bar.id = "astral-canvas-toolbar";
+    bar.style.cssText = "position:sticky;top:0;z-index:5;display:flex;justify-content:flex-end;gap:8px;padding:2px 4px;";
+    if (canvasFlags.exp) bar.appendChild(chromeToolbarButton("⬇ Export page", "astral-export-canvas", null));
+    if (canvasFlags.share) bar.appendChild(chromeToolbarButton("↗ Share page", "astral-share-btn", "canvas"));
+    canvas.insertBefore(bar, canvas.firstChild);
+  }
+  function chromeToolbarButton(text, cls, shareScope) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.className = cls;
+    b.textContent = text;
+    if (shareScope) b.setAttribute("data-share-scope", shareScope);
+    b.style.cssText = "font-size:11px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);"
+      + "border-radius:8px;padding:3px 10px;color:inherit;cursor:pointer;";
+    return b;
+  }
+
+  document.addEventListener("click", function (e) {
+    var t = e.target;
+    var refine = t.closest && t.closest(".astral-refine-btn");
+    if (refine) { openRefinePrompt(refine); return; }
+    var hist = t.closest && t.closest(".astral-vhistory-btn");
+    if (hist) { openHistoryList(hist); return; }
+    var csv = t.closest && t.closest(".astral-export-csv");
+    if (csv) {
+      e.preventDefault();
+      var cid = chromeComponentId(csv);
+      exportDownload(csv.getAttribute("href"), (cid || "table") + ".csv", true);
+      return;
+    }
+    var expCanvas = t.closest && t.closest(".astral-export-canvas");
+    if (expCanvas) {
+      if (!activeChatId) { showToast("Open a chat first — nothing to export yet.", "error"); return; }
+      exportDownload("/api/export/canvas/" + encodeURIComponent(activeChatId) + ".html",
+        "canvas-" + activeChatId + ".html", false);
+      return;
+    }
+    var share = t.closest && t.closest(".astral-share-btn");
+    if (share) {
+      mintShare(share.getAttribute("data-share-scope") || "component", chromeComponentId(share));
+      return;
+    }
+    if (chromePop && !chromePop.contains(t)) closeChromePop();
+  });
 
   // Attachment staging: paperclip → pick → upload → chip → send as structured
   // attachments[] on the next chat_message.
@@ -819,6 +1216,77 @@
     files.forEach(uploadStagedFile);
     e.target.value = "";  // allow re-selecting the same file later
   });
+
+  // ---- 055 cross-device continuity: background-run arming + task chips ----
+  // The composer toggle next to the paperclip arms async_mode for the NEXT
+  // send only; sendChat reads bgArmed via hoisting (same contract as the
+  // attachment helpers above it) and disarms after the message goes out.
+  var bgBtn = document.getElementById("astral-bg-btn");
+  var bgArmed = false;
+  function setBgArmed(on) {
+    bgArmed = !!on;
+    if (!bgBtn) return;
+    bgBtn.setAttribute("aria-pressed", bgArmed ? "true" : "false");
+    // Armed look via the runtime theme tokens — this file styles its own
+    // dynamic chrome inline (see showToast/openChromePop).
+    bgBtn.style.cssText = bgArmed
+      ? "color:rgb(var(--astral-primary));border-color:rgb(var(--astral-primary) / .7);background:rgb(var(--astral-primary) / .15);"
+      : "";
+  }
+  if (bgBtn) bgBtn.addEventListener("click", function () { setBgArmed(!bgArmed); });
+
+  // One slim chip per running background task (keyed by task_id, cleared by
+  // its task_completed). Lives at the top of the composer so it survives chat
+  // switches; tapping a chip opens the task's chat.
+  var bgTaskChips = {};  // task_id → chip element
+  var bgTaskDone = {};   // task_id → true (dedupes watcher + fan-out copies)
+  var bgTaskHost = null;
+  function bgTaskHostEl() {
+    if (!bgTaskHost && form) {
+      bgTaskHost = document.createElement("div");
+      bgTaskHost.id = "astral-bgtasks";
+      bgTaskHost.style.cssText = "display:none;flex-wrap:wrap;gap:6px;";
+      form.insertBefore(bgTaskHost, form.firstChild);
+    }
+    return bgTaskHost;
+  }
+  function syncBgTaskHost() {
+    if (bgTaskHost) bgTaskHost.style.display = bgTaskHost.children.length ? "flex" : "none";
+  }
+  function addTaskChip(taskId, chatId, title) {
+    if (!taskId || bgTaskChips[taskId] || bgTaskDone[taskId]) return;
+    var host = bgTaskHostEl();
+    if (!host) return;
+    var chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "astral-chip";
+    chip.style.cursor = "pointer";
+    chip.title = "Open the chat running this task";
+    var dot = document.createElement("span");
+    dot.style.cssText = "width:7px;height:7px;border-radius:9999px;background:rgb(var(--astral-primary));flex:none;";
+    chip.appendChild(dot);
+    var label = document.createElement("span");
+    label.className = "astral-chip-name";
+    label.textContent = "Background task running" + (title ? " — " + title : "…");
+    chip.appendChild(label);
+    if (chatId) chip.addEventListener("click", function () {
+      if (chatId !== activeChatId) action("load_chat", { chat_id: chatId });
+      closeHistoryOverlay();
+    });
+    host.appendChild(chip);
+    bgTaskChips[taskId] = chip;
+    syncBgTaskHost();
+  }
+  function removeTaskChip(taskId) {
+    var chip = bgTaskChips[taskId];
+    if (chip && chip.parentNode) chip.parentNode.removeChild(chip);
+    delete bgTaskChips[taskId];
+    syncBgTaskHost();
+    // Don't leave the dispatch-time status text stranded once nothing runs.
+    var any = false;
+    for (var k in bgTaskChips) { any = true; break; }
+    if (!any && statusEl && statusEl.textContent === "Running in background…") setStatus("");
+  }
 
   // Chrome runtime: settings menu, modal surfaces, generic [data-ui-action]
   // delegation, and the tour step-runner. Server renders all chrome HTML
@@ -1134,6 +1602,10 @@
              resumed: firstConnect ? serverResumed : true });
       firstConnect = false;
       action("get_history", {});
+      // Re-attach to still-running background tasks: watch_task re-registers
+      // this socket as a watcher and answers task_completed immediately when
+      // the task finished while the socket was down.
+      for (var tid in bgTaskChips) action("watch_task", { task_id: tid });
       var qp = new URLSearchParams(location.search).get("chat");
       if (qp) setTimeout(function () { action("load_chat", { chat_id: qp }); }, 500);
     };
@@ -1168,7 +1640,8 @@
     { name: "/agents", desc: "list your enabled agents" },
     { name: "/summarize", desc: "summarize a link or text" },
     { name: "/research", desc: "research + cited brief" },
-    { name: "/weather", desc: "weather + forecast" }
+    { name: "/weather", desc: "weather + forecast" },
+    { name: "/download", desc: "get the Windows desktop app" }
   ];
   var input = document.getElementById("astral-input");
   var menu = document.getElementById("astral-slash-menu");

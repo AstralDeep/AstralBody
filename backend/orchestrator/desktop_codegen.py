@@ -7,6 +7,12 @@ calls this meta-tool. It returns the generated code (a ``code`` primitive)
 ``AstralDeep.exe`` — downloaded directly from GitHub, integrity-checked
 (SHA256 + sigstore) before the app runs.
 
+Link-only mode (057): the user can also just ask for the desktop app / the
+Windows download link ("where do I download the Windows app?", ``/download``).
+The LLM calls the same meta-tool WITHOUT ``code`` and the response is the
+verified download card alone — same release resolution, same fail-open
+last-known-good cache, never a fabricated URL.
+
 Design (deterministic meta-tool, not intent detection — matches the project's
 preference for deterministic pre-LLM/meta-tool paths, e.g. ``onboarding_submit``):
 
@@ -56,7 +62,11 @@ SYSTEM_PROMPT_ADDENDUM = (
     "agent that can read/write files and run commands in an approved workspace, "
     "permission-gated, PHI-gated, audited). Tell the user to install it, sign in, "
     "enable the coding agent's permissions, then have it write/run the code. Do "
-    "NOT call this tool for code that only needs to run in the browser/server."
+    "NOT call this tool for code that only needs to run in the browser/server.\n"
+    "When the user just asks for the desktop app or its download link (e.g. "
+    "\"where do I download the Windows app?\"), call `offer_desktop_codegen` "
+    "with NO code — it returns only the verified download card for the latest "
+    "release. Never paste a download URL from memory."
 )
 
 
@@ -76,16 +86,18 @@ def meta_tool_definitions() -> List[Dict[str, Any]]:
                     "alongside a download card for the Astral desktop app (a coding agent "
                     "that writes/runs the code locally, permission-gated + PHI-gated + "
                     "audited). Call this when the user asks for code that must execute on "
-                    "their computer — NOT for browser/server-only code."
+                    "their computer — NOT for browser/server-only code. ALSO call it with "
+                    "no `code` when the user simply asks for the desktop app or its "
+                    "Windows download link — it then returns just the verified card."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "language": {"type": "string", "description": "Code language, e.g. python"},
-                        "code": {"type": "string", "description": "The generated code to show + run locally"},
+                        "code": {"type": "string", "description": "The generated code to show + run locally; omit to offer just the download card"},
                         "summary": {"type": "string", "description": "One-line note on what the code does"},
                     },
-                    "required": ["language", "code"],
+                    "required": [],
                 },
             },
         },
@@ -308,17 +320,23 @@ async def _offer(orch, args: Dict[str, Any], *, user_id: str,
     language = (args.get("language") or "text").strip().lower() or "text"
     code = (args.get("code") or "").strip()
     summary = (args.get("summary") or "").strip()
-    if not code:
-        return MCPResponse(error={"message": "offer_desktop_codegen needs `code`",
-                                  "retryable": False})
 
     info = get_release_info()
     card = build_download_card(info)
+    if not code and card.get("variant") == "available":
+        # Link-only ask (057): no generated code to frame — retitle the card
+        # for a plain install instead of the coding-agent pitch.
+        card["title"] = "Astral desktop app for Windows"
+        card["description"] = (
+            "Download and install the Astral desktop app, then sign in with "
+            "your account. Integrity is verified (SHA-256 + sigstore) before "
+            "the app runs.")
 
     components: List[Dict[str, Any]] = []
     if summary:
         components.append({"type": "text", "content": summary, "variant": "markdown"})
-    components.append({"type": "code", "code": code, "language": language})
+    if code:
+        components.append({"type": "code", "code": code, "language": language})
     components.append(card)
 
     status = "offered" if card.get("variant") == "available" else "unavailable"

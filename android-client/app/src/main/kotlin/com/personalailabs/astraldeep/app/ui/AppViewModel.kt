@@ -71,15 +71,26 @@ data class UiState(
     val screen: Screen = Screen.Chat,
     val activeChatId: String? = null,
     val turns: List<ChatTurn> = emptyList(),
-    // canvas lifecycle (commit-on-done): the committed, live canvas is the last
-    // FINAL SDUI the orchestrator produced.
+    // canvas lifecycle: identity-keyed ops morph the live canvas as they arrive
+    // (even mid-turn — 055 live-op rule); only in-turn FULL renders buffer.
     val canvas: List<Component> = emptyList(),
-    /** Buffer built from a replacing turn's ops; shown only when the turn is done. */
+    /** Buffer built from a replacing turn's full renders; committed on `done`. */
     val pendingCanvas: List<Component> = emptyList(),
     /** Orchestrator is working this turn (drives the thin progress indicator). */
     val turnActive: Boolean = false,
     /** This turn will REPLACE the canvas on completion (a user chat turn). */
     val pendingReplace: Boolean = false,
+    /**
+     * Snapshot of the committed canvas at turn arming — the timeline archives
+     * THIS at commit, since in-turn ops now morph [canvas] itself.
+     */
+    val preTurnCanvas: List<Component> = emptyList(),
+    /**
+     * An in-turn op has landed on the live canvas: clears the query skeleton
+     * (first canvas content, matching the web) and makes the live canvas the
+     * committed state when no full render was buffered.
+     */
+    val turnOpsApplied: Boolean = false,
     /** Label describing the current committed canvas (the prompt that made it). */
     val canvasLabel: String = "",
     /** Label for the in-flight replacing turn. */
@@ -136,12 +147,12 @@ data class UiState(
     val isViewingHistory: Boolean get() = viewingIndex != null
 
     /**
-     * Skeletons show for the whole in-flight replacing query (from send until the
-     * final SDUI commits on `done`) — the canvas shows a loading state, never a
-     * bare status line or stale content, while a query is being answered.
+     * Skeletons show from send until the turn's FIRST live canvas content lands
+     * (identity-keyed ops apply immediately — 055 live rule, matching the web's
+     * hide-on-first-content) or, for a turn with none, until `done` commits.
      */
     val showSkeleton: Boolean
-        get() = pendingReplace && viewingIndex == null
+        get() = pendingReplace && !turnOpsApplied && viewingIndex == null
 
     /**
      * Mutating affordances are locked while the read-only workspace timeline is
@@ -154,21 +165,25 @@ data class UiState(
 /**
  * The `ui_event` actions refused while the read-only workspace-timeline snapshot
  * is active (T041). Covers the real mutation entry points reachable from rendered
- * components — chat send, component actions, table pagination, and theme saves.
+ * components — chat send, component actions (incl. the 055 refine/restore verbs),
+ * table pagination, and theme saves.
  * Navigation (chrome_open, load_chat, discover_agents, …) and the timeline-exit
  * action stay allowed so the user is never trapped. Pure → unit-tested.
  */
 internal fun isTimelineMutation(action: String): Boolean = action in TIMELINE_MUTATIONS
 
-private val TIMELINE_MUTATIONS = setOf("chat_message", "component_action", "table_paginate", "save_theme")
+private val TIMELINE_MUTATIONS =
+    setOf("chat_message", "component_action", "component_refine", "component_restore", "table_paginate", "save_theme")
 
 /**
  * Owns the connection + derived UI state. Folds each [Inbound] into [state] and
- * sends chat/events out. The canvas follows a "commit-on-done" lifecycle so the
- * UI-generation area only ever shows a COMPLETE orchestrator canvas (or skeletons
- * while the first one is being produced): a replacing turn buffers its ops into
- * [UiState.pendingCanvas] and swaps them into [UiState.canvas] on `chat_status
- * done`, so a new user message never blanks the previous canvas. Each superseded
+ * sends chat/events out. Identity-keyed canvas ops (`ui_upsert`, streaming)
+ * apply to the LIVE canvas immediately — even mid-turn — so the originating
+ * device renders partial output exactly like co-viewing devices (055 live-op
+ * rule). Only in-turn FULL renders buffer into [UiState.pendingCanvas] (an
+ * authoritative replace landing mid-accumulation is the 044 clobber hazard) and
+ * win per identity on `chat_status done`, so the committed state always equals
+ * what the user is looking at when the turn ends. Each superseded pre-turn
  * canvas is pushed onto [UiState.canvasHistory] for the read-only timeline.
  */
 class AppViewModel(
@@ -194,8 +209,13 @@ class AppViewModel(
         session =
             viewModelScope.launch {
                 launch {
-                    client.stream(token, device, _state.value.activeChatId).collect { msg ->
-                        _state.value = reduce(_state.value, msg)
+                    client.stream(token, device) { _state.value.activeChatId }.collect { msg ->
+                        val before = _state.value
+                        _state.value = reduce(before, msg)
+                        // Cross-device continuity (audit item 12): a background
+                        // result landing in the OPEN chat re-issues load_chat so
+                        // narrative + canvas refresh without a manual reopen.
+                        continuityReloadTarget(before, msg)?.let(::requestChatRefresh)
                     }
                 }
                 launch {
@@ -211,11 +231,19 @@ class AppViewModel(
                                         turnActive = false,
                                         pendingReplace = false,
                                         pendingCanvas = emptyList(),
+                                        preTurnCanvas = emptyList(),
+                                        turnOpsApplied = false,
                                         agentsLoading = false,
                                         historyLoading = false,
                                         auditLoading = false,
                                     )
-                                ConnectionState.Connected -> cur.copy(connection = c, everConnected = true)
+                                ConnectionState.Connected -> {
+                                    // (Re)registered with a chat open: re-issue
+                                    // load_chat to pull in anything delivered
+                                    // while this socket was down (continuity).
+                                    cur.activeChatId?.let(::requestChatRefresh)
+                                    cur.copy(connection = c, everConnected = true)
+                                }
                                 else -> cur.copy(connection = c)
                             }
                     }
@@ -252,18 +280,11 @@ class AppViewModel(
                 (text + "\n📎 " + ready.joinToString(", ") { it.filename }).trim()
             }
         _state.value =
-            s.copy(
+            armTurn(s).copy(
                 turns = s.turns + ChatTurn("user", bubble),
-                turnActive = true,
-                pendingReplace = true,
-                pendingCanvas = emptyList(),
                 pendingLabel = (text.ifBlank { ready.firstOrNull()?.filename ?: "" }).take(80),
                 staged = emptyList(),
-                viewingIndex = null,
                 statusText = null,
-                banner = null,
-                stepTrail = emptyList(),
-                asyncDetached = false,
             )
         val attachments = ready.map { ChatAttachment(it.attachmentId!!, it.filename, it.category) }
         client.sendChat(text, _state.value.activeChatId, attachments)
@@ -301,18 +322,32 @@ class AppViewModel(
         // canvas shows the skeleton the instant it's tapped, not only once the
         // server acks the turn.
         if (action == "chat_message") {
-            _state.value =
-                _state.value.copy(
-                    turnActive = true,
-                    pendingReplace = true,
-                    pendingCanvas = emptyList(),
-                    viewingIndex = null,
-                    banner = null,
-                    stepTrail = emptyList(),
-                    asyncDetached = false,
-                )
+            _state.value = armTurn(_state.value)
         }
         client.sendEvent(action, _state.value.activeChatId, payload)
+    }
+
+    /**
+     * Optimistic turn-start arming shared by [sendChat] and the rendered-control
+     * `chat_message` path: purge the turn-scoped welcome components from the
+     * committed canvas (feature 055 uniform rule — see [dropWelcome]) and
+     * snapshot it as [UiState.preTurnCanvas] for the timeline, since in-turn ops
+     * now morph the live canvas. `internal` so the JVM unit test can drive it.
+     */
+    internal fun armTurn(s: UiState): UiState {
+        val live = s.canvas.dropWelcome()
+        return s.copy(
+            canvas = live,
+            preTurnCanvas = live,
+            turnOpsApplied = false,
+            turnActive = true,
+            pendingReplace = true,
+            pendingCanvas = emptyList(),
+            viewingIndex = null,
+            banner = null,
+            stepTrail = emptyList(),
+            asyncDetached = false,
+        )
     }
 
     /** Start a fresh conversation (clears the canvas, timeline, and transcript). */
@@ -324,6 +359,8 @@ class AppViewModel(
                 turns = emptyList(),
                 canvas = emptyList(),
                 pendingCanvas = emptyList(),
+                preTurnCanvas = emptyList(),
+                turnOpsApplied = false,
                 canvasHistory = emptyList(),
                 viewingIndex = null,
                 turnActive = false,
@@ -495,8 +532,13 @@ class AppViewModel(
     }
 
     fun openChat(chatId: String) {
-        sendEvent("load_chat", buildJsonObject { put("chat_id", chatId) })
+        requestChatRefresh(chatId)
         _state.value = _state.value.copy(screen = Screen.Chat, viewingIndex = null)
+    }
+
+    /** Re-issue load_chat — the chat_loaded + trailing ui_render(canvas) rehydrate everything. */
+    private fun requestChatRefresh(chatId: String) {
+        sendEvent("load_chat", buildJsonObject { put("chat_id", chatId) })
     }
 
     /** Enable/disable a single tool of an agent (REST per-(tool,kind) write), then refresh. */
@@ -596,11 +638,12 @@ class AppViewModel(
                         }
                     val s2 = if (reasoningTurns.isEmpty()) s else s.copy(turns = s.turns + reasoningTurns)
                     when {
-                        // In-turn renders are ADDITIVE overlays (native clients skip
-                        // the designer): buffer-merge by identity so they never wipe
-                        // the round's ui_upsert-added components (charts/tables/etc.).
-                        // This buffering is the actual "clobber" fix (FR-013); an
-                        // empty in-turn frame has nothing to add, so it's a no-op.
+                        // In-turn FULL renders stay buffered until commit — an
+                        // authoritative render replacing the canvas mid-accumulation
+                        // is the actual "clobber" hazard (FR-013). Identity-keyed
+                        // ops go LIVE instead (see UiUpsert); the buffer-merge keeps
+                        // later renders additive by identity. An empty in-turn
+                        // frame has nothing to add, so it's a no-op.
                         s2.pendingReplace ->
                             if (canvasComps.isEmpty()) {
                                 s2
@@ -642,20 +685,17 @@ class AppViewModel(
                         }
                     val canvasOps = msg.ops.filterNot { isDocCard(it.componentId) || isSkeleton(it.component) }
                     val s2 = if (docTurns.isEmpty()) s else s.copy(turns = s.turns + docTurns)
-                    when {
-                        canvasOps.isEmpty() -> s2
-                        s2.pendingReplace -> s2.copy(pendingCanvas = Canvas.apply(s2.pendingCanvas, canvasOps))
-                        else -> s2.copy(canvas = Canvas.apply(s2.canvas, canvasOps))
-                    }
+                    // Identity-keyed ops apply LIVE even mid-turn (055: no
+                    // origin/co-viewer divergence) — see applyCanvasOps.
+                    applyCanvasOps(s2, canvasOps)
                 }
             is Inbound.ChatCreated -> s.copy(activeChatId = msg.chatId ?: s.activeChatId)
             is Inbound.UserMessageAcked ->
-                s.copy(
-                    activeChatId = msg.chatId ?: s.activeChatId,
-                    turnActive = true,
-                    pendingReplace = true,
-                    pendingCanvas = emptyList(),
-                )
+                // The origin's optimistic arm normally ran already (sendChat / the
+                // chat_message ui_event); arming here too covers an acked turn that
+                // skipped it, without resetting an armed turn's pre-turn snapshot
+                // or already-applied live ops.
+                (if (s.pendingReplace) s else armTurn(s)).copy(activeChatId = msg.chatId ?: s.activeChatId)
             is Inbound.ChatLoaded ->
                 s.copy(
                     activeChatId = msg.chat.id ?: s.activeChatId,
@@ -664,6 +704,8 @@ class AppViewModel(
                     // the trailing ui_render(canvas) rehydrates `canvas`.
                     canvas = emptyList(),
                     pendingCanvas = emptyList(),
+                    preTurnCanvas = emptyList(),
+                    turnOpsApplied = false,
                     canvasHistory = emptyList(),
                     viewingIndex = null,
                     turnActive = false,
@@ -680,7 +722,7 @@ class AppViewModel(
             is Inbound.UiStreamData ->
                 applyCanvasOps(s, streamFrameToOps(msg, s.activeChatId, seqState))
             is Inbound.StreamSubscribed ->
-                applyCanvasOps(s, subscribeAckOps(msg))
+                applyCanvasOps(s, subscribeAckOps(msg, canvasIds(s)))
             is Inbound.StreamErrorMsg ->
                 applyCanvasOps(s, streamErrorOps(msg))
             is Inbound.ChromeMenu -> s.copy(chromeMenu = msg.model)
@@ -750,6 +792,8 @@ class AppViewModel(
                     turnActive = false,
                     pendingReplace = false,
                     pendingCanvas = emptyList(),
+                    preTurnCanvas = emptyList(),
+                    turnOpsApplied = false,
                     agentsLoading = false,
                     historyLoading = false,
                     auditLoading = false,
@@ -761,11 +805,23 @@ class AppViewModel(
             is Inbound.ToolProgress ->
                 s.copy(stepTrail = trailUpsert(s.stepTrail, "• ${msg.label}"))
             // The turn detached into a background task: keep the turn alive but let
-            // the UI relax — results will arrive when the task completes.
+            // the UI relax — results will arrive when the task completes. A task in
+            // ANOTHER chat (started on another device, audit item 12) must not touch
+            // this chat's turn state — unobtrusive banner only. A null chat_id
+            // (legacy flat frame) is treated as the open chat, as before.
             is Inbound.TaskStarted ->
-                s.copy(statusText = "Working in the background…", asyncDetached = true)
+                if (forOpenChat(msg.chatId, s)) {
+                    s.copy(statusText = "Working in the background…", asyncDetached = true)
+                } else {
+                    s.copy(banner = "Background task started in another chat", bannerKind = "info")
+                }
             is Inbound.TaskCompleted ->
-                commitTurn(s).copy(banner = "Background task finished", bannerKind = "info")
+                if (forOpenChat(msg.chatId, s)) {
+                    commitTurn(s).copy(banner = "Background task finished", bannerKind = "info")
+                } else {
+                    // The banner layer has no tap action — point at History instead.
+                    s.copy(banner = "Background task finished in another chat — open it from History", bannerKind = "info")
+                }
             is Inbound.Notification -> {
                 val text =
                     listOfNotNull(
@@ -778,6 +834,36 @@ class AppViewModel(
                     s.copy(banner = text, bannerKind = if (msg.level == "error") "error" else "info")
                 }
             }
+            // 055 (US3): the eight workspace verb acks, promoted ignored → handled
+            // (wire-contract §4). The server's follow-up ui_upsert/ui_render
+            // fan-outs stay authoritative; these give the issuing socket immediate
+            // identity-keyed reconcile + feedback without waiting on them.
+            is Inbound.ComponentSaved ->
+                s.copy(
+                    banner = msg.title?.takeIf { it.isNotBlank() }?.let { "Saved $it" } ?: "Component saved",
+                    bannerKind = "info",
+                )
+            is Inbound.ComponentSaveError ->
+                s.copy(banner = msg.error ?: "Couldn't save component", bannerKind = "error")
+            is Inbound.ComponentDeleted ->
+                msg.componentId?.takeIf { it.isNotBlank() }
+                    ?.let { applyCanvasOps(s, listOf(CanvasOp("remove", it))) } ?: s
+            is Inbound.CombineStatus -> s.copy(statusText = msg.message ?: msg.status)
+            is Inbound.CombineError ->
+                s.copy(statusText = null, banner = msg.error ?: "Couldn't combine components", bannerKind = "error")
+            is Inbound.ComponentsReplaced -> {
+                val ops =
+                    msg.removedIds.map { CanvasOp("remove", it) } +
+                        msg.newComponents.mapNotNull { c -> c.id?.let { CanvasOp("upsert", it, c) } }
+                applyCanvasOps(s.copy(statusText = null), ops)
+            }
+            is Inbound.SavedComponentsList -> {
+                // Accepted ack; no native saved-components surface exists to
+                // refresh (browsing rides the server-driven chrome surfaces) —
+                // logged so it is never a silent drop (FR-002).
+                Log.i(TAG, "saved_components_list acked (${msg.count} components)")
+                s
+            }
             is Inbound.Unknown -> {
                 // A deliberately-ignored frame (parity matrix) is a quiet drop; a
                 // truly unclassified type warns so drift is visible (FR-001).
@@ -789,6 +875,34 @@ class AppViewModel(
                 s
             }
             else -> s
+        }
+
+    /**
+     * A task frame targets the open chat. Foreign only when BOTH ids are known
+     * and differ — a null frame chat_id (legacy flat shape) and a not-yet-acked
+     * `activeChatId` (first turn) both count as ours, mirroring the UiUpsert
+     * drop guard.
+     */
+    private fun forOpenChat(
+        chatId: String?,
+        s: UiState,
+    ): Boolean = chatId == null || s.activeChatId == null || chatId == s.activeChatId
+
+    /**
+     * The chat to re-issue load_chat for after folding [msg] — a background task
+     * or scheduler notification that landed in the OPEN chat refreshes it in
+     * place (cross-device continuity, audit item 12); anything else (a different
+     * chat, or no chat named) reloads nothing. Pure → unit-tested; the send
+     * itself happens in [start]'s collect loop.
+     */
+    internal fun continuityReloadTarget(
+        s: UiState,
+        msg: Inbound,
+    ): String? =
+        when (msg) {
+            is Inbound.TaskCompleted -> msg.chatId?.takeIf { it == s.activeChatId }
+            is Inbound.Notification -> msg.chatId?.takeIf { it == s.activeChatId }
+            else -> null
         }
 
     /** Web-parity step line: ✓ completed · ✗ errored · • otherwise, then the name. */
@@ -819,17 +933,29 @@ class AppViewModel(
         return next.takeLast(MAX_TRAIL)
     }
 
-    /** Route streaming/patch ops to the buffer (mid-replace-turn) or live canvas. */
+    /**
+     * Ids already on the LIVE canvas — the list [applyCanvasOps] targets, i.e.
+     * what the user sees — the subscribe-ack placeholder guard, so a device
+     * joining mid-stream never blanks retained content under the same identity
+     * (055).
+     */
+    private fun canvasIds(s: UiState): Set<String> = s.canvas.mapNotNullTo(HashSet()) { it.id }
+
+    /**
+     * Apply identity-keyed ops (ui_upsert, streaming, workspace verb acks) to
+     * the LIVE canvas — even while a replacing turn is armed (055 live-op rule):
+     * the origin morphs in place exactly like co-viewing devices, and the first
+     * in-turn op clears the query skeleton. Only full renders buffer mid-turn.
+     */
     private fun applyCanvasOps(
         s: UiState,
         ops: List<CanvasOp>,
     ): UiState {
         if (ops.isEmpty()) return s
-        return if (s.pendingReplace) {
-            s.copy(pendingCanvas = Canvas.apply(s.pendingCanvas, ops))
-        } else {
-            s.copy(canvas = Canvas.apply(s.canvas, ops))
-        }
+        return s.copy(
+            canvas = Canvas.apply(s.canvas, ops),
+            turnOpsApplied = s.turnOpsApplied || s.pendingReplace,
+        )
     }
 
     /**
@@ -859,16 +985,24 @@ class AppViewModel(
     }
 
     /**
-     * A turn finished (`chat_status done`). For a replacing turn that produced a
-     * canvas, swap the buffer in and push the prior canvas onto the timeline; a
-     * text-only turn leaves the canvas untouched (never blank it).
+     * A turn finished (`chat_status done`). For a replacing turn that produced
+     * canvas content, the committed state is what the user is looking at — the
+     * live canvas (in-turn ops applied as they arrived, 055 live rule) with the
+     * buffered full render, when one arrived, winning per identity on top — and
+     * the pre-turn snapshot goes onto the timeline. A text-only turn leaves the
+     * canvas untouched (never blank it) apart from the welcome purge (see
+     * [dropWelcome]).
      */
     private fun commitTurn(s: UiState): UiState {
         if (!s.pendingReplace) {
             return s.copy(turnActive = false, statusText = null, stepTrail = emptyList(), asyncDetached = false)
         }
-        if (s.pendingCanvas.isEmpty()) {
+        if (s.pendingCanvas.isEmpty() && !s.turnOpsApplied) {
+            // Text-only turn: keep the canvas — minus welcome (belt-and-braces;
+            // the arming purge already dropped it).
             return s.copy(
+                canvas = s.canvas.dropWelcome(),
+                preTurnCanvas = emptyList(),
                 turnActive = false,
                 pendingReplace = false,
                 statusText = null,
@@ -876,19 +1010,29 @@ class AppViewModel(
                 asyncDetached = false,
             )
         }
+        // The buffered render merges ONTO the live canvas (render wins per
+        // identity, live-only components survive) — a partial overlay render
+        // must never drop the round's already-applied upserts.
+        val live = s.canvas.dropWelcome()
+        val committed = if (s.pendingCanvas.isEmpty()) live else Canvas.apply(live, renderToOps(s.pendingCanvas))
+        // Welcome components never enter the timeline; a welcome-only pre-turn
+        // canvas archives nothing (the "Canvas 1" leak regression).
+        val archived = s.preTurnCanvas.dropWelcome()
         val newHistory =
-            if (s.canvas.isNotEmpty()) {
+            if (archived.isNotEmpty()) {
                 s.canvasHistory +
                     CanvasSnapshot(
                         label = s.canvasLabel.ifBlank { "Canvas ${s.canvasHistory.size + 1}" },
-                        components = s.canvas,
+                        components = archived,
                     )
             } else {
                 s.canvasHistory
             }
         return s.copy(
-            canvas = s.pendingCanvas,
+            canvas = committed,
             pendingCanvas = emptyList(),
+            preTurnCanvas = emptyList(),
+            turnOpsApplied = false,
             canvasHistory = newHistory,
             canvasLabel = s.pendingLabel,
             pendingLabel = "",
@@ -911,6 +1055,13 @@ class AppViewModel(
 
     /** A `skeleton` loading placeholder — stray in a finished canvas, so dropped. */
     private fun isSkeleton(c: Component?): Boolean = c != null && c.type.equals("skeleton", ignoreCase = true)
+
+    /**
+     * Turn-scoped welcome components (feature 055 uniform rule): identities are
+     * "wel_"-prefixed, purged at turn start and never archived. Unconditional —
+     * when the server flag is off the welcome arrives id-less, so this is a no-op.
+     */
+    private fun List<Component>.dropWelcome(): List<Component> = filterNot { it.id?.startsWith("wel_") == true }
 
     private fun flattenText(components: List<Component>): String =
         components.joinToString("\n") { c ->

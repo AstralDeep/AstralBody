@@ -1,10 +1,11 @@
 // Feature 051 — the iOS/macOS app model: a faithful port of the Android
 // `AppViewModel`. System-browser PKCE sign-in, WS session with the ios/macos
 // device profile, and the full server-driven reduce: the "commit-on-done"
-// canvas lifecycle (a replacing turn buffers ops into `pendingCanvas` and swaps
-// them in on `chat_status done`, pushing the prior canvas onto the timeline),
-// server-owned chrome (`chrome_menu`/`chrome_surface`), agents/audit/history
-// surfaces, streaming nodes, attachments, and live theming.
+// canvas lifecycle (a replacing turn buffers full `ui_render` replaces into
+// `pendingCanvas` and swaps them in on `chat_status done`, pushing the prior
+// canvas onto the timeline, while identity-keyed ops morph the visible canvas
+// live), server-owned chrome (`chrome_menu`/`chrome_surface`), agents/audit/
+// history surfaces, streaming nodes, attachments, and live theming.
 import Foundation
 import SwiftUI
 import AuthenticationServices
@@ -89,6 +90,9 @@ final class AppModel: NSObject {
     var pendingCanvas: [AstralComponent] = []
     var turnActive = false
     var pendingReplace = false
+    /// Set by the first live canvas op of an armed turn — clears the skeleton
+    /// while the turn stays active (web parity: first canvas content hides it).
+    var liveOpsThisTurn = false
     var canvasLabel = ""
     var pendingLabel = ""
     var canvasHistory: [CanvasSnapshot] = []
@@ -130,7 +134,7 @@ final class AppModel: NSObject {
         return canvas
     }
     var isViewingHistory: Bool { viewingIndex != nil }
-    var showSkeleton: Bool { pendingReplace && viewingIndex == nil }
+    var showSkeleton: Bool { pendingReplace && !liveOpsThisTurn && viewingIndex == nil }
     var mutationsLocked: Bool { timelineReadOnly }
 
     // MARK: session plumbing (never read by views — not observation-tracked)
@@ -157,7 +161,11 @@ final class AppModel: NSObject {
 
     private let docMarker = "full write-up is on the canvas"
     private let maxTrail = 20
-    private let timelineMutations: Set<String> = ["chat_message", "component_action", "table_paginate", "save_theme"]
+    private let timelineMutations: Set<String> = ["chat_message", "component_action", "table_paginate",
+                                                  "save_theme", "component_refine", "component_restore"]
+
+    /// Test seam: observes every outbound WS frame text (nil in production).
+    @ObservationIgnored var outboundTap: ((String) -> Void)?
 
     var serverBase: URL {
         URL(string: serverBaseText) ?? URL(string: AstralConfig.serverBaseURL)!
@@ -425,11 +433,18 @@ final class AppModel: NSObject {
         }
     }
 
-    private func handle(_ event: WSEvent) async {
+    /// Internal (not private) so XCTests can drive connection events.
+    func handle(_ event: WSEvent) async {
         switch event {
         case .connected:
             connected = true
             everConnected = true
+            // 055 continuity: register_ui resumed the server session, but the
+            // server replays no turn frames on register — re-issue load_chat
+            // so anything that finished while this socket was down (background
+            // task, another device) re-hydrates the narrative and canvas.
+            // No-op on first connect: activeChatId is never persisted.
+            refreshActiveChat()
         case .disconnected:
             connected = false
             turnActive = false
@@ -460,6 +475,7 @@ final class AppModel: NSObject {
             turnActive = true
             pendingReplace = true
             pendingCanvas = []
+            liveOpsThisTurn = false
         case "chat_loaded":
             reduceChatLoaded(frame)
         case "chat_status":
@@ -473,7 +489,11 @@ final class AppModel: NSObject {
         case "ui_stream_data", "stream_data":
             applyCanvasOps(streamFrameToOps(frame, activeChat: activeChatId, seqState: &seqState))
         case "stream_subscribed":
-            applyCanvasOps(subscribeAckOps(frame))
+            // 055 mid-stream join: load_chat may already have re-hydrated the
+            // streamed component — the placeholder must not blank it. Ops go
+            // live to the visible canvas even mid-turn, so its ids are the
+            // guard source (the same list applyCanvasOps mutates).
+            applyCanvasOps(subscribeAckOps(frame, existingIds: Set(canvas.compactMap(\.componentId))))
         case "stream_error":
             applyCanvasOps(streamErrorOps(frame))
         case "chrome_menu":
@@ -507,12 +527,25 @@ final class AppModel: NSObject {
             let label = (head + pct).isEmpty ? "Working…" : head + pct
             stepTrail = trailUpsert(stepTrail, "• \(label)")
         case "task_started":
-            statusText = "Working in the background…"
-            asyncDetached = true
+            if frameTargetsActiveChat(frame) {
+                statusText = "Working in the background…"
+                asyncDetached = true
+            } else {
+                bannerIsError = false
+                errorBanner = "Background task started in another chat"
+            }
         case "task_completed":
-            commitTurn()
-            bannerIsError = false
-            errorBanner = "Background task finished"
+            if frameTargetsActiveChat(frame) {
+                commitTurn()
+                bannerIsError = false
+                errorBanner = "Background task finished"
+                // The task ran detached — its output landed server-side, not
+                // in this socket's turn frames. Reload to pick it up.
+                refreshActiveChat()
+            } else {
+                bannerIsError = false
+                errorBanner = "Background task finished in another chat"
+            }
         case "notification":
             let text = [frame.payload["title"]?.stringValue, frame.payload["body"]?.stringValue]
                 .compactMap { $0?.isEmpty == false ? $0 : nil }.joined(separator: ": ")
@@ -520,6 +553,40 @@ final class AppModel: NSObject {
                 bannerIsError = frame.payload["level"]?.stringValue == "error"
                 errorBanner = text
             }
+            // 055 continuity: a delivery into the OPEN chat refreshes it in
+            // place (scheduled-run output persists to history server-side).
+            if let chatId = nestedChatId(frame), chatId == activeChatId {
+                refreshActiveChat()
+            }
+        // 055 (US3): the eight workspace verb acks, promoted ignored → handled
+        // (wire-contract §4). The server's follow-up ui_upsert/ui_render
+        // fan-outs stay authoritative; these give the issuing socket immediate
+        // feedback without waiting on them.
+        case "component_saved":
+            let title = frame.payload["component"]?["title"]?.stringValue ?? ""
+            bannerIsError = false
+            errorBanner = title.isEmpty ? "Component saved" : "Saved \(title)"
+        case "component_save_error":
+            bannerIsError = true
+            errorBanner = frame.payload["error"]?.stringValue ?? "Couldn't save component"
+        case "component_deleted":
+            if let cid = frame.payload["component_id"]?.stringValue, !cid.isEmpty {
+                applyCanvasOps([UpsertOp(op: "remove", componentId: cid, component: nil)])
+            }
+        case "combine_status":
+            statusText = frame.payload["message"]?.stringValue ?? frame.payload["status"]?.stringValue
+        case "combine_error":
+            statusText = nil
+            bannerIsError = true
+            errorBanner = frame.payload["error"]?.stringValue ?? "Couldn't combine components"
+        case "components_combined", "components_condensed":
+            statusText = nil
+            applyCanvasOps(replacementOps(frame))
+        case "saved_components_list":
+            // Accepted ack; there is no native saved-components surface to
+            // refresh (browsing rides the server-driven chrome surface) — a
+            // future surface would consume `payload["components"]` here.
+            break
         case "auth_required":
             Task { await self.handleAuthRequired() }
         default:
@@ -529,6 +596,21 @@ final class AppModel: NSObject {
 
     private func nestedChatId(_ frame: InboundFrame) -> String? {
         frame.payload["payload"]?["chat_id"]?.stringValue ?? frame.payload["chat_id"]?.stringValue
+    }
+
+    /// 055 cross-device continuity: does a background-task frame concern the
+    /// chat currently open? A frame with no chat id targets the issuing
+    /// socket (pre-fan-out servers) and counts as ours.
+    private func frameTargetsActiveChat(_ frame: InboundFrame) -> Bool {
+        guard let chatId = nestedChatId(frame), !chatId.isEmpty else { return true }
+        return chatId == activeChatId
+    }
+
+    /// Re-issue load_chat for the open chat so the narrative and canvas pick
+    /// up content produced off this socket (background task, another device).
+    private func refreshActiveChat() {
+        guard let chatId = activeChatId, !chatId.isEmpty else { return }
+        sendEvent("load_chat", .object(["chat_id": .string(chatId)]))
     }
 
     private func reduceUiRender(_ frame: InboundFrame) {
@@ -564,12 +646,7 @@ final class AppModel: NSObject {
             }
         }
         let canvasOps = ops.filter { !isDocCard($0.componentId) && !isSkeleton($0.component) }
-        if canvasOps.isEmpty { return }
-        if pendingReplace {
-            pendingCanvas = Canvas.apply(pendingCanvas, canvasOps)
-        } else {
-            canvas = Canvas.apply(canvas, canvasOps)
-        }
+        applyCanvasOps(canvasOps)
     }
 
     private func reduceChatLoaded(_ frame: InboundFrame) {
@@ -661,13 +738,20 @@ final class AppModel: NSObject {
             return
         }
         if pendingCanvas.isEmpty {
+            // No buffered render — the live canvas (already carrying any ops
+            // applied mid-turn) IS the committed state, minus any welcome
+            // that resurrected mid-turn (055: `wel_` never survives a turn).
+            canvas = canvas.dropWelcome()
             turnActive = false; pendingReplace = false; statusText = nil
             stepTrail = []; asyncDetached = false
             return
         }
-        if !canvas.isEmpty {
+        // 055: `wel_` identities never enter the timeline; a welcome-only
+        // canvas archives nothing.
+        let archived = canvas.dropWelcome()
+        if !archived.isEmpty {
             let label = canvasLabel.isEmpty ? "Canvas \(canvasHistory.count + 1)" : canvasLabel
-            canvasHistory.append(CanvasSnapshot(label: label, components: canvas))
+            canvasHistory.append(CanvasSnapshot(label: label, components: archived))
         }
         canvas = pendingCanvas
         pendingCanvas = []
@@ -677,12 +761,19 @@ final class AppModel: NSObject {
         stepTrail = []; asyncDetached = false
     }
 
+    /// Identity-keyed ops morph the VISIBLE canvas immediately, even while a
+    /// replacing turn is armed — only full `ui_render` replaces buffer (the
+    /// mid-turn clobber hazard 044 guards against). A buffered render still
+    /// wins at commit, so mid-turn ops mirror into it and the committed state
+    /// stays what it would have been under accumulate-then-commit.
     private func applyCanvasOps(_ ops: [UpsertOp]) {
         if ops.isEmpty { return }
+        canvas = Canvas.apply(canvas, ops)
         if pendingReplace {
-            pendingCanvas = Canvas.apply(pendingCanvas, ops)
-        } else {
-            canvas = Canvas.apply(canvas, ops)
+            liveOpsThisTurn = true
+            if !pendingCanvas.isEmpty {
+                pendingCanvas = Canvas.apply(pendingCanvas, ops)
+            }
         }
     }
 
@@ -698,6 +789,24 @@ final class AppModel: NSObject {
             return UpsertOp(op: "upsert", componentId: id,
                             component: c.componentId == nil ? c.withComponentId(id) : c)
         }
+    }
+
+    /// components_combined / components_condensed → canvas ops: remove the
+    /// consumed ids, upsert each carried result. Results are saved-row shapes
+    /// (`{id, component_data, …}`); the component dict rides in
+    /// `component_data` and may not carry a workspace identity yet (the
+    /// server stamps it in the reconcile ui_render that follows), so identity
+    /// falls back to the fresh row id.
+    private func replacementOps(_ frame: InboundFrame) -> [UpsertOp] {
+        let removed = frame.payload["removed_ids"]?.arrayValue?.compactMap { $0.stringValue } ?? []
+        var ops: [UpsertOp] = removed.map { UpsertOp(op: "remove", componentId: $0, component: nil) }
+        for row in frame.payload["new_components"]?.arrayValue ?? [] {
+            guard let comp = row["component_data"].flatMap({ AstralComponent(json: $0) }) else { continue }
+            let cid = comp.componentId ?? row["id"]?.stringValue ?? "combined-\(ops.count)"
+            ops.append(UpsertOp(op: "upsert", componentId: cid,
+                                component: comp.componentId == nil ? comp.withComponentId(cid) : comp))
+        }
+        return ops
     }
 
     private func stepLine(name: String?, status: String?) -> String {
@@ -782,6 +891,11 @@ final class AppModel: NSObject {
         turnActive = true
         pendingReplace = true
         pendingCanvas = []
+        liveOpsThisTurn = false
+        // 055 uniform rule: purge the ephemeral welcome (`wel_` identities)
+        // from the committed canvas at turn start — the server no longer
+        // sends the blanking `ui_render []` (wire-contract §1).
+        canvas = canvas.dropWelcome()
         pendingLabel = String((text.isEmpty ? (ready.first?.filename ?? "") : text).prefix(80))
         staged = []
         viewingIndex = nil
@@ -817,6 +931,8 @@ final class AppModel: NSObject {
             turnActive = true
             pendingReplace = true
             pendingCanvas = []
+            liveOpsThisTurn = false
+            canvas = canvas.dropWelcome()   // 055: same turn-start purge as sendChat
             viewingIndex = nil
             errorBanner = nil
             stepTrail = []
@@ -831,7 +947,37 @@ final class AppModel: NSObject {
     }
 
     private func rawSend(_ text: String) {
+        outboundTap?(text)
         Task { await ws?.send(text) }
+    }
+
+    // MARK: refine + export (055 US4/US5)
+
+    /// 055 US4: component-scoped refine (wire-contract §3). The instruction
+    /// comes from the context-menu sheet; an empty one never reaches the wire.
+    func refineComponent(_ componentId: String, instruction: String) {
+        let trimmed = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !componentId.isEmpty, !trimmed.isEmpty else { return }
+        sendEvent("component_refine", .object([
+            "component_id": .string(componentId),
+            "instruction": .string(trimmed),
+        ]))
+    }
+
+    /// 055 US5: CSV export URL for one table component, chat-scoped per the
+    /// REST contract; opened in the system browser (session-authed route).
+    func exportComponentURL(_ componentId: String) -> URL? {
+        guard let chatId = activeChatId, !chatId.isEmpty, !componentId.isEmpty else { return nil }
+        let base = serverBase.appendingPathComponent("api/export/component/\(componentId).csv")
+        var comps = URLComponents(url: base, resolvingAgainstBaseURL: false)
+        comps?.queryItems = [URLQueryItem(name: "chat_id", value: chatId)]
+        return comps?.url
+    }
+
+    /// 055 US5: self-contained HTML export of the current chat's canvas.
+    func exportCanvasURL() -> URL? {
+        guard let chatId = activeChatId, !chatId.isEmpty else { return nil }
+        return serverBase.appendingPathComponent("api/export/canvas/\(chatId).html")
     }
 
     func newChat() {

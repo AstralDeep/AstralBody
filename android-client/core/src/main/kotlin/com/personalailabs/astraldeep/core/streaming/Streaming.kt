@@ -11,21 +11,29 @@ import kotlinx.serialization.json.put
  * Client-side consumption of the orchestrator's push-streaming protocol — a
  * direct port of the verified Windows `streaming.py`. Pure: translate a stream
  * frame into canvas ops that the existing `Canvas` reducer applies in place,
- * keyed by a synthetic `stream-<stream_id>` node. Renders the structured
- * `components` (ignoring any web `html`), with per-stream monotonic seq dedupe,
- * session filtering, terminal final-and-forget, and error→alert.
+ * keyed by the frame's `component_id` when the stream is bridged to a workspace
+ * identity (055), else a synthetic `stream-<stream_id>` node. Renders the
+ * structured `components` (ignoring any web `html`), with per-stream monotonic
+ * seq dedupe, session filtering, terminal final-and-forget, and error→alert.
  */
 const val STREAM_NODE_PREFIX = "stream-"
 
 fun streamNodeId(streamId: String): String = "$STREAM_NODE_PREFIX$streamId"
 
-/** (canvasComponentId, dedupeKey) for a frame — push keys on stream_id, legacy poll on tool_name. */
+/**
+ * (canvasComponentId, dedupeKey) for a frame — push keys on stream_id, legacy
+ * poll on tool_name. A bridged stream's [componentId] keys the canvas node from
+ * the first frame (no `stream-<id>` node ever exists), so the terminal persist
+ * `ui_upsert` under the same identity replaces in place instead of
+ * double-rendering; seq dedupe stays keyed on stream_id.
+ */
 private fun nodeKey(
     streamId: String?,
     toolName: String?,
+    componentId: String? = null,
 ): Pair<String, String>? =
     when {
-        streamId != null -> streamNodeId(streamId) to streamId
+        streamId != null -> (componentId ?: streamNodeId(streamId)) to streamId
         toolName != null -> "${STREAM_NODE_PREFIX}tool-$toolName" to "tool:$toolName"
         else -> null
     }
@@ -67,7 +75,7 @@ fun streamFrameToOps(
     activeChat: String?,
     seqState: MutableMap<String, Int>,
 ): List<CanvasOp> {
-    val (node, key) = nodeKey(frame.streamId, frame.toolName) ?: return emptyList()
+    val (node, key) = nodeKey(frame.streamId, frame.toolName, frame.componentId) ?: return emptyList()
 
     val session = frame.sessionId
     if (session != null && activeChat != null && session != activeChat) return emptyList()
@@ -88,9 +96,18 @@ fun streamFrameToOps(
     return listOf(CanvasOp("upsert", node, body))
 }
 
-/** A lightweight placeholder shown on `stream_subscribed`, replaced by the first frame. */
-fun subscribeAckOps(msg: Inbound.StreamSubscribed): List<CanvasOp> {
-    val (node, _) = nodeKey(msg.streamId, msg.toolName) ?: return emptyList()
+/**
+ * A lightweight placeholder shown on `stream_subscribed`, replaced by the first
+ * frame. [existingIds] (ids already on the target canvas) guards the late-join
+ * case (055): a device subscribing mid-stream may already hold retained content
+ * under the node's identity, and the placeholder must not blank it.
+ */
+fun subscribeAckOps(
+    msg: Inbound.StreamSubscribed,
+    existingIds: Set<String> = emptySet(),
+): List<CanvasOp> {
+    val (node, _) = nodeKey(msg.streamId, msg.toolName, msg.componentId) ?: return emptyList()
+    if (node in existingIds) return emptyList()
     val tool = msg.toolName ?: "tool"
     val attrs =
         buildJsonObject {

@@ -57,8 +57,10 @@ object Wire {
                     terminal = root.bool("terminal") ?: false,
                     error = errorFromJson(root.obj("error")),
                     toolName = root.str("tool_name"),
+                    componentId = root.str("component_id"),
                 )
-            "stream_subscribed" -> Inbound.StreamSubscribed(root.str("stream_id"), root.str("tool_name"))
+            "stream_subscribed" ->
+                Inbound.StreamSubscribed(root.str("stream_id"), root.str("tool_name"), root.str("component_id"))
             "stream_error" -> {
                 val payload = root.obj("payload")
                 Inbound.StreamErrorMsg(
@@ -120,7 +122,10 @@ object Wire {
             }
             // Task frames nest their fields under `payload` (older emitters were flat).
             "task_started" ->
-                Inbound.TaskStarted(root.obj("payload")?.str("task_id") ?: root.str("task_id"))
+                Inbound.TaskStarted(
+                    taskId = root.obj("payload")?.str("task_id") ?: root.str("task_id"),
+                    chatId = root.obj("payload")?.str("chat_id") ?: root.str("chat_id"),
+                )
             "task_completed" ->
                 Inbound.TaskCompleted(
                     taskId = root.obj("payload")?.str("task_id") ?: root.str("task_id"),
@@ -131,6 +136,7 @@ object Wire {
                     title = root.str("title"),
                     body = root.str("body"),
                     level = root.str("level"),
+                    chatId = root.str("chat_id"),
                 )
             // Stored preferences at boot ({preferences:{theme:{…}}}); the app folds
             // `theme` into the live palette (US5 restyle).
@@ -138,6 +144,18 @@ object Wire {
             // Read-only workspace timeline toggle ({active}); `on` is tolerated.
             "workspace_timeline_mode" ->
                 Inbound.WorkspaceTimelineMode(active = root.bool("active") ?: root.bool("on") ?: false)
+            // Workspace verb acks (055 US3, wire-contract §4).
+            "component_saved" -> Inbound.ComponentSaved(title = root.obj("component")?.str("title"))
+            "component_save_error" -> Inbound.ComponentSaveError(root.str("error"))
+            "component_deleted" -> Inbound.ComponentDeleted(root.str("component_id"))
+            "combine_status" -> Inbound.CombineStatus(root.str("status"), root.str("message"))
+            "combine_error" -> Inbound.CombineError(root.str("error"))
+            "components_combined", "components_condensed" ->
+                Inbound.ComponentsReplaced(
+                    removedIds = root.strList("removed_ids"),
+                    newComponents = replacementsFromJson(root.arr("new_components")),
+                )
+            "saved_components_list" -> Inbound.SavedComponentsList(count = root.arr("components")?.size ?: 0)
             else -> Inbound.Unknown(type)
         }
 
@@ -241,6 +259,18 @@ object Wire {
                 componentId = cid,
                 component = o.obj("component")?.let { Component.fromJson(it) },
             )
+        } ?: emptyList()
+
+    // components_combined/condensed results are saved-row shapes ({id,
+    // component_data, …}); the primitive dict rides in `component_data` and may
+    // not carry a workspace identity yet (the reconcile ui_render that follows
+    // stamps it), so identity falls back to the fresh row id.
+    private fun replacementsFromJson(arr: JsonArray?): List<Component> =
+        arr?.mapIndexedNotNull { i, el ->
+            val row = el as? JsonObject ?: return@mapIndexedNotNull null
+            val data = row.obj("component_data") ?: return@mapIndexedNotNull null
+            val comp = Component.fromJson(data)
+            if (comp.id != null) comp else comp.copy(id = row.str("id") ?: "combined-$i")
         } ?: emptyList()
 
     private fun errorFromJson(o: JsonObject?): StreamError? =

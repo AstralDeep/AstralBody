@@ -60,11 +60,22 @@ def test_nested_tool_source_is_grounded():
     assert provenance_of(comp) == "grounded"
 
 
-def test_explicit_attribute_wins():
-    assert provenance_of({"type": "metric", "provenance": "verified"}) == "grounded"
+def test_stamped_field_is_authoritative():
+    # 055 US4: the server-stamped canonical value wins in BOTH directions —
+    # the footer reads the stamp, never re-derives around it.
+    assert provenance_of({"type": "metric", "provenance": "grounded"}) == "grounded"
     assert provenance_of({"type": "metric", "provenance": "estimated"}) == "estimated"
-    assert provenance_of({"type": "metric", "provenance": "model",
+    assert provenance_of({"type": "metric", "provenance": "generated",
                           "_source_tool": "x"}) == "generated"
+    assert provenance_of({"type": "metric", "provenance": " Grounded "}) == "grounded"
+
+
+def test_synonyms_are_not_honored():
+    # FR-026: agent-supplied synonyms cannot upgrade trust through the
+    # renderer — non-canonical values fall back to derivation.
+    assert provenance_of({"type": "metric", "provenance": "verified"}) == "generated"
+    assert provenance_of({"type": "metric", "provenance": "tool"}) == "generated"
+    assert provenance_of({"type": "metric", "provenance": "uncertain"}) == "generated"
 
 
 def test_unknown_explicit_falls_back_to_derivation():

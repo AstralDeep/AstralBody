@@ -63,6 +63,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.window.core.layout.WindowWidthSizeClass
 import com.personalailabs.astraldeep.app.R
+import com.personalailabs.astraldeep.app.render.CanvasChrome
 import com.personalailabs.astraldeep.app.render.CanvasHost
 import com.personalailabs.astraldeep.app.render.MarkdownText
 import com.personalailabs.astraldeep.app.render.Renderer
@@ -177,9 +178,10 @@ private fun CanvasArea(
 ) {
     var showTimeline by remember { mutableStateOf(false) }
     Column(modifier = modifier.background(MaterialTheme.colorScheme.background)) {
-        // A read-only banner (history), else a thin progress line for in-place
-        // (non-skeleton) turns. During a replacing query the skeleton IS the
-        // loading state, and the status text lives only in the Messages bar.
+        // A read-only banner (history), else a thin progress line for any
+        // non-skeleton stretch of a turn: in-place turns, and a replacing query
+        // once its first live content lands (055 — the skeleton is only the
+        // loading state until then). Status text lives only in the Messages bar.
         if (state.isViewingHistory) {
             ReadOnlyBanner(
                 label = state.canvasHistory.getOrNull(state.viewingIndex ?: -1)?.label,
@@ -193,7 +195,19 @@ private fun CanvasArea(
             when {
                 state.showSkeleton -> SkeletonCanvas(Modifier.fillMaxSize())
                 state.visibleCanvas.isEmpty() -> EmptyCanvasHint(Modifier.fillMaxSize())
-                else -> CanvasHost(components = state.visibleCanvas, renderer = renderer, modifier = Modifier.fillMaxSize())
+                else ->
+                    CanvasHost(
+                        components = state.visibleCanvas,
+                        renderer = renderer,
+                        modifier = Modifier.fillMaxSize(),
+                        // Refine pauses on ANY read-only view — the server timeline
+                        // (mutationsLocked) and the client-side canvas snapshots.
+                        chrome =
+                            CanvasChrome(
+                                chatId = state.activeChatId,
+                                mutationsLocked = state.mutationsLocked || state.isViewingHistory,
+                            ),
+                    )
             }
 
             // Timeline entry point — only when previous canvases exist and we're live.

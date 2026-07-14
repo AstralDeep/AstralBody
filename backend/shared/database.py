@@ -12,7 +12,12 @@ from typing import List, Dict, Optional, Tuple
 logger = logging.getLogger('Database')
 
 # 054.001: + user_llm_config, + system_llm_config (bring-your-own-LLM stores)
-SCHEMA_REVISION = '054.001'
+# 055.001: + component_version (refine/restore history), + share_grant
+#          (snapshot share links) — both additive, inert while their flags
+#          are off (FF_COMPONENT_REFINE / FF_ARTIFACT_SHARING)
+# 055.002: + background_task (durable cross-device task records) — additive,
+#          inert while FF_BG_CONTINUITY is off
+SCHEMA_REVISION = '055.002'
 
 _POOLS: Dict[str, dict] = {}
 _POOLS_LOCK = threading.Lock()
@@ -1230,6 +1235,77 @@ class Database:
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
+        ''')
+
+        # ── Feature 055 (US4): bounded per-component version history ────────
+        # Archived component dicts written before a refine/restore overwrite;
+        # retention pruned to the newest 5 per (chat, component) by the store.
+        # Rollback: DROP TABLE IF EXISTS component_version;
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS component_version (
+                id BIGSERIAL PRIMARY KEY,
+                chat_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                component_id TEXT NOT NULL,
+                version_no INTEGER NOT NULL,
+                component JSONB NOT NULL,
+                reason TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (chat_id, component_id, version_no)
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_component_version_lookup
+            ON component_version (chat_id, component_id, version_no DESC)
+        ''')
+
+        # ── Feature 055 (US5): snapshot-scoped public share grants ──────────
+        # Raw tokens are never stored (sha256 only); snapshots are immutable
+        # renditions captured at mint — public serving never reads live rows.
+        # Rollback: DROP TABLE IF EXISTS share_grant;
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS share_grant (
+                id BIGSERIAL PRIMARY KEY,
+                token_sha256 TEXT NOT NULL UNIQUE,
+                user_id TEXT NOT NULL,
+                chat_id TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                component_id TEXT,
+                snapshot_html TEXT NOT NULL,
+                snapshot_json JSONB NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                expires_at TIMESTAMPTZ,
+                revoked_at TIMESTAMPTZ,
+                open_count INTEGER NOT NULL DEFAULT 0
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_share_grant_owner
+            ON share_grant (user_id, created_at DESC)
+        ''')
+
+        # ── Feature 055 (bg continuity): durable background-task records ────
+        # Write-through bookkeeping from BackgroundTaskManager (fail-open)
+        # that powers reconnect/late-join replay; `notified` flips TRUE once a
+        # completion frame reached (or was replayed to) a client.
+        # Rollback: DROP TABLE IF EXISTS background_task;
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS background_task (
+                task_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                chat_id TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'async_chat',
+                status TEXT NOT NULL,
+                title TEXT,
+                summary TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                completed_at TIMESTAMPTZ,
+                notified BOOLEAN NOT NULL DEFAULT FALSE
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_background_task_user
+            ON background_task (user_id, created_at DESC)
         ''')
 
         # ── Feature 029: agent catalog migrations (data-model.md) ───────────

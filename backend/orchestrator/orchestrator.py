@@ -59,7 +59,7 @@ from rote.rote import ROTE
 from shared.feature_flags import flags
 from shared.llm_text import strip_reasoning_markup
 from shared.perf import perf_span
-from orchestrator.stream_manager import StreamManager
+from orchestrator.stream_manager import StreamManager, markdown_safe_prefix_len
 
 load_dotenv(override=False)
 
@@ -190,11 +190,32 @@ _LEAKED_TOOL_CALL_PATTERNS = [
     # standalone <｜DSML｜invoke ...></｜DSML｜invoke> blocks.
     re.compile(r"<｜DSML｜tool_calls>.*?</｜DSML｜tool_calls>", re.DOTALL),
     re.compile(r"<｜DSML｜invoke[^>]*>.*?</｜DSML｜invoke>", re.DOTALL),
+    # 055 (D6) — XML-ish pseudo-call syntax observed live: a tool name glued
+    # onto <arg_key>/<arg_value> trains (`update_component<arg_key>…`).
+    # The composite (name + closed pairs) must run before the nameless pair
+    # pattern so the name prefix is removed with its train; a truncated train
+    # (opener never closed) strips to end-of-text — everything after it is
+    # protocol syntax, not prose.
+    re.compile(
+        r"[A-Za-z_][A-Za-z0-9_]*\s*(?:<arg_key>.*?</arg_key>\s*(?:<arg_value>.*?</arg_value>)?\s*)+",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(r"<arg_(?:key|value)>.*?</arg_(?:key|value)>", re.IGNORECASE | re.DOTALL),
+    re.compile(
+        r"(?:[A-Za-z_][A-Za-z0-9_]*\s*)?<arg_(?:key|value)>.*$",
+        re.IGNORECASE | re.DOTALL,
+    ),
     # Stray dangling open tags with no close
     re.compile(r"<\|?tool_call\|?>", re.IGNORECASE),
     re.compile(r"<\|tool_calls_section_(?:begin|end)\|>", re.IGNORECASE),
     re.compile(r"\[/?TOOL_CALLS\]", re.IGNORECASE),
     re.compile(r"</?｜DSML｜[^>]*>"),
+    re.compile(r"</?arg_(?:key|value)>", re.IGNORECASE),
+    # 055 (D6) — NAME@true attribute trains riding alongside the pseudo-calls
+    # (`NEW_PAGE@true`). Anchored on a TERMINAL boolean so addresses survive:
+    # the lookahead keeps john@true.example.com intact (the "true" there is a
+    # domain label, not a value).
+    re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*@(?:true|false)(?![\w.@-])", re.IGNORECASE),
 ]
 
 
@@ -253,6 +274,124 @@ class ToolDiagnostic(NamedTuple):
     reason: Optional[str]
 
 
+def _strip_toolcall_leakage(content: str) -> str:
+    """Remove leaked tool-call markup from model-authored text (055 D6).
+
+    Shared by the final-text sanitizer, the chat narrative, the canvas
+    doc-card promotion, and the round-summary path. Returns the stripped
+    text (possibly empty) — each caller owns its honest fallback.
+    """
+    cleaned = content or ""
+    for pat in _LEAKED_TOOL_CALL_PATTERNS:
+        cleaned = pat.sub("", cleaned)
+    return cleaned.strip()
+
+
+# 055 (D6): honest fallback when stripping empties a model response — the
+# user gets a short actionable line instead of an empty bubble/card; the raw
+# payload goes to the diagnostic log only, never the render surface.
+_LEAK_FALLBACK_TEXT = (
+    "The AI model's response contained only tool-call markup, so there is "
+    "nothing to show for this turn. Please try again."
+)
+
+
+def _log_stripped_empty(surface: str, chat_id: Optional[str], raw: str) -> None:
+    logger.warning(
+        "toolcall_leak.stripped_empty surface=%s chat=%s raw=%r",
+        surface, chat_id, raw[:500],
+    )
+
+
+#: 055 US4 (wire-contract §6): the server-owned provenance vocabulary.
+_PROVENANCE_KINDS = ("grounded", "estimated", "generated")
+
+
+def _derive_provenance(comp) -> str:
+    """Reuses the web footer's subtree derivation (renderer._subtree_tool_source)
+    so server stamp and footer always classify identically: a subtree tracing
+    to a tool result is "grounded", anything else "generated". "estimated" is
+    never derivable — only server code may assign it (a refine that did not
+    re-run the source tool, research D10) via ``_stamp_provenance(kind=...)``.
+    """
+    from webrender.renderer import _subtree_tool_source
+    return "grounded" if _subtree_tool_source(comp) else "generated"
+
+
+def _stamp_provenance(comp, kind=None) -> None:
+    """055 US4 (FR-026): stamp ``provenance`` on a component dict, ALWAYS
+    overwriting any agent/model-supplied value — trust cannot be
+    self-upgraded. ``kind`` is a server-side override; anything outside the
+    vocabulary falls back to derivation. With FF_COMPONENT_REFINE off the
+    field is STRIPPED, never merely left alone: 055-era clients render trust
+    badges from this field, so letting an agent-supplied value ride through
+    with the kill switch off would let agents mint their own badges (FR-026
+    has no flag carve-out).
+    """
+    if not isinstance(comp, dict):
+        return
+    if not flags.is_enabled("component_refine"):
+        comp.pop("provenance", None)
+        return
+    comp["provenance"] = kind if kind in _PROVENANCE_KINDS else _derive_provenance(comp)
+
+
+def _stamp_canvas_provenance(components) -> None:
+    """Stamp a materialized canvas — the last stop before delivery, and the
+    only place designer garnish exists as component dicts. Garnish (``dg_``
+    ids, rebuilt from the layout JSON on every materialization) can never
+    self-assign trust, so it is re-derived unconditionally — a garnish
+    container wrapping tool-sourced refs correctly reads grounded; persisted
+    components keep their server stamp, and legacy (pre-055) rows without one
+    are derived in place.
+    """
+    if not flags.is_enabled("component_refine"):
+        for comp in components or []:
+            if isinstance(comp, dict):
+                comp.pop("provenance", None)
+        return
+    from orchestrator.ui_designer import GARNISH_ID_PREFIX
+    for comp in components or []:
+        if not isinstance(comp, dict):
+            continue
+        ident = str(comp.get("id") or comp.get("component_id") or "")
+        if ident.startswith(GARNISH_ID_PREFIX) or comp.get("provenance") not in _PROVENANCE_KINDS:
+            _stamp_provenance(comp)
+
+
+def _tag_source(comp, agent_id, tool_name, tool_params=None, correlation_id=None):
+    """Recursively tag a component dict and all nested children with source
+    metadata (055 US2: hoisted from handle_chat_message so the stream
+    persist-on-terminal path stamps identical provenance).
+
+    `tool_params` is only tagged on the top-level node — the auto-subscribe
+    path reads it there to replay the same arguments on `stream_subscribe`.
+
+    Feature 004: `correlation_id` is the audit-log id of the originating
+    tool dispatch. When present, every component (including nested children)
+    carries it so the frontend can scope user feedback to the originating
+    dispatch.
+
+    055 US4: every tagged node also gets its ``provenance`` field stamped
+    from the just-written source attribution (agent-supplied values are
+    always overwritten — FR-026).
+    """
+    if not isinstance(comp, dict):
+        return
+    comp["_source_agent"] = agent_id
+    comp["_source_tool"] = tool_name
+    if tool_params is not None:
+        comp["_source_params"] = tool_params
+    if correlation_id is not None:
+        comp["_source_correlation_id"] = correlation_id
+    _stamp_provenance(comp)
+    for key in ("content", "children"):
+        nested = comp.get(key)
+        if isinstance(nested, list):
+            for child in nested:
+                _tag_source(child, agent_id, tool_name, correlation_id=correlation_id)
+
+
 def _sanitize_text_response(content: str) -> str:
     """Strip leaked tool-call tokens from a text response.
 
@@ -269,10 +408,7 @@ def _sanitize_text_response(content: str) -> str:
     """
     if not content:
         return content
-    cleaned = content
-    for pat in _LEAKED_TOOL_CALL_PATTERNS:
-        cleaned = pat.sub("", cleaned)
-    cleaned = cleaned.strip()
+    cleaned = _strip_toolcall_leakage(content)
     if not cleaned:
         return (
             "No agents are currently enabled, so I can't run that for you. "
@@ -446,6 +582,37 @@ def remap_merged_source(agent_id: str, tool_name: str):
     return new_agent, tool_name
 
 
+def _is_native_device(profile) -> bool:
+    """Windows/Android/iOS/macOS/watch — surfaces that render structured
+    components with their own layout engine (not the designer's web HTML)."""
+    from rote.capabilities import DeviceType
+    return profile is not None and profile.device_type in (
+        DeviceType.WINDOWS, DeviceType.ANDROID,
+        DeviceType.IOS, DeviceType.MACOS, DeviceType.WATCH)
+
+
+def _native_canvas_components(components) -> List[Dict[str, Any]]:
+    """055 US3 (wire-contract §5): the materialized canvas for NATIVE delivery
+    excludes ``doc_`` narrative cards and model "Reasoning" collapsibles —
+    their reducers divert those to the chat rail, so shipping them in a canvas
+    frame would have them silently dropped client-side. Matchers mirror the
+    clients' (AppViewModel.kt isDocCard/isReasoning and the Swift twin)."""
+    out = []
+    for c in components or []:
+        if not isinstance(c, dict):
+            continue
+        # The author id is "doc_…"; the workspace persists it under the
+        # namespaced "au_doc_…" identity — match both.
+        if (str(c.get("id") or "").startswith("doc_")
+                or str(c.get("component_id") or "").startswith(("doc_", "au_doc_"))):
+            continue
+        if (str(c.get("type") or "").lower() == "collapsible"
+                and str(c.get("title") or "").strip().lower() == "reasoning"):
+            continue
+        out.append(c)
+    return out
+
+
 class Orchestrator:
     def __init__(self):
         # 020-async-queries: background task manager for async chat processing
@@ -582,6 +749,12 @@ class Orchestrator:
         data_dir = os.path.join(backend_dir, 'data')
         self.history = HistoryManager(data_dir=data_dir)
 
+        # 055 bg-continuity: durable task records + a completion fan that
+        # reaches every socket of the user (the originator may be gone). The
+        # manager itself is constructed above, before the DB exists.
+        self.async_task_manager.bind(
+            db=self.history.db, on_complete=self._fan_task_completed)
+
         # Feature 054: persisted per-user + system LLM configuration store
         # (user_llm_config / system_llm_config tables; Fernet under
         # CREDENTIAL_ENCRYPTION_KEY with the shared dev key-file fallback).
@@ -634,6 +807,11 @@ class Orchestrator:
             agent_canceller=self._cancel_stream_request,
             validate_chat_ownership=self._validate_chat_ownership_for_stream,
         )
+        # 055 US2 (FR-011): out-of-band terminals (retry exhaustion, dormant
+        # TTL eviction, resume-dispatch failure) reach the persist path via
+        # this hook; the in-band wrapper in handle_agent_message covers frames
+        # that arrive as agent messages. persist_done keeps them idempotent.
+        self.stream_manager.terminal_hook = self._persist_stream_terminal
 
         # Hook/Event System — extensible lifecycle events
         self.hooks = HookManager()
@@ -1091,6 +1269,10 @@ class Orchestrator:
             # never send these messages so the branches are never taken.
             elif isinstance(msg, ToolStreamData) and flags.is_enabled("tool_streaming"):
                 if self.stream_manager is not None:
+                    # 055 US2: capture the bridged subscription BEFORE the
+                    # frame is processed — an error chunk can resolve the
+                    # stream terminally, tearing the record down.
+                    sub = self._bridged_stream_subscription(msg.stream_id)
                     try:
                         await self.stream_manager.handle_agent_chunk(msg)
                     except NotImplementedError:
@@ -1101,9 +1283,12 @@ class Orchestrator:
                             f"ToolStreamData received but stream_manager handler "
                             f"not yet implemented (stream_id={msg.stream_id})"
                         )
+                    if sub is not None:
+                        await self._persist_stream_terminal(sub)
 
             elif isinstance(msg, ToolStreamEnd) and flags.is_enabled("tool_streaming"):
                 if self.stream_manager is not None:
+                    sub = self._bridged_stream_subscription(msg.stream_id)
                     try:
                         await self.stream_manager.handle_agent_end(msg)
                     except NotImplementedError:
@@ -1111,6 +1296,8 @@ class Orchestrator:
                             f"ToolStreamEnd received but stream_manager handler "
                             f"not yet implemented (stream_id={msg.stream_id})"
                         )
+                    if sub is not None:
+                        await self._persist_stream_terminal(sub)
 
         except Exception as e:
             logger.error(f"Error handling agent message: {e}")
@@ -1294,6 +1481,28 @@ class Orchestrator:
                                 "first-run LLM dialog push failed (refusals "
                                 "still enforce the gate)", exc_info=True)
 
+                    # 055 bg-continuity: a reconnecting client that carries its
+                    # active chat id (RegisterUI.session_id) resumes that
+                    # chat's server context without waiting for a load_chat —
+                    # active-chat marker (which also suppresses the welcome
+                    # canvas below), stream subscriptions, and a replay of any
+                    # in-flight background task. Ownership-validated; an
+                    # invalid/foreign id is ignored silently (register still
+                    # succeeds).
+                    if msg.session_id and flags.is_enabled("bg_continuity"):
+                        try:
+                            owned = await self.history.db.afetch_one(
+                                "SELECT id FROM chats WHERE id = ? AND user_id = ?",
+                                (msg.session_id, user_id))
+                            if owned:
+                                self._ws_active_chat[id(websocket)] = msg.session_id
+                                await self._resume_chat_streams(
+                                    websocket, user_id, msg.session_id)
+                                await self._replay_chat_task(websocket, msg.session_id)
+                        except Exception:
+                            logger.debug("register_ui chat resume failed (non-fatal)",
+                                         exc_info=True)
+
                     # Initial canvas: server-driven welcome examples when this
                     # socket has no chat to resume — ordinary astralprims
                     # components over the normal ui_render path (Constitution
@@ -1320,6 +1529,12 @@ class Orchestrator:
                         await _dash_task
                     except Exception:
                         logger.warning("register_ui dashboard delivery failed", exc_info=True)
+
+                    # 055 bg-continuity late-connect catch-up: in-flight tasks
+                    # replay as task_started; completed-but-unnotified ones as
+                    # task_completed (marked notified after delivery).
+                    if flags.is_enabled("bg_continuity"):
+                        await self._replay_user_tasks(websocket, user_id)
                     logger.info(
                         "perf register_ui.total duration_ms=%d user=%s",
                         int((time.monotonic() - _register_started) * 1000), user_id)
@@ -1492,13 +1707,7 @@ class Orchestrator:
                     user_message = msg.payload.get("message", "")
                     chat_id = msg.session_id or msg.payload.get("chat_id")
                     draft_agent_id = msg.payload.get("draft_agent_id")
-                    # Leaving the welcome canvas: blank it so flat ui_upsert
-                    # appends start from an empty canvas on every target.
-                    if self._ws_welcome.pop(id(websocket), None):
-                        try:
-                            await self.send_ui_render(websocket, [])
-                        except Exception:
-                            pass
+                    await self._retire_welcome_canvas(websocket)
                     # Feature 013 / FR-018, FR-024: in-chat tool picker
                     # selection narrows the orchestrator's tool list. None
                     # / absent ≡ no narrowing (existing default behavior).
@@ -1794,30 +2003,15 @@ class Orchestrator:
                         except Exception:
                             logger.exception("workspace re-hydration failed for chat %s", chat_id)
 
-                        # 001-tool-stream-ui (US3 T054): after chat_loaded
-                        # is sent, resume any DORMANT streams for this chat.
-                        # Each resumed stream gets a stream_subscribed reply
-                        # so the frontend re-registers it in pushStreamsRef
-                        # and starts merging chunks again.
-                        if self.stream_manager is not None:
-                            try:
-                                resumed = await self.stream_manager.resume(
-                                    websocket, user_id, chat_id,
-                                )
-                                for resumed_stream_id, resumed_tool_name in resumed:
-                                    cfg = self._streamable_tools.get(resumed_tool_name, {})
-                                    await self._safe_send(websocket, json.dumps({
-                                        "type": "stream_subscribed",
-                                        "stream_id": resumed_stream_id,
-                                        "tool_name": resumed_tool_name,
-                                        "agent_id": cfg.get("agent_id", ""),
-                                        "session_id": chat_id,
-                                        "max_fps": cfg.get("max_fps", 30),
-                                        "min_fps": cfg.get("min_fps", 5),
-                                        "attached": False,
-                                    }))
-                            except Exception as e:
-                                logger.warning(f"stream_manager.resume failed: {e}")
+                        # Stream re-attachment (dormant resume + active-stream
+                        # attach) — shared with the register_ui session resume
+                        # (055 bg-continuity).
+                        await self._resume_chat_streams(websocket, user_id, chat_id)
+
+                        # 055 bg-continuity: a chat with a live background run
+                        # shows the running state to the joining device.
+                        if flags.is_enabled("bg_continuity"):
+                            await self._replay_chat_task(websocket, chat_id)
                     else:
                         await self.send_ui_render(websocket, [
                             Alert(message="Chat not found", variant="error").to_dict()
@@ -2326,6 +2520,16 @@ class Orchestrator:
                     # Feature 028 — standardized deterministic component
                     # action (contracts/component-action.md).
                     await self._handle_component_action(websocket, user_id, msg.payload or {})
+
+                elif msg.action == "component_refine":
+                    # 055 US4 (wire-contract §3) — component-scoped LLM edit
+                    # in place; gated + refused inside the handler.
+                    await self._handle_component_refine(websocket, user_id, msg.payload or {})
+
+                elif msg.action == "component_restore":
+                    # 055 US4 — restore an archived component_version under
+                    # the same identity (no LLM).
+                    await self._handle_component_restore(websocket, user_id, msg.payload or {})
 
                 elif msg.action == "authorize_action":
                     # C-S8 — the user confirmed a require_token-gated call: mint a
@@ -2886,14 +3090,19 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 attachments=atts,
             )
 
+        uid = user_id or self._get_user_id(websocket)
+        # Short user-facing label for cross-device task frames (055).
+        title = " ".join((display_message or message or "").split())[:60]
         bg_task = await self.async_task_manager.submit(
             chat_id=chat_id,
-            user_id=user_id or self._get_user_id(websocket),
+            user_id=uid,
             coro_factory=_run_in_background,
+            kind="async_chat",
+            title=title,
             msg=message,
             cid=chat_id,
             display=display_message,
-            uid=user_id or self._get_user_id(websocket),
+            uid=uid,
             draft=draft_agent_id,
             tools=selected_tools,
             atts=attachments,
@@ -2902,14 +3111,21 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # Register the submitting websocket as a watcher
         bg_task.watchers.append(websocket)
 
-        await self._safe_send(websocket, json.dumps({
+        started = {
             "type": "task_started",
             "payload": {
                 "task_id": bg_task.task_id,
                 "chat_id": chat_id,
                 "status": "queued",
             },
-        }))
+        }
+        if flags.is_enabled("bg_continuity"):
+            # 055: the start signal reaches every device of the user, not just
+            # the originating socket (title labels it on non-chat surfaces).
+            started["payload"]["title"] = title
+            await self._send_to_user_sockets(uid, started)
+        else:
+            await self._safe_send(websocket, json.dumps(started))
 
         # Send loading state so UI knows the query was accepted
         await self._safe_send(websocket, json.dumps({
@@ -2970,6 +3186,16 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 "no system LLM credential configured — scheduled turn not run")
 
         target_chat = chat_id or f"scheduled-{user_id}"
+        if not chat_id and flags.is_enabled("bg_continuity"):
+            # 055: nothing else creates the fallback chat, and
+            # history.add_message silently drops writes to a missing chat —
+            # the whole run's output would be lost. Fallback only: an explicit
+            # target_chat_id must already exist (chat ids are globally keyed,
+            # so creating one here could collide with another user's chat).
+            if not await asyncio.to_thread(
+                    self.history.get_chat, target_chat, user_id=user_id):
+                await asyncio.to_thread(
+                    self.history.create_chat, target_chat, user_id=user_id)
         bg = BackgroundTask(
             task_id=(correlation_id or "sched")[:8],
             chat_id=target_chat,
@@ -3033,6 +3259,178 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             "notify_user.delivered",
             extra={"user_id": user_id, "sockets": sent, "kind": payload.get("type")},
         )
+
+    async def _send_to_user_sockets(self, user_id: str, frame: Dict[str, Any]) -> int:
+        """Deliver one frame to EVERY connected socket authenticated as
+        ``user_id`` (055 bg-continuity — multi-device fan, chat-agnostic).
+        Returns the number of sockets reached."""
+        try:
+            data = json.dumps(frame)
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("_send_to_user_sockets: unserializable frame", exc_info=True)
+            return 0
+        from orchestrator.async_tasks import VirtualWebSocket
+        sent = 0
+        for ws, claims in list(self.ui_sessions.items()):
+            if (claims or {}).get("sub") != user_id:
+                continue
+            # A background turn's own VirtualWebSocket sits in ui_sessions for
+            # the turn's lifetime — "delivering" to it would count as a
+            # notified device and silently skip the register_ui catch-up
+            # replay for users with no real socket connected.
+            if isinstance(ws, VirtualWebSocket):
+                continue
+            try:
+                if await self._safe_send(ws, data):
+                    sent += 1
+            except Exception:  # pragma: no cover - per-socket best-effort
+                logger.debug("_send_to_user_sockets: send failed", exc_info=True)
+        return sent
+
+    async def _fan_task_completed(self, bg_task, frame: Dict[str, Any]) -> int:
+        """BackgroundTaskManager completion hook (055 bg-continuity): the
+        task_completed frame reaches every socket of the user — the
+        originating socket may be long gone. Returns the delivered count so
+        the manager can persist ``notified``."""
+        return await self._send_to_user_sockets(bg_task.user_id, frame)
+
+    def _task_started_frame(self, bg_task) -> Dict[str, Any]:
+        """A task_started replay frame for an in-flight background task."""
+        return {
+            "type": "task_started",
+            "payload": {
+                "task_id": bg_task.task_id,
+                "chat_id": bg_task.chat_id,
+                "status": bg_task.status.value,
+                "title": bg_task.title,
+                "replay": True,
+            },
+        }
+
+    async def _replay_user_tasks(self, websocket, user_id: str):
+        """055 bg-continuity late-connect catch-up: in-flight tasks replay as
+        task_started; completed-but-unnotified rows replay as task_completed
+        and are marked notified. Fail-open — never breaks registration."""
+        from orchestrator.async_tasks import TaskStatus
+        try:
+            for t in await self.async_task_manager.list_for_user(user_id):
+                if t.status not in (TaskStatus.QUEUED, TaskStatus.RUNNING):
+                    continue
+                await self._safe_send(websocket, json.dumps(self._task_started_frame(t)))
+            rows = await self.history.db.afetch_all(
+                "SELECT task_id, chat_id, status, summary, completed_at "
+                "FROM background_task WHERE user_id = ? AND notified = FALSE "
+                "AND status IN ('completed', 'failed', 'cancelled') "
+                "ORDER BY created_at DESC LIMIT 20", (user_id,))
+            for r in rows:
+                completed_at = r.get("completed_at")
+                await self._safe_send(websocket, json.dumps({
+                    "type": "task_completed",
+                    "payload": {
+                        "task_id": r["task_id"],
+                        "chat_id": r["chat_id"],
+                        "status": r["status"],
+                        "completed_at": completed_at.isoformat() if completed_at else None,
+                        "summary": r.get("summary") or "",
+                        "replay": True,
+                    },
+                }))
+            if rows:
+                ph = ", ".join(["?"] * len(rows))
+                await self.history.db.aexecute(
+                    f"UPDATE background_task SET notified = TRUE WHERE task_id IN ({ph})",
+                    tuple(r["task_id"] for r in rows))
+        except Exception:
+            logger.debug("background-task replay failed (non-fatal)", exc_info=True)
+
+    async def _replay_chat_task(self, websocket, chat_id: str):
+        """055 bg-continuity: a socket joining a chat with a live background
+        run shows the running state immediately (processing_async + a
+        task_started replay)."""
+        try:
+            t = await self.async_task_manager.get_active_for_chat(chat_id)
+            if t is None:
+                return
+            await self._safe_send(websocket, json.dumps({
+                "type": "chat_status",
+                "status": "processing_async",
+                "message": f"Query running in background (task {t.task_id})",
+            }))
+            await self._safe_send(websocket, json.dumps(self._task_started_frame(t)))
+        except Exception:
+            logger.debug("active-task replay failed (non-fatal)", exc_info=True)
+
+    async def _resume_chat_streams(self, websocket, user_id: str, chat_id: str):
+        """Re-attach a socket to a chat's push streams. Shared by load_chat
+        and the register_ui session resume (055 bg-continuity).
+
+        001-tool-stream-ui (US3 T054): resume any DORMANT streams for this
+        chat. Each resumed stream gets a stream_subscribed reply so the
+        frontend re-registers it in pushStreamsRef and starts merging chunks
+        again."""
+        if self.stream_manager is not None:
+            try:
+                resumed = await self.stream_manager.resume(
+                    websocket, user_id, chat_id,
+                )
+                for resumed_stream_id, resumed_tool_name in resumed:
+                    cfg = self._streamable_tools.get(resumed_tool_name, {})
+                    resumed_ack = {
+                        "type": "stream_subscribed",
+                        "stream_id": resumed_stream_id,
+                        "tool_name": resumed_tool_name,
+                        "agent_id": cfg.get("agent_id", ""),
+                        "session_id": chat_id,
+                        "max_fps": cfg.get("max_fps", 30),
+                        "min_fps": cfg.get("min_fps", 5),
+                        "attached": False,
+                    }
+                    # 055 US2: keep the resumed placeholder on
+                    # its workspace identity (wire-contract §2).
+                    resumed_cid = self.stream_manager.component_id_for(
+                        resumed_stream_id)
+                    if resumed_cid is not None:
+                        resumed_ack["component_id"] = resumed_cid
+                    await self._safe_send(websocket, json.dumps(resumed_ack))
+            except Exception as e:
+                logger.warning(f"stream_manager.resume failed: {e}")
+
+        # 055 late-join: resume() above only revives DORMANT
+        # streams. Streams kept ACTIVE by the user's other
+        # sockets need this socket attached too, plus a
+        # replay of the retained chunk so the canvas shows
+        # current state instead of a blank placeholder.
+        # Rides FF_STREAM_ARTIFACTS — flag off keeps
+        # load_chat's frames byte-identical to pre-055.
+        if (self.stream_manager is not None
+                and flags.is_enabled("stream_artifacts")):
+            try:
+                attached_subs = await self.stream_manager.attach_to_chat(
+                    websocket, user_id, chat_id,
+                )
+                for att_stream_id, att_tool_name in attached_subs:
+                    cfg = self._streamable_tools.get(att_tool_name, {})
+                    att_ack = {
+                        "type": "stream_subscribed",
+                        "stream_id": att_stream_id,
+                        "tool_name": att_tool_name,
+                        "agent_id": cfg.get("agent_id", ""),
+                        "session_id": chat_id,
+                        "max_fps": cfg.get("max_fps", 30),
+                        "min_fps": cfg.get("min_fps", 5),
+                        "attached": True,
+                    }
+                    att_cid = self.stream_manager.component_id_for(
+                        att_stream_id)
+                    if att_cid is not None:
+                        att_ack["component_id"] = att_cid
+                    await self._safe_send(websocket, json.dumps(att_ack))
+                    # Ack first: clients key the placeholder
+                    # off it before the replay frame fills it.
+                    await self.stream_manager.replay_retained(
+                        websocket, att_stream_id)
+            except Exception as e:
+                logger.warning(f"stream_manager.attach_to_chat failed: {e}")
 
     async def _attach_turn_attachments(self, websocket, message, chat_id, user_id, turn_message_id, attachments):
         """Feature 031: validate, link, and surface this turn's attachments.
@@ -3796,6 +4194,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             MAX_TURNS = 10
             turn_count = 0
             heartbeat_task = await self._start_heartbeat(websocket)
+            # 055 US3: every rich component this turn lands on the canvas —
+            # feeds the coalesced post-done designer pass for native origins.
+            _turn_canvas_components: List[Dict[str, Any]] = []
 
             # Denial loop detection: track tools denied by permission checks
             denial_tracker: Dict[str, int] = {}  # tool_name -> denial count
@@ -4005,33 +4406,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                             "final answer now without calling more tools.")})
                         tools_desc = []
 
-                    # Collect tool UI components and tag each (recursively) with source metadata
-                    def _tag_source(comp, agent_id, tool_name, tool_params=None, correlation_id=None):
-                        """Recursively tag a component dict and all nested children.
-
-                        `tool_params` is only tagged on the top-level node — the
-                        frontend auto-subscribe path reads it there to replay the
-                        same arguments on `stream_subscribe`.
-
-                        Feature 004: `correlation_id` is the audit-log id of the
-                        originating tool dispatch. When present, every component
-                        (including nested children) carries it so the frontend
-                        can scope user feedback to the originating dispatch.
-                        """
-                        if not isinstance(comp, dict):
-                            return
-                        comp["_source_agent"] = agent_id
-                        comp["_source_tool"] = tool_name
-                        if tool_params is not None:
-                            comp["_source_params"] = tool_params
-                        if correlation_id is not None:
-                            comp["_source_correlation_id"] = correlation_id
-                        for key in ("content", "children"):
-                            nested = comp.get(key)
-                            if isinstance(nested, list):
-                                for child in nested:
-                                    _tag_source(child, agent_id, tool_name, correlation_id=correlation_id)
-
+                    # Collect tool UI components and tag each (recursively)
+                    # with source metadata (module-level _tag_source).
                     tool_ui_components = []
                     for i_tc, res in enumerate(tool_results):
                         if res and res.ui_components and not res.error:
@@ -4060,6 +4436,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                             websocket, tool_ui_components, chat_id, user_id=user_id,
                             user_request=message,
                         )
+                        _turn_canvas_components.extend(tool_ui_components)
                         if chat_id:
                             await asyncio.to_thread(
                                 self.history.add_message, chat_id, "assistant",
@@ -4122,6 +4499,14 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                             await self.send_ui_render(websocket, [
                                 Alert(message="All available tools are restricted by your permission settings. Please update your agent permissions.", variant="warning").to_dict()
                             ], target="chat")
+                            # 055 US1: this break used to exit the loop without
+                            # a terminal chat_status, leaving client loading
+                            # states (skeletons) stuck until disconnect.
+                            await self._safe_send(websocket, json.dumps({
+                                "type": "chat_status",
+                                "status": "done",
+                                "message": ""
+                            }))
                             break
 
                     # Update task state and track tool calls
@@ -4340,10 +4725,11 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                                     Text(content="The full write-up is on the canvas.",
                                          variant="caption").to_dict()]
                             else:
-                                chat_core = self._chat_narrative(content)
+                                chat_core = self._chat_narrative(content, chat_id=chat_id)
                             final_ops = await self._send_or_replace_components(
                                 websocket, parsed_components, chat_id, user_id=user_id
                             ) or []
+                            _turn_canvas_components.extend(parsed_components)
                             chat_summary = (list(leak_alerts) + chat_core
                                             + [self._provenance_caption(_tools_ran)])
                             await self.send_ui_render(websocket, chat_summary, target="chat")
@@ -4364,12 +4750,13 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                             narrative_doc = self._narrative_doc_card(chat_id, content)
                             final_ops = await self._send_or_replace_components(
                                 websocket, [narrative_doc], chat_id, user_id=user_id) or []
+                            _turn_canvas_components.append(narrative_doc)
                             chat_core = [
                                 Text(content=self._concise_lead(content)).to_dict(),
                                 Text(content="The full write-up is on the canvas.",
                                      variant="caption").to_dict()]
                         else:
-                            chat_core = self._chat_narrative(content)
+                            chat_core = self._chat_narrative(content, chat_id=chat_id)
                         response_components = (list(leak_alerts) + chat_core
                                                + [self._provenance_caption(_tools_ran)])
                         # Feature 030: text-only turns for a never-configured
@@ -4407,11 +4794,11 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     _narrative_span.__exit__(None, None, None)
 
                     # Signal that processing is complete
-                    await self._safe_send(websocket, json.dumps({
-                        "type": "chat_status",
-                        "status": "done",
-                        "message": ""
-                    }))
+                    await self._send_chat_status(websocket, "done")
+                    # 055 US3: native-origin turns get their coalesced designer
+                    # pass here — after done, before the handler returns.
+                    await self._design_turn_post_done(
+                        websocket, chat_id, user_id, message, _turn_canvas_components)
                     return
 
             # If loop exits without final response — generate LLM summary
@@ -4443,11 +4830,10 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                         ]).to_dict()
                     ], target="chat")
 
-                await self._safe_send(websocket, json.dumps({
-                    "type": "chat_status",
-                    "status": "done",
-                    "message": ""
-                }))
+                await self._send_chat_status(websocket, "done")
+                # 055 US3: the max-turns exit is also a completed turn.
+                await self._design_turn_post_done(
+                    websocket, chat_id, user_id, message, _turn_canvas_components)
 
         except websockets.exceptions.ConnectionClosed:
             logger.warning(f"WebSocket closed during chat processing for chat_id {chat_id} — client likely reconnected")
@@ -4480,24 +4866,16 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                         await self.send_ui_render(websocket, [
                             Alert(message="Auto-fix could not resolve the schema issue. Try refining the agent.", variant="warning").to_dict()
                         ])
-                    await self._safe_send(websocket, json.dumps({
-                        "type": "chat_status", "status": "done", "message": ""
-                    }))
+                    await self._send_chat_status(websocket, "done")
                 except Exception as fix_err:
                     logger.warning(f"Auto-fix for schema error failed: {fix_err}")
-                    await self._safe_send(websocket, json.dumps({
-                        "type": "chat_status", "status": "done", "message": ""
-                    }))
+                    await self._send_chat_status(websocket, "done")
                     await self.send_ui_render(websocket, [
                         Alert(message=f"Tool schema error and auto-fix failed: {error_text}", variant="error", title="Error").to_dict()
                     ])
             else:
                 # Clear the 'thinking' spinner so the UI doesn't hang
-                await self._safe_send(websocket, json.dumps({
-                    "type": "chat_status",
-                    "status": "done",
-                    "message": ""
-                }))
+                await self._send_chat_status(websocket, "done")
                 # Show a user-friendly error message
                 if "424" in error_text or "Failed Dependency" in error_text or "Repository Not Found" in error_text:
                     error_text = ("The LLM server cannot find the configured model. "
@@ -4952,7 +5330,10 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         response (no UI frames); ``content`` ⇒ progressively emit the
         narrative as ``ui_stream_data`` frames scoped to ``chat_id``
         (JSON/fence-shaped output stays silent — it is a component payload the
-        final render must deliver whole). Returns a response object shaped
+        final render must deliver whole). Frames are held back to the last
+        safe markdown boundary so none ships a dangling ``**``/``*``/backtick/
+        ``[`` token (055 FR-013); end-of-stream flushes the full text before
+        the terminal clear. Returns a response object shaped
         like the non-streamed one; any failure propagates so the caller
         retries the call non-streaming (contracts/narrative-streaming.md).
         """
@@ -4977,6 +5358,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         stream_id = "narrative-" + _uuid.uuid4().hex[:12]
         seq = 0
         emitted = False
+        sent_len = 0
         last_emit = 0.0
         try:
             while True:
@@ -5021,12 +5403,25 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                             mode = "silent" if head[0] in "{[`" else "content"
                     if mode == "content" and (
                             not emitted or time.monotonic() - last_emit >= 0.15):
-                        await self._emit_narrative_frame(
-                            websocket, chat_id, stream_id, seq,
-                            "".join(content_parts), terminal=False)
-                        seq += 1
-                        emitted = True
-                        last_emit = time.monotonic()
+                        cumulative = "".join(content_parts)
+                        safe_len = markdown_safe_prefix_len(cumulative)
+                        if safe_len > sent_len:
+                            await self._emit_narrative_frame(
+                                websocket, chat_id, stream_id, seq,
+                                cumulative[:safe_len], terminal=False)
+                            seq += 1
+                            emitted = True
+                            sent_len = safe_len
+                            last_emit = time.monotonic()
+            if mode == "content":
+                # Terminal flush: ship the tail held past the last safe
+                # boundary before the clearing frame (055 FR-013).
+                full = "".join(content_parts)
+                if len(full) > sent_len:
+                    await self._emit_narrative_frame(
+                        websocket, chat_id, stream_id, seq, full, terminal=False)
+                    seq += 1
+                    emitted = True
             if emitted:
                 await self._emit_narrative_frame(
                     websocket, chat_id, stream_id, seq, "", terminal=True)
@@ -5392,8 +5787,11 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     usage=usage, outcome="success",
                 )
 
-            summary_text = strip_reasoning_markup(response.choices[0].message.content or "")
-            summary_text = summary_text.strip()
+            raw_summary = strip_reasoning_markup(response.choices[0].message.content or "").strip()
+            summary_text = _strip_toolcall_leakage(raw_summary)
+            if raw_summary and not summary_text:
+                _log_stripped_empty("tool_summary", chat_id, raw_summary)
+                summary_text = _LEAK_FALLBACK_TEXT
 
             if summary_text:
                 # Feature 029 (FR-027): contextual title over the constant
@@ -5730,6 +6128,11 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             return MCPResponse(error={"message": msg, "retryable": True},
                                ui_components=[alert.to_dict()])
 
+        # 055 US2: the LLM-authored params as written, captured before
+        # path-mapping / credential injection mutate `args` — the stream
+        # bridge identity must fingerprint what `_source_params` will carry.
+        stream_params = dict(args)
+
         # Feature 027 — orchestrator meta-tools dispatch before the agent
         # gates (the pseudo-agent has no scopes/credentials; ownership and
         # approval gates live inside the handler — contracts/agentic-creation.md).
@@ -5848,6 +6251,10 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                                        ui_components=[alert.to_dict()])
                 if decision.args is not None:
                     args = decision.args  # rewritten (e.g. a secret arg redacted)
+                    # The streaming twin must dispatch the SAME redacted args —
+                    # auto-subscribe with the pre-rewrite capture would hand
+                    # the agent the secret the rule just removed.
+                    stream_params = dict(args)
                 # Never forward a consumed authorization token to the agent.
                 if isinstance(args, dict) and "_txn_token" in args:
                     args = {k: v for k, v in args.items() if k != "_txn_token"}
@@ -6061,6 +6468,11 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 "tool_name": tool_name,
             }
 
+        # 055 US2: a push-streamable tool also streams — subscribe this
+        # user's sockets on the chat before the one-shot dispatch (fail-open).
+        await self._auto_subscribe_stream_artifacts(
+            websocket, chat_id, user_id, tool_name, stream_params)
+
         # Audit: record the tool dispatch (in_progress → success/failure)
         from audit.hooks import ToolDispatchAudit
         claims = self.ui_sessions.get(websocket) if websocket is not None else None
@@ -6247,6 +6659,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 prepared.append((idx, tc, tool_name, agent_id, None, _arg_err()))
                 continue
 
+            # 055 US2: LLM-authored params as written (see execute_single_tool).
+            stream_params = dict(args)
+
             if chat_id:
                 args = await asyncio.to_thread(
                     self._map_file_paths, chat_id, args, user_id=user_id)
@@ -6300,6 +6715,10 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     return MCPResponse(error={"message": f"No agent for {tn}"})
                 prepared.append((idx, tc, tool_name, agent_id, None, _no_agent()))
                 continue
+
+            # 055 US2: streaming-capable tools in a parallel wave subscribe too.
+            await self._auto_subscribe_stream_artifacts(
+                websocket, chat_id, user_id, tool_name, stream_params)
 
             prepared.append((idx, tc, tool_name, agent_id, args, None))
 
@@ -6860,16 +7279,18 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
     # PUSH STREAMING (001-tool-stream-ui)
     # =========================================================================
 
-    def _validate_chat_ownership_for_stream(
+    async def _validate_chat_ownership_for_stream(
         self, websocket, user_id: str, chat_id: str,
     ) -> bool:
         """Callback used by StreamManager to verify that ``chat_id`` belongs
         to ``user_id``. Reuses the existing history.get_chat ownership
-        check that all other chat-scoped operations go through.
+        check that all other chat-scoped operations go through (off-loop —
+        the 052 detector refuses sync DB calls on the event-loop thread).
         Returns True if the chat exists AND is owned by the user.
         """
         try:
-            chat = self.history.get_chat(chat_id, user_id=user_id)
+            chat = await asyncio.to_thread(
+                self.history.get_chat, chat_id, user_id=user_id)
             return chat is not None
         except Exception as e:
             logger.warning(f"chat ownership check failed: {e}")
@@ -6895,7 +7316,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         this user/agent pair we inject them encrypted alongside the args
         before sending — exactly like the polling path.
         """
-        if agent_id not in self.agents:
+        if agent_id not in self.agents and agent_id not in self.local_agents:
             raise RuntimeError(f"agent {agent_id!r} is not connected")
 
         request_id = f"stream_{tool_name}_{int(time.time() * 1000)}_{stream_id[-6:]}"
@@ -6921,6 +7342,21 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 "_stream_id": stream_id,
             },
         )
+        if agent_id in self.local_agents:
+            # Feature 040 built-ins run in-process with no agent WS — the
+            # loopback routes their ToolStreamData/End frames back through
+            # handle_agent_message exactly like the networked path (this
+            # dispatch had predated 040 and knew only self.agents, leaving
+            # push streaming dead for every built-in).
+            from shared.local_transport import LoopbackSocket
+            agent = self.local_agents[agent_id]
+            loopback = LoopbackSocket(self, agent_id)
+            asyncio.create_task(agent.handle_mcp_request(loopback, request))
+            logger.info(
+                f"Dispatched streaming tool call (in-process): {tool_name} → "
+                f"{agent_id} (stream_id={stream_id}, request_id={request_id})"
+            )
+            return request_id
         agent_ws = self.agents[agent_id]
         await agent_ws.send(request.to_json())
         logger.info(
@@ -6936,13 +7372,24 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         The agent's BaseA2AAgent loop closes the underlying generator and
         sends a final ``ToolStreamData`` with ``terminal: true``.
         """
+        cancel_msg = ToolStreamCancel(request_id=request_id, stream_id=stream_id)
+        if agent_id in self.local_agents:
+            # In-process twin of the WS send: hand the cancel straight to the
+            # agent's own handler (the loopback has no inbound channel).
+            try:
+                await self.local_agents[agent_id]._handle_stream_cancel(cancel_msg)
+                logger.info(
+                    f"Cancelled in-process stream: stream_id={stream_id} → {agent_id}"
+                )
+            except Exception as e:
+                logger.warning(f"_cancel_stream_request (in-process) failed: {e}")
+            return
         if agent_id not in self.agents:
             logger.debug(
                 f"_cancel_stream_request: agent {agent_id} not connected, "
                 f"nothing to cancel"
             )
             return
-        cancel_msg = ToolStreamCancel(request_id=request_id, stream_id=stream_id)
         try:
             await self.agents[agent_id].send(cancel_msg.to_json())
             logger.info(
@@ -6950,6 +7397,166 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             )
         except Exception as e:
             logger.warning(f"_cancel_stream_request failed: {e}")
+
+    async def _auto_subscribe_stream_artifacts(
+        self, websocket, chat_id: Optional[str], user_id: Optional[str],
+        tool_name: str, params: Dict[str, Any],
+    ) -> None:
+        """055 US2 (FR-009/FR-010): server-side subscription at streaming-tool
+        dispatch.
+
+        No client sends ``stream_subscribe`` unprompted (research D4), so a
+        push-streamable tool dispatched from chat would stream to nobody.
+        Subscribe the originating socket and every co-viewing socket of the
+        chat here; the client ``stream_subscribe`` action stays valid for
+        reattach (wire-contract §2). Called AFTER the dispatch gates pass, so
+        no additional permission checks. Fail-open — any refusal leaves the
+        turn on today's terminal-only delivery.
+        """
+        if websocket is None or not chat_id or not user_id:
+            return
+        # getattr: dispatch-focused test stubs build partial Orchestrators
+        # without a stream_manager — fail-open applies to those too.
+        if (getattr(self, "stream_manager", None) is None
+                or not flags.is_enabled("stream_artifacts")
+                or not flags.is_enabled("tool_streaming")):
+            return
+        tool_cfg = self._streamable_tools.get(tool_name)
+        if not tool_cfg or tool_cfg.get("kind") != "push":
+            return
+        agent_id = tool_cfg["agent_id"]
+        # The subscription identity must fingerprint the same params the
+        # one-shot component is `_source_params`-stamped with — never the
+        # injected private keys.
+        clean_params = {k: v for k, v in params.items()
+                        if not (isinstance(k, str) and k.startswith("_"))}
+        # Originating socket first: it creates the subscription (dispatching
+        # the streaming run to the agent); co-viewers attach (FR-009a dedup).
+        targets = [websocket] + [
+            ws for ws in self._sockets_on_chat(user_id, chat_id)
+            if ws is not websocket
+        ]
+        for ws in targets:
+            try:
+                stream_id, attached = await self.stream_manager.subscribe(
+                    ws=ws, user_id=user_id, chat_id=chat_id,
+                    tool_name=tool_name, agent_id=agent_id,
+                    params=clean_params, tool_metadata=tool_cfg,
+                )
+            except Exception as e:
+                logger.info(
+                    "stream_artifacts.auto_subscribe_skipped tool=%s agent=%s "
+                    "chat=%s user=%s err=%s", tool_name, agent_id, chat_id,
+                    user_id, e)
+                continue
+            reply = {
+                "type": "stream_subscribed",
+                "stream_id": stream_id,
+                "tool_name": tool_name,
+                "agent_id": agent_id,
+                "session_id": chat_id,
+                "max_fps": tool_cfg.get("max_fps", 30),
+                "min_fps": tool_cfg.get("min_fps", 5),
+                "attached": attached,
+            }
+            cid = self.stream_manager.component_id_for(stream_id)
+            if cid is not None:
+                reply["component_id"] = cid
+            await self._safe_send(ws, json.dumps(reply))
+
+    def _bridged_stream_subscription(self, stream_id: str):
+        """The live bridged subscription for ``stream_id``, or None (flag off,
+        unbridged legacy stream, or unknown id).
+
+        Captured BEFORE the stream manager processes a chunk/end frame:
+        terminal processing tears the record down, and the persist wrapper
+        still needs its retention + identity afterwards.
+        """
+        if self.stream_manager is None or not flags.is_enabled("stream_artifacts"):
+            return None
+        sub = self.stream_manager.subscription_for_stream(stream_id)
+        if sub is None or sub.bridged_component_id is None:
+            return None
+        return sub
+
+    async def _persist_stream_terminal(self, sub) -> None:
+        """055 US2 (FR-011): persist a bridged stream's terminal state as a
+        normal workspace component under the identity every frame carried.
+
+        Natural completion (``agent_end``) persists the retained last
+        content-bearing chunk; a FAILED resolution persists an honest
+        failed-state Alert under the SAME identity so reload shows the truth
+        instead of silently dropping what the user watched. Non-terminal
+        states (active/reconnecting/dormant) are left alone. Fail-open:
+        persistence failures degrade to today's ephemeral behavior.
+        """
+        import copy
+        from orchestrator.stream_manager import StreamState
+        cid = sub.bridged_component_id
+        if cid is None:
+            return
+        if sub.persist_done:
+            return
+        if sub.state is StreamState.FAILED:
+            reason = (sub.state_reason or "error").replace("_", " ")
+            components = [Alert(
+                message=(f"The live stream from '{sub.tool_name}' ended with "
+                         f"an error ({reason}) before completing."),
+                variant="error").to_dict()]
+        elif (sub.state is StreamState.STOPPED
+                # dormant_ttl = abandonment; unsubscribe = the user closing an
+                # indefinite live view (its only success-terminal). In both,
+                # what streamed is still what persists.
+                and sub.state_reason in ("agent_end", "dormant_ttl", "unsubscribe")
+                and sub.retained_chunk is not None
+                and sub.retained_chunk.components):
+            components = copy.deepcopy(sub.retained_chunk.components)
+        else:
+            return
+        sub.persist_done = True
+        for comp in components:
+            if isinstance(comp, dict):
+                # The agent SDK stamps every top-level id with the stream id;
+                # dropping it here keeps the stream-scoped id from ever being
+                # resolved as an author identity.
+                if str(comp.get("id", "")).startswith("stream-"):
+                    comp.pop("id", None)
+                _tag_source(comp, sub.agent_id, sub.tool_name,
+                            tool_params=sub.params)
+        chat_id, user_id = sub.chat_id, sub.user_id
+        try:
+            ops = await self.workspace.aupsert(
+                chat_id, user_id, components, force_component_id=cid)
+        except Exception:
+            logger.exception(
+                "stream_artifacts.persist_failed stream=%s component=%s agent=%s "
+                "tool=%s chat=%s user=%s",
+                sub.stream_id, cid, sub.agent_id, sub.tool_name, chat_id, user_id)
+            return
+        if not ops:
+            return
+        try:
+            await self.send_ui_upsert(None, chat_id, user_id, ops)
+        except Exception:
+            logger.debug("stream_artifacts.persist_fanout_failed stream=%s "
+                         "component=%s chat=%s", sub.stream_id, cid, chat_id,
+                         exc_info=True)
+        try:
+            await self.workspace.asnapshot(chat_id, user_id, cause="stream")
+        except Exception:
+            logger.debug("stream_artifacts.persist_snapshot_failed stream=%s "
+                         "component=%s chat=%s", sub.stream_id, cid, chat_id,
+                         exc_info=True)
+        try:
+            from audit.hooks import record_workspace_event
+            for op in ops:
+                asyncio.create_task(record_workspace_event(
+                    user_id=user_id,
+                    action="component_updated" if not op.get("created") else "component_added",
+                    chat_id=chat_id, component_id=op.get("component_id"),
+                ))
+        except Exception:
+            logger.debug("workspace audit failed", exc_info=True)
 
     def _tool_security_blocked(self, agent_id: Optional[str], tool_name: str) -> bool:
         """True when a hard security-flag block is set for (agent, tool).
@@ -7065,7 +7672,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # the FR-009a `attached` flag so the client knows whether this was a
         # fresh subscribe or an attach to an existing deduplicated stream.
         cfg = self._streamable_tools.get(tool_name, {})
-        await self._safe_send(websocket, json.dumps({
+        reply = {
             "type": "stream_subscribed",
             "stream_id": stream_id,
             "tool_name": tool_name,
@@ -7074,7 +7681,13 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             "max_fps": cfg.get("max_fps", 30),
             "min_fps": cfg.get("min_fps", 5),
             "attached": attached,
-        }))
+        }
+        # 055 US2: bridged streams carry the workspace identity from the ack
+        # onward so the client keys the placeholder by it (wire-contract §2).
+        cid = self.stream_manager.component_id_for(stream_id)
+        if cid is not None:
+            reply["component_id"] = cid
+        await self._safe_send(websocket, json.dumps(reply))
 
     async def _handle_push_stream_unsubscribe(
         self, websocket, session_id: Optional[str], payload: Dict, user_id: str
@@ -7304,6 +7917,39 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             logger.debug(f"Failed to send message (connection likely closed): {e}")
             return False
 
+    def _vws_fan_targets(self, websocket) -> List[Any]:
+        """Real sockets that must mirror a VirtualWebSocket-bound chat frame
+        (055 bg-continuity): the task-owner's sockets active on the task's
+        chat. Empty for real sockets (no double delivery), when
+        FF_BG_CONTINUITY is off, or when the background task carries no
+        user+chat identity (e.g. bare handshake/test tasks)."""
+        from orchestrator.async_tasks import VirtualWebSocket
+        if not isinstance(websocket, VirtualWebSocket):
+            return []
+        if not flags.is_enabled("bg_continuity"):
+            return []
+        task = getattr(websocket, "task", None)
+        user_id = getattr(task, "user_id", None)
+        chat_id = getattr(task, "chat_id", None)
+        if not user_id or not chat_id:
+            return []
+        # The executing socket never fans to itself (a registered
+        # VirtualWebSocket would otherwise recurse).
+        return [ws for ws in self._sockets_on_chat(user_id, chat_id)
+                if ws is not websocket]
+
+    async def _send_chat_status(self, websocket, status: str, message: str = ""):
+        """Send a chat_status frame; a VirtualWebSocket-bound frame also fans
+        to the user's real sockets on the task's chat (055 bg-continuity) so
+        background turns surface their terminal state on every device."""
+        data = json.dumps({"type": "chat_status", "status": status, "message": message})
+        await self._safe_send(websocket, data)
+        for ws in self._vws_fan_targets(websocket):
+            try:
+                await self._safe_send(ws, data)
+            except Exception:  # pragma: no cover - per-socket best-effort
+                logger.debug("vws chat_status fan failed", exc_info=True)
+
     async def _broadcast_user_history(self):
         """Send each connected UI client their own user's recent chat history.
 
@@ -7362,14 +8008,17 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     return heading[:80]
         return default
 
-    def _chat_narrative(self, content: str) -> List[Dict]:
+    def _chat_narrative(self, content: str, chat_id: Optional[str] = None) -> List[Dict]:
         """Feature 029 (FR-027): the final-turn chat-panel narrative.
 
         Replaces the constant ``Card(title="Analysis")``: short plain answers
         render as bare markdown (no card chrome); longer ones get a card with
         a title derived from the response itself.
         """
-        text = (content or "").strip()
+        text = _strip_toolcall_leakage(content)
+        if not text and (content or "").strip():
+            _log_stripped_empty("chat_narrative", chat_id, content)
+            text = _LEAK_FALLBACK_TEXT
         if len(text) <= 280 and "\n\n" not in text and not text.startswith("#"):
             return [Text(content=text, variant="markdown").to_dict()]
         return [
@@ -7384,7 +8033,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         order. With no arrangements this is exactly the pre-029 flat canvas."""
         layouts = self.workspace.live_layouts(chat_id, user_id)
         if not layouts:
-            return self.workspace.live_components(chat_id, user_id)
+            components = self.workspace.live_components(chat_id, user_id)
+            _stamp_canvas_provenance(components)
+            return components
         from orchestrator import ui_designer
         from orchestrator.workspace import iter_layout_refs
         by_id: Dict[str, Dict] = {}
@@ -7413,12 +8064,25 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         out: List[Dict] = []
         for _pos, _kind, payload in sorted(stream, key=lambda t: (t[0], t[1])):
             out.extend(payload)
+        _stamp_canvas_provenance(out)
         return out
 
-    async def _push_canvas(self, chat_id: str, user_id: str, originating_ws=None):
+    async def _push_canvas(self, chat_id: str, user_id: str, originating_ws=None,
+                           turn_marker: Optional[str] = None):
         """Full-canvas ui_render (materialized arrangements) to every socket of
         the user on this chat — the same fan-out + per-socket ROTE adaptation
-        the legacy reconciliation path uses."""
+        the legacy reconciliation path uses.
+
+        ``turn_marker`` (055 US3): the chat's latest message id when the canvas
+        was designed — the push is dropped when the chat has since moved on
+        (cross-socket/async stale guard)."""
+        if turn_marker is not None:
+            latest = str(await asyncio.to_thread(
+                self.history.get_latest_message_id, chat_id, user_id=user_id) or "")
+            if latest != str(turn_marker):
+                logger.info("ui_designer: chat %s advanced past the designed "
+                            "turn — canvas push dropped", chat_id)
+                return
         components = await asyncio.to_thread(self._canvas_components, chat_id, user_id)
         targets = [
             ws for ws in self.ui_clients
@@ -7428,7 +8092,70 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         if originating_ws is not None and originating_ws not in targets:
             targets.append(originating_ws)
         for ws in targets:
-            await self.send_ui_render(ws, components)
+            # speak=False: a full-canvas push re-presents existing content —
+            # watch sockets must never re-speak it (055 US3 / FR-030).
+            await self.send_ui_render(ws, components, speak=False)
+
+    async def _run_designer(self, websocket, components: List[Dict], chat_id: str,
+                            user_id: str, user_request: str, layout_key: str,
+                            *, progress: bool = True) -> Optional[List[Dict]]:
+        """One bounded designer conversation over ``components``; returns the
+        validated arrangement or ``None`` (None ALWAYS = keep the flat canvas).
+
+        ``progress=False`` suppresses the per-pass ``chat_status`` frames —
+        required on the post-done native pass (055 US3), where they would flip
+        clients back to turn-active behind a stuck status line."""
+        from orchestrator import ui_designer
+
+        _designer_pass = {"n": 0}
+
+        async def _designer_llm(messages):
+            # Same credential resolution as the round itself (feature 006,
+            # websocket-scoped) and the same llm_call auditing (FR-028).
+            # Feature 030: each pass announces itself — the walkthrough
+            # measured an 83 s frame-silent gap while the designer worked
+            # behind a stale status line.
+            _designer_pass["n"] += 1
+            if progress:
+                try:
+                    await self._safe_send(websocket, json.dumps({
+                        "type": "chat_status", "status": "thinking",
+                        "message": f"Designing your layout (pass {_designer_pass['n']} of "
+                                   f"{ui_designer.designer_max_rounds()})...",
+                    }))
+                except Exception:
+                    logger.debug("designer progress status send failed", exc_info=True)
+            msg, _usage = await self._call_llm(
+                websocket, messages, tools_desc=None,
+                temperature=0.2, feature="ui_designer",
+            )
+            return (msg.content or "") if msg else None
+
+        from webrender import allowed_primitive_types
+        # The current persisted arrangement for this layout_key (if any)
+        # lets the designer avoid re-arranging it for a marginal gain.
+        _current_layout = None
+        try:
+            for _lay in await asyncio.to_thread(
+                    self.workspace.live_layouts, chat_id, user_id):
+                if _lay.get("layout_key") == layout_key:
+                    _current_layout = _lay.get("layout")
+                    break
+        except Exception:
+            _current_layout = None
+        canvas_rows = await asyncio.to_thread(
+            self.workspace.live_rows, chat_id, user_id)
+        with perf_span("turn.designer", chat=chat_id):
+            return await ui_designer.design_round(
+                user_request=user_request,
+                round_components=components,
+                canvas_rows=canvas_rows,
+                chat_id=chat_id,
+                layout_key=layout_key,
+                allowed_types=set(allowed_primitive_types()),
+                llm_call=_designer_llm,
+                current_layout=_current_layout,
+            )
 
     async def _deliver_round_components(self, websocket, components: List[Dict], chat_id: str,
                                         user_id: str, *, user_request: str = "") -> List[Dict]:
@@ -7445,19 +8172,15 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         """
         from orchestrator import ui_designer
         from orchestrator.workspace import layout_key_for
-        from rote.capabilities import DeviceType
         timeline = self._ws_timeline_mode.get(id(websocket), False)
-        # Native clients (Windows/Android) render structured components with their
-        # OWN responsive layout. The web-oriented designer pass — a slow LLM call
-        # that emits a layout tree they can't render — only hurts them (the
-        # walkthrough saw a ~150 s wait, after which the flat components the user
-        # already saw were replaced by an unrenderable designed canvas, leaving only
-        # the text doc). Deliver the flat components and let the client arrange them;
-        # web/voice/etc. still get the adaptive designer.
+        # Native clients render structured components with their OWN responsive
+        # layout, so the per-round designer pass never runs for them: rounds
+        # deliver flat, and with FF_DESIGNER_ALL_DEVICES on the turn handler
+        # runs ONE coalesced post-done pass instead (_design_turn_post_done,
+        # 055 US3). Flag off restores the 052 skip (native-origin turns are
+        # never designed — the walkthrough saw a ~150 s mid-turn wait).
         _prof = self.rote.get_profile(websocket) if websocket is not None else None
-        if _prof is not None and _prof.device_type in (
-                DeviceType.WINDOWS, DeviceType.ANDROID,
-                DeviceType.IOS, DeviceType.MACOS, DeviceType.WATCH):
+        if _is_native_device(_prof):
             return await self._send_or_replace_components(websocket, components, chat_id, user_id)
         if not chat_id or not ui_designer.should_design(components, timeline_mode=timeline):
             return await self._send_or_replace_components(websocket, components, chat_id, user_id)
@@ -7476,55 +8199,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             turn_marker = str(await asyncio.to_thread(
                 self.history.get_latest_message_id, chat_id, user_id=user_id) or "")
             layout_key = layout_key_for(chat_id, turn_marker)
-
-            _designer_pass = {"n": 0}
-
-            async def _designer_llm(messages):
-                # Same credential resolution as the round itself (feature 006,
-                # websocket-scoped) and the same llm_call auditing (FR-028).
-                # Feature 030: each pass announces itself — the walkthrough
-                # measured an 83 s frame-silent gap while the designer worked
-                # behind a stale status line.
-                _designer_pass["n"] += 1
-                try:
-                    await self._safe_send(websocket, json.dumps({
-                        "type": "chat_status", "status": "thinking",
-                        "message": f"Designing your layout (pass {_designer_pass['n']} of "
-                                   f"{ui_designer.designer_max_rounds()})...",
-                    }))
-                except Exception:
-                    logger.debug("designer progress status send failed", exc_info=True)
-                msg, _usage = await self._call_llm(
-                    websocket, messages, tools_desc=None,
-                    temperature=0.2, feature="ui_designer",
-                )
-                return (msg.content or "") if msg else None
-
-            from webrender import allowed_primitive_types
-            # The current persisted arrangement for this layout_key (if any)
-            # lets the designer avoid re-arranging it for a marginal gain.
-            _current_layout = None
-            try:
-                for _lay in await asyncio.to_thread(
-                        self.workspace.live_layouts, chat_id, user_id):
-                    if _lay.get("layout_key") == layout_key:
-                        _current_layout = _lay.get("layout")
-                        break
-            except Exception:
-                _current_layout = None
-            canvas_rows = await asyncio.to_thread(
-                self.workspace.live_rows, chat_id, user_id)
-            with perf_span("turn.designer", chat=chat_id):
-                layout = await ui_designer.design_round(
-                    user_request=user_request,
-                    round_components=components,
-                    canvas_rows=canvas_rows,
-                    chat_id=chat_id,
-                    layout_key=layout_key,
-                    allowed_types=set(allowed_primitive_types()),
-                    llm_call=_designer_llm,
-                    current_layout=_current_layout,
-                )
+            layout = await self._run_designer(
+                websocket, components, chat_id, user_id, user_request, layout_key)
         except Exception:
             logger.exception("ui_designer crashed — flat ui_upsert already delivered")
             layout = None
@@ -7536,12 +8212,14 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 # forced to the originating socket while it still views this
                 # chat; other sockets are chat-filtered inside _push_canvas.
                 if self._ws_active_chat.get(id(websocket)) == chat_id:
-                    await self._push_canvas(chat_id, user_id, originating_ws=websocket)
+                    await self._push_canvas(chat_id, user_id, originating_ws=websocket,
+                                            turn_marker=turn_marker)
                 else:
                     logger.info(
                         "ui_designer: originating socket left chat %s — "
                         "designed render not forced to it", chat_id)
-                    await self._push_canvas(chat_id, user_id, originating_ws=None)
+                    await self._push_canvas(chat_id, user_id, originating_ws=None,
+                                            turn_marker=turn_marker)
             except Exception:
                 logger.exception(
                     "designed canvas delivery failed — flat ui_upsert already delivered")
@@ -7558,6 +8236,80 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             logger.debug("workspace audit failed", exc_info=True)
         return ops
 
+    async def _design_turn_post_done(self, websocket, chat_id: str, user_id: str,
+                                     user_request: str, turn_components: List[Dict]) -> None:
+        """055 US3 (FF_DESIGNER_ALL_DEVICES): the ONE coalesced designer pass
+        for native-origin turns, run inline AFTER the terminal ``chat_status
+        done`` and before the turn handler returns — per-socket chat lock +
+        TCP ordering keep done → designed render → next ack race-free on the
+        originating socket, and async-mode turns are still inside
+        ``handle_chat_message`` here, so the push precedes ``task_completed``.
+        Progress frames are suppressed (they would flip natives back to
+        turn-active). ANY failure is log-only: the flat components already
+        delivered per round are the fallback rendering."""
+        if not chat_id or not turn_components:
+            return
+        if not flags.is_enabled("designer_all_devices"):
+            return
+        prof = self.rote.get_profile(websocket) if websocket is not None else None
+        if not _is_native_device(prof):
+            return
+        from orchestrator import ui_designer
+        from orchestrator.workspace import layout_key_for
+        timeline = self._ws_timeline_mode.get(id(websocket), False)
+        components = _native_canvas_components(turn_components)
+        if not ui_designer.should_design(components, timeline_mode=timeline):
+            return
+        try:
+            turn_marker = str(await asyncio.to_thread(
+                self.history.get_latest_message_id, chat_id, user_id=user_id) or "")
+            layout_key = layout_key_for(chat_id, turn_marker)
+            layout = await self._run_designer(
+                websocket, components, chat_id, user_id, user_request,
+                layout_key, progress=False)
+            if not layout:
+                return
+            await asyncio.to_thread(
+                self.workspace.upsert_layout, chat_id, user_id, layout_key, layout)
+            # Same stale-chat rule as the mid-turn path: the designed render is
+            # only forced to the originating socket while it still views this
+            # chat; other sockets are chat-filtered inside the push.
+            originating = websocket if (
+                self._ws_active_chat.get(id(websocket)) == chat_id) else None
+            await self._push_designed_native_canvas(
+                chat_id, user_id, originating, turn_marker)
+        except Exception:
+            logger.exception(
+                "ui_designer.post_done_failed chat=%s user=%s — flat components "
+                "already delivered", chat_id, user_id)
+
+    async def _push_designed_native_canvas(self, chat_id: str, user_id: str,
+                                           originating_ws, turn_marker: str) -> None:
+        """Out-of-turn full ``ui_render`` of the designed canvas (055 US3):
+        materialized pre-ROTE, doc/Reasoning-filtered for native sockets,
+        never spoken, dropped when a newer turn has started on the chat."""
+        latest = str(await asyncio.to_thread(
+            self.history.get_latest_message_id, chat_id, user_id=user_id) or "")
+        if latest != str(turn_marker):
+            logger.info("ui_designer.post_done_dropped chat=%s user=%s turn=%s "
+                        "latest=%s reason=stale_turn",
+                        chat_id, user_id, turn_marker, latest)
+            return
+        components = await asyncio.to_thread(self._canvas_components, chat_id, user_id)
+        native_components = _native_canvas_components(components)
+        targets = [
+            ws for ws in self.ui_clients
+            if self._get_user_id(ws) == user_id
+            and self._ws_active_chat.get(id(ws)) == chat_id
+        ]
+        if originating_ws is not None and originating_ws not in targets:
+            targets.append(originating_ws)
+        for ws in targets:
+            payload = (native_components
+                       if _is_native_device(self.rote.get_profile(ws))
+                       else components)
+            await self.send_ui_render(ws, payload, speak=False)
+
     async def _send_or_replace_components(self, websocket, components: List[Dict], chat_id: str,
                                           user_id: str, *, force_component_id: Optional[str] = None) -> List[Dict]:
         """Feature 028: persist rich components into the chat's workspace under
@@ -7568,9 +8320,16 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         the disappearing-UI defect. Updates morph in place on every socket of
         this user viewing the chat (FR-040); new components append. Returns
         the persisted op list so callers can snapshot the turn (FR-030).
+
+        055 US4: stamps ``provenance`` on every component before it persists
+        or renders — this is where model-authored components (parsed rounds,
+        narrative doc cards) enter the workspace without passing
+        ``_tag_source``, so a model-supplied trust value is overwritten here.
         """
         if not components:
             return []
+        for comp in components:
+            _stamp_provenance(comp)
         if not chat_id:
             await self.send_ui_render(websocket, components)
             return []
@@ -7731,6 +8490,310 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             await self._safe_send(websocket, json.dumps({
                 "type": "chat_status", "status": "done", "message": ""
             }))
+
+    async def _refine_restore_gate(self, websocket, user_id: str,
+                                   payload: Dict[str, Any]):
+        """055 US4 (wire-contract §3): shared gate sequence for
+        component_refine/component_restore — the component_action stack:
+        feature flag, watch carve-out, component context, timeline read-only
+        guard, row existence, retired-source refusal, security flags +
+        per-user permission on the source agent/tool. The source gates are
+        skipped only when the component has no source at all (a
+        model-authored artifact has no tool to gate; the refine LLM gate
+        still applies in the caller). Refusals are per-action error frames
+        (Alert to the chat rail), never socket teardown.
+
+        Returns ``(chat_id, component_id, row)`` or ``None`` after refusing.
+        """
+        chat_id = payload.get("chat_id") or self._ws_active_chat.get(id(websocket))
+        component_id = payload.get("component_id")
+        if not flags.is_enabled("component_refine"):
+            await self._audit_workspace_denial(user_id, chat_id or "", component_id or "",
+                                               "feature_disabled")
+            await self.send_ui_render(websocket, [
+                Alert(message="Component refine is not enabled on this server.",
+                      variant="error").to_dict()
+            ], target="chat")
+            return None
+        # Declared ROTE-capability divergence: the watch renders no
+        # refine/restore affordance and the server refuses honestly.
+        profile = self.rote.get_profile(websocket)
+        if getattr(profile.device_type, "value", str(profile.device_type)) == "watch":
+            await self._audit_workspace_denial(user_id, chat_id or "", component_id or "",
+                                               "watch_unsupported")
+            await self.send_ui_render(websocket, [
+                Alert(message="This action isn't available on the watch.",
+                      variant="warning").to_dict()
+            ], target="chat")
+            return None
+        if not chat_id or not component_id:
+            await self.send_ui_render(websocket, [
+                Alert(message="This action is missing its component context.",
+                      variant="error").to_dict()
+            ], target="chat")
+            return None
+        if self._ws_timeline_mode.get(id(websocket)):
+            await self._audit_workspace_denial(user_id, chat_id, component_id, "timeline_readonly")
+            await self.send_ui_render(websocket, [
+                Alert(message="You are viewing a past workspace state — return to live to interact.",
+                      variant="warning").to_dict()
+            ], target="chat")
+            return None
+        row = await self.workspace.aget_by_component_id(chat_id, user_id, component_id)
+        if row is None or not isinstance(row.get("component_data"), dict):
+            await self.send_ui_render(websocket, [
+                Alert(message="This component is no longer available.",
+                      variant="warning").to_dict()
+            ], target="chat")
+            return None
+        cd = row["component_data"]
+        agent_id = cd.get("_source_agent", "")
+        tool_name = cd.get("_source_tool", "")
+        if agent_id in RETIRED_AGENT_IDS:
+            await self._audit_workspace_denial(user_id, chat_id, component_id, "agent_retired")
+            await self.send_ui_render(websocket, [
+                Alert(
+                    title="Capability retired",
+                    message="This component came from an agent that has been retired; "
+                            "it can still be viewed but no longer changed.",
+                    variant="warning",
+                ).to_dict()
+            ], target="chat")
+            return None
+        if agent_id and tool_name:
+            agent_id, tool_name = remap_merged_source(agent_id, tool_name)
+            allowed, deny_reason = await asyncio.to_thread(
+                self._component_action_allowed, user_id, agent_id, tool_name)
+            if not allowed:
+                await self._audit_workspace_denial(user_id, chat_id, component_id, deny_reason)
+                await self.send_ui_render(websocket, [
+                    Alert(message=f"Action not permitted: {deny_reason}",
+                          variant="error").to_dict()
+                ], target="chat")
+                return None
+        return chat_id, component_id, row
+
+    async def _handle_component_refine(self, websocket, user_id: str, payload: Dict[str, Any]):
+        """055 US4 (FR-022/FR-023, research D10): bounded LLM edit of ONE
+        component in place under its existing identity.
+
+        Gate order is the component_action stack plus the 054 per-user LLM
+        gate — a refine is an LLM turn billed to the user's own provider
+        config. The source tool is NOT re-run, so the result re-stamps
+        provenance as 'estimated'; the prior dict is archived to
+        component_version BEFORE the overwrite (FR-024).
+        """
+        gate = await self._refine_restore_gate(websocket, user_id, payload)
+        if gate is None:
+            return
+        chat_id, component_id, _row = gate
+        instruction = str(payload.get("instruction") or "").strip()
+        if not instruction:
+            await self.send_ui_render(websocket, [
+                Alert(message="Tell me how this component should change.",
+                      variant="warning").to_dict()
+            ], target="chat")
+            return
+        if not await self.llm_configured_for(user_id):
+            actor_user_id, auth_principal = self._llm_audit_principals(websocket)
+            await self._record_llm_unconfigured(
+                self.audit_recorder,
+                actor_user_id=actor_user_id,
+                auth_principal=auth_principal,
+                feature="ui_event:component_refine",
+            )
+            await self.send_ui_render(websocket, [
+                Alert(message="Set up your AI provider to use this.",
+                      variant="error").to_dict()
+            ], target="chat")
+            return
+
+        from orchestrator import artifact_versions
+        lock = self._workspace_locks.setdefault(chat_id, asyncio.Lock())
+        try:
+            async with lock:
+                # Re-read inside the lock: the archived "current" must be the
+                # dict actually being overwritten, not a pre-lock snapshot.
+                row = await self.workspace.aget_by_component_id(chat_id, user_id, component_id)
+                if row is None or not isinstance(row.get("component_data"), dict):
+                    await self.send_ui_render(websocket, [
+                        Alert(message="This component is no longer available.",
+                              variant="warning").to_dict()
+                    ], target="chat")
+                    return
+                current = row["component_data"]
+                refined = await self._refine_component_llm(
+                    websocket, current, instruction[:4000])
+                if refined is None:
+                    await self.send_ui_render(websocket, [
+                        Alert(message="The AI couldn't produce a valid same-type edit "
+                                      "for this component, so it was left unchanged.",
+                              variant="warning").to_dict()
+                    ], target="chat")
+                    return
+                version_no = await artifact_versions.aarchive(
+                    self.history.db, chat_id, user_id, component_id, current, "refine")
+                # Hydrate the history affordance (web data-versions popover) —
+                # without this the restore path is unreachable from the UI.
+                refined["versions"] = await artifact_versions.alist_versions(
+                    self.history.db, chat_id, user_id, component_id)
+                ops = await self.workspace.aupsert(
+                    chat_id, user_id, [refined], force_component_id=component_id)
+                await self.send_ui_upsert(websocket, chat_id, user_id, ops)
+                try:
+                    await self.workspace.asnapshot(chat_id, user_id, cause="component_refine")
+                except Exception:
+                    logger.debug("workspace snapshot failed (component_refine)", exc_info=True)
+                try:
+                    from audit.hooks import record_workspace_event
+                    await record_workspace_event(
+                        user_id=user_id, action="component_refined",
+                        chat_id=chat_id, component_id=component_id,
+                        detail={"archived_version": version_no},
+                    )
+                except Exception:
+                    logger.debug("workspace audit failed (component_refined)", exc_info=True)
+        except Exception as e:
+            logger.error(f"component_refine failed: {e}", exc_info=True)
+            await self.send_ui_render(websocket, [
+                Alert(message=f"The refine failed: {e}", variant="error").to_dict()
+            ], target="chat")
+        finally:
+            await self._safe_send(websocket, json.dumps({
+                "type": "chat_status", "status": "done", "message": ""
+            }))
+
+    async def _handle_component_restore(self, websocket, user_id: str, payload: Dict[str, Any]):
+        """055 US4 (FR-024): restore an archived component_version under the
+        same identity — the component_action gate stack minus the LLM gate
+        (no model runs). The current dict is archived first, so a restore is
+        itself undoable and the version chain stays complete."""
+        gate = await self._refine_restore_gate(websocket, user_id, payload)
+        if gate is None:
+            return
+        chat_id, component_id, _row = gate
+        from orchestrator import artifact_versions
+        version = await artifact_versions.aget_version(
+            self.history.db, chat_id, user_id, component_id, payload.get("version_no"))
+        if version is None or not isinstance(version.get("component"), dict):
+            await self.send_ui_render(websocket, [
+                Alert(message="That version is no longer available.",
+                      variant="warning").to_dict()
+            ], target="chat")
+            return
+        lock = self._workspace_locks.setdefault(chat_id, asyncio.Lock())
+        try:
+            async with lock:
+                row = await self.workspace.aget_by_component_id(chat_id, user_id, component_id)
+                if row is None or not isinstance(row.get("component_data"), dict):
+                    await self.send_ui_render(websocket, [
+                        Alert(message="This component is no longer available.",
+                              variant="warning").to_dict()
+                    ], target="chat")
+                    return
+                current = row["component_data"]
+                restored = dict(version["component"])
+                restored["component_id"] = component_id
+                archived_no = await artifact_versions.aarchive(
+                    self.history.db, chat_id, user_id, component_id, current, "restore")
+                restored["versions"] = await artifact_versions.alist_versions(
+                    self.history.db, chat_id, user_id, component_id)
+                ops = await self.workspace.aupsert(
+                    chat_id, user_id, [restored], force_component_id=component_id)
+                await self.send_ui_upsert(websocket, chat_id, user_id, ops)
+                try:
+                    await self.workspace.asnapshot(chat_id, user_id, cause="component_restore")
+                except Exception:
+                    logger.debug("workspace snapshot failed (component_restore)", exc_info=True)
+                try:
+                    from audit.hooks import record_workspace_event
+                    await record_workspace_event(
+                        user_id=user_id, action="component_restored",
+                        chat_id=chat_id, component_id=component_id,
+                        detail={"restored_version": int(version["version_no"]),
+                                "archived_version": archived_no},
+                    )
+                except Exception:
+                    logger.debug("workspace audit failed (component_restored)", exc_info=True)
+        except Exception as e:
+            logger.error(f"component_restore failed: {e}", exc_info=True)
+            await self.send_ui_render(websocket, [
+                Alert(message=f"The restore failed: {e}", variant="error").to_dict()
+            ], target="chat")
+        finally:
+            await self._safe_send(websocket, json.dumps({
+                "type": "chat_status", "status": "done", "message": ""
+            }))
+
+    async def _refine_component_llm(self, websocket, component: Dict[str, Any],
+                                    instruction: str) -> Optional[Dict[str, Any]]:
+        """Bounded single-purpose LLM edit constrained to the SAME component
+        type (research D10): one structured-output call under the user's
+        provider config, validated against the renderer registry. Returns
+        the refined dict with identity + source metadata carried over and
+        provenance re-stamped 'estimated', or ``None`` when the model
+        refused / emitted an unusable or type-changing result (the caller
+        leaves the component untouched)."""
+        from webrender import allowed_primitive_types
+        valid_types = set(allowed_primitive_types()) | {"chart"}
+        orig_type = str(component.get("type") or "").strip().lower()
+        if orig_type not in valid_types:
+            return None
+        view = {k: v for k, v in component.items()
+                if not str(k).startswith("_") and k not in ("component_id", "provenance")}
+        comp_json = json.dumps(view)
+        if len(comp_json) > 30000:
+            logger.info("component_refine: component too large to refine (%d chars)",
+                        len(comp_json))
+            return None
+        source_line = ""
+        if component.get("_source_tool"):
+            source_line = (
+                f"\nIts data came from tool '{component.get('_source_tool')}' of agent "
+                f"'{component.get('_source_agent')}' — do not fabricate data that "
+                "tool did not provide.")
+        prompt = (
+            f"Here is a UI component of type '{orig_type}' as JSON:{source_line}\n\n"
+            f"{comp_json}\n\n"
+            f"Apply this change requested by the user: {instruction}\n\n"
+            f'Respond with ONLY the complete edited component as one JSON object. '
+            f'It MUST keep "type": "{orig_type}" and remain a valid component of '
+            "that type; preserve all data the instruction does not ask you to change."
+        )
+        result = await self._call_llm_json(
+            websocket,
+            [
+                {"role": "system", "content": (
+                    "You are a precise UI component editor. Output ONLY one valid "
+                    "JSON object — no explanations, no markdown fences.")},
+                {"role": "user", "content": prompt},
+            ],
+            feature="component_refine", temperature=0.1,
+        )
+        if not isinstance(result, dict):
+            return None
+        if isinstance(result.get("component"), dict) and "type" not in result:
+            result = result["component"]  # tolerate a {"component": {...}} wrapper
+        if str(result.get("type") or "").strip().lower() != orig_type:
+            logger.info("component_refine: model changed the component type "
+                        "(%r -> %r) — rejected", orig_type, result.get("type"))
+            return None
+        # The model can neither stamp trust nor mint identities/attribution:
+        # strip anything it invented, then carry the original's over.
+        refined = {k: v for k, v in result.items() if not str(k).startswith("_")}
+        for key in ("provenance", "component_id", "id"):
+            refined.pop(key, None)
+        self._validate_component_tree(refined, valid_types)
+        for key in ("_source_agent", "_source_tool", "_source_params",
+                    "_source_correlation_id"):
+            if key in component:
+                refined[key] = component[key]
+        if component.get("id"):
+            refined["id"] = component["id"]
+        if component.get("component_id"):
+            refined["component_id"] = component["component_id"]
+        _stamp_provenance(refined, kind="estimated")
+        return refined
 
     async def _reconcile_legacy_replacement(self, websocket, chat_id: str, user_id: str,
                                             *, cause: str):
@@ -8093,6 +9156,24 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         comp.update(source)
         return comp
 
+    async def _retire_welcome_canvas(self, websocket):
+        """First chat_message from a welcome-showing socket: pop the flag.
+
+        055 FF_FIRST_TURN_CONTRACT (on): clients purge the wel_-identified
+        welcome components locally at turn start, so no frame is sent — the
+        legacy blanking ``ui_render []`` reached the client one RTT after
+        send and destroyed its optimistic loading skeleton (US1 root cause).
+        Flag off restores the legacy blanking frame byte-for-byte. The
+        ``_ws_welcome`` bookkeeping pops either way (the
+        enable_recommended_agents welcome refresh keys on it).
+        """
+        if self._ws_welcome.pop(id(websocket), None):
+            if not flags.is_enabled("first_turn_contract"):
+                try:
+                    await self.send_ui_render(websocket, [])
+                except Exception:
+                    pass
+
     async def send_ui_render(self, websocket, components: List, target: str = "canvas",
                              speak: bool = True):
         """Send a UIRender message to a UI client, adapted via ROTE.
@@ -8137,6 +9218,20 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 logger.debug("watch_speech unavailable for ui_render", exc_info=True)
         msg = UIRender(components=adapted, target=target, html=html, speech=speech)
         await self._safe_send(websocket, msg.to_json())
+        # 055 bg-continuity: a background (VirtualWebSocket) turn's chat-rail
+        # narrative also reaches the user's real sockets on that chat, each
+        # re-adapted per device (rich canvas components already fan through
+        # the workspace upsert path). Real-socket sends fan nowhere — checked
+        # inline so the method stays self-contained for them (DB-free tests
+        # bind it standalone).
+        if target == "chat":
+            from orchestrator.async_tasks import VirtualWebSocket
+            if isinstance(websocket, VirtualWebSocket):
+                for ws in self._vws_fan_targets(websocket):
+                    try:
+                        await self.send_ui_render(ws, components, target="chat", speak=speak)
+                    except Exception:  # pragma: no cover - per-socket best-effort
+                        logger.debug("vws chat-rail fan failed", exc_info=True)
 
     async def _shell_token_for_request(self, request):
         """Feature 026: access token for the web shell's WS register_ui handshake.
@@ -8400,11 +9495,15 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         no workspace identity at all.
         """
         import hashlib
-        m = re.search(r"(?m)^#{1,6}\s+(.+)$", content or "")
+        text = _strip_toolcall_leakage(content)
+        if not text and (content or "").strip():
+            _log_stripped_empty("doc_card", chat_id, content)
+            text = _LEAK_FALLBACK_TEXT
+        m = re.search(r"(?m)^#{1,6}\s+(.+)$", text)
         title = (m.group(1).strip()[:120] if m else "Document")
         digest = hashlib.sha1(f"{chat_id}|{title}".encode("utf-8")).hexdigest()[:12]
         return Card(id=f"doc_{digest}", title=title, content=[
-            Text(content=content, variant="markdown"),
+            Text(content=text, variant="markdown"),
         ]).to_dict()
 
     @staticmethod
@@ -8994,7 +10093,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         app.mount("/static", _NoCacheStaticFiles(directory=_os.path.join(_webrender_dir, "static")), name="static")
 
         # Mount REST API routers
-        from orchestrator.api import chat_router, component_router, agent_router, dashboard_router, draft_router, voice_router, task_router, async_task_router, user_router, chrome_router
+        from orchestrator.api import chat_router, component_router, agent_router, dashboard_router, draft_router, voice_router, task_router, async_task_router, user_router, chrome_router, export_router, share_router
         from orchestrator.auth import auth_router
         from orchestrator.web_auth import web_auth_router  # Feature 026 — server-side OIDC
         from orchestrator.attachments.router import attachments_router
@@ -9018,6 +10117,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         app.include_router(draft_router)
         app.include_router(dashboard_router)
         app.include_router(chrome_router)  # Feature 042 — GET /api/chrome/menu
+        # Feature 055 US5 — flag-gated export/share (routes 404 while off)
+        app.include_router(export_router)
+        app.include_router(share_router)
         app.include_router(auth_router)
         app.include_router(web_auth_router)  # Feature 026 — /auth/login,/callback,/session,/logout
         app.include_router(attachments_router)

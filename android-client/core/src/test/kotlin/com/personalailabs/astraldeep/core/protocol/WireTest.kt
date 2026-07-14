@@ -79,6 +79,26 @@ class WireTest {
         assertEquals(3, r.seq)
         assertEquals(false, r.terminal)
         assertEquals(1, r.components.size)
+        // No component_id on the wire (legacy/narrative stream) — null, never a default.
+        assertEquals(null, r.componentId)
+    }
+
+    @Test
+    fun decodes_stream_component_id_additive_field() {
+        val data =
+            assertIs<Inbound.UiStreamData>(
+                Wire.decode(
+                    """{"type":"ui_stream_data","stream_id":"s1","seq":1,"components":[{"type":"text"}],"component_id":"wc_abc"}""",
+                ),
+            )
+        assertEquals("wc_abc", data.componentId)
+        val sub =
+            assertIs<Inbound.StreamSubscribed>(
+                Wire.decode("""{"type":"stream_subscribed","stream_id":"s1","tool_name":"ticker","component_id":"wc_abc"}"""),
+            )
+        assertEquals("wc_abc", sub.componentId)
+        val bare = assertIs<Inbound.StreamSubscribed>(Wire.decode("""{"type":"stream_subscribed","stream_id":"s1","tool_name":"ticker"}"""))
+        assertEquals(null, bare.componentId)
     }
 
     @Test
@@ -189,6 +209,7 @@ class WireTest {
     fun decodes_task_started_and_completed_payload_shape() {
         val started = assertIs<Inbound.TaskStarted>(Wire.decode("""{"type":"task_started","payload":{"task_id":"t1","chat_id":"c1","status":"queued"}}"""))
         assertEquals("t1", started.taskId)
+        assertEquals("c1", started.chatId)
         val done = assertIs<Inbound.TaskCompleted>(Wire.decode("""{"type":"task_completed","payload":{"task_id":"t1","chat_id":"c1","status":"completed"}}"""))
         assertEquals("t1", done.taskId)
         assertEquals("c1", done.chatId)
@@ -196,7 +217,9 @@ class WireTest {
 
     @Test
     fun decodes_task_frames_flat_shape() {
-        assertEquals("t2", assertIs<Inbound.TaskStarted>(Wire.decode("""{"type":"task_started","task_id":"t2"}""")).taskId)
+        val started = assertIs<Inbound.TaskStarted>(Wire.decode("""{"type":"task_started","task_id":"t2"}"""))
+        assertEquals("t2", started.taskId)
+        assertEquals(null, started.chatId)
         val done = assertIs<Inbound.TaskCompleted>(Wire.decode("""{"type":"task_completed","task_id":"t2","chat_id":"c2"}"""))
         assertEquals("t2", done.taskId)
         assertEquals("c2", done.chatId)
@@ -211,6 +234,7 @@ class WireTest {
         assertEquals("Daily brief", r.title)
         assertEquals("Ready", r.body)
         assertEquals("info", r.level)
+        assertEquals("c1", r.chatId)
     }
 
     @Test
@@ -235,6 +259,48 @@ class WireTest {
         // `on` is tolerated as an alias; a bare frame defaults to inactive.
         assertEquals(true, assertIs<Inbound.WorkspaceTimelineMode>(Wire.decode("""{"type":"workspace_timeline_mode","on":true}""")).active)
         assertEquals(false, assertIs<Inbound.WorkspaceTimelineMode>(Wire.decode("""{"type":"workspace_timeline_mode"}""")).active)
+    }
+
+    @Test
+    fun decodes_workspace_verb_acks() {
+        val saved = assertIs<Inbound.ComponentSaved>(Wire.decode("""{"type":"component_saved","component":{"id":"row1","title":"Chart"}}"""))
+        assertEquals("Chart", saved.title)
+        val saveErr = assertIs<Inbound.ComponentSaveError>(Wire.decode("""{"type":"component_save_error","error":"Component not found"}"""))
+        assertEquals("Component not found", saveErr.error)
+        val deleted = assertIs<Inbound.ComponentDeleted>(Wire.decode("""{"type":"component_deleted","component_id":"row1"}"""))
+        assertEquals("row1", deleted.componentId)
+        val status = assertIs<Inbound.CombineStatus>(Wire.decode("""{"type":"combine_status","status":"combining","message":"Combining A with B..."}"""))
+        assertEquals("combining", status.status)
+        assertEquals("Combining A with B...", status.message)
+        val err = assertIs<Inbound.CombineError>(Wire.decode("""{"type":"combine_error","error":"boom"}"""))
+        assertEquals("boom", err.error)
+        val list = assertIs<Inbound.SavedComponentsList>(Wire.decode("""{"type":"saved_components_list","components":[{"id":"r1"},{"id":"r2"}]}"""))
+        assertEquals(2, list.count)
+    }
+
+    @Test
+    fun decodes_components_combined_rows_with_identity_fallback() {
+        val r =
+            assertIs<Inbound.ComponentsReplaced>(
+                Wire.decode(
+                    """{"type":"components_combined","removed_ids":["rowA","rowB"],"new_components":[{"id":"rowC","component_data":{"type":"card","component_id":"wc_1"}},{"id":"rowD","component_data":{"type":"table"}}]}""",
+                ),
+            )
+        assertEquals(listOf("rowA", "rowB"), r.removedIds)
+        // The first result carries its stamped workspace identity; the second
+        // falls back to the fresh saved-row id.
+        assertEquals(listOf("wc_1", "rowD"), r.newComponents.map { it.id })
+        assertEquals("card", r.newComponents[0].type)
+    }
+
+    @Test
+    fun decodes_components_condensed_same_shape() {
+        val r =
+            assertIs<Inbound.ComponentsReplaced>(
+                Wire.decode("""{"type":"components_condensed","removed_ids":["r1","r2","r3"],"new_components":[{"id":"r4","component_data":{"type":"card"}}]}"""),
+            )
+        assertEquals(3, r.removedIds.size)
+        assertEquals(listOf("r4"), r.newComponents.map { it.id })
     }
 
     @Test

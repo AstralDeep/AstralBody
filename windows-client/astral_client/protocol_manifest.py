@@ -63,15 +63,16 @@ CLASSIFICATION: dict[str, str] = {
     "stream_list": IGNORED,           # no desktop surface enumerates streams
     "stream_data": HANDLED,
     "stream_error": HANDLED,
-    # workspace component verbs (web workspace acks; desktop canvas is ui_* driven)
-    "component_saved": IGNORED,
-    "component_save_error": IGNORED,
-    "saved_components_list": IGNORED,
-    "component_deleted": IGNORED,
-    "combine_status": IGNORED,
-    "combine_error": IGNORED,
-    "components_combined": IGNORED,
-    "components_condensed": IGNORED,
+    # workspace component verbs (055 US3: identity-keyed canvas reconcile +
+    # status surfaces; previously web-only acks)
+    "component_saved": HANDLED,
+    "component_save_error": HANDLED,
+    "saved_components_list": HANDLED,
+    "component_deleted": HANDLED,
+    "combine_status": HANDLED,
+    "combine_error": HANDLED,
+    "components_combined": HANDLED,
+    "components_condensed": HANDLED,
     # permissions (capability lives in the native Agents dialog via agent_list)
     "agent_permissions": IGNORED,
     "agent_permissions_updated": IGNORED,

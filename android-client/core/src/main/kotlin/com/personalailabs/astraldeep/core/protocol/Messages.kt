@@ -78,9 +78,15 @@ sealed interface Inbound {
         val terminal: Boolean,
         val error: StreamError?,
         val toolName: String?,
+        /** 055 additive field — workspace identity when the stream is bridged; absent on legacy streams. */
+        val componentId: String? = null,
     ) : Inbound
 
-    data class StreamSubscribed(val streamId: String?, val toolName: String?) : Inbound
+    data class StreamSubscribed(
+        val streamId: String?,
+        val toolName: String?,
+        val componentId: String? = null,
+    ) : Inbound
 
     data class StreamErrorMsg(
         val requestAction: String?,
@@ -136,13 +142,21 @@ sealed interface Inbound {
     data class ToolProgress(val label: String) : Inbound
 
     /** The turn detached into a background task (`task_started`). */
-    data class TaskStarted(val taskId: String?) : Inbound
+    data class TaskStarted(val taskId: String?, val chatId: String? = null) : Inbound
 
     /** A background task finished (`task_completed`). */
     data class TaskCompleted(val taskId: String?, val chatId: String?) : Inbound
 
-    /** A scheduler/system push (`notification`, feature 044). */
-    data class Notification(val title: String?, val body: String?, val level: String?) : Inbound
+    /**
+     * A scheduler/system push (`notification`, feature 044). [chatId] names the
+     * chat the job wrote into (055 continuity — the open chat reloads on it).
+     */
+    data class Notification(
+        val title: String?,
+        val body: String?,
+        val level: String?,
+        val chatId: String? = null,
+    ) : Inbound
 
     /**
      * Boot/refresh of stored user preferences (`user_preferences`, feature 044).
@@ -157,6 +171,38 @@ sealed interface Inbound {
      * disables mutating affordances (input/send + component actions).
      */
     data class WorkspaceTimelineMode(val active: Boolean) : Inbound
+
+    // --- workspace component verbs (055 US3, wire-contract §4) — promoted
+    // ignored → handled; the server's ui_upsert/ui_render fan-outs stay
+    // authoritative, these give the issuing socket immediate feedback. ---
+
+    /** A `save_component` ack (`component_saved`); [title] names the saved row. */
+    data class ComponentSaved(val title: String?) : Inbound
+
+    /** `component_save_error` — a save/delete failure. */
+    data class ComponentSaveError(val error: String?) : Inbound
+
+    /** `component_deleted` — an identity-keyed remove of [componentId]. */
+    data class ComponentDeleted(val componentId: String?) : Inbound
+
+    /** `combine_status` — combine/condense progress. */
+    data class CombineStatus(val status: String?, val message: String?) : Inbound
+
+    /** `combine_error` — a combine/condense failure. */
+    data class CombineError(val error: String?) : Inbound
+
+    /**
+     * `components_combined` / `components_condensed` — the consumed identities
+     * to remove plus the carried result component(s), identity-assigned at
+     * decode (workspace id when stamped, else the fresh saved-row id).
+     */
+    data class ComponentsReplaced(
+        val removedIds: List<String>,
+        val newComponents: List<Component>,
+    ) : Inbound
+
+    /** `saved_components_list` — [count] rows; no native surface consumes the rows yet. */
+    data class SavedComponentsList(val count: Int) : Inbound
 
     data class Unknown(val type: String) : Inbound
 }

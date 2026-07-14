@@ -84,7 +84,7 @@ def _make_fake(history, user_id, llm_content=None, llm_exc=None, llm_delay=0.0):
     async def _safe_send(ws, payload):
         sent.append((ws, json.loads(payload)))
 
-    async def send_ui_render(ws, components, target="canvas"):
+    async def send_ui_render(ws, components, target="canvas", speak=True):
         renders.append((ws, components, target))
 
     async def _call_llm(websocket, messages, tools_desc=None, temperature=None, feature="tool_dispatch"):
@@ -108,7 +108,8 @@ def _make_fake(history, user_id, llm_content=None, llm_exc=None, llm_delay=0.0):
         _call_llm=_call_llm,
     )
     for name in ("_deliver_round_components", "_send_or_replace_components",
-                 "send_ui_upsert", "_push_canvas", "_canvas_components"):
+                 "send_ui_upsert", "_push_canvas", "_canvas_components",
+                 "_run_designer"):
         setattr(fake, name, types.MethodType(getattr(Orchestrator, name), fake))
     fake._sent = sent
     fake._renders = renders

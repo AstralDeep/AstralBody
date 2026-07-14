@@ -20,7 +20,7 @@ import sys
 import threading
 from typing import Any, Dict, List, Optional
 
-from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt, QSettings, QTimer, Signal
+from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt, QSettings, QTimer, QUrl, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -47,7 +48,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QWidgetAction,
 )
-from PySide6.QtGui import QAction, QBrush, QColor
+from PySide6.QtGui import QAction, QBrush, QColor, QDesktopServices
 
 from . import theme as T
 from .auth import LoginCancelled
@@ -93,6 +94,40 @@ def parser_status_glyph(status: str) -> tuple:
         "pending_admin_approval": ("⏳", "needs admin approval"),
         "unavailable": ("✗", "can't read this type yet"),
     }.get(status or "", ("•", "staged"))
+
+
+def replacement_ops(msg: dict) -> list:
+    """Feature 055 (US3): ``components_combined`` / ``components_condensed`` →
+    canvas ops — remove each consumed id, upsert each carried result. Results
+    are saved-row shapes (``{id, chat_id, component_data, …}``); the component
+    dict rides in ``component_data`` and may not carry a workspace identity yet
+    (the server stamps it in the reconcile ``ui_render`` that follows), so
+    identity falls back to the fresh row id — mirroring the Apple twin."""
+    ops = [
+        {"op": "remove", "component_id": str(rid)}
+        for rid in msg.get("removed_ids") or [] if rid
+    ]
+    for row in msg.get("new_components") or []:
+        if not isinstance(row, dict):
+            continue
+        comp = row.get("component_data")
+        if not isinstance(comp, dict):
+            continue
+        cid = comp.get("component_id") or row.get("id")
+        if not cid:
+            continue
+        comp = dict(comp)
+        comp.setdefault("component_id", str(cid))
+        ops.append({"op": "upsert", "component_id": str(cid), "component": comp})
+    return ops
+
+
+def frame_chat_id(msg: dict) -> Optional[str]:
+    """The chat a background push frame belongs to. Task frames
+    (``task_started``/``task_completed``) carry it under ``payload``; scheduler
+    ``notification`` frames carry it at the top level; absent on legacy frames."""
+    cid = (msg.get("payload") or {}).get("chat_id") or msg.get("chat_id")
+    return str(cid) if cid else None
 
 
 #: ui_event actions handled entirely in-app (never sent to the server, so they
@@ -272,6 +307,21 @@ class ChatRail(QWidget):
         self._hint = hint
 
 
+def _ask_refine_instruction(parent, title: str) -> str:
+    """Small modal prompt for a component-refine instruction (055 US4).
+    Factored out (like renderer._choose_color) so the emit path is
+    offscreen-testable without driving a modal dialog. '' == cancelled."""
+    what = f'"{title}"' if title else "this component"
+    text, ok = QInputDialog.getText(
+        parent, "Refine component", f"How should {what} change?")
+    return text.strip() if ok and text else ""
+
+
+def _open_external(url: str) -> None:
+    """Open a URL in the system browser (the download-card / OIDC model)."""
+    QDesktopServices.openUrl(QUrl(url))
+
+
 class Canvas(QScrollArea):
     """The SDUI canvas: native widgets per structured component, keyed by id."""
 
@@ -305,6 +355,20 @@ class Canvas(QScrollArea):
         # of the turn (set_components / apply_ops, which streaming also routes
         # through) or explicitly when the turn ends without any.
         self._skeleton: Optional[QWidget] = None
+        # Mirrors the window's per-turn flag (feature 055 US1): an EMPTY full
+        # render mid-turn keeps the loading state instead of swapping the
+        # skeleton for the idle hint; out-of-turn empty renders remain
+        # authoritative clears.
+        self.turn_active = False
+        # Feature 055 (US4/US5): per-component context menu (refine + export).
+        # `timeline_mode` mirrors the window's read-only flag (refine disabled);
+        # `http_base` is set by the MainWindow; `open_url` is injectable for
+        # offscreen tests.
+        self.timeline_mode = False
+        self.http_base = ""
+        self.open_url = _open_external
+        self._inner.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._inner.customContextMenuRequested.connect(self._on_context_menu)
         self.show_empty_state()
 
     def _drop_empty(self) -> None:
@@ -348,6 +412,9 @@ class Canvas(QScrollArea):
         """Append the loading placeholder below any existing components."""
         if self._skeleton is not None:
             return
+        # The idle hint never co-shows with a turn's loading state (055
+        # FR-005); resolve_loading restores it if the turn ends canvas-empty.
+        self._drop_empty()
         w = render({"type": "skeleton", "variant": "card", "count": 3}, self.ctx)
         self._skeleton = w
         self._insert(w)
@@ -358,6 +425,33 @@ class Canvas(QScrollArea):
         if w is not None:
             w.setParent(None)
             w.deleteLater()
+
+    def resolve_loading(self) -> None:
+        """Turn-end resolution (chat_status done / error): drop the skeleton
+        and, when the turn ended with no canvas output (a text-only answer
+        after the welcome purge), restore the idle empty-state hint — the
+        server no longer sends the turn-start empty render that used to leave
+        the hint behind (feature 055 US1)."""
+        self.hide_skeleton()
+        if not self._last_components and not self._by_id:
+            self.show_empty_state()
+
+    def purge_welcome(self) -> None:
+        """Feature 055 (US1, uniform rule): at turn start drop every ephemeral
+        welcome component — identity (``component_id`` or ``id``) prefixed
+        ``wel_`` — re-rendering the remainder through the identity-reconciled
+        path. When the server flag is off the welcome arrives id-less, nothing
+        matches and this is a byte-equivalent no-op. Callers flip
+        ``turn_active`` first, so a welcome-only canvas empties WITHOUT the
+        idle hint (the skeleton is armed right after)."""
+        kept = [
+            comp for comp in self._last_components
+            if not (isinstance(comp, dict) and str(
+                comp.get("component_id") or comp.get("id") or ""
+            ).startswith("wel_"))
+        ]
+        if len(kept) != len(self._last_components):
+            self.set_components(kept)
 
     def set_components(self, components: list) -> None:
         """Full canvas render (a `ui_render` to the canvas region), reconciled BY
@@ -374,16 +468,26 @@ class Canvas(QScrollArea):
         full render and the incoming list is the same object as (or compares
         equal to) the previous one, the canvas already IS this state — skip
         reconciliation entirely. apply_ops/restyle flip ``_mutated_since_render``
-        so patched or palette-stale canvases always reconcile."""
+        so patched or palette-stale canvases always reconcile.
+
+        Feature 055 (US1): an EMPTY set while a turn is in flight
+        (``turn_active``) keeps the loading state — the armed skeleton
+        survives the rebuild and the idle empty-state hint is NOT shown. Only
+        out-of-turn empty renders resolve to the hint (authoritative clears)."""
         incoming = components or []
+        # Mid-turn empty render: never swap the skeleton for the idle hint.
+        keep_loading = not incoming and self.turn_active
         if not self._mutated_since_render and (
             incoming is self._last_components
             or incoming == self._last_components
         ):
-            self.hide_skeleton()
+            if not keep_loading:
+                self.hide_skeleton()
             return
         components = list(incoming)
-        self.hide_skeleton()  # canvas content arrived (or is being rebuilt)
+        skeleton = self._skeleton if keep_loading else None
+        if skeleton is None:
+            self.hide_skeleton()  # canvas content arrived (or is being rebuilt)
         self._last_components = components  # retained for restyle() (US5)
         # The empty-state hint is dropped before the rebuild (the detach loop
         # below would otherwise delete it out from under self._empty) and
@@ -411,7 +515,7 @@ class Canvas(QScrollArea):
                 detached.append(w)
         reused = set(reusable.values())
         for w in detached:
-            if w not in reused:
+            if w not in reused and w is not skeleton:
                 w.setParent(None)
                 w.deleteLater()
         # Re-insert in the new order, reusing a kept widget by id or rendering
@@ -429,7 +533,7 @@ class Canvas(QScrollArea):
             # single widget object is never added to the layout more than once.
             w = reusable.get(cid) if (cid and cid not in placed) else None
             if w is None:
-                w = render(comp, self.ctx)
+                w = render(comp, self.ctx, top_level=True)
                 if cid:
                     w.setProperty("component_id", cid)
             self._insert(w)
@@ -438,9 +542,11 @@ class Canvas(QScrollArea):
                 if cid not in placed:
                     rendered[cid] = comp
                 placed.add(cid)
+        if skeleton is not None:
+            self._insert(skeleton)  # the loading placeholder stays at the bottom
         self._rendered = rendered
         self._mutated_since_render = False
-        if not components:
+        if not components and not keep_loading:
             self.show_empty_state()
 
     def restyle(self) -> None:
@@ -482,7 +588,7 @@ class Canvas(QScrollArea):
                     w.deleteLater()
                 continue
             comp = op.get("component") or {}
-            new_w = render(comp, self.ctx)
+            new_w = render(comp, self.ctx, top_level=True)
             new_w.setProperty("component_id", cid)
             old = self._by_id.get(cid)
             if old is not None:
@@ -493,6 +599,78 @@ class Canvas(QScrollArea):
                 self._insert(new_w)
             self._by_id[cid] = new_w
             self._rendered[cid] = comp  # keep the payload map in sync
+
+    # --- 055 US4/US5: component context menu (refine + export) ------------- #
+
+    def _component_at(self, pos) -> tuple:
+        """``(component_id, component dict)`` of the top-level canvas component
+        under ``pos`` (inner coords), else ``(None, None)``. Walks parents from
+        the deepest child, accepting only canvas-tracked identities — nested
+        children may carry an author ``id`` property that is NOT a workspace
+        identity and must not be targeted by refine/export."""
+        w = self._inner.childAt(pos)
+        while w is not None and w is not self._inner:
+            raw = w.property("component_id")
+            if raw and str(raw) in self._by_id:
+                cid = str(raw)
+                return cid, self._rendered.get(cid)
+            w = w.parentWidget()
+        return None, None
+
+    def component_menu(self, cid, comp) -> Optional[QMenu]:
+        """Build the context menu for a component (or bare canvas when ``cid``
+        is None): Refine… (055 US4, disabled while viewing history), Export
+        data (CSV) for tables, Export canvas (HTML). Returns ``None`` when no
+        entry applies (no menu shown)."""
+        comp = comp if isinstance(comp, dict) else {}
+        chat_id = getattr(self.ctx, "chat_id", None)
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            f"QMenu {{ background:{T.SURFACE}; color:{T.TEXT}; border:1px solid {T.BORDER}; padding:4px; }}"
+            f"QMenu::item {{ padding:6px 24px; }}"
+            f"QMenu::item:selected {{ background:{T.PRIMARY}; color:#ffffff; }}"
+            f"QMenu::separator {{ height:1px; background:{T.BORDER}; margin:4px 8px; }}"
+        )
+        if cid:
+            refine = menu.addAction("Refine…")
+            refine.setEnabled(not self.timeline_mode)
+            refine.triggered.connect(lambda _=False, x=cid: self.request_refine(x))
+            if str(comp.get("type") or "") == "table" and chat_id:
+                csv = menu.addAction("Export data (CSV)")
+                csv.triggered.connect(lambda _=False, x=cid, c=chat_id: self.open_url(
+                    rest.export_component_csv_url(self.http_base, x, c)))
+        if chat_id:
+            if not menu.isEmpty():
+                menu.addSeparator()
+            html = menu.addAction("Export canvas (HTML)")
+            html.triggered.connect(lambda _=False, c=chat_id: self.open_url(
+                rest.export_canvas_html_url(self.http_base, c)))
+        return None if menu.isEmpty() else menu
+
+    def _on_context_menu(self, pos) -> None:
+        cid, comp = self._component_at(pos)
+        menu = self.component_menu(cid, comp)
+        if menu is not None:
+            menu.exec(self._inner.mapToGlobal(pos))
+
+    def request_refine(self, cid: str) -> None:
+        """Prompt for an instruction and emit ``component_refine`` (wire-contract
+        §3). Empty/cancelled prompt sends nothing; historical views are
+        read-only (the server also refuses — `_ws_timeline_mode` guard).
+        No versions submenu: no native frame carries the version list, so
+        restore stays a web affordance (declared in the parity matrix)."""
+        if self.timeline_mode:
+            return
+        comp = self._rendered.get(cid)
+        title = str(comp.get("title") or "") if isinstance(comp, dict) else ""
+        instruction = _ask_refine_instruction(self, title)
+        if not instruction:
+            return
+        payload = {"component_id": cid, "instruction": instruction}
+        chat_id = getattr(self.ctx, "chat_id", None)
+        if chat_id:
+            payload["chat_id"] = chat_id
+        self.ctx.emit("component_refine", payload)
 
 
 class SurfaceDialog(QDialog):
@@ -1317,6 +1495,9 @@ class MainWindow(QMainWindow):
         self._user_prefs: dict = {}
         # Feature 044 (US4): staged chat attachments (chip records) for the turn.
         self._attachments: List[dict] = []
+        # Feature 055: tap-to-open target for a background-completion banner —
+        # a click loads this chat instead of just dismissing (None = dismiss).
+        self._banner_chat: Optional[str] = None
 
         ctx = RenderContext(emit=self._emit, download=self._download,
                             apply_theme=self._apply_theme_pref)
@@ -1348,6 +1529,8 @@ class MainWindow(QMainWindow):
         self.rail = ChatRail()
         self.rail.show_empty_hint()
         self.canvas = Canvas(ctx)
+        # 055 US5: the canvas context menu opens export URLs against this origin.
+        self.canvas.http_base = _http_base(url)
         split = QSplitter(Qt.Orientation.Horizontal)
         split.addWidget(self._wrap(self.rail, "Conversation"))
         split.addWidget(self._wrap(self.canvas, "Canvas"))
@@ -1500,7 +1683,11 @@ class MainWindow(QMainWindow):
         # (FR-019), not a silent no-op.
 
     # --- banner (connection state / errors / notices) ------------------- #
-    def _show_banner(self, text: str, kind: str = "info") -> None:
+    def _show_banner(self, text: str, kind: str = "info",
+                     chat_id: Optional[str] = None) -> None:
+        # Every banner (re)sets the tap-to-open target, so a plain notice can
+        # never inherit a stale chat link from an earlier task banner (055).
+        self._banner_chat = chat_id
         color = {
             "error": T.VARIANT_COLORS["error"][0],
             "warning": T.VARIANT_COLORS["warning"][0],
@@ -1513,14 +1700,21 @@ class MainWindow(QMainWindow):
         self._banner.setVisible(True)
 
     def _hide_banner(self) -> None:
+        self._banner_chat = None
         self._banner.setVisible(False)
         self._banner.setText("")
 
     def _on_banner_clicked(self) -> None:
-        """Banner click: cancel an in-flight startup sign-in, else dismiss."""
+        """Banner click: cancel an in-flight startup sign-in, open a linked
+        chat (055 background-task tap-to-open), else dismiss."""
         if self._login_active:
             self.cancel_login()
+            self._hide_banner()
+            return
+        chat = self._banner_chat
         self._hide_banner()
+        if chat:
+            self._load_chat(chat)
 
     def _set_composer_enabled(self, enabled: bool) -> None:
         """Enable/disable the message input + Send button (feature 044 FR-007 —
@@ -1533,9 +1727,16 @@ class MainWindow(QMainWindow):
         )
 
     # --- chrome actions -------------------------------------------------- #
+    def _set_active_chat(self, chat_id: Optional[str]) -> None:
+        """Single write point for the active chat: the canvas ctx follows it,
+        and the transport's register session_id tracks it so a reconnect's
+        re-register resumes this chat's fan-out + task replay (feature 055)."""
+        self.active_chat = chat_id
+        self.canvas.ctx.chat_id = chat_id
+        self.client.session_id = chat_id or "win-client"
+
     def _new_chat(self) -> None:
-        self.active_chat = None
-        self.canvas.ctx.chat_id = None
+        self._set_active_chat(None)
         self.rail.clear()
         self.rail.show_empty_hint()
         self.canvas.set_components([])
@@ -1919,6 +2120,13 @@ class MainWindow(QMainWindow):
             else:
                 self.rail.add_note("📎 " + names)
         self.client.send_chat(text, self.active_chat, attachments=atts or None)
+        # Optimistic loading state until the turn's first canvas content — the
+        # typed path matches _emit's chat_message twin (feature 055 US1):
+        # retire the ephemeral welcome, then arm the skeleton.
+        if not self._timeline_mode:
+            self._set_turn_active(True)
+            self.canvas.purge_welcome()
+            self.canvas.show_skeleton()
         # Clear only the chips that went out; keep still-uploading ones so a late
         # upload result isn't lost (they remain staged for the next turn).
         self._clear_sent_attachments()
@@ -1935,8 +2143,11 @@ class MainWindow(QMainWindow):
                 self.rail.add("user", msg)
             self.client.send_chat(msg, self.active_chat)
             # Optimistic loading state until the turn's first canvas content
-            # (parity with the Android twin's send-time skeleton).
+            # (parity with the Android twin's send-time skeleton); the welcome
+            # is retired BEFORE the skeleton arms (feature 055 US1).
             if not self._timeline_mode:
+                self._set_turn_active(True)
+                self.canvas.purge_welcome()
                 self.canvas.show_skeleton()
         else:
             self.client.send_event(action, payload, session_id=self.active_chat)
@@ -1997,6 +2208,13 @@ class MainWindow(QMainWindow):
             # Pull chrome state so the native dialogs + CTA are accurate.
             self.client.send_event("discover_agents", {})
             self.client.send_event("get_history", {})
+            if self.active_chat:
+                # 055: re-hydrate the chat that was open when the connection
+                # dropped, picking up narrative/canvas changes (and replayed
+                # background-task state) that landed while this device was
+                # away. Only a REconnect can get here with a chat open — the
+                # first connect precedes any chat.
+                self._load_chat(self.active_chat)
         elif s.startswith("auth_required"):
             self._begin_silent_refresh()
 
@@ -2008,6 +2226,13 @@ class MainWindow(QMainWindow):
         registration, which on every turn completion would wipe task/error/
         notification banners and cause redundant round-trips (feature 044 fix)."""
         self.topbar.set_status("Connected", T.VARIANT_COLORS["success"][0])
+
+    def _set_turn_active(self, active: bool) -> None:
+        """Single write point for the per-turn flag; the canvas mirrors it so
+        an empty render mid-turn keeps the loading state instead of the idle
+        empty-state hint (feature 055 US1)."""
+        self._turn_active = active
+        self.canvas.turn_active = active
 
     def _begin_silent_refresh(self) -> None:
         """FR-004: silently refresh the session token OFF the GUI thread — the
@@ -2065,6 +2290,9 @@ class MainWindow(QMainWindow):
         self.client = OrchestratorClient(
             self._url, token, device_caps(supported_types=native_types())
         )
+        # The rebuilt transport keeps registering with the open chat's id so
+        # the server resumes that chat's fan-out + task replay (055).
+        self.client.session_id = self.active_chat or "win-client"
         self.client.message.connect(self._on_message)
         self.client.status.connect(self._on_status)
         self.client.start()
@@ -2204,15 +2432,45 @@ class MainWindow(QMainWindow):
         elif t == "ui_upsert":
             if not msg.get("chat_id") or msg.get("chat_id") == self.active_chat:
                 self.canvas.apply_ops(msg.get("ops") or [])
+        # 055 (US3, wire-contract §4): the eight workspace verb acks, promoted
+        # ignored → handled. The server's follow-up ui_upsert/ui_render
+        # reconcile stays authoritative; these give this socket immediate
+        # identity-keyed feedback without waiting on it.
+        elif t == "component_deleted":
+            cid = msg.get("component_id")
+            if cid:
+                self.canvas.apply_ops([{"op": "remove", "component_id": str(cid)}])
+        elif t in ("components_combined", "components_condensed"):
+            self._reset_status_line()
+            rows = msg.get("new_components") or []
+            chat = next((r.get("chat_id") for r in rows
+                         if isinstance(r, dict) and r.get("chat_id")), None)
+            if not chat or chat == self.active_chat:
+                ops = replacement_ops(msg)
+                if ops:
+                    self.canvas.apply_ops(ops)
+        elif t == "component_saved":
+            title = (msg.get("component") or {}).get("title") or ""
+            self._show_banner(f"Saved {title}" if title else "Component saved")
+        elif t == "component_save_error":
+            self._show_banner(msg.get("error") or "Couldn't save component", "error")
+        elif t == "combine_status":
+            self.topbar.set_status(
+                msg.get("message") or msg.get("status") or "Combining…",
+                T.VARIANT_COLORS["accent"][0],
+            )
+        elif t == "combine_error":
+            self._reset_status_line()
+            self._show_banner(msg.get("error") or "Couldn't combine components", "error")
+        elif t == "saved_components_list":
+            self._refresh_saved_components(msg.get("components") or [])
         elif t == "chat_created":
-            self.active_chat = (msg.get("payload") or {}).get(
-                "chat_id"
-            ) or self.active_chat
-            self.canvas.ctx.chat_id = self.active_chat
+            self._set_active_chat(
+                (msg.get("payload") or {}).get("chat_id") or self.active_chat
+            )
         elif t == "chat_loaded":
             chat = msg.get("chat") or {}
-            self.active_chat = chat.get("id") or self.active_chat
-            self.canvas.ctx.chat_id = self.active_chat
+            self._set_active_chat(chat.get("id") or self.active_chat)
             self._replay_transcript(chat)
         elif t == "agent_list":
             self._agents = msg.get("agents") or []
@@ -2244,31 +2502,42 @@ class MainWindow(QMainWindow):
             st = msg.get("status")
             if st in ("thinking", "executing", "fixing", "processing_async",
                       "combining", "condensing"):
-                self._turn_active = True
+                self._set_turn_active(True)
                 self.topbar.set_status(
                     msg.get("message") or st, T.VARIANT_COLORS["accent"][0]
                 )
             elif st == "done":
-                self._turn_active = False
+                self._set_turn_active(False)
                 # The turn ended without canvas output (text-only answer,
-                # cancellation) — clear the query-start skeleton.
-                self.canvas.hide_skeleton()
+                # cancellation) — clear the query-start skeleton (and restore
+                # the idle hint when the canvas ended the turn empty).
+                self.canvas.resolve_loading()
                 # A per-turn status reset ONLY — not the full reconnect re-sync
                 # (which would hide banners + re-fire discover/history every turn).
                 self._reset_status_line()
         elif t == "error":
             # FR-002/SC-006 — never silent; resolve any stuck turn.
             self._show_banner(normalize_error(msg), "error")
-            self._turn_active = False
-            self.canvas.hide_skeleton()
+            self._set_turn_active(False)
+            self.canvas.resolve_loading()
             self.topbar.set_status("Connected", T.VARIANT_COLORS["success"][0])
         elif t == "notification":
             title = msg.get("title") or ""
             body = msg.get("body") or ""
-            self._show_banner(f"{title}: {body}" if title else body,
-                              "error" if msg.get("level") == "error" else "info")
+            text = f"{title}: {body}" if title else body
+            kind = "error" if msg.get("level") == "error" else "info"
+            chat = frame_chat_id(msg)
+            if chat and chat == self.active_chat:
+                # 055: the notification targets the OPEN chat (e.g. a job that
+                # started on another device finished here) — reload it so the
+                # narrative + canvas refresh without user action.
+                self._show_banner(text, kind)
+                self._load_chat(chat)
+            else:
+                # Another (or no) chat: the banner carries a tap-to-open link.
+                self._show_banner(text, kind, chat_id=chat)
         elif t == "user_message_acked":
-            self._turn_active = True
+            self._set_turn_active(True)
             self.topbar.set_status("Working…", T.VARIANT_COLORS["accent"][0])
         elif t == "chat_step":
             step = msg.get("step") or {}
@@ -2280,12 +2549,34 @@ class MainWindow(QMainWindow):
                      or msg.get("message") or "working")
             self.topbar.set_status(str(label), T.VARIANT_COLORS["accent"][0])
         elif t == "task_started":
-            self._show_banner("Working on this in the background…")
+            chat = frame_chat_id(msg)
+            if chat and chat != self.active_chat:
+                # 055: a task began in a DIFFERENT chat (e.g. on another
+                # device) — an unobtrusive status notice, never a banner over
+                # this conversation.
+                self.topbar.set_status(
+                    "Background task running in another chat", T.MUTED)
+            else:
+                self._show_banner("Working on this in the background…")
         elif t == "task_completed":
-            self._turn_active = False
-            self._show_banner("Background task finished.")
+            self._set_turn_active(False)
+            chat = frame_chat_id(msg)
+            if chat and chat != self.active_chat:
+                # 055: finished elsewhere — tap-to-open toast, no canvas hijack.
+                self._show_banner(
+                    "Background task finished in another chat — click to open.",
+                    chat_id=chat)
+            else:
+                self._show_banner("Background task finished.")
+                if chat:
+                    # 055: the finished task's chat is on screen — reload it so
+                    # the narrative + canvas refresh without user action.
+                    self._load_chat(chat)
         elif t == "workspace_timeline_mode":
             self._timeline_mode = bool(msg.get("active") or msg.get("on"))
+            # The canvas mirrors the flag: refine is disabled in its context
+            # menu while a historical (read-only) view is active (055 US4).
+            self.canvas.timeline_mode = self._timeline_mode
             if self._timeline_mode:
                 self.canvas.hide_skeleton()
             # FR-007: a historical workspace view is strictly read-only — disable
@@ -2325,7 +2616,7 @@ class MainWindow(QMainWindow):
         """Handle stream control frames (subscribe ack / error / teardown)."""
         t = msg.get("type")
         if t == "stream_subscribed":
-            ops = subscribe_ack_ops(msg)
+            ops = subscribe_ack_ops(msg, existing_ids=self.canvas._by_id)
             if ops:
                 self.canvas.apply_ops(ops)
             self.topbar.set_status(
@@ -2373,6 +2664,13 @@ class MainWindow(QMainWindow):
         if self._history_dialog is not None and items:
             self._history_dialog.set_chats(items)
         logger.info("history surface rendered (%d chats)", len(items))
+
+    def _refresh_saved_components(self, components: list) -> None:
+        """Feature 055 (US3): the ``saved_components_list`` ack. The desktop has
+        no native saved-components surface yet (workspace browsing rides the
+        server-driven chrome surfaces), so this is a logged refresh hook — never
+        a silent drop (FR-002 posture); a future surface consumes the list here."""
+        logger.info("saved components list received (%d items)", len(components or []))
 
     def _replay_transcript(self, chat: dict) -> None:
         """Repopulate the rail from a loaded chat's messages (best-effort)."""

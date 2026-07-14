@@ -62,7 +62,8 @@
     "chrome_memory_update", "chrome_open", "chrome_perms_save", "chrome_profile_save",
     "chrome_safe_set", "chrome_skill_toggle", "chrome_theme_preset", "chrome_tour_event",
     "chrome_visibility_set", "chrome_workspace_timeline_live", "chrome_workspace_timeline_view",
-    "combine_components", "component_action", "component_feedback", "condense_components",
+    "combine_components", "component_action", "component_feedback", "component_refine",
+    "component_restore", "condense_components",
     "delete_saved_component", "discover_agents", "draft_approve", "draft_discard",
     "draft_refine", "enable_recommended_agents", "feedback_amend", "feedback_retract",
     "get_agent_permissions", "get_dashboard", "get_history", "get_saved_components",
@@ -80,6 +81,14 @@
       "scope": "watch-profile sockets only; absent when the rendition is unspeakable",
       "introduced_by": "051-apple-native-clients (FR-036)",
       "contract": "specs/051-apple-native-clients/contracts/spoken-rendition.md"
+    },
+    {
+      "field": "component_id",
+      "shape": "string",
+      "carried_on": ["ui_stream_data", "stream_subscribed"],
+      "scope": "present when the stream is bridged to a workspace component identity; absent on legacy/narrative streams",
+      "introduced_by": "055-uniform-artifacts (FR-010)",
+      "contract": "specs/055-uniform-artifacts/contracts/wire-contract.md"
     }
   ],
   "component_types": [
