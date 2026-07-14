@@ -19,7 +19,7 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from orchestrator.chain_authority import AuthoritySkip, MachineAuthority  # noqa: E402
+from orchestrator.chain_authority import MachineAuthority  # noqa: E402
 from scheduler.runner import JobRunner  # noqa: E402
 from shared.protocol import MCPResponse  # noqa: E402
 
