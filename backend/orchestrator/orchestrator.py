@@ -4300,9 +4300,18 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 self._active_request = {}
             if chat_id:
                 self._active_request[chat_id] = message
-                # 056 (FR-021): a fresh turn gets a fresh global chain budget
-                # (lazily re-created on the turn's first chained hop).
-                self._chain_budgets.pop(chat_id, None)
+                # 056 (FR-021): a fresh top-level turn gets a fresh global chain
+                # budget (lazily re-created on the turn's first chained hop). A
+                # sub-task, however, runs on a fresh sub-chat under a budget
+                # SLICE of its parent turn that ``subtasks._run_one`` pre-binds
+                # here; preserve that slice (a budget WITH a parent) so hops
+                # started inside the sub-task debit the parent turn's global
+                # ceiling instead of a fresh parentless budget — otherwise each
+                # sub-task could independently spend the full hop budget
+                # (unbounded fan-out / resource-exhaustion bypass).
+                _existing_budget = self._chain_budgets.get(chat_id)
+                if _existing_budget is None or _existing_budget.parent is None:
+                    self._chain_budgets.pop(chat_id, None)
 
             # 033 turn coordination (flag-gated + fail-open via turn_hooks):
             # flow tool-budget (C-S1), dual ledger (C-N7), skill recall (C-N10),
@@ -5065,7 +5074,15 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             return None
         from orchestrator.async_tasks import VirtualWebSocket
         if isinstance(websocket, VirtualWebSocket):
-            return None
+            # SYSTEM context by default (scheduled jobs, compaction, background
+            # work — 054 FR-019). The exception is a foreground sub-task the
+            # user is actively waiting on (subtasks._run_one), which stamps
+            # ``llm_context_user_id`` so its ReAct planning and LLM-tool
+            # credential resolve to the REQUESTING user, not the admin system
+            # account — otherwise a fully-configured user whose deployment has
+            # no system credential gets every decomposition failing, and where
+            # a system credential exists the user is silently billed to it.
+            return getattr(websocket, "llm_context_user_id", None)
         # A live socket absent from ui_sessions has no user claims yet; the
         # _registered_events gate guarantees no LLM dispatch happens before
         # registration, so treating it as SYSTEM here can only surface as an
@@ -6461,20 +6478,31 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
         # Feature 054: surface the resolved LLM credentials for THIS call's
         # context so agent-side LLM tools can run (they no longer have any
-        # env fallback): the caller's persisted record on a user socket,
-        # the admin system record on system-context turns. The kwarg name
+        # env fallback): the caller's persisted record on a user socket, the
+        # admin system record on system-context turns. The kwarg name
         # ``_session_llm_credentials`` is kept for agent-side compatibility.
-        _llm_ctx_user = self._llm_context_user_id(websocket)
-        if _llm_ctx_user is None:
-            _llm_cfg = await self._llm_store.get_system()
-        else:
-            _llm_cfg = await self._llm_store.get(_llm_ctx_user)
-        if _llm_cfg is not None:
-            args["_session_llm_credentials"] = {
-                "OPENAI_API_KEY": _llm_cfg.api_key,
-                "OPENAI_BASE_URL": _llm_cfg.base_url,
-                "LLM_MODEL": _llm_cfg.model,
-            }
+        #
+        # ONLY inject for in-process built-in agents, where the plaintext key
+        # stays inside the orchestrator process (and is scrubbed from the
+        # deep-copied args in ``_execute_in_process``). A WebSocket/A2A agent —
+        # notably a user-created draft or any external agent — would otherwise
+        # receive the user's LIVE provider API key in plaintext over the wire
+        # on EVERY dispatch, even a tool that never touches an LLM (e.g.
+        # ``dice_roller.roll``): the exact inverse of the ECIES per-user-secret
+        # boundary. Every bundled LLM-using tool (general, web_research,
+        # summarizer) runs in-process, so no legitimate consumer is affected.
+        if agent_id in self.local_agents:
+            _llm_ctx_user = self._llm_context_user_id(websocket)
+            if _llm_ctx_user is None:
+                _llm_cfg = await self._llm_store.get_system()
+            else:
+                _llm_cfg = await self._llm_store.get(_llm_ctx_user)
+            if _llm_cfg is not None:
+                args["_session_llm_credentials"] = {
+                    "OPENAI_API_KEY": _llm_cfg.api_key,
+                    "OPENAI_BASE_URL": _llm_cfg.base_url,
+                    "LLM_MODEL": _llm_cfg.model,
+                }
 
         # 5th gate (015): when no `agent_id` was resolved via `tool_to_agent` —
         # which happens because the tool was filtered out at chat-time tool-list
@@ -6938,12 +6966,19 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         try:
             from orchestrator import delegation as _dg
             token = args.get("_delegation_token") if isinstance(args, dict) else None
+            parent_payload = _dg.decode_token_payload(token) if token else None
+            if parent_payload is not None:
+                # Give a production Keycloak first-hop token the depth-0 actor
+                # claim it lacks, so a later child minted off it verifies as a
+                # complete chain. The actor is THIS dispatch's agent — resolved
+                # from our own record, never from anything the agent presents.
+                parent_payload = _dg.normalize_hop_parent(parent_payload, agent_id)
             self._dispatch_context[request_id] = {
                 "agent_id": agent_id,
                 "user_id": args.get("user_id") if isinstance(args, dict) else None,
                 "chat_id": args.get("session_id") if isinstance(args, dict) else None,
                 "ui_websocket": ui_websocket,
-                "parent_token": _dg.decode_token_payload(token) if token else None,
+                "parent_token": parent_payload,
             }
         except Exception:  # never let bookkeeping break a dispatch
             logger.debug("dispatch context registration failed", exc_info=True)
@@ -7048,6 +7083,24 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     ui_components=[alert.to_dict()]),
                 render_components=[alert.to_dict()],
                 hop_audited=True)  # this path emitted its own hop record
+
+        # Fail closed BEFORE minting if the child-signing key is unset in
+        # production posture — never sign a child delegation with the committed
+        # dev constant (Constitution X). Checked up front so no partial audit
+        # trail (mint/enforce) is emitted for a hop that cannot be signed.
+        try:
+            _dg._child_signing_key()
+        except _dg.DelegationConfigError:
+            logger.error("delegation.hop.mint refused signing_key_unset callee=%s tool=%s chat=%s",
+                         agent_id, tool_name, chat_id)
+            await self._record_hop_audit(
+                operation="mint", outcome="failure", parent=parent_token,
+                child=None, callee_agent_id=agent_id, tool_name=tool_name,
+                chat_id=chat_id, correlation_id=corr, detail="signing_key_unset",
+                requested_scopes=requested)
+            return _refusal(
+                "Chained hop refused: the delegation signing key is not "
+                "configured (set DELEGATION_CHILD_SIGNING_KEY).")
 
         try:
             child = _dg.mint_child_delegation(parent_token, agent_id, requested)
@@ -7297,15 +7350,20 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             except Exception:
                 logger.debug("hop cap release failed", exc_info=True)
 
-    async def _execute_with_retry_audited(self, websocket, agent_id, tool_name, args, chat_id=None):
-        """Dispatch a tool with the SAME ToolDispatchAudit start/end events as the
-        single-tool path (feature 040 / FR-032).
+    async def _execute_with_retry_audited(self, websocket, agent_id, tool_name, args, chat_id=None, user_id=None):
+        """Dispatch a tool with the SAME ToolDispatchAudit start/end events,
+        taint output-recording, and POST-tool hooks as the single-tool path
+        (feature 040 / FR-032; 056 US3 gate-parity).
 
         The parallel-tool path historically called ``_execute_with_retry``
-        directly, emitting no ``agent_tool_call`` audit rows — so parallel
-        batches were unaudited. Routing them through this wrapper makes every
-        tool call auditable regardless of dispatch path, and propagates the
-        correlation_id onto the response (component-feedback parity).
+        directly, emitting no ``agent_tool_call`` audit rows AND skipping both
+        the taint output record and the POST_TOOL_USE/FAILURE hooks that
+        ``execute_single_tool`` runs after a dispatch — so an untrusted value
+        produced in a multi-call round was never marked tainted (multi-hop
+        exfil-laundering defense bypassed) and post-tool hook side effects
+        (interaction collector → personalization/knowledge, admin handlers)
+        were dropped. Routing every parallel dispatch through this wrapper makes
+        those three behaviors identical to the single path.
         """
         from audit.hooks import ToolDispatchAudit
         claims = self.ui_sessions.get(websocket) if websocket is not None else None
@@ -7328,7 +7386,34 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     result.correlation_id = _audit_ctx.correlation_id
                 except Exception:
                     pass
-            return result
+
+        # Taint output-recording — parity with the single path. Untrusted tool
+        # output taints its result; without this a later sink (send/egress)
+        # sees a multi-call-round value as trusted. Flag-gated, best-effort.
+        if user_id and result is not None and result.error is None:
+            try:
+                from orchestrator import taint as _taint
+                if _taint.taint_enabled():
+                    tracker = self._taint_tracker(chat_id)
+                    src = _taint.classify_source(agent_id, tool_name)
+                    inp = tracker.effective_trust_of_args(args)
+                    tracker.record_output(result.ui_components, src, inp)
+            except Exception:
+                logger.debug("taint: output record failed (parallel)", exc_info=True)
+
+        # POST_TOOL_USE / POST_TOOL_FAILURE — parity with the single path.
+        if flags.is_enabled("hook_system"):
+            post_event = HookEvent.POST_TOOL_FAILURE if (result and result.error) else HookEvent.POST_TOOL_USE
+            await self.hooks.emit(HookContext(
+                event=post_event,
+                user_id=user_id or "",
+                agent_id=agent_id or "",
+                tool_name=tool_name,
+                tool_args=args,
+                tool_result=result.result if result else None,
+                error=result.error.get("message") if (result and result.error) else None,
+            ))
+        return result
 
     async def execute_parallel_tools(self, websocket, tool_calls, tool_to_agent: Dict, chat_id: str = None, user_id: str = None, tool_to_unqualified: Optional[Dict[str, str]] = None) -> List[Optional[MCPResponse]]:
         """Execute multiple tool calls with concurrency safety.
@@ -7412,9 +7497,18 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 continue
             if agent_id == "__subtasks__":
                 from orchestrator import subtasks as _st
+                # Sub-task tool-scoping filters by UNQUALIFIED skill id
+                # (handle_chat_message: ``skill.id not in selected_tools``), so
+                # ``_parent_tools`` must carry unqualified ids — identical to
+                # the single-tool path. Passing the qualified LLM names
+                # (``tool_to_agent`` keys like ``forecaster-1__submit_dataset``)
+                # made every collision-qualified tool silently unmatched and
+                # dropped from the sub-task's allow-list.
                 args["_parent_tools"] = sorted(
-                    {t for t, a in (tool_to_agent or {}).items()
-                     if not str(a).startswith("__")})
+                    {t for t in (tool_to_unqualified or {}).values()
+                     if not str(tool_to_agent.get(t, "")).startswith("__")}
+                    or {t for t, a in (tool_to_agent or {}).items()
+                        if not str(a).startswith("__")})
                 prepared.append((idx, tc, tool_name, agent_id, None,
                                  _st.handle_meta_tool(
                                      self, tool_name, args, user_id=user_id,
@@ -7457,14 +7551,14 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             elif use_concurrency_safety:
                 scope = self.tool_permissions.get_tool_scope(agent_id, tool_name)
                 if scope in self._PARALLEL_SAFE_SCOPES:
-                    parallel_items.append((idx, tool_name, self._execute_with_retry_audited(websocket, agent_id, tool_name, args, chat_id)))
+                    parallel_items.append((idx, tool_name, self._execute_with_retry_audited(websocket, agent_id, tool_name, args, chat_id, user_id)))
                 else:
                     serial_items.append((idx, tool_name, agent_id, args))
             else:
                 # 056 US3: audit parity holds on this branch too (040 FR-032
                 # routed only the concurrency-safety branches through the
                 # audited wrapper; flag-off dispatches were unaudited).
-                parallel_items.append((idx, tool_name, self._execute_with_retry_audited(websocket, agent_id, tool_name, args, chat_id)))
+                parallel_items.append((idx, tool_name, self._execute_with_retry_audited(websocket, agent_id, tool_name, args, chat_id, user_id)))
 
         # Collect results in original order
         results_by_idx: Dict[int, Any] = {}
@@ -7489,7 +7583,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # Execute serial (write/system) tools one at a time
         for idx, tool_name, agent_id, args in serial_items:
             try:
-                results_by_idx[idx] = await self._execute_with_retry_audited(websocket, agent_id, tool_name, args, chat_id)
+                results_by_idx[idx] = await self._execute_with_retry_audited(websocket, agent_id, tool_name, args, chat_id, user_id)
             except Exception as e:
                 results_by_idx[idx] = e
 
@@ -7730,13 +7824,20 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 logger.debug(f"A2A fallback discovery failed for {agent_id}: {e}")
 
         return MCPResponse(
-            request_id=f"req_{tool_name}_{int(time.time() * 1000)}",
+            request_id=f"req_{tool_name}_{_uuid.uuid4().hex}",
             error={"message": f"Agent {agent_id} not connected via WebSocket or A2A", "retryable": False},
         )
 
     async def _execute_via_websocket(self, agent_id: str, tool_name: str, args: Dict, timeout: float = 30.0, ui_websocket=None) -> Optional[MCPResponse]:
         """Execute a tool call via WebSocket (internal agents)."""
-        request_id = f"req_{tool_name}_{int(time.time() * 1000)}"
+        # Cryptographically-random, collision-free request id. A time-based id
+        # (``req_<tool>_<ms>``) collided when two same-tool calls landed in one
+        # millisecond — resolving the WRONG pending future — and, being sent to
+        # the agent in the dispatch, was GUESSABLE: a malicious agent could
+        # forge a hop's ``parent_request_id`` to resolve another dispatch's
+        # authority from ``_dispatch_context`` (confused-deputy). uuid4 is
+        # os.urandom-backed, so neither collision nor guessing is feasible.
+        request_id = f"req_{tool_name}_{_uuid.uuid4().hex}"
 
         request = MCPRequest(
             request_id=request_id,
@@ -7798,7 +7899,11 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         """
         import copy
         from shared.local_transport import LoopbackSocket
-        request_id = f"req_{tool_name}_{int(time.time() * 1000)}"
+        # Cryptographically-random, collision-free request id (see
+        # _execute_via_websocket) — this id keys both ``pending_requests`` and
+        # ``_dispatch_context``, the record a mediated hop resolves authority
+        # from, so it must be neither collidable nor guessable.
+        request_id = f"req_{tool_name}_{_uuid.uuid4().hex}"
         # Private copy so in-agent credential decryption never writes plaintext
         # back into the caller's args dict (callers may retain/audit it).
         call_args = copy.deepcopy(args)
@@ -7872,7 +7977,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         from a2a.types import Message as A2AMessage, Role, Task, Message as A2AMsg
         from shared.a2a_bridge import make_data_part, a2a_response_to_mcp_response
 
-        request_id = f"a2a_{tool_name}_{int(time.time() * 1000)}"
+        request_id = f"a2a_{tool_name}_{_uuid.uuid4().hex}"
 
         base_url = self.a2a_clients.get(agent_id) or self.agent_urls.get(agent_id)
         if not base_url:
@@ -8106,7 +8211,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         if agent_id not in self.agents and agent_id not in self.local_agents:
             raise RuntimeError(f"agent {agent_id!r} is not connected")
 
-        request_id = f"stream_{tool_name}_{int(time.time() * 1000)}_{stream_id[-6:]}"
+        request_id = f"stream_{tool_name}_{_uuid.uuid4().hex}_{stream_id[-6:]}"
 
         # Inject per-user credentials (E2E encrypted — only the agent can decrypt)
         full_args = dict(args)
@@ -9233,21 +9338,32 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         params = dict(cd.get("_source_params") or {})
         if isinstance(params_patch, dict):
             params.update(params_patch)
-        # Per-user credentials ride along exactly as on the chat path.
-        args = dict(params)
-        try:
-            creds = await asyncio.to_thread(
-                self.credential_manager.get_agent_credentials_encrypted, user_id, agent_id)
-            if creds:
-                args["_credentials"] = creds
-                args["_credentials_encrypted"] = True
-        except Exception:
-            logger.debug("component_action: credential injection failed", exc_info=True)
 
         lock = self._workspace_locks.setdefault(chat_id, asyncio.Lock())
         try:
             async with lock:  # deterministic ordering per chat (contract §Concurrency)
-                result = await self._execute_with_retry(websocket, agent_id, tool_name, args)
+                # FR-036: a deterministic component re-execution must face the
+                # SAME gate stack as a chat dispatch of the same tool — the
+                # policy engine, taint gate, supervisor/HITL, PRE_TOOL_USE hook,
+                # RFC 8693 delegation mint, per-user credential + LLM-credential
+                # injection, and the concurrency cap — not merely the
+                # security-flag + permission pre-check above (kept as a fast
+                # fail). Without this, clicking Refresh/invoke on a saved
+                # component ran a policy-denied or HITL-confirm-required tool
+                # that the chat path would have blocked.
+                auth = await self._authorize_and_prepare(
+                    websocket, agent_id, tool_name, dict(params), chat_id, user_id)
+                if isinstance(auth, GateRefusal):
+                    await self._audit_workspace_denial(
+                        user_id, chat_id, component_id,
+                        (str((auth.response.error or {}).get("message"))[:200]
+                         if auth.response and auth.response.error else "gate_refused"))
+                    if auth.render_components:
+                        await self.send_ui_render(
+                            websocket, auth.render_components,
+                            target=auth.render_target or "chat")
+                    return
+                result = await self._execute_with_retry(websocket, agent_id, tool_name, auth.args)
                 if result and result.ui_components and not result.error:
                     for comp in result.ui_components:
                         if isinstance(comp, dict):

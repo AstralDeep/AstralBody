@@ -203,6 +203,12 @@ async def _run_one(orch, spec: Dict[str, Any], *, user_id: str,
     task = BackgroundTask(task_id=f"sub-{uuid.uuid4().hex[:8]}",
                           chat_id=sub_chat, user_id=user_id)
     vws = VirtualWebSocket(task)
+    # A sub-task is FOREGROUND work the user is waiting on: resolve its LLM
+    # (ReAct planning + agent-side LLM tools) to the requesting user, not the
+    # admin SYSTEM account a bare VirtualWebSocket would default to (054
+    # FR-019). Without this a fully-configured user whose deployment has no
+    # system credential gets every decomposition failing.
+    vws.llm_context_user_id = user_id
     # The sub-task inherits the parent's session authority (same human
     # principal, same gates) but may use only the tools the parent turn itself
     # offered — never a superset (FR-020). Binding the parent's claims onto the
@@ -210,6 +216,12 @@ async def _run_one(orch, spec: Dict[str, Any], *, user_id: str,
     parent_claims = orch.ui_sessions.get(parent_ws) if parent_ws is not None else None
     if isinstance(parent_claims, dict):
         orch.ui_sessions[vws] = dict(parent_claims)
+    # Bind this sub-task's budget slice as the sub-chat's chain budget so hops
+    # started INSIDE the sub-task charge the slice — whose ``charge`` also
+    # debits the parent turn's global ceiling — rather than a fresh parentless
+    # budget keyed on the sub-chat. handle_chat_message's turn-reset preserves
+    # a pre-bound slice (a budget with a parent); we remove it in ``finally``.
+    orch._chain_budgets[sub_chat] = budget
 
     await _audit_subtask(orch, user_id=user_id, chat_id=parent_chat_id,
                          correlation_id=correlation_id, action="spawned",
@@ -242,6 +254,7 @@ async def _run_one(orch, spec: Dict[str, Any], *, user_id: str,
         return SubtaskResult(title, status="failed", detail=str(exc)[:200])
     finally:
         orch.ui_sessions.pop(vws, None)
+        orch._chain_budgets.pop(sub_chat, None)
         try:
             await vws.close()
         except Exception:  # pragma: no cover — close is best-effort

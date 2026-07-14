@@ -60,6 +60,13 @@ def principal_id(run_id: str, benchmark: str, role: str = "primary") -> str:
     return f"{base}__{benchmark}__{role}"
 
 
+def _like_escape(s: str) -> str:
+    """Escape SQL ``LIKE`` metacharacters so a literal prefix is matched
+    literally (paired with ``ESCAPE '\\'``). The underscores in ``__bench__``
+    and the ``__`` separators are otherwise single-char wildcards."""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def assert_namespaced(user_id: str) -> None:
     """Guard: refuse to operate on a non-namespaced principal (never touch real users)."""
     if NAMESPACE_PREFIX not in user_id:
@@ -78,7 +85,11 @@ def teardown(conn, run_id: str) -> int:
     before deleting (never a wildcard).
     """
     ns = run_id if run_id.startswith(NAMESPACE_PREFIX) else NAMESPACE_PREFIX + run_id
-    like = ns + "%"
+    # Anchor to the ``<ns>__`` separator every principal carries (principal_id
+    # appends ``__<benchmark>__<role>``) with LIKE metacharacters escaped —
+    # otherwise ``__bench__abc%`` (no boundary, unescaped ``_`` wildcards) also
+    # matched run "abcd"'s principals, deleting a concurrent run's rows.
+    like = _like_escape(ns + "__") + "%"
     deleted = 0
     with conn.cursor() as cur:
         # Commit per table: a failed DELETE would otherwise poison the shared
@@ -89,7 +100,7 @@ def teardown(conn, run_id: str) -> int:
         for table in _DELETABLE_USER_TABLES:
             try:
                 cur.execute(
-                    f"DELETE FROM {table} WHERE user_id LIKE %s", (like,)
+                    f"DELETE FROM {table} WHERE user_id LIKE %s ESCAPE '\\'", (like,)
                 )
                 count = cur.rowcount or 0
                 conn.commit()
