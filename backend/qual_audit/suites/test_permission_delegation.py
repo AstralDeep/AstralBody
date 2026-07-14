@@ -17,7 +17,14 @@ USER_ID = "researcher-001"
 
 @pytest.fixture
 def configured_perm_manager(perm_manager):
-    """ToolPermissionManager with nefarious-style tool scopes registered."""
+    """ToolPermissionManager with nefarious-style tool scopes registered.
+
+    Permissions are persisted, and these cases share one fixed (user, agent)
+    pair — so each starts from a clean slate. Without this, the override row
+    ``test_per_tool_override`` writes survives into the NEXT run of the suite
+    and fails ``test_permission_change_immediate_effect``, which sets only the
+    scope and expects the tool allowed.
+    """
     tool_scope_map = {
         "read_user_profile": "tools:read",
         "read_system_logs": "tools:read",
@@ -26,6 +33,8 @@ def configured_perm_manager(perm_manager):
         "exfiltrate_data": "tools:system",
     }
     perm_manager.register_tool_scopes(AGENT_ID, tool_scope_map)
+    for user in (USER_ID, "user-alpha", "user-beta"):
+        perm_manager.remove_agent_permissions(user, AGENT_ID)
     return perm_manager
 
 

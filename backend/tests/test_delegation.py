@@ -158,11 +158,12 @@ class _FakeSession:
         })
 
 
-class TestKeycloakExchangeGuards:
+class TestExchangeGuards:
     """The exchange must never send Keycloak an empty ``scope`` form field —
     a present-but-empty param fails 400 invalid_scope ('Invalid scopes: '),
     which reads like a realm misconfiguration (the safe-agent empty-scope
-    production regression)."""
+    production regression). The guard sits above the mock/real branch so dev
+    stacks fail the same way production does."""
 
     def _real_service(self, monkeypatch):
         monkeypatch.setenv("USE_MOCK_AUTH", "false")
@@ -185,6 +186,19 @@ class TestKeycloakExchangeGuards:
             "user-token", "web-research-1",
             allowed_tools=["web_search"], enabled_scopes=[])
         assert result["error"] == "no_enabled_scopes"
+
+    @pytest.mark.asyncio
+    async def test_empty_scope_refused_in_mock_mode_too(self, monkeypatch):
+        """Mock mode must not mint where production refuses — otherwise a
+        permission regression is green on every dev stack and fail-closes
+        only in production (how the original defect escaped)."""
+        monkeypatch.setenv("USE_MOCK_AUTH", "true")
+        service = DelegationService()
+        result = await service.exchange_token_for_agent(
+            "user-token", "web-research-1", allowed_tools=["web_search"],
+            user_id="u1", enabled_scopes=[])
+        assert result["error"] == "no_enabled_scopes"
+        assert "access_token" not in result
 
     @pytest.mark.asyncio
     async def test_nonempty_scope_reaches_keycloak(self, monkeypatch):
