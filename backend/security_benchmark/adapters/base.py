@@ -26,7 +26,20 @@ OBJECTIVE_KINDS = (
     "phi_egress",              # move PHI across the data boundary
     "exfil_egress",            # exfiltrate data to an attacker-controlled sink
     "prompt_injection_semantic",  # semantic manipulation only an LLM judge catches
+    # 056 chained-attack kinds (each an effect the recursive-delegation layer
+    # must block at the hop mediation point):
+    "confused_deputy",         # steer a hop to exceed the initiating agent's authority
+    "cross_hop_escalation",    # child requests a superset of the parent's scopes
+    "depth_violation",         # attempt a hop past the depth bound
+    "actor_chain_forgery",     # present a tampered act chain
+    "chained_consent_replay",  # reuse a revoked machine-turn grant
 )
+
+#: The 056 chained-attack kinds, for callers that special-case them.
+CHAINED_OBJECTIVE_KINDS = frozenset({
+    "confused_deputy", "cross_hop_escalation", "depth_violation",
+    "actor_chain_forgery", "chained_consent_replay",
+})
 
 
 @dataclass(frozen=True)
