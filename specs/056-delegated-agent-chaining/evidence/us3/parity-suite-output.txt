@@ -1,0 +1,38 @@
+============================= test session starts ==============================
+platform linux -- Python 3.11.15, pytest-9.1.1, pluggy-1.6.0 -- /usr/local/bin/python
+cachedir: .pytest_cache
+rootdir: /app/backend
+configfile: pytest.ini
+plugins: asyncio-1.4.0, anyio-4.14.2
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 27 items
+
+tests/test_dispatch_parity.py::test_same_refusal_on_single_and_parallel[security_flag] PASSED [  3%]
+tests/test_dispatch_parity.py::test_same_refusal_on_single_and_parallel[permission] PASSED [  7%]
+tests/test_dispatch_parity.py::test_same_refusal_on_single_and_parallel[policy] PASSED [ 11%]
+tests/test_dispatch_parity.py::test_same_refusal_on_single_and_parallel[taint] PASSED [ 14%]
+tests/test_dispatch_parity.py::test_same_refusal_on_single_and_parallel[supervisor] PASSED [ 18%]
+tests/test_dispatch_parity.py::test_same_refusal_on_single_and_parallel[hitl] PASSED [ 22%]
+tests/test_dispatch_parity.py::test_same_refusal_on_single_and_parallel[delegation_required] PASSED [ 25%]
+tests/test_dispatch_parity.py::test_same_refusal_on_single_and_parallel[cap] PASSED [ 29%]
+tests/test_dispatch_parity.py::test_no_agent_refusal_matches PASSED      [ 33%]
+tests/test_dispatch_parity.py::test_parallel_now_mints_delegation_token PASSED [ 37%]
+tests/test_dispatch_parity.py::test_audit_rows_equivalent_on_both_paths PASSED [ 40%]
+tests/test_dispatch_parity.py::test_meta_tool_parity_in_parallel_batch PASSED [ 44%]
+tests/test_dispatch_parity.py::test_real_agent_hop_cannot_reach_meta_tools PASSED [ 48%]
+tests/test_hop_concurrency_accounting.py::test_hop_charges_both_slots PASSED [ 51%]
+tests/test_hop_concurrency_accounting.py::test_direct_call_charges_only_executing_slot PASSED [ 55%]
+tests/test_hop_concurrency_accounting.py::test_initiator_fanout_bounded_by_own_cap PASSED [ 59%]
+tests/test_hop_concurrency_accounting.py::test_executing_slot_cap_still_applies PASSED [ 62%]
+tests/test_hop_concurrency_accounting.py::test_release_frees_both_slots PASSED [ 66%]
+tests/test_hop_concurrency_accounting.py::test_self_hop_charges_single_slot_once PASSED [ 70%]
+tests/test_security_gates_wiring.py::test_supervisor_blocks_unrequested_destructive PASSED [ 74%]
+tests/test_security_gates_wiring.py::test_supervisor_allows_when_intent_present PASSED [ 77%]
+tests/test_security_gates_wiring.py::test_supervisor_allows_non_destructive PASSED [ 81%]
+tests/test_security_gates_wiring.py::test_supervisor_off_is_noop PASSED  [ 85%]
+tests/test_security_gates_wiring.py::test_hitl_blocks_egress PASSED      [ 88%]
+tests/test_security_gates_wiring.py::test_hitl_blocks_irreversible PASSED [ 92%]
+tests/test_security_gates_wiring.py::test_hitl_allows_benign PASSED      [ 96%]
+tests/test_security_gates_wiring.py::test_hitl_off_is_noop PASSED        [100%]
+
+============================== 27 passed in 0.46s ==============================

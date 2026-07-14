@@ -1,0 +1,22 @@
+2026-07-14 00:53:19,645 - astral.perf - INFO - perf boot.init_db duration_ms=6
+2026-07-14 00:53:19,651 - DelegationService - INFO - DelegationService configured for Keycloak: https://iam.ai.uky.edu/realms/Astral (DPoP enabled)
+2026-07-14 00:53:19,660 - Onboarding.Seed - INFO - Tutorial seed loaded (0 rows affected on this run)
+2026-07-14 00:53:19,672 - Orchestrator.Hooks - INFO - Hook registered: post_tool_use -> on_tool_use
+2026-07-14 00:53:19,672 - Orchestrator.Hooks - INFO - Hook registered: post_tool_failure -> on_tool_use
+2026-07-14 00:53:19,672 - Orchestrator - INFO - Knowledge synthesis system initialized
+2026-07-14 00:53:19,675 - Orchestrator - ERROR - Delegation required but unavailable: agent=web-research-1 user=u1 — refusing dispatch
+2026-07-14 00:53:19,675 - Orchestrator - ERROR - Delegation required but unavailable: agent=web-research-1 user=u1 — refusing dispatch
+== 1. Production posture, no session token: both paths refuse fail-closed ==
+single  : Tool execution is disabled: delegated authorization (RFC 8693 token exchange) is unavailable for agent 'web-re
+parallel: Tool execution is disabled: delegated authorization (RFC 8693 token exchange) is unavailable for agent 'web-re
+PASS — identical fail-closed refusals
+
+== 2. Token available: the parallel batch now carries _delegation_token per call ==
+underscore args per parallel call: {"web_search": ["_delegation_token"], "fetch_page": ["_delegation_token"]}
+PASS — every parallel call dispatched scoped (previously UNSCOPED)
+
+== 3. Meta-tool parity: __scheduler__/__memory__ dispatch from a parallel batch ==
+results: ['sched-ok', 'mem-ok']
+PASS — meta-tools no longer dead-end in a parallel batch
+
+US3 LIVE VERIFICATION: ALL CHECKS PASSED

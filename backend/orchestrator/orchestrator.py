@@ -658,6 +658,10 @@ class Orchestrator:
         self.concurrency_cap = ConcurrencyCap(max_per_user_agent=3)
         # Maps cap_job_id -> (user_id, agent_id) so terminal ToolProgress can release the right slot.
         self._pending_cap_entries: Dict[str, tuple] = {}
+        # 056 US3 (FR-019): a chained hop's long-running work ALSO charges the
+        # initiating agent's (user, agent) slot; this maps cap_job_id → that
+        # second slot so every release site frees both sides.
+        self._hop_cap_entries: Dict[str, tuple] = {}
         # Maps cap_job_id -> {user_id, agent_id, chat_id, tool_name} for long-running
         # jobs, so a job's progress + terminal result can be routed to (and
         # persisted in) the originating CHAT — not a single ephemeral socket —
@@ -6451,6 +6455,38 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                         ui_components=[alert.to_dict()]),
                     render_components=[alert.to_dict()],
                     render_target="chat")
+            # 056 US3 (FR-019): a chained hop charges BOTH the executing
+            # agent's slot (above) and the initiating agent's slot, so fan-out
+            # cannot multiply a user's effective concurrency past the per-agent
+            # cap. Reject-not-queue is preserved; a rejection surfaces to the
+            # requester as an honest per-call failure.
+            if initiating_agent_id and initiating_agent_id != agent_id:
+                hop_acquired = await self.concurrency_cap.acquire(
+                    user_id, initiating_agent_id, cap_job_id)
+                if not hop_acquired:
+                    await self.concurrency_cap.release(user_id, agent_id, cap_job_id)
+                    inflight = self.concurrency_cap.inflight_jobs(
+                        user_id, initiating_agent_id)
+                    max_n = self.concurrency_cap.max_per_user_agent
+                    err_msg = (
+                        f"You already have {max_n} jobs running on "
+                        f"'{initiating_agent_id}'. "
+                        f"Wait for one to finish or cancel one before starting another. "
+                        f"(Running: {', '.join(inflight)})"
+                    )
+                    logger.info(
+                        "ConcurrencyCap rejected hop dispatch (initiator slot): "
+                        "user=%s initiator=%s callee=%s tool=%s",
+                        user_id, initiating_agent_id, agent_id, tool_name,
+                    )
+                    alert = Alert(message=err_msg, variant="warning")
+                    return GateRefusal(
+                        response=MCPResponse(
+                            error={"message": err_msg, "retryable": False},
+                            ui_components=[alert.to_dict()]),
+                        render_components=[alert.to_dict()],
+                        render_target="chat")
+                self._hop_cap_entries[cap_job_id] = (user_id, initiating_agent_id)
             args["_cap_job_id"] = cap_job_id
             self._pending_cap_entries[cap_job_id] = (user_id, agent_id)
             # Remember the chat this long-running job belongs to so its progress
@@ -6623,6 +6659,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 await self.concurrency_cap.release(user_id, agent_id, cap_job_id)
             finally:
                 self._pending_cap_entries.pop(cap_job_id, None)
+            await self._release_hop_cap_slot(cap_job_id)
 
         # Hook: POST_TOOL_USE or POST_TOOL_FAILURE
         if flags.is_enabled("hook_system"):
@@ -6682,6 +6719,18 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
     # Scopes considered safe for concurrent execution (read-only operations)
     _PARALLEL_SAFE_SCOPES = frozenset({"tools:read", "tools:search"})
     _MAX_PARALLEL_CONCURRENCY = 10
+
+    async def _release_hop_cap_slot(self, cap_job_id: str) -> None:
+        """Release the initiating agent's slot of a dual-charged hop (056
+        FR-019). No-op when the job was not a hop. Called from every site
+        that releases the executing agent's slot."""
+        entry = self._hop_cap_entries.pop(cap_job_id, None)
+        if entry:
+            u_id, a_id = entry
+            try:
+                await self.concurrency_cap.release(u_id, a_id, cap_job_id)
+            except Exception:
+                logger.debug("hop cap release failed", exc_info=True)
 
     async def _execute_with_retry_audited(self, websocket, agent_id, tool_name, args, chat_id=None):
         """Dispatch a tool with the SAME ToolDispatchAudit start/end events as the
@@ -6760,17 +6809,14 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             # 055 US2: LLM-authored params as written (see execute_single_tool).
             stream_params = dict(args)
 
-            if chat_id:
-                args = await asyncio.to_thread(
-                    self._map_file_paths, chat_id, args, user_id=user_id)
-                args["session_id"] = chat_id
-                if user_id:
-                    args["user_id"] = user_id
-
             # agent_id resolved above (before the JSON parse) so the parse-fail
             # error path can include it in the prepared tuple.
 
-            # Feature 027 — meta-tools dispatch directly (see execute_single_tool).
+            # Feature 027/030/039 — meta-tools dispatch directly, with the SAME
+            # four reserved pseudo-agent branches as the single path (056 US3
+            # T008/FR-018 — previously only __orchestrator__ worked here). The
+            # exemption stays limited to these reserved ids; real-agent calls
+            # (and therefore chained hops) can never reach a meta-tool handler.
             if agent_id == "__orchestrator__":
                 from orchestrator import agentic_creation
                 prepared.append((idx, tc, tool_name, agent_id, None,
@@ -6778,47 +6824,47 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                                      self, tool_name, args, user_id=user_id,
                                      chat_id=chat_id, websocket=websocket)))
                 continue
-
-            if user_id and agent_id:
-                creds = self.credential_manager.get_agent_credentials_encrypted(user_id, agent_id)
-                if creds:
-                    args["_credentials"] = creds
-                    args["_credentials_encrypted"] = True
-
-            # System-level security block
-            agent_flags = self.security_flags.get(agent_id, {}) if agent_id else {}
-            if agent_id and tool_name in agent_flags and agent_flags[tool_name].get("blocked"):
-                reason = agent_flags[tool_name].get("reason", "Security threat detected")
-                err_msg = f"Tool '{tool_name}' is system-blocked: {reason}"
-                logger.warning(f"Security block (parallel): agent={agent_id} tool={tool_name}")
-                async def _sec_err(msg=err_msg):
-                    return MCPResponse(error={"message": msg, "retryable": False},
-                                       ui_components=[Alert(message=msg, variant="error").to_dict()])
-                prepared.append((idx, tc, tool_name, agent_id, None, _sec_err()))
+            if agent_id == "__scheduler__":
+                from orchestrator import scheduling_chat
+                prepared.append((idx, tc, tool_name, agent_id, None,
+                                 scheduling_chat.handle_meta_tool(
+                                     self, tool_name, args, user_id=user_id,
+                                     chat_id=chat_id, websocket=websocket)))
+                continue
+            if agent_id == "__memory__":
+                from orchestrator import memory_chat
+                prepared.append((idx, tc, tool_name, agent_id, None,
+                                 memory_chat.handle_meta_tool(
+                                     self, tool_name, args, user_id=user_id,
+                                     chat_id=chat_id, websocket=websocket)))
+                continue
+            if agent_id == "__desktop_codegen__":
+                from orchestrator import desktop_codegen
+                prepared.append((idx, tc, tool_name, agent_id, None,
+                                 desktop_codegen.handle_meta_tool(
+                                     self, tool_name, args, user_id=user_id,
+                                     chat_id=chat_id, websocket=websocket)))
                 continue
 
-            # Permission check
-            if user_id and agent_id and not await asyncio.to_thread(
-                    self.tool_permissions.is_tool_allowed, user_id, agent_id, tool_name):
-                err_msg = f"Tool '{tool_name}' is restricted for this agent. Update permissions in the sidebar to enable it."
-                logger.warning(f"Permission denied (parallel): user={user_id} agent={agent_id} tool={tool_name}")
-                async def _perm_err(msg=err_msg):
-                    return MCPResponse(error={"message": msg, "retryable": False},
-                                       ui_components=[Alert(message=msg, variant="error").to_dict()])
-                prepared.append((idx, tc, tool_name, agent_id, None, _perm_err()))
+            # 056 US3 (T007/FR-017): the FULL single-path gate stack via the
+            # shared authorizer. The parallel path previously applied only
+            # creds/security/permission/no-agent and skipped policy, taint,
+            # supervisor, HITL, the RFC 8693 delegation mint (dispatching
+            # UNSCOPED where the single path refuses fail-closed), the 054
+            # LLM-credential surfacing, PRE_TOOL_USE, and the concurrency
+            # cap. Refusals keep this path's batched delivery: the refusal
+            # response carries its error and is rendered with the error batch
+            # below, exactly like any other failed parallel call.
+            auth = await self._authorize_and_prepare(
+                websocket, agent_id, tool_name, args, chat_id, user_id,
+                stream_params=stream_params)
+            if isinstance(auth, GateRefusal):
+                async def _refused(resp=auth.response):
+                    return resp
+                prepared.append((idx, tc, tool_name, agent_id, None, _refused()))
                 continue
 
-            if not agent_id or (agent_id not in self.agents and agent_id not in self.a2a_clients and agent_id not in self.local_agents):
-                async def _no_agent(tn=tool_name):
-                    return MCPResponse(error={"message": f"No agent for {tn}"})
-                prepared.append((idx, tc, tool_name, agent_id, None, _no_agent()))
-                continue
-
-            # 055 US2: streaming-capable tools in a parallel wave subscribe too.
-            await self._auto_subscribe_stream_artifacts(
-                websocket, chat_id, user_id, tool_name, stream_params)
-
-            prepared.append((idx, tc, tool_name, agent_id, args, None))
+            prepared.append((idx, tc, tool_name, agent_id, auth.args, None))
 
         if not prepared:
             return []
@@ -6840,7 +6886,10 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 else:
                     serial_items.append((idx, tool_name, agent_id, args))
             else:
-                parallel_items.append((idx, tool_name, self._execute_with_retry(websocket, agent_id, tool_name, args)))
+                # 056 US3: audit parity holds on this branch too (040 FR-032
+                # routed only the concurrency-safety branches through the
+                # audited wrapper; flag-off dispatches were unaudited).
+                parallel_items.append((idx, tool_name, self._execute_with_retry_audited(websocket, agent_id, tool_name, args, chat_id)))
 
         # Collect results in original order
         results_by_idx: Dict[int, Any] = {}
@@ -6875,6 +6924,28 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # Reassemble in original order
         ordered = [results_by_idx.get(i) for i in range(len(tool_calls))]
         tool_names = [tc.function.name for tc in tool_calls]
+
+        # 056 US3: the authorizer now acquires the concurrency cap for
+        # long-running parallel dispatches — release slots for errored/absent
+        # results here, since no terminal ToolProgress will arrive to do it
+        # (mirrors the single path's release-on-error).
+        args_by_idx = {p[0]: p[4] for p in prepared if p[4] is not None}
+        for _idx, _res in enumerate(ordered):
+            _errored = (
+                _res is None or isinstance(_res, Exception)
+                or (getattr(_res, "error", None) is not None))
+            if not _errored:
+                continue
+            _cap_id = (args_by_idx.get(_idx) or {}).get("_cap_job_id")
+            if not _cap_id:
+                continue
+            _entry = self._pending_cap_entries.pop(_cap_id, None)
+            if _entry:
+                try:
+                    await self.concurrency_cap.release(_entry[0], _entry[1], _cap_id)
+                except Exception:
+                    logger.debug("cap release failed", exc_info=True)
+            await self._release_hop_cap_slot(_cap_id)
 
         results = ordered
         
@@ -9112,6 +9183,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     await self.concurrency_cap.release(u_id, a_id, cap_job_id)
                 except Exception:
                     logger.debug("cap release failed", exc_info=True)
+            await self._release_hop_cap_slot(cap_job_id)
 
     def _sockets_on_chat(self, user_id: str, chat_id: str) -> List[Any]:
         """Every socket ``user_id`` currently has open on ``chat_id`` (for
