@@ -106,12 +106,12 @@ Setup → Foundational → **US1** (Phase A, MVP) → **US3** (Phase B, boundary
 
 ### Tests for User Story 2
 
-- [ ] T024 [P] [US2] Analyze-gate rule tests (each A–L check pass/fail + cited offending field) in `backend/tests/test_agent_analyze.py`
-- [ ] T025 [P] [US2] Byte-identity test between `backend/agent_constitution/agent_constitution.md` and `specs/057-byo-client-agents/agent-constitution.md` in `backend/tests/test_agent_constitution_identity.py`
+- [X] T024 [P] [US2] Analyze-gate rule tests (each A–L check pass/fail + cited offending field) in `backend/tests/test_agent_analyze.py`
+- [X] T025 [P] [US2] Byte-identity test between `backend/agent_constitution/agent_constitution.md` and `specs/057-byo-client-agents/agent-constitution.md` in `backend/tests/test_agent_constitution_identity.py`
 
 ### Implementation for User Story 2
 
-- [ ] T026 [US2] `backend/orchestrator/agent_analyze.py`: deterministic `check(draft_spec, constitution) → AnalyzeResult(passed, constitution_version, violations[])` implementing A–L per `contracts/analyze-gate.md` (rule-decided; LLM only for phrasing)
+- [X] T026 [US2] `backend/orchestrator/agent_analyze.py`: deterministic `check(draft_spec, constitution) → AnalyzeResult(passed, constitution_version, violations[])` implementing A–L per `contracts/analyze-gate.md` (rule-decided; LLM only for phrasing)
 - [ ] T027 [US2] Wire Analyze **immediately before** `generate_code`: on `passed=False` do not generate and do not advance (structural FR-003/SC-004); re-run on revision + on `revalidation_required` — in `backend/orchestrator/agentic_creation.py`
 - [ ] T028 [US2] 5-phase authoring state machine over `draft_agents` (`specify|clarify|plan|tasks|analyze|generate`) with mandatory Clarify+Analyze gates, in `backend/orchestrator/agent_authoring.py`
 - [ ] T029 [US2] `backend/webrender/chrome/surfaces/authoring.py` — the `agent_authoring` surface exporting **both** `render()` (web HTML) and `components()` (native SDUI); register in `surfaces/__init__.py::SURFACE_MODULES`; `chrome_author_specify/_clarify/_plan/_tasks/_analyze/_generate` handlers returning `("agent_authoring", {session_id}, notice)`; assistant-drafted + user-editable artifact per phase (per `contracts/authoring-surface.md`)
