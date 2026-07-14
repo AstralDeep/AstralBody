@@ -42,10 +42,14 @@ The decoded payload the mint produces and the enforcement/audit path consumes:
   "exp":  <parent exp>,                          # capped at parent (552, 560)
   "delegation": true,
   "delegation_depth":     <parent depth + 1>,    # refused past max (533-541)
-  "max_delegation_depth": <min(recorded, 3)>,    # DEFAULT_MAX_DELEGATION_DEPTH (delegation.py:416)
-  "cnf":  {"jkt": <DPoP thumbprint>}             # carried from parent (565-566)
+  "max_delegation_depth": <min(recorded, 3)>     # DEFAULT_MAX_DELEGATION_DEPTH (delegation.py:416)
 }
 ```
+
+> Note: the `cnf`/DPoP binding shown in earlier drafts was **removed** — DPoP
+> was retired from the delegation service (it broke the non-DPoP Keycloak login
+> flow on the shared `astral-frontend` client and was vestigial in the
+> orchestrator-mediated model). Delegated tokens are plain bearer tokens.
 
 **Invariants** (already property-tested by 048's `test_recursive_delegation.py`,
 14 tests; this feature must keep them green with the flag on):
