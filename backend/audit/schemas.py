@@ -62,6 +62,11 @@ EVENT_CLASSES = (
     # .approved / .rejected / .discarded / .revision_applied /
     # .revision_rolled_back — one correlation_id per capability gap.
     "agent_lifecycle",
+    # Feature 056 — delegated agent chaining. Per-hop provenance records
+    # (delegation.hop.mint / delegation.hop.enforce pairs sharing the turn's
+    # correlation_id) ride the hash chain so a full delegation chain is
+    # reconstructable from the audit log alone (048 T018 / 056 FR-026).
+    "delegation",
 )
 
 OUTCOMES = ("in_progress", "success", "failure", "interrupted")

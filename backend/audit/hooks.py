@@ -37,6 +37,17 @@ def actor_principal_from_claims(claims: Optional[Dict[str, Any]]) -> tuple[str, 
     """
     if not claims:
         return "legacy", "legacy"
+    # 056 FR-014: machine-initiated turns (scheduled runs, parser replay,
+    # draft self-tests) carry a synthetic machine-context claims dict — set by
+    # MachineTurnAuthority on the turn's virtual socket — instead of a session
+    # JWT. Resolve it BEFORE the legacy fallback so machine-turn records are
+    # recorded and attributed to machine:<class> acting for the owning human,
+    # never dropped as "legacy"/"unknown" (SC-005).
+    machine_class = claims.get("machine_class")
+    if machine_class:
+        owner = claims.get("sub")
+        if owner:
+            return owner, f"machine:{machine_class}"
     user = claims.get("sub", "legacy")
     act = claims.get("act") or {}
     principal = act.get("sub") if isinstance(act, dict) and act.get("sub") else user
@@ -235,14 +246,24 @@ class ToolDispatchAudit:
         self, *, claims: Optional[Dict[str, Any]], agent_id: Optional[str],
         tool_name: str, chat_id: Optional[str],
         args_meta: Optional[Dict[str, Any]] = None,
+        correlation_id: Optional[str] = None,
     ):
         self._claims = claims
         self._agent_id = agent_id
         self._tool_name = tool_name
         self._chat_id = chat_id
-        self._correlation_id = make_correlation_id()
+        # 056 US1: a chained hop passes its delegation.hop.mint/.enforce
+        # correlation id here so the hop's tool.start/end pair shares it —
+        # the whole hop reconstructs from one id (SC-003).
+        self._correlation_id = correlation_id or make_correlation_id()
         self._started_at = now_utc()
         self._args_meta = self._sanitize_args_meta(args_meta or {})
+        # 056 FR-014: machine-turn records carry the run's authorizing consent
+        # reference so authority is attributable from the row alone — while
+        # cost attribution stays on the system LLM credential (054), the two
+        # never blur.
+        if claims and claims.get("machine_class") and claims.get("consent_ref"):
+            self._args_meta["consent_ref"] = str(claims["consent_ref"])
         self._outcome = "success"
         self._outcome_detail: Optional[str] = None
         self._outputs_meta: Dict[str, Any] = {}

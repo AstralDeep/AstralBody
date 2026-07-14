@@ -129,6 +129,18 @@ async def auto_continue_after_go_live(orch, *, requested_by: Optional[str],
         bg = BackgroundTask(task_id=f"autocont-{source_attachment_id[:8]}",
                             chat_id=source_chat_id, user_id=requested_by)
         vws = VirtualWebSocket(bg)
+        # 056 US2 (FR-012): the replay is a machine turn — derive its authority
+        # at the SAME shared seam scheduled runs use, so a real-agent reader
+        # tool dispatches delegated under the uploader's standing consent in
+        # production instead of being refused fail-closed. No derivable
+        # authority is NOT fatal here: the replay still runs (dev posture and
+        # non-agent paths are unchanged), and production simply refuses its
+        # real-agent dispatches exactly as it does today.
+        from orchestrator.chain_authority import AuthoritySkip
+        authority = await orch.derive_machine_authority(
+            user_id=requested_by, agent_id=None, turn_class="parser_replay")
+        if not isinstance(authority, AuthoritySkip):
+            orch._bind_machine_turn(vws, authority)
         try:
             await orch.handle_chat_message(
                 vws, str(original), source_chat_id, user_id=requested_by,
@@ -136,13 +148,15 @@ async def auto_continue_after_go_live(orch, *, requested_by: Optional[str],
                               "filename": att.filename, "category": att.category}],
             )
         finally:
+            orch._unbind_machine_turn(vws)
             try:
                 await vws.close()
             except Exception:  # pragma: no cover - close is best-effort
                 pass
         logger.info("autoparse.auto_continued",
                     extra={"user_id": requested_by, "chat_id": source_chat_id,
-                           "attachment_id": source_attachment_id, "extension": extension})
+                           "attachment_id": source_attachment_id, "extension": extension,
+                           "delegated": not isinstance(authority, AuthoritySkip)})
         return True
     except Exception:
         logger.debug("autoparse: auto-continue failed (non-fatal)", exc_info=True)

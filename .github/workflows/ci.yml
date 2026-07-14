@@ -181,7 +181,7 @@ jobs:
         run: docker load -i /tmp/astraldeep.tar
       # Same invocations as the test job, minus the coverage plumbing (the
       # flags-on run owns the coverage artifact).
-      - name: Backend suite with all six 055 flags off
+      - name: Backend suite with the 055 flags AND the 056 chaining flags off (SC-009 byte-equivalence)
         run: |
           docker run --rm --network host \
             -v "$PWD/backend:/app/backend" \
@@ -202,6 +202,8 @@ jobs:
             -e FF_ARTIFACT_EXPORT=0 \
             -e FF_ARTIFACT_SHARING=0 \
             -e FF_BG_CONTINUITY=0 \
+            -e FF_RECURSIVE_DELEGATION=0 \
+            -e FF_SCHEDULER_EXECUTION=0 \
             -w /app/backend --entrypoint bash astraldeep:ci \
             -c "python -m pytest -q -m 'not integration' && python -m pytest audit/tests llm_config/tests orchestrator/tests onboarding/tests personalization/tests scheduler/tests dreaming/tests verification/tests -q && python -m pytest tests/perf/concurrent_surfaces.py -q"
 

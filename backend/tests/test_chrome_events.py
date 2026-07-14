@@ -19,6 +19,20 @@ class FakeWS:
 
 
 class FakeOrch:
+
+    # 056 US2: machine-turn classes derive their root authority at the
+    # orchestrator's shared seam; a stand-in must model it. No durable consent
+    # exists in these tests, so the honest answer is an AuthoritySkip (the turn
+    # runs unbound, exactly as it does in dev posture today).
+    async def derive_machine_authority(self, **kwargs):
+        from orchestrator.chain_authority import AuthoritySkip
+        return AuthoritySkip("missing_consent", "test double")
+
+    def _bind_machine_turn(self, vws, authority):
+        pass
+
+    def _unbind_machine_turn(self, vws):
+        pass
     def __init__(self, roles=("user",)):
         self.ws = FakeWS()
         self.ui_sessions = {self.ws: {"realm_access": {"roles": list(roles)}}}
@@ -298,6 +312,14 @@ def test_chat_created_draft_appears_in_drafts_surface_and_discards(monkeypatch):
         await websocket.send_json({"type": "ui_render", "components": [
             {"type": "card", "title": "ok", "content": [{"type": "text", "content": "fine"}]}]})
     orch.handle_chat_message = handle_chat_message
+
+    # 056 US2: the self-test is a machine turn — model the authority seam.
+    async def derive_machine_authority(**kwargs):
+        from orchestrator.chain_authority import AuthoritySkip
+        return AuthoritySkip("missing_consent", "test double")
+    orch.derive_machine_authority = derive_machine_authority
+    orch._bind_machine_turn = lambda vws, authority: None
+    orch._unbind_machine_turn = lambda vws: None
 
     # 1. Created from chat
     res = run(ac.handle_meta_tool(

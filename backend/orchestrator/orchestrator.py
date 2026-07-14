@@ -50,6 +50,7 @@ from shared.protocol import (
     Message, MCPRequest, MCPResponse, UIEvent, UIRender, UIUpdate,
     RegisterAgent, RegisterUI, AgentCard, ToolProgress,
     ToolStreamData, ToolStreamEnd, ToolStreamCancel,
+    AgentHopRequest, AgentHopResponse,
     validate_streaming_metadata,
 )
 from astralprims import (
@@ -613,6 +614,37 @@ def _native_canvas_components(components) -> List[Dict[str, Any]]:
     return out
 
 
+class PreparedDispatch(NamedTuple):
+    """Outcome of ``Orchestrator._authorize_and_prepare`` when every gate
+    allows the call (056 US3). Carries the fully prepared arguments (path
+    mapping, credential/LLM-credential injection, policy rewrites, delegation
+    token, cap job id) so the caller only has to dispatch and deliver."""
+    args: Dict[str, Any]
+    stream_params: Dict[str, Any]
+    cap_job_id: Optional[str]
+    delegation_token: Optional[str]
+    # 056 US1: on a chained hop, the correlation id shared by the hop's
+    # delegation.hop.mint/.enforce records — threaded into ToolDispatchAudit
+    # so the hop's tool.start/end pair shares it too (SC-003 reconstruction).
+    hop_correlation_id: Optional[str] = None
+
+
+class GateRefusal(NamedTuple):
+    """Outcome of ``Orchestrator._authorize_and_prepare`` when a gate denies
+    the call (056 US3). ``response`` is the refusal the dispatch path must
+    return; ``render_components`` are the alert dicts the caller renders (may
+    differ from ``response.ui_components`` — e.g. the no-agent and
+    delegation-required refusals render an alert the response doesn't carry;
+    hook blocks render nothing). ``render_target`` preserves each gate's
+    historical ``send_ui_render`` target (None = default)."""
+    response: MCPResponse
+    render_components: Optional[List[Dict[str, Any]]] = None
+    render_target: Optional[str] = None
+    # 056: True when the refusal already emitted its own delegation hop record
+    # (the child-mint/enforce refusals do), so the wrapper does not double-audit.
+    hop_audited: bool = False
+
+
 class Orchestrator:
     def __init__(self):
         # 020-async-queries: background task manager for async chat processing
@@ -634,6 +666,21 @@ class Orchestrator:
         self.concurrency_cap = ConcurrencyCap(max_per_user_agent=3)
         # Maps cap_job_id -> (user_id, agent_id) so terminal ToolProgress can release the right slot.
         self._pending_cap_entries: Dict[str, tuple] = {}
+        # 056 US3 (FR-019): a chained hop's long-running work ALSO charges the
+        # initiating agent's (user, agent) slot; this maps cap_job_id → that
+        # second slot so every release site frees both sides.
+        self._hop_cap_entries: Dict[str, tuple] = {}
+        # 056 US1: orchestrator-side record of every in-flight agent dispatch
+        # (request_id → user/chat/ui-socket/agent/decoded parent token). A
+        # mediated hop request resolves its authority against THIS record —
+        # never against agent-supplied identity — closing the confused-deputy
+        # seam. Entries live exactly as long as their dispatch.
+        self._dispatch_context: Dict[str, Dict[str, Any]] = {}
+        # Strong refs to in-flight hop-mediation tasks (asyncio keeps weak refs).
+        self._background_hop_tasks: set = set()
+        # 056 US1/US4 (FR-021): per-turn global chain budgets keyed by chat id
+        # (reset at each turn start; lazily created on first hop).
+        self._chain_budgets: Dict[str, Any] = {}
         # Maps cap_job_id -> {user_id, agent_id, chat_id, tool_name} for long-running
         # jobs, so a job's progress + terminal result can be routed to (and
         # persisted in) the originating CHAT — not a single ephemeral socket —
@@ -1256,6 +1303,16 @@ class Orchestrator:
                     self.pending_requests[req_id].set_result(msg)
                 else:
                     logger.warning(f"Received response for unknown request: {req_id}")
+
+            elif isinstance(msg, AgentHopRequest):
+                # 056 US1: an agent requests a MEDIATED hop to a peer tool.
+                # Mediation runs as its own task so the (possibly loopback)
+                # control frame returns immediately and deep hop chains never
+                # nest inside this router's stack.
+                task = asyncio.create_task(
+                    self._handle_agent_hop_request(websocket, msg))
+                self._background_hop_tasks.add(task)
+                task.add_done_callback(self._background_hop_tasks.discard)
 
             elif isinstance(msg, ToolProgress):
                 # Long-running job progress. Handled UNCONDITIONALLY — this branch
@@ -3136,6 +3193,57 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
         return None
 
+    async def derive_machine_authority(self, *, user_id: str,
+                                       agent_id: Optional[str],
+                                       turn_class: str,
+                                       consented_scopes: Optional[List[str]] = None,
+                                       grant_id: Optional[str] = None):
+        """Derive a machine turn's root authority at the ONE shared seam
+        (056 US2, FR-012). Every machine-turn class — scheduled runs, parser
+        replay, draft self-tests, and any future class — calls this and nothing
+        else, so they cannot drift apart. Returns a ``MachineAuthority`` or an
+        ``AuthoritySkip``; callers bind the former with
+        :meth:`_bind_machine_turn` and honor the latter fail-closed."""
+        from orchestrator.chain_authority import MachineTurnAuthority
+        from orchestrator.offline_grant import OfflineGrantStore
+        grants = getattr(self, "offline_grants", None) or OfflineGrantStore(self.history.db)
+        return await MachineTurnAuthority(self, grants).derive(
+            user_id=user_id, agent_id=agent_id,
+            consented_scopes=consented_scopes, grant_id=grant_id,
+            turn_class=turn_class)
+
+    def _bind_machine_turn(self, vws, authority) -> None:
+        """Bind a machine turn's virtual socket to its consent-derived root
+        authority (056 US2, FR-012/FR-014/FR-015 — the ONE shared seam).
+
+        Two bindings, both deliberate:
+
+        * ``ui_sessions[vws]`` carries the machine claims plus the fresh
+          consent-derived subject token as ``_raw_token``, so the existing RFC
+          8693 exchange (``_get_delegation_token``) mints a properly scoped
+          delegated token for every real-agent dispatch in the turn — the
+          machine turn now acts DELEGATED in production instead of being
+          refused fail-closed for having no session token. Any hop the turn
+          starts mints children off that same root (one authority model, two
+          roots). 055's fan-out already skips VirtualWebSocket entries, so this
+          never counts as a connected device.
+        * ``vws.machine_claims`` is the per-turn audit marker the dispatch path
+          reads, attributing every record to ``machine:<class>`` acting for the
+          owning human (never "legacy"). Cost attribution is untouched: a
+          VirtualWebSocket turn still resolves the SYSTEM LLM credential (054),
+          so who PAID and who AUTHORIZED stay distinct.
+        """
+        claims = authority.machine_claims()
+        try:
+            vws.machine_claims = claims
+        except Exception:  # pragma: no cover — VirtualWebSocket accepts attrs
+            logger.debug("machine claims binding failed", exc_info=True)
+        self.ui_sessions[vws] = {**claims, "_raw_token": authority.access_token}
+
+    def _unbind_machine_turn(self, vws) -> None:
+        """Drop a machine turn's session binding when the turn ends."""
+        self.ui_sessions.pop(vws, None)
+
     async def run_scheduled_turn(
         self,
         *,
@@ -3146,6 +3254,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         access_token: str,
         allowed_scopes: List[str],
         correlation_id: str,
+        authority=None,
     ) -> str:
         """Execute a scheduled job's instruction as a background chat turn (025 T040/T046).
 
@@ -3156,13 +3265,16 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         reconnect (in-app only). Returns a short summary for the completion
         notification.
 
-        Authority: the runner has already minted ``access_token`` from the
-        offline grant and computed ``allowed_scopes`` = consented ∩ current.
-        Execution runs under the user's current scopes — the security ceiling
-        enforced by ``handle_chat_message``. Deep-threading the minted delegated
-        token and narrowing tool execution end-to-end to ``allowed_scopes`` is
-        the explicit scope of the T057 security review before the flag is enabled
-        in production (see specs/030-finish-soul-integration/security-review.md).
+        Authority (056 US2 — the T057-scoped threading, now built): the runner
+        derives a :class:`~orchestrator.chain_authority.MachineAuthority` from
+        the job's durable consent (fresh token per run, scopes narrowed to
+        consented ∩ current) and passes it as ``authority``. It is bound to the
+        turn's virtual socket by :meth:`_bind_machine_turn`, so every
+        real-agent dispatch in the turn runs under a delegated token derived
+        from that consent and every audit row names ``machine:scheduled_job``
+        acting for the owning human. Without an ``authority`` the turn still
+        runs (unchanged legacy behavior), but production posture refuses its
+        real-agent dispatches fail-closed, exactly as before.
         """
         from orchestrator.async_tasks import BackgroundTask, VirtualWebSocket
 
@@ -3202,9 +3314,12 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             user_id=user_id,
         )
         vws = VirtualWebSocket(bg)
+        if authority is not None:
+            self._bind_machine_turn(vws, authority)
         try:
             await self.handle_chat_message(vws, instruction, target_chat, user_id=user_id)
         finally:
+            self._unbind_machine_turn(vws)
             try:
                 await vws.close()
             except Exception:  # pragma: no cover - close is best-effort
@@ -3978,6 +4093,18 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 tool_to_unqualified[_dc_name] = _dc_name
             desktop_codegen_injected = True
 
+        # 056 US4 — planning decomposition: the delegate_subtasks meta-tool lets
+        # the planner split a broad request into bounded, isolated sub-tasks
+        # instead of micro-planning every step itself. Flag-gated
+        # (FF_RECURSIVE_DELEGATION); same exclusions as the other meta-tools.
+        from orchestrator import subtasks as _subtasks
+        if _subtasks.should_inject(draft_agent_id) and not is_text_only:
+            for _st_def in _subtasks.meta_tool_definitions():
+                _st_name = _st_def["function"]["name"]
+                tools_desc.append(_st_def)
+                tool_to_agent[_st_name] = _subtasks.META_AGENT_ID
+                tool_to_unqualified[_st_name] = _st_name
+
         if not tools_desc and draft_agent_id:
             _perm_memo.__exit__(None, None, None)
             await self.send_ui_render(websocket, [
@@ -4061,7 +4188,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             if flags.is_enabled("skill_packs") and hasattr(self, 'knowledge_index'):
                 try:
                     from orchestrator import skill_packs
-                    _meta = {"__orchestrator__", "__scheduler__", "__memory__", "__desktop_codegen__"}
+                    _meta = {"__orchestrator__", "__scheduler__", "__memory__",
+                             "__desktop_codegen__", "__subtasks__"}
                     _agents_in_play = {a for a in tool_to_agent.values() if a and a not in _meta}
                     _digest = skill_packs.build_skill_digest(self.knowledge_index, _agents_in_play)
                     if _digest:
@@ -4076,7 +4204,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             # Meta-tools (orchestrator/scheduler/memory pseudo-agents) are
             # excluded — they are not user "skills".
             personalization_skill_lines: List[str] = []
-            _meta_agent_ids = {"__orchestrator__", "__scheduler__", "__memory__",
+            _meta_agent_ids = {"__orchestrator__", "__scheduler__", "__memory__", "__subtasks__",
                                "__desktop_codegen__"}
             for _td in tools_desc:
                 try:
@@ -4172,6 +4300,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 self._active_request = {}
             if chat_id:
                 self._active_request[chat_id] = message
+                # 056 (FR-021): a fresh turn gets a fresh global chain budget
+                # (lazily re-created on the turn's first chained hop).
+                self._chain_budgets.pop(chat_id, None)
 
             # 033 turn coordination (flag-gated + fail-open via turn_hooks):
             # flow tool-budget (C-S1), dual ledger (C-N7), skill recall (C-N10),
@@ -6101,8 +6232,440 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             logger.debug("mint_action_token failed", exc_info=True)
             return None
 
-    async def execute_single_tool(self, websocket, tool_call, tool_to_agent: Dict, chat_id: str = None, user_id: str = None, tool_to_unqualified: Optional[Dict[str, str]] = None) -> Optional[MCPResponse]:
-        """Execute a single tool call and render its UI components. Returns the Result object."""
+    async def _authorize_and_prepare(
+        self, websocket, agent_id: Optional[str], tool_name: str, args: Dict,
+        chat_id: str = None, user_id: str = None, *,
+        stream_params: Optional[Dict] = None,
+        parent_token: Optional[Dict[str, Any]] = None,
+        initiating_agent_id: Optional[str] = None,
+    ):
+        """Run the gate stack, auditing a HOP's refusal (056 SC-002).
+
+        Thin wrapper over :meth:`_run_gate_stack`. A chained hop refused by any
+        gate — including the ones that refuse before the delegation step
+        (security flag, permission/opt-out, policy, taint, supervisor, HITL,
+        cap) — emits a ``delegation.hop.mint`` failure record, so 100% of
+        gate-violating hop attempts carry audit evidence. Direct dispatch is
+        unchanged (no hop record, exactly as today).
+        """
+        outcome = await self._run_gate_stack(
+            websocket, agent_id, tool_name, args, chat_id, user_id,
+            stream_params=stream_params, parent_token=parent_token,
+            initiating_agent_id=initiating_agent_id)
+        if parent_token is not None and isinstance(outcome, GateRefusal) \
+                and not outcome.hop_audited:
+            from audit.recorder import make_correlation_id
+            await self._record_hop_audit(
+                operation="mint", outcome="failure", parent=parent_token,
+                child=None, callee_agent_id=agent_id or "", tool_name=tool_name,
+                chat_id=chat_id, correlation_id=make_correlation_id(),
+                detail=(outcome.response.error or {}).get("message", "")[:200])
+        return outcome
+
+    async def _run_gate_stack(
+        self, websocket, agent_id: Optional[str], tool_name: str, args: Dict,
+        chat_id: str = None, user_id: str = None, *,
+        stream_params: Optional[Dict] = None,
+        parent_token: Optional[Dict[str, Any]] = None,
+        initiating_agent_id: Optional[str] = None,
+    ):
+        """Run the FULL single-path gate stack once (056 US3, FR-017/SC-006).
+
+        Shared by ``execute_single_tool``, ``execute_parallel_tools``, and
+        every chained hop (which re-enters ``execute_single_tool``), so a
+        violating call is refused identically on every dispatch path. Applies,
+        in the single path's historical order: the system security-flag block,
+        the per-user tool permission gate, the deterministic policy engine,
+        the taint/data-flow sink gate, the intent-alignment supervisor + HITL,
+        file-path mapping, per-(user, callee) credential injection, LLM
+        credential surfacing (054), the disabled-tool diagnosis gate, the
+        no-agent check, the RFC 8693 delegation-token mint (fail-closed in
+        production posture), the PRE_TOOL_USE hook, the concurrency cap, and
+        the 055 stream auto-subscribe.
+
+        Returns :class:`PreparedDispatch` on allow or :class:`GateRefusal` on
+        any deny — gate logic only, no UI delivery: each caller renders the
+        refusal per its own delivery model (immediate for the single path,
+        batched for the parallel path), keeping wire behavior byte-identical.
+
+        ``parent_token`` (056 US1, wired by the chained-hop seam) switches the
+        delegation step from the flat single-hop exchange to a child mint;
+        ``initiating_agent_id`` additionally charges the initiating agent's
+        concurrency slot on long-running hops (FR-019).
+        """
+        if stream_params is None:
+            stream_params = dict(args)
+
+        # System-level security block (proactive security review)
+        agent_flags = self.security_flags.get(agent_id, {}) if agent_id else {}
+        if agent_id and tool_name in agent_flags and agent_flags[tool_name].get("blocked"):
+            reason = agent_flags[tool_name].get("reason", "Security threat detected")
+            err_msg = f"Tool '{tool_name}' is system-blocked: {reason}"
+            logger.warning(f"Security block: agent={agent_id} tool={tool_name}")
+            alert = Alert(message=err_msg, variant="error")
+            return GateRefusal(
+                response=MCPResponse(
+                    error={"message": err_msg, "retryable": False},
+                    ui_components=[alert.to_dict()]),
+                render_components=[alert.to_dict()],
+                render_target="chat")
+
+        # Permission enforcement gate (RFC 8693 delegation)
+        if user_id and agent_id and not await asyncio.to_thread(
+                self.tool_permissions.is_tool_allowed, user_id, agent_id, tool_name):
+            err_msg = f"Tool '{tool_name}' is restricted for this agent. Update permissions in the sidebar to enable it."
+            logger.warning(f"Permission denied: user={user_id} agent={agent_id} tool={tool_name}")
+            alert = Alert(message=err_msg, variant="warning")
+            return GateRefusal(
+                response=MCPResponse(
+                    error={"message": err_msg, "retryable": False},
+                    ui_components=[alert.to_dict()]),
+                render_components=[alert.to_dict()])
+
+        # Deterministic pre-action policy engine — an ordered, fail-closed rule
+        # chain (data, admin-extensible via POLICY_RULES) on top of the
+        # permission gate. Default OFF + no seed rules ⇒ purely additive.
+        # deny/confirm block the call; rewrite redacts args before execution.
+        if user_id:
+            from orchestrator import policy
+            if policy.policy_enabled():
+                try:
+                    decision = policy.evaluate_policy(
+                        policy.load_rules(),
+                        {"tool": tool_name, "agent": agent_id, "user_id": user_id,
+                         "roles": self._policy_roles(websocket), "args": args})
+                except Exception:
+                    logger.debug("policy: evaluation failed — allowing", exc_info=True)
+                    decision = policy.PolicyDecision()
+                # A require_token rule demands a valid single-use transaction
+                # token bound to (agent, user, tool, hash(args)). Fail-closed —
+                # missing/tampered/expired/replayed ⇒ deny.
+                if decision.effect == policy.REQUIRE_TOKEN:
+                    from orchestrator import transaction_token as _txn
+                    token = args.get("_txn_token") if isinstance(args, dict) else None
+                    ok_tok, why = _txn.verify_and_consume(
+                        _txn.default_store(), token, agent_id or "", user_id,
+                        tool_name, args)
+                    if not ok_tok:
+                        msg = decision.reason or (
+                            f"'{tool_name}' needs a valid one-time authorization "
+                            f"token ({why}).")
+                        logger.warning("policy.require_token user=%s tool=%s rule=%s reason=%s",
+                                       user_id, tool_name, decision.rule_id, why)
+                        alert = Alert(message=msg, variant="warning")
+                        return GateRefusal(
+                            response=MCPResponse(
+                                error={"message": msg, "retryable": False},
+                                ui_components=[alert.to_dict()]),
+                            render_components=[alert.to_dict()])
+                elif decision.effect in (policy.DENY, policy.CONFIRM):
+                    msg = decision.reason or (
+                        f"'{tool_name}' needs confirmation before it can run."
+                        if decision.effect == policy.CONFIRM
+                        else f"'{tool_name}' was blocked by an access policy.")
+                    logger.warning("policy.%s user=%s tool=%s rule=%s",
+                                   decision.effect, user_id, tool_name, decision.rule_id)
+                    alert = Alert(message=msg, variant="warning")
+                    return GateRefusal(
+                        response=MCPResponse(
+                            error={"message": msg, "retryable": False},
+                            ui_components=[alert.to_dict()]),
+                        render_components=[alert.to_dict()])
+                if decision.args is not None:
+                    args = decision.args  # rewritten (e.g. a secret arg redacted)
+                    # The streaming twin must dispatch the SAME redacted args —
+                    # auto-subscribe with the pre-rewrite capture would hand
+                    # the agent the secret the rule just removed.
+                    stream_params = dict(args)
+                # Never forward a consumed authorization token to the agent.
+                if isinstance(args, dict) and "_txn_token" in args:
+                    args = {k: v for k, v in args.items() if k != "_txn_token"}
+
+        # Value-level taint/data-flow gate. If this call is a write/egress SINK
+        # and its arguments carry untrusted-tainted values (effective trust =
+        # min over data ancestors, recorded from prior untrusted-source outputs
+        # — survives multi-hop laundering), refuse it. Flag-gated (default OFF)
+        # + fail-open: unknown values are trusted, so a call with only
+        # constants/user intent always passes.
+        if user_id:
+            from orchestrator import taint as _taint
+            if _taint.taint_enabled() and _taint.is_sink(agent_id, tool_name):
+                tracker = self._taint_tracker(chat_id)
+                trust = tracker.effective_trust_of_args(args)
+                if _taint.check_flow(trust) == "deny":
+                    msg = (f"'{tool_name}' was blocked: it would send untrusted "
+                           f"data (from a web/third-party source) into a "
+                           f"write/egress action.")
+                    logger.warning("taint.deny user=%s tool=%s agent=%s trust=%s",
+                                   user_id, tool_name, agent_id, _taint.trust_name(trust))
+                    alert = Alert(message=msg, variant="warning")
+                    return GateRefusal(
+                        response=MCPResponse(
+                            error={"message": msg, "retryable": False},
+                            ui_components=[alert.to_dict()]),
+                        render_components=[alert.to_dict()])
+
+        # Intent-alignment supervisor (C-S5) + high-risk human-in-the-loop
+        # (C-S11). Both default OFF and fail-open: when on, a destructive tool
+        # the user never asked for, or a risky (egress/irreversible/cross-
+        # principal/tainted) call, is held for confirmation instead of running.
+        if user_id and agent_id:
+            from orchestrator import supervisor as _sup
+            if _sup.supervisor_enabled():
+                request_text = getattr(self, "_active_request", {}).get(chat_id, "")
+                if not _sup.intent_aligned(request_text, tool_name):
+                    msg = (f"'{tool_name}' looks like a destructive action you "
+                           f"didn't ask for — please confirm before it runs.")
+                    logger.warning("supervisor.escalate user=%s tool=%s", user_id, tool_name)
+                    alert = Alert(message=msg, variant="warning")
+                    return GateRefusal(
+                        response=MCPResponse(
+                            error={"message": msg, "retryable": False},
+                            ui_components=[alert.to_dict()]),
+                        render_components=[alert.to_dict()])
+            from orchestrator import hitl as _hitl
+            if _hitl.hitl_enabled():
+                trust = "trusted"
+                try:
+                    from orchestrator import taint as _tnt
+                    if _tnt.taint_enabled():
+                        trust = _tnt.trust_name(
+                            self._taint_tracker(chat_id).effective_trust_of_args(args))
+                except Exception:
+                    trust = "trusted"
+                risks = _hitl.assess_risk(tool_name, args, actor_principal=user_id, trust=trust)
+                if _hitl.requires_confirmation(risks):
+                    req = _hitl.confirmation_request(tool_name, risks)
+                    logger.warning("hitl.confirm user=%s tool=%s risks=%s", user_id, tool_name, risks)
+                    alert = Alert(message=req.summary, variant="warning")
+                    return GateRefusal(
+                        response=MCPResponse(
+                            error={"message": req.summary, "retryable": False},
+                            ui_components=[alert.to_dict()]),
+                        render_components=[alert.to_dict()])
+
+        # Map file paths if chat_id provided
+        if chat_id:
+            args = await asyncio.to_thread(
+                self._map_file_paths, chat_id, args, user_id=user_id)
+            args["session_id"] = chat_id
+            if user_id:
+                args["user_id"] = user_id
+
+        # Inject per-user credentials (E2E encrypted — only agent can decrypt)
+        if user_id and agent_id:
+            creds = self.credential_manager.get_agent_credentials_encrypted(user_id, agent_id)
+            if creds:
+                args["_credentials"] = creds
+                args["_credentials_encrypted"] = True
+
+        # Feature 054: surface the resolved LLM credentials for THIS call's
+        # context so agent-side LLM tools can run (they no longer have any
+        # env fallback): the caller's persisted record on a user socket,
+        # the admin system record on system-context turns. The kwarg name
+        # ``_session_llm_credentials`` is kept for agent-side compatibility.
+        _llm_ctx_user = self._llm_context_user_id(websocket)
+        if _llm_ctx_user is None:
+            _llm_cfg = await self._llm_store.get_system()
+        else:
+            _llm_cfg = await self._llm_store.get(_llm_ctx_user)
+        if _llm_cfg is not None:
+            args["_session_llm_credentials"] = {
+                "OPENAI_API_KEY": _llm_cfg.api_key,
+                "OPENAI_BASE_URL": _llm_cfg.base_url,
+                "LLM_MODEL": _llm_cfg.model,
+            }
+
+        # 5th gate (015): when no `agent_id` was resolved via `tool_to_agent` —
+        # which happens because the tool was filtered out at chat-time tool-list
+        # construction — see whether the tool actually EXISTS on a registered
+        # agent and surface a friendly disabled-tool alert. This catches the
+        # case where the model emitted a call for a tool the user disabled in
+        # the picker (or whose owning agent they disabled wholesale).
+        if not agent_id and tool_name:
+            owner = self._find_tool_owner(tool_name)
+            if owner is not None:
+                diag = await asyncio.to_thread(
+                    self._diagnose_disabled_tool, tool_name, user_id, chat_id)
+                alert = self._alert_for_disabled_tool(diag, tool_name)
+                logger.info(
+                    "Dispatch blocked by disabled-tool gate: tool=%s owner=%s status=%s user=%s chat=%s",
+                    tool_name, owner, diag.status.value, user_id, chat_id,
+                )
+                return GateRefusal(
+                    response=MCPResponse(
+                        error={"message": alert.message, "retryable": False},
+                        ui_components=[alert.to_dict()]),
+                    render_components=[alert.to_dict()],
+                    render_target="chat")
+
+        if not agent_id or (
+            agent_id not in self.agents
+            and agent_id not in self.a2a_clients
+            and agent_id not in self.local_agents
+        ):
+            err_msg = f"No agent available for tool '{tool_name}'"
+            return GateRefusal(
+                response=MCPResponse(error={"message": err_msg}),
+                render_components=[Alert(message=err_msg, variant="error").to_dict()],
+                render_target="chat")
+
+        # RFC 8693 delegation: generate a scoped token excluding system-blocked tools
+        # The delegation token constrains what the agent can do even if it's compromised
+        delegation_token: Optional[str] = None
+        hop_correlation_id: Optional[str] = None
+        if user_id and agent_id and parent_token is not None:
+            # 056 US1 (FR-001/FR-002): a chained hop NEVER reuses the parent's
+            # token and never falls back to the flat exchange — it acts under
+            # a freshly minted, strictly-narrower child, or is refused. Real
+            # minting runs in every posture (dev included, D17.2).
+            minted = await self._mint_child_for_hop(
+                parent_token, agent_id, tool_name, user_id, chat_id)
+            if isinstance(minted, GateRefusal):
+                return minted
+            delegation_token, hop_correlation_id = minted
+            args["_delegation_token"] = delegation_token
+        elif user_id and agent_id:
+            delegation_token = await self._get_delegation_token(websocket, agent_id, user_id)
+            if delegation_token:
+                args["_delegation_token"] = delegation_token
+            elif self._delegation_required():
+                # Feature 030 / Constitution VII: agents MUST act under RFC
+                # 8693 delegated tokens. The walkthrough found the deployed
+                # realm missing the tools:* client scopes — every exchange
+                # failed invalid_scope and dispatch silently proceeded
+                # UNSCOPED. Production posture now fails closed with an
+                # actionable operator message; development keeps the
+                # fail-open behavior (warned once per agent) so local stacks
+                # without a fully configured realm still work.
+                err_msg = (
+                    "Tool execution is disabled: delegated authorization "
+                    "(RFC 8693 token exchange) is unavailable for agent "
+                    f"'{agent_id}'. An operator must register the tools:* "
+                    "client scopes on the identity provider (see "
+                    "docs/keycloak-realm-settings.md), or set "
+                    "DELEGATION_REQUIRED=false to accept unscoped dispatch."
+                )
+                logger.error(
+                    "Delegation required but unavailable: agent=%s user=%s — refusing dispatch",
+                    agent_id, user_id,
+                )
+                return GateRefusal(
+                    response=MCPResponse(error={"message": err_msg, "retryable": False}),
+                    render_components=[Alert(message=err_msg, variant="error").to_dict()],
+                    render_target="chat")
+
+        # Hook: PRE_TOOL_USE — allows handlers to block or modify tool args
+        if flags.is_enabled("hook_system"):
+            hook_ctx = HookContext(
+                event=HookEvent.PRE_TOOL_USE,
+                user_id=user_id or "",
+                agent_id=agent_id or "",
+                tool_name=tool_name,
+                tool_args=args,
+            )
+            hook_resp = await self.hooks.emit(hook_ctx)
+            if hook_resp.action == "block":
+                err_msg = f"Tool '{tool_name}' blocked by hook: {hook_resp.reason or 'no reason given'}"
+                logger.info(f"Hook blocked tool: {tool_name}")
+                return GateRefusal(
+                    response=MCPResponse(error={"message": err_msg, "retryable": False}))
+            if hook_resp.action == "modify" and hook_resp.modified_args:
+                args = hook_resp.modified_args
+
+        # 015-external-ai-agents: concurrency cap for long-running tools (FR-026).
+        # Acquired here so a 4th concurrent attempt is rejected without ever
+        # touching the upstream service. Released either on dispatch error
+        # (below) or by the terminal-phase ToolProgress handler.
+        cap_job_id: Optional[str] = None
+        if user_id and agent_id and self._is_long_running_tool(agent_id, tool_name):
+            cap_job_id = f"cap_{tool_name}_{_uuid.uuid4().hex[:8]}"
+            acquired = await self.concurrency_cap.acquire(user_id, agent_id, cap_job_id)
+            if not acquired:
+                inflight = self.concurrency_cap.inflight_jobs(user_id, agent_id)
+                max_n = self.concurrency_cap.max_per_user_agent
+                err_msg = (
+                    f"You already have {max_n} jobs running on '{agent_id}'. "
+                    f"Wait for one to finish or cancel one before starting another. "
+                    f"(Running: {', '.join(inflight)})"
+                )
+                logger.info(
+                    "ConcurrencyCap rejected dispatch: user=%s agent=%s tool=%s",
+                    user_id, agent_id, tool_name,
+                )
+                alert = Alert(message=err_msg, variant="warning")
+                return GateRefusal(
+                    response=MCPResponse(
+                        error={"message": err_msg, "retryable": False},
+                        ui_components=[alert.to_dict()]),
+                    render_components=[alert.to_dict()],
+                    render_target="chat")
+            # 056 US3 (FR-019): a chained hop charges BOTH the executing
+            # agent's slot (above) and the initiating agent's slot, so fan-out
+            # cannot multiply a user's effective concurrency past the per-agent
+            # cap. Reject-not-queue is preserved; a rejection surfaces to the
+            # requester as an honest per-call failure.
+            if initiating_agent_id and initiating_agent_id != agent_id:
+                hop_acquired = await self.concurrency_cap.acquire(
+                    user_id, initiating_agent_id, cap_job_id)
+                if not hop_acquired:
+                    await self.concurrency_cap.release(user_id, agent_id, cap_job_id)
+                    inflight = self.concurrency_cap.inflight_jobs(
+                        user_id, initiating_agent_id)
+                    max_n = self.concurrency_cap.max_per_user_agent
+                    err_msg = (
+                        f"You already have {max_n} jobs running on "
+                        f"'{initiating_agent_id}'. "
+                        f"Wait for one to finish or cancel one before starting another. "
+                        f"(Running: {', '.join(inflight)})"
+                    )
+                    logger.info(
+                        "ConcurrencyCap rejected hop dispatch (initiator slot): "
+                        "user=%s initiator=%s callee=%s tool=%s",
+                        user_id, initiating_agent_id, agent_id, tool_name,
+                    )
+                    alert = Alert(message=err_msg, variant="warning")
+                    return GateRefusal(
+                        response=MCPResponse(
+                            error={"message": err_msg, "retryable": False},
+                            ui_components=[alert.to_dict()]),
+                        render_components=[alert.to_dict()],
+                        render_target="chat")
+                self._hop_cap_entries[cap_job_id] = (user_id, initiating_agent_id)
+            args["_cap_job_id"] = cap_job_id
+            self._pending_cap_entries[cap_job_id] = (user_id, agent_id)
+            # Remember the chat this long-running job belongs to so its progress
+            # and final result are delivered to (and persisted in) that chat for
+            # any client that returns to it later (014/015 + 028).
+            self._job_context[cap_job_id] = {
+                "user_id": user_id,
+                "agent_id": agent_id,
+                "chat_id": chat_id,
+                "tool_name": tool_name,
+            }
+
+        # 055 US2: a push-streamable tool also streams — subscribe this
+        # user's sockets on the chat before the one-shot dispatch (fail-open).
+        await self._auto_subscribe_stream_artifacts(
+            websocket, chat_id, user_id, tool_name, stream_params)
+
+        return PreparedDispatch(
+            args=args,
+            stream_params=stream_params,
+            cap_job_id=cap_job_id,
+            delegation_token=delegation_token,
+            hop_correlation_id=hop_correlation_id,
+        )
+
+    async def execute_single_tool(self, websocket, tool_call, tool_to_agent: Dict, chat_id: str = None, user_id: str = None, tool_to_unqualified: Optional[Dict[str, str]] = None, parent_token: Optional[Dict[str, Any]] = None, initiating_agent_id: Optional[str] = None) -> Optional[MCPResponse]:
+        """Execute a single tool call and render its UI components. Returns the Result object.
+
+        056 US1: a mediated chained hop re-enters HERE (via
+        ``_handle_agent_hop_request``) with ``parent_token`` (the initiator's
+        decoded delegation payload, from the orchestrator's own dispatch
+        record) and ``initiating_agent_id`` — switching the delegation step to
+        a strictly-narrower child mint and charging both sides' concurrency
+        slots. Absent both kwargs, behavior is the unchanged direct path."""
         # The LLM may have emitted a qualified name (e.g. "forecaster-1__submit_dataset")
         # when two agents own a tool of the same id. Resolve the bare skill id so the
         # owning agent receives the name it actually registered.
@@ -6178,309 +6741,58 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             return await desktop_codegen.handle_meta_tool(
                 self, tool_name, args, user_id=user_id, chat_id=chat_id, websocket=websocket
             )
-
-        # System-level security block (proactive security review)
-        agent_flags = self.security_flags.get(agent_id, {}) if agent_id else {}
-        if agent_id and tool_name in agent_flags and agent_flags[tool_name].get("blocked"):
-            reason = agent_flags[tool_name].get("reason", "Security threat detected")
-            err_msg = f"Tool '{tool_name}' is system-blocked: {reason}"
-            logger.warning(f"Security block: agent={agent_id} tool={tool_name}")
-            alert = Alert(message=err_msg, variant="error")
-            await self.send_ui_render(websocket, [alert.to_dict()], target="chat")
-            return MCPResponse(
-                error={"message": err_msg, "retryable": False},
-                ui_components=[alert.to_dict()]
+        if agent_id == "__subtasks__":
+            # 056 US4 — planner decomposition into bounded isolated sub-tasks.
+            # A sub-task may use only the tools THIS turn offered (never a
+            # superset — FR-020); the handler's own gates and the sub-turns'
+            # full gate stacks do the rest.
+            from orchestrator import subtasks as _st
+            args["_parent_tools"] = sorted(
+                {t for t in (tool_to_unqualified or {}).values()
+                 if not str(tool_to_agent.get(t, "")).startswith("__")}
+                or {t for t, a in (tool_to_agent or {}).items()
+                    if not str(a).startswith("__")})
+            return await _st.handle_meta_tool(
+                self, tool_name, args, user_id=user_id, chat_id=chat_id, websocket=websocket
             )
 
-        # Permission enforcement gate (RFC 8693 delegation)
-        if user_id and agent_id and not await asyncio.to_thread(
-                self.tool_permissions.is_tool_allowed, user_id, agent_id, tool_name):
-            err_msg = f"Tool '{tool_name}' is restricted for this agent. Update permissions in the sidebar to enable it."
-            logger.warning(f"Permission denied: user={user_id} agent={agent_id} tool={tool_name}")
-            alert = Alert(message=err_msg, variant="warning")
-            await self.send_ui_render(websocket, [alert.to_dict()])
-            return MCPResponse(
-                error={"message": err_msg, "retryable": False},
-                ui_components=[alert.to_dict()]
-            )
-
-        # Deterministic pre-action policy engine — an ordered, fail-closed rule
-        # chain (data, admin-extensible via POLICY_RULES) on top of the
-        # permission gate. Default OFF + no seed rules ⇒ purely additive.
-        # deny/confirm block the call; rewrite redacts args before execution.
-        if user_id:
-            from orchestrator import policy
-            if policy.policy_enabled():
-                try:
-                    decision = policy.evaluate_policy(
-                        policy.load_rules(),
-                        {"tool": tool_name, "agent": agent_id, "user_id": user_id,
-                         "roles": self._policy_roles(websocket), "args": args})
-                except Exception:
-                    logger.debug("policy: evaluation failed — allowing", exc_info=True)
-                    decision = policy.PolicyDecision()
-                # A require_token rule demands a valid single-use transaction
-                # token bound to (agent, user, tool, hash(args)). Fail-closed —
-                # missing/tampered/expired/replayed ⇒ deny.
-                if decision.effect == policy.REQUIRE_TOKEN:
-                    from orchestrator import transaction_token as _txn
-                    token = args.get("_txn_token") if isinstance(args, dict) else None
-                    ok_tok, why = _txn.verify_and_consume(
-                        _txn.default_store(), token, agent_id or "", user_id,
-                        tool_name, args)
-                    if not ok_tok:
-                        msg = decision.reason or (
-                            f"'{tool_name}' needs a valid one-time authorization "
-                            f"token ({why}).")
-                        logger.warning("policy.require_token user=%s tool=%s rule=%s reason=%s",
-                                       user_id, tool_name, decision.rule_id, why)
-                        alert = Alert(message=msg, variant="warning")
-                        await self.send_ui_render(websocket, [alert.to_dict()])
-                        return MCPResponse(error={"message": msg, "retryable": False},
-                                           ui_components=[alert.to_dict()])
-                elif decision.effect in (policy.DENY, policy.CONFIRM):
-                    msg = decision.reason or (
-                        f"'{tool_name}' needs confirmation before it can run."
-                        if decision.effect == policy.CONFIRM
-                        else f"'{tool_name}' was blocked by an access policy.")
-                    logger.warning("policy.%s user=%s tool=%s rule=%s",
-                                   decision.effect, user_id, tool_name, decision.rule_id)
-                    alert = Alert(message=msg, variant="warning")
-                    await self.send_ui_render(websocket, [alert.to_dict()])
-                    return MCPResponse(error={"message": msg, "retryable": False},
-                                       ui_components=[alert.to_dict()])
-                if decision.args is not None:
-                    args = decision.args  # rewritten (e.g. a secret arg redacted)
-                    # The streaming twin must dispatch the SAME redacted args —
-                    # auto-subscribe with the pre-rewrite capture would hand
-                    # the agent the secret the rule just removed.
-                    stream_params = dict(args)
-                # Never forward a consumed authorization token to the agent.
-                if isinstance(args, dict) and "_txn_token" in args:
-                    args = {k: v for k, v in args.items() if k != "_txn_token"}
-
-        # Value-level taint/data-flow gate. If this call is a write/egress SINK
-        # and its arguments carry untrusted-tainted values (effective trust =
-        # min over data ancestors, recorded from prior untrusted-source outputs
-        # — survives multi-hop laundering), refuse it. Flag-gated (default OFF)
-        # + fail-open: unknown values are trusted, so a call with only
-        # constants/user intent always passes.
-        if user_id:
-            from orchestrator import taint as _taint
-            if _taint.taint_enabled() and _taint.is_sink(agent_id, tool_name):
-                tracker = self._taint_tracker(chat_id)
-                trust = tracker.effective_trust_of_args(args)
-                if _taint.check_flow(trust) == "deny":
-                    msg = (f"'{tool_name}' was blocked: it would send untrusted "
-                           f"data (from a web/third-party source) into a "
-                           f"write/egress action.")
-                    logger.warning("taint.deny user=%s tool=%s agent=%s trust=%s",
-                                   user_id, tool_name, agent_id, _taint.trust_name(trust))
-                    alert = Alert(message=msg, variant="warning")
-                    await self.send_ui_render(websocket, [alert.to_dict()])
-                    return MCPResponse(error={"message": msg, "retryable": False},
-                                       ui_components=[alert.to_dict()])
-
-        # Intent-alignment supervisor (C-S5) + high-risk human-in-the-loop
-        # (C-S11). Both default OFF and fail-open: when on, a destructive tool
-        # the user never asked for, or a risky (egress/irreversible/cross-
-        # principal/tainted) call, is held for confirmation instead of running.
-        if user_id and agent_id:
-            from orchestrator import supervisor as _sup
-            if _sup.supervisor_enabled():
-                request_text = getattr(self, "_active_request", {}).get(chat_id, "")
-                if not _sup.intent_aligned(request_text, tool_name):
-                    msg = (f"'{tool_name}' looks like a destructive action you "
-                           f"didn't ask for — please confirm before it runs.")
-                    logger.warning("supervisor.escalate user=%s tool=%s", user_id, tool_name)
-                    alert = Alert(message=msg, variant="warning")
-                    await self.send_ui_render(websocket, [alert.to_dict()])
-                    return MCPResponse(error={"message": msg, "retryable": False},
-                                       ui_components=[alert.to_dict()])
-            from orchestrator import hitl as _hitl
-            if _hitl.hitl_enabled():
-                trust = "trusted"
-                try:
-                    from orchestrator import taint as _tnt
-                    if _tnt.taint_enabled():
-                        trust = _tnt.trust_name(
-                            self._taint_tracker(chat_id).effective_trust_of_args(args))
-                except Exception:
-                    trust = "trusted"
-                risks = _hitl.assess_risk(tool_name, args, actor_principal=user_id, trust=trust)
-                if _hitl.requires_confirmation(risks):
-                    req = _hitl.confirmation_request(tool_name, risks)
-                    logger.warning("hitl.confirm user=%s tool=%s risks=%s", user_id, tool_name, risks)
-                    alert = Alert(message=req.summary, variant="warning")
-                    await self.send_ui_render(websocket, [alert.to_dict()])
-                    return MCPResponse(error={"message": req.summary, "retryable": False},
-                                       ui_components=[alert.to_dict()])
-
-        # Map file paths if chat_id provided
-        if chat_id:
-            args = await asyncio.to_thread(
-                self._map_file_paths, chat_id, args, user_id=user_id)
-            args["session_id"] = chat_id
-            if user_id:
-                args["user_id"] = user_id
-
-        # Inject per-user credentials (E2E encrypted — only agent can decrypt)
-        if user_id and agent_id:
-            creds = self.credential_manager.get_agent_credentials_encrypted(user_id, agent_id)
-            if creds:
-                args["_credentials"] = creds
-                args["_credentials_encrypted"] = True
-
-        # Feature 054: surface the resolved LLM credentials for THIS call's
-        # context so agent-side LLM tools can run (they no longer have any
-        # env fallback): the caller's persisted record on a user socket,
-        # the admin system record on system-context turns. The kwarg name
-        # ``_session_llm_credentials`` is kept for agent-side compatibility.
-        _llm_ctx_user = self._llm_context_user_id(websocket)
-        if _llm_ctx_user is None:
-            _llm_cfg = await self._llm_store.get_system()
-        else:
-            _llm_cfg = await self._llm_store.get(_llm_ctx_user)
-        if _llm_cfg is not None:
-            args["_session_llm_credentials"] = {
-                "OPENAI_API_KEY": _llm_cfg.api_key,
-                "OPENAI_BASE_URL": _llm_cfg.base_url,
-                "LLM_MODEL": _llm_cfg.model,
-            }
-
-        # 5th gate (015): when no `agent_id` was resolved via `tool_to_agent` —
-        # which happens because the tool was filtered out at chat-time tool-list
-        # construction — see whether the tool actually EXISTS on a registered
-        # agent and surface a friendly disabled-tool alert. This catches the
-        # case where the model emitted a call for a tool the user disabled in
-        # the picker (or whose owning agent they disabled wholesale).
-        if not agent_id and tool_name:
-            owner = self._find_tool_owner(tool_name)
-            if owner is not None:
-                diag = await asyncio.to_thread(
-                    self._diagnose_disabled_tool, tool_name, user_id, chat_id)
-                alert = self._alert_for_disabled_tool(diag, tool_name)
-                logger.info(
-                    "Dispatch blocked by disabled-tool gate: tool=%s owner=%s status=%s user=%s chat=%s",
-                    tool_name, owner, diag.status.value, user_id, chat_id,
-                )
-                await self.send_ui_render(websocket, [alert.to_dict()], target="chat")
-                return MCPResponse(
-                    error={"message": alert.message, "retryable": False},
-                    ui_components=[alert.to_dict()],
-                )
-
-        if not agent_id or (
-            agent_id not in self.agents
-            and agent_id not in self.a2a_clients
-            and agent_id not in self.local_agents
-        ):
-            err_msg = f"No agent available for tool '{tool_name}'"
-            await self.send_ui_render(websocket, [
-                Alert(message=err_msg, variant="error").to_dict()
-            ], target="chat")
-            return MCPResponse(error={"message": err_msg})
-
-        # RFC 8693 delegation: generate a scoped token excluding system-blocked tools
-        # The delegation token constrains what the agent can do even if it's compromised
-        if user_id and agent_id:
-            delegation_token = await self._get_delegation_token(websocket, agent_id, user_id)
-            if delegation_token:
-                args["_delegation_token"] = delegation_token
-            elif self._delegation_required():
-                # Feature 030 / Constitution VII: agents MUST act under RFC
-                # 8693 delegated tokens. The walkthrough found the deployed
-                # realm missing the tools:* client scopes — every exchange
-                # failed invalid_scope and dispatch silently proceeded
-                # UNSCOPED. Production posture now fails closed with an
-                # actionable operator message; development keeps the
-                # fail-open behavior (warned once per agent) so local stacks
-                # without a fully configured realm still work.
-                err_msg = (
-                    "Tool execution is disabled: delegated authorization "
-                    "(RFC 8693 token exchange) is unavailable for agent "
-                    f"'{agent_id}'. An operator must register the tools:* "
-                    "client scopes on the identity provider (see "
-                    "docs/keycloak-realm-settings.md), or set "
-                    "DELEGATION_REQUIRED=false to accept unscoped dispatch."
-                )
-                logger.error(
-                    "Delegation required but unavailable: agent=%s user=%s — refusing dispatch",
-                    agent_id, user_id,
-                )
-                await self.send_ui_render(websocket, [
-                    Alert(message=err_msg, variant="error").to_dict()
-                ], target="chat")
-                return MCPResponse(error={"message": err_msg, "retryable": False})
-
-        # Hook: PRE_TOOL_USE — allows handlers to block or modify tool args
-        if flags.is_enabled("hook_system"):
-            hook_ctx = HookContext(
-                event=HookEvent.PRE_TOOL_USE,
-                user_id=user_id or "",
-                agent_id=agent_id or "",
-                tool_name=tool_name,
-                tool_args=args,
-            )
-            hook_resp = await self.hooks.emit(hook_ctx)
-            if hook_resp.action == "block":
-                err_msg = f"Tool '{tool_name}' blocked by hook: {hook_resp.reason or 'no reason given'}"
-                logger.info(f"Hook blocked tool: {tool_name}")
-                return MCPResponse(error={"message": err_msg, "retryable": False})
-            if hook_resp.action == "modify" and hook_resp.modified_args:
-                args = hook_resp.modified_args
-
-        # 015-external-ai-agents: concurrency cap for long-running tools (FR-026).
-        # Acquired here so a 4th concurrent attempt is rejected without ever
-        # touching the upstream service. Released either on dispatch error
-        # (below) or by the terminal-phase ToolProgress handler.
-        cap_job_id: Optional[str] = None
-        if user_id and agent_id and self._is_long_running_tool(agent_id, tool_name):
-            cap_job_id = f"cap_{tool_name}_{_uuid.uuid4().hex[:8]}"
-            acquired = await self.concurrency_cap.acquire(user_id, agent_id, cap_job_id)
-            if not acquired:
-                inflight = self.concurrency_cap.inflight_jobs(user_id, agent_id)
-                max_n = self.concurrency_cap.max_per_user_agent
-                err_msg = (
-                    f"You already have {max_n} jobs running on '{agent_id}'. "
-                    f"Wait for one to finish or cancel one before starting another. "
-                    f"(Running: {', '.join(inflight)})"
-                )
-                logger.info(
-                    "ConcurrencyCap rejected dispatch: user=%s agent=%s tool=%s",
-                    user_id, agent_id, tool_name,
-                )
-                alert = Alert(message=err_msg, variant="warning")
-                await self.send_ui_render(websocket, [alert.to_dict()], target="chat")
-                return MCPResponse(
-                    error={"message": err_msg, "retryable": False},
-                    ui_components=[alert.to_dict()],
-                )
-            args["_cap_job_id"] = cap_job_id
-            self._pending_cap_entries[cap_job_id] = (user_id, agent_id)
-            # Remember the chat this long-running job belongs to so its progress
-            # and final result are delivered to (and persisted in) that chat for
-            # any client that returns to it later (014/015 + 028).
-            self._job_context[cap_job_id] = {
-                "user_id": user_id,
-                "agent_id": agent_id,
-                "chat_id": chat_id,
-                "tool_name": tool_name,
-            }
-
-        # 055 US2: a push-streamable tool also streams — subscribe this
-        # user's sockets on the chat before the one-shot dispatch (fail-open).
-        await self._auto_subscribe_stream_artifacts(
-            websocket, chat_id, user_id, tool_name, stream_params)
+        # 056 US3 (FR-017): the FULL gate stack runs in the shared authorizer
+        # so single, parallel, and chained dispatch refuse identically. Gate
+        # logic lives there; this path keeps its immediate per-call delivery.
+        auth = await self._authorize_and_prepare(
+            websocket, agent_id, tool_name, args, chat_id, user_id,
+            stream_params=stream_params, parent_token=parent_token,
+            initiating_agent_id=initiating_agent_id)
+        if isinstance(auth, GateRefusal):
+            if auth.render_components:
+                if auth.render_target:
+                    await self.send_ui_render(
+                        websocket, auth.render_components, target=auth.render_target)
+                else:
+                    await self.send_ui_render(websocket, auth.render_components)
+            return auth.response
+        args = auth.args
+        stream_params = auth.stream_params
+        cap_job_id = auth.cap_job_id
 
         # Audit: record the tool dispatch (in_progress → success/failure)
         from audit.hooks import ToolDispatchAudit
         claims = self.ui_sessions.get(websocket) if websocket is not None else None
+        if claims is None and websocket is not None:
+            # 056 US2 (FR-014): machine turns carry a synthetic machine-context
+            # marker on their virtual socket — record them attributed, never
+            # dropped as "legacy".
+            claims = getattr(websocket, "machine_claims", None)
+        if initiating_agent_id and isinstance(claims, dict):
+            # 056 US1: a hop's tool-call rows name the ACTING agent via the
+            # RFC 8693 act claim while the human stays the actor_user_id.
+            claims = {**claims, "act": {"sub": f"agent:{initiating_agent_id}"}}
         async with ToolDispatchAudit(
             claims=claims,
             agent_id=agent_id,
             tool_name=tool_name,
             chat_id=chat_id,
+            correlation_id=auth.hop_correlation_id,
             args_meta={k: v for k, v in args.items() if not (isinstance(k, str) and k.startswith("_"))},
         ) as _audit_ctx:
             result = await self._execute_with_retry(websocket, agent_id, tool_name, args)
@@ -6525,6 +6837,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 await self.concurrency_cap.release(user_id, agent_id, cap_job_id)
             finally:
                 self._pending_cap_entries.pop(cap_job_id, None)
+            await self._release_hop_cap_slot(cap_job_id)
 
         # Hook: POST_TOOL_USE or POST_TOOL_FAILURE
         if flags.is_enabled("hook_system"):
@@ -6584,6 +6897,392 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
     # Scopes considered safe for concurrent execution (read-only operations)
     _PARALLEL_SAFE_SCOPES = frozenset({"tools:read", "tools:search"})
     _MAX_PARALLEL_CONCURRENCY = 10
+
+    def _chain_budget_for(self, chat_id: Optional[str]):
+        """The turn's global chain budget (056 FR-021), lazily created. Bounds
+        cumulative depth, total hop count, and wall clock across ALL nesting in
+        the turn (interactive or machine).
+
+        Chat-keyed budgets reset at each turn start (``handle_chat_message``
+        pops ``chat_id``). A chat-less dispatch (``chat_id`` None) has no turn
+        boundary to reset on, so its shared ``_global`` budget is recreated
+        once it exhausts — otherwise a single process would refuse every
+        chat-less hop forever after the first wall-clock window elapses."""
+        from orchestrator.chain_authority import ChainBudget
+        key = chat_id or "_global"
+        budget = self._chain_budgets.get(key)
+        if budget is None or (chat_id is None and budget.exhausted()):
+            budget = ChainBudget(turn_id=f"turn_{_uuid.uuid4().hex[:8]}", chat_id=chat_id)
+            self._chain_budgets[key] = budget
+        return budget
+
+    def _register_dispatch_context(self, request_id: str, agent_id: str,
+                                   args: Dict, ui_websocket) -> None:
+        """Record the orchestrator-side context of an in-flight dispatch
+        (056 US1). A mediated hop from the executing agent resolves user,
+        chat, UI socket, and — critically — the PARENT delegation authority
+        from this record, never from anything the agent presents (FR-001)."""
+        try:
+            from orchestrator import delegation as _dg
+            token = args.get("_delegation_token") if isinstance(args, dict) else None
+            self._dispatch_context[request_id] = {
+                "agent_id": agent_id,
+                "user_id": args.get("user_id") if isinstance(args, dict) else None,
+                "chat_id": args.get("session_id") if isinstance(args, dict) else None,
+                "ui_websocket": ui_websocket,
+                "parent_token": _dg.decode_token_payload(token) if token else None,
+            }
+        except Exception:  # never let bookkeeping break a dispatch
+            logger.debug("dispatch context registration failed", exc_info=True)
+
+    async def _record_hop_audit(self, *, operation: str, outcome: str,
+                                parent: Optional[Dict], child: Optional[Dict],
+                                callee_agent_id: str, tool_name: str,
+                                chat_id: Optional[str], correlation_id: str,
+                                detail: Optional[str] = None,
+                                requested_scopes=None, granted_scopes=None) -> None:
+        """Append one hop provenance record to the hash-chained audit under
+        the ``delegation`` event class (056 T018, FR-026). Paired records
+        (``delegation.hop.mint`` / ``delegation.hop.enforce``) share the hop's
+        correlation_id with the hop's own tool-call pair, so a full chain is
+        reconstructable from the log alone. Carries actor/scope/depth
+        metadata only — NEVER token bytes (FR-028)."""
+        from audit.recorder import get_recorder, now_utc
+        from audit.schemas import AuditEventCreate
+        from orchestrator import delegation as _dg
+        rec = get_recorder()
+        if rec is None:
+            return
+        base = _dg.delegation_chain_audit_record(
+            parent or {}, child or {}, operation=operation, tool=tool_name)
+        human = base.get("human_authorizer")
+        acting = base.get("acting_agent") or f"agent:{callee_agent_id}"
+        if not human:
+            logger.warning("hop audit skipped: no human authorizer (op=%s tool=%s)",
+                           operation, tool_name)
+            return
+        inputs_meta: Dict[str, Any] = {
+            "parent_actor": base.get("parent_actor"),
+            "acting_agent": acting,
+            "delegation_depth": base.get("delegation_depth"),
+            "actor_chain": base.get("actor_chain"),
+        }
+        if requested_scopes is not None:
+            inputs_meta["requested_scopes"] = sorted(requested_scopes)[:16]
+        if granted_scopes is not None:
+            inputs_meta["granted_scopes"] = sorted(granted_scopes)[:16]
+        try:
+            await rec.record(AuditEventCreate(
+                actor_user_id=human,
+                auth_principal=acting,
+                agent_id=callee_agent_id,
+                event_class="delegation",
+                action_type=f"delegation.hop.{operation}",
+                description=f"delegation hop {operation}: {tool_name} on {callee_agent_id}",
+                conversation_id=chat_id,
+                correlation_id=correlation_id,
+                outcome=outcome,
+                outcome_detail=detail,
+                inputs_meta=inputs_meta,
+                started_at=now_utc(),
+            ))
+        except Exception:
+            logger.debug("hop audit record failed", exc_info=True)
+
+    async def _mint_child_for_hop(self, parent_token: Dict, agent_id: str,
+                                  tool_name: str, user_id: str,
+                                  chat_id: Optional[str]):
+        """Mint + verify the child authority for one hop (056 T015/T016/T017).
+
+        Returns ``(encoded_child_token, hop_correlation_id)`` on success or a
+        :class:`GateRefusal` (per-call, fail-closed, audited — never
+        session-terminating). The child satisfies the 048 invariants: scopes =
+        intersection(parent, requested), expiry ≤ parent, depth = parent + 1
+        (refused past the bound), actor chain terminating at the human. An
+        empty intersection against a non-empty request refuses outright
+        (FR-005, D3) rather than dispatching a do-nothing token. Credentials
+        are NEVER carried on the token — the per-(user, callee) credential
+        injection already ran in the authorizer (FR-008).
+        """
+        from audit.recorder import make_correlation_id
+        from orchestrator import delegation as _dg
+        corr = make_correlation_id()
+
+        # Requested scopes for the callee — the same (user, callee) resolution
+        # the flat single-hop mint uses: the callee's non-blocked, user-enabled
+        # tools plus the user's enabled scope-level claims.
+        card = self.agent_cards.get(agent_id)
+        agent_flags = self.security_flags.get(agent_id, {})
+
+        def _scope_reads():
+            allowed = []
+            for skill in (card.skills if card else []):
+                if skill.id in agent_flags and agent_flags[skill.id].get("blocked"):
+                    continue
+                if not self.tool_permissions.is_tool_allowed(user_id, agent_id, skill.id):
+                    continue
+                allowed.append(skill.id)
+            return allowed, self.tool_permissions.get_enabled_scope_names(user_id, agent_id)
+
+        allowed_tools, enabled_scopes = await asyncio.to_thread(_scope_reads)
+        requested = list(enabled_scopes or []) + [f"tool:{t}" for t in allowed_tools]
+
+        def _refusal(message_text: str) -> GateRefusal:
+            alert = Alert(message=message_text, variant="warning")
+            return GateRefusal(
+                response=MCPResponse(
+                    error={"message": message_text, "retryable": False},
+                    ui_components=[alert.to_dict()]),
+                render_components=[alert.to_dict()],
+                hop_audited=True)  # this path emitted its own hop record
+
+        try:
+            child = _dg.mint_child_delegation(parent_token, agent_id, requested)
+        except _dg.DelegationDepthExceeded as exc:
+            logger.warning("delegation.hop.mint refused depth_exceeded callee=%s tool=%s chat=%s",
+                           agent_id, tool_name, chat_id)
+            await self._record_hop_audit(
+                operation="mint", outcome="failure", parent=parent_token,
+                child=None, callee_agent_id=agent_id, tool_name=tool_name,
+                chat_id=chat_id, correlation_id=corr, detail="depth_exceeded",
+                requested_scopes=requested)
+            return _refusal(
+                f"Chained hop refused: delegation depth limit reached ({exc}).")
+
+        granted = (child.get("scope") or "").split()
+        if requested and not granted:
+            logger.warning("delegation.hop.mint refused empty_intersection callee=%s tool=%s chat=%s",
+                           agent_id, tool_name, chat_id)
+            await self._record_hop_audit(
+                operation="mint", outcome="failure", parent=parent_token,
+                child=child, callee_agent_id=agent_id, tool_name=tool_name,
+                chat_id=chat_id, correlation_id=corr, detail="empty_intersection",
+                requested_scopes=requested, granted_scopes=granted)
+            return _refusal(
+                f"Chained hop refused: none of the scopes '{tool_name}' needs "
+                f"are within the parent delegation's authority.")
+
+        await self._record_hop_audit(
+            operation="mint", outcome="in_progress", parent=parent_token,
+            child=child, callee_agent_id=agent_id, tool_name=tool_name,
+            chat_id=chat_id, correlation_id=corr,
+            requested_scopes=requested, granted_scopes=granted)
+
+        required_scope = ""
+        try:
+            required_scope = self.tool_permissions.get_tool_scope(agent_id, tool_name) or ""
+        except Exception:
+            required_scope = ""
+        ok, reason = _dg.authorize_chained_tool_call(child, tool_name, required_scope)
+        if not ok:
+            logger.warning("delegation.hop.enforce refused reason=%r callee=%s tool=%s chat=%s",
+                           reason, agent_id, tool_name, chat_id)
+            await self._record_hop_audit(
+                operation="enforce", outcome="failure", parent=parent_token,
+                child=child, callee_agent_id=agent_id, tool_name=tool_name,
+                chat_id=chat_id, correlation_id=corr, detail=reason,
+                granted_scopes=granted)
+            return _refusal(f"Chained hop refused: {reason}.")
+
+        await self._record_hop_audit(
+            operation="enforce", outcome="success", parent=parent_token,
+            child=child, callee_agent_id=agent_id, tool_name=tool_name,
+            chat_id=chat_id, correlation_id=corr, granted_scopes=granted)
+        logger.info("delegation.hop.minted callee=%s tool=%s depth=%s chat=%s corr=%s",
+                    agent_id, tool_name, child.get("delegation_depth"), chat_id, corr)
+        return _dg.encode_delegation_payload(child), corr
+
+    async def _handle_agent_hop_request(self, websocket, msg: "AgentHopRequest") -> None:
+        """Mediate one agent-initiated hop (056 US1, FR-001/FR-003/FR-029).
+
+        Resolves the initiator's user/chat/UI-socket/parent-authority from the
+        orchestrator's OWN dispatch record (never agent-supplied), charges the
+        turn's global chain budget, and re-enters ``execute_single_tool`` so
+        the hop passes the FULL single-path gate stack under a freshly minted
+        child delegation. Every refusal is per-call and honest (an error
+        ``MCPResponse``, never a teardown — FR-028); refusals that carry a
+        resolvable authority (a mint/enforce/budget/reserved-callee refusal)
+        are also audited to the hash chain, while the two pre-authority
+        refusals — an unknown/spoofed parent and the flag-off inert path —
+        are log-only (there is no derivable principal to attribute them to).
+        Reserved ``__``-pseudo-agent ids are refused before dispatch, so the
+        meta-tool exemption is structurally unavailable to hops (FR-003/FR-018).
+        """
+        from orchestrator import delegation as _dg
+        hop_id = msg.request_id or ""
+        callee = msg.callee_agent_id or ""
+        tool_name = msg.tool_name or ""
+        initiator = msg.initiator_agent_id or ""
+
+        async def _refuse(message_text: str, *, ctx=None, detail=None, parent=None):
+            if detail is not None:
+                from audit.recorder import make_correlation_id
+                await self._record_hop_audit(
+                    operation="mint", outcome="failure",
+                    parent=parent or {"sub": (ctx or {}).get("user_id")},
+                    child=None, callee_agent_id=callee, tool_name=tool_name,
+                    chat_id=(ctx or {}).get("chat_id"),
+                    correlation_id=make_correlation_id(), detail=detail)
+            await self._deliver_hop_response(websocket, hop_id, MCPResponse(
+                request_id=hop_id,
+                error={"message": message_text, "retryable": False}))
+
+        try:
+            if not _dg.recursive_delegation_enabled():
+                # Flag off ⇒ the chaining seam does not exist (FR-009).
+                return await _refuse(
+                    "Agent-to-agent chaining is disabled (FF_RECURSIVE_DELEGATION off).")
+            ctx = self._dispatch_context.get(msg.parent_request_id or "")
+            if ctx is None or ctx.get("agent_id") != initiator:
+                logger.warning(
+                    "delegation.hop refused unknown_parent initiator=%s callee=%s tool=%s",
+                    initiator, callee, tool_name)
+                return await _refuse(
+                    "Hop refused: no active parent dispatch for this request.",
+                    detail="unknown_parent")
+            if not callee or callee.startswith("__"):
+                logger.warning(
+                    "delegation.hop refused reserved_callee initiator=%s callee=%s",
+                    initiator, callee)
+                return await _refuse(
+                    f"Hop refused: '{callee}' is not a dispatchable agent.",
+                    ctx=ctx, detail="reserved_callee",
+                    parent=ctx.get("parent_token"))
+            parent = ctx.get("parent_token")
+            if not parent:
+                # No parent authority to attenuate — refuse rather than mint
+                # ambient authority (FR-001); dev-mode hops exercise real
+                # minting too (D17.2), so the refusal is identical everywhere.
+                logger.warning(
+                    "delegation.hop refused no_parent_authority initiator=%s callee=%s",
+                    initiator, callee)
+                return await _refuse(
+                    "Hop refused: the initiating dispatch carries no delegated "
+                    "authority to attenuate.", ctx=ctx, detail="no_parent_authority")
+            budget = self._chain_budget_for(ctx.get("chat_id"))
+            reason = budget.charge(_dg._token_depth(parent) + 1)
+            if reason is not None:
+                logger.warning(
+                    "delegation.hop refused budget_stop reason=%s initiator=%s callee=%s chat=%s",
+                    reason, initiator, callee, ctx.get("chat_id"))
+                return await _refuse(
+                    f"Hop refused: chain budget exhausted ({reason}).",
+                    ctx=ctx, detail=f"budget_stop:{reason}", parent=parent)
+
+            logger.info(
+                "delegation.hop.request initiator=%s callee=%s tool=%s chat=%s depth=%s",
+                initiator, callee, tool_name, ctx.get("chat_id"),
+                _dg._token_depth(parent) + 1)
+            from types import SimpleNamespace
+            tc = SimpleNamespace(function=SimpleNamespace(
+                name=tool_name, arguments=json.dumps(dict(msg.arguments or {}))))
+            resp = await self.execute_single_tool(
+                ctx.get("ui_websocket"), tc, {tool_name: callee},
+                ctx.get("chat_id"), user_id=ctx.get("user_id"),
+                parent_token=parent, initiating_agent_id=initiator)
+            if resp is None:
+                resp = MCPResponse(
+                    request_id=hop_id,
+                    error={"message": "hop produced no result", "retryable": True})
+            else:
+                resp = await self._scan_hop_payload(
+                    resp, initiator=initiator, callee=callee, tool_name=tool_name,
+                    ctx=ctx, parent=parent)
+            await self._deliver_hop_response(websocket, hop_id, resp)
+        except Exception as exc:
+            logger.exception("hop mediation failed (hop=%s)", hop_id)
+            await self._deliver_hop_response(websocket, hop_id, MCPResponse(
+                request_id=hop_id,
+                error={"message": f"hop mediation error: {exc}", "retryable": False}))
+
+    async def _scan_hop_payload(self, resp: MCPResponse, *, initiator: str,
+                                callee: str, tool_name: str, ctx: Dict,
+                                parent: Optional[Dict]) -> MCPResponse:
+        """Scan a hop RESULT before it enters the initiating agent's context
+        (056 FR-007/D11).
+
+        Chaining turns one agent's output into another agent's input — exactly
+        the multi-agent flow the C-S14 scanner was built for, where it has been
+        advisory (logged, delivered anyway) on the tool path. On an inter-agent
+        hop it ENFORCES: a finding quarantines the payload (it is NOT delivered
+        upstream), records an audited reason, and returns an honest error to the
+        requesting agent, which can work around it. Fail-open on scanner error —
+        a broken scanner must not break dispatch.
+
+        Deliberately NOT gated on ``FF_MAS_DEFENSE`` (which gates the advisory
+        tool-path scan): scanning inter-agent payloads is a core guarantee of
+        chaining, so it rides the chaining flag itself — with
+        ``FF_RECURSIVE_DELEGATION`` off no hop exists and nothing changes.
+        """
+        from audit.recorder import make_correlation_id
+        from orchestrator import mas_defense
+        if resp.error is not None:
+            return resp
+        try:
+            # Scan BOTH channels the hop delivers upstream (result AND
+            # ui_components) — _deliver_hop_response forwards both, so a marker
+            # in either reaches the initiating agent's context.
+            findings = []
+            if resp.result is not None:
+                findings += mas_defense.scan_message(resp.result)
+            if resp.ui_components:
+                findings += mas_defense.scan_message(resp.ui_components)
+        except Exception:  # pragma: no cover — scanner is pure/stdlib
+            logger.debug("hop payload scan failed — delivering", exc_info=True)
+            return resp
+        if not findings:
+            return resp
+        markers = sorted({f.marker for f in findings})
+        logger.warning(
+            "delegation.hop.quarantine initiator=%s callee=%s tool=%s markers=%s chat=%s",
+            initiator, callee, tool_name, markers, ctx.get("chat_id"))
+        await self._record_hop_audit(
+            operation="enforce", outcome="failure", parent=parent, child=None,
+            callee_agent_id=callee, tool_name=tool_name,
+            chat_id=ctx.get("chat_id"), correlation_id=make_correlation_id(),
+            detail=f"quarantined: injection markers {', '.join(markers)[:120]}")
+        msg = (f"The result of '{tool_name}' was quarantined: it contained "
+               f"prompt-injection markers and was not delivered.")
+        return MCPResponse(error={"message": msg, "retryable": False})
+
+    async def _deliver_hop_response(self, initiator_ws, hop_id: str,
+                                    resp: MCPResponse) -> None:
+        """Deliver a mediated hop's outcome to the initiating agent (056 US1).
+
+        In-process initiators awaited a future registered on their loopback
+        socket — resolve it directly. Networked initiators receive an
+        ``agent_hop_response`` frame over their existing control socket."""
+        futures = getattr(initiator_ws, "_hop_futures", None)
+        if isinstance(futures, dict):
+            fut = futures.pop(hop_id, None)
+            if fut is not None and not fut.done():
+                fut.set_result(resp)
+                return
+        send = getattr(initiator_ws, "send", None)
+        if send is None:
+            logger.warning("no route to deliver hop response %s", hop_id)
+            return
+        try:
+            frame = AgentHopResponse(request_id=hop_id, response={
+                "result": resp.result,
+                "error": resp.error,
+                "ui_components": resp.ui_components,
+            })
+            await send(frame.to_json())
+        except Exception:
+            logger.warning("hop response delivery failed for %s", hop_id, exc_info=True)
+
+    async def _release_hop_cap_slot(self, cap_job_id: str) -> None:
+        """Release the initiating agent's slot of a dual-charged hop (056
+        FR-019). No-op when the job was not a hop. Called from every site
+        that releases the executing agent's slot."""
+        entry = self._hop_cap_entries.pop(cap_job_id, None)
+        if entry:
+            u_id, a_id = entry
+            try:
+                await self.concurrency_cap.release(u_id, a_id, cap_job_id)
+            except Exception:
+                logger.debug("hop cap release failed", exc_info=True)
 
     async def _execute_with_retry_audited(self, websocket, agent_id, tool_name, args, chat_id=None):
         """Dispatch a tool with the SAME ToolDispatchAudit start/end events as the
@@ -6662,17 +7361,14 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             # 055 US2: LLM-authored params as written (see execute_single_tool).
             stream_params = dict(args)
 
-            if chat_id:
-                args = await asyncio.to_thread(
-                    self._map_file_paths, chat_id, args, user_id=user_id)
-                args["session_id"] = chat_id
-                if user_id:
-                    args["user_id"] = user_id
-
             # agent_id resolved above (before the JSON parse) so the parse-fail
             # error path can include it in the prepared tuple.
 
-            # Feature 027 — meta-tools dispatch directly (see execute_single_tool).
+            # Feature 027/030/039 — meta-tools dispatch directly, with the SAME
+            # four reserved pseudo-agent branches as the single path (056 US3
+            # T008/FR-018 — previously only __orchestrator__ worked here). The
+            # exemption stays limited to these reserved ids; real-agent calls
+            # (and therefore chained hops) can never reach a meta-tool handler.
             if agent_id == "__orchestrator__":
                 from orchestrator import agentic_creation
                 prepared.append((idx, tc, tool_name, agent_id, None,
@@ -6680,47 +7376,57 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                                      self, tool_name, args, user_id=user_id,
                                      chat_id=chat_id, websocket=websocket)))
                 continue
-
-            if user_id and agent_id:
-                creds = self.credential_manager.get_agent_credentials_encrypted(user_id, agent_id)
-                if creds:
-                    args["_credentials"] = creds
-                    args["_credentials_encrypted"] = True
-
-            # System-level security block
-            agent_flags = self.security_flags.get(agent_id, {}) if agent_id else {}
-            if agent_id and tool_name in agent_flags and agent_flags[tool_name].get("blocked"):
-                reason = agent_flags[tool_name].get("reason", "Security threat detected")
-                err_msg = f"Tool '{tool_name}' is system-blocked: {reason}"
-                logger.warning(f"Security block (parallel): agent={agent_id} tool={tool_name}")
-                async def _sec_err(msg=err_msg):
-                    return MCPResponse(error={"message": msg, "retryable": False},
-                                       ui_components=[Alert(message=msg, variant="error").to_dict()])
-                prepared.append((idx, tc, tool_name, agent_id, None, _sec_err()))
+            if agent_id == "__scheduler__":
+                from orchestrator import scheduling_chat
+                prepared.append((idx, tc, tool_name, agent_id, None,
+                                 scheduling_chat.handle_meta_tool(
+                                     self, tool_name, args, user_id=user_id,
+                                     chat_id=chat_id, websocket=websocket)))
+                continue
+            if agent_id == "__memory__":
+                from orchestrator import memory_chat
+                prepared.append((idx, tc, tool_name, agent_id, None,
+                                 memory_chat.handle_meta_tool(
+                                     self, tool_name, args, user_id=user_id,
+                                     chat_id=chat_id, websocket=websocket)))
+                continue
+            if agent_id == "__desktop_codegen__":
+                from orchestrator import desktop_codegen
+                prepared.append((idx, tc, tool_name, agent_id, None,
+                                 desktop_codegen.handle_meta_tool(
+                                     self, tool_name, args, user_id=user_id,
+                                     chat_id=chat_id, websocket=websocket)))
+                continue
+            if agent_id == "__subtasks__":
+                from orchestrator import subtasks as _st
+                args["_parent_tools"] = sorted(
+                    {t for t, a in (tool_to_agent or {}).items()
+                     if not str(a).startswith("__")})
+                prepared.append((idx, tc, tool_name, agent_id, None,
+                                 _st.handle_meta_tool(
+                                     self, tool_name, args, user_id=user_id,
+                                     chat_id=chat_id, websocket=websocket)))
                 continue
 
-            # Permission check
-            if user_id and agent_id and not await asyncio.to_thread(
-                    self.tool_permissions.is_tool_allowed, user_id, agent_id, tool_name):
-                err_msg = f"Tool '{tool_name}' is restricted for this agent. Update permissions in the sidebar to enable it."
-                logger.warning(f"Permission denied (parallel): user={user_id} agent={agent_id} tool={tool_name}")
-                async def _perm_err(msg=err_msg):
-                    return MCPResponse(error={"message": msg, "retryable": False},
-                                       ui_components=[Alert(message=msg, variant="error").to_dict()])
-                prepared.append((idx, tc, tool_name, agent_id, None, _perm_err()))
+            # 056 US3 (T007/FR-017): the FULL single-path gate stack via the
+            # shared authorizer. The parallel path previously applied only
+            # creds/security/permission/no-agent and skipped policy, taint,
+            # supervisor, HITL, the RFC 8693 delegation mint (dispatching
+            # UNSCOPED where the single path refuses fail-closed), the 054
+            # LLM-credential surfacing, PRE_TOOL_USE, and the concurrency
+            # cap. Refusals keep this path's batched delivery: the refusal
+            # response carries its error and is rendered with the error batch
+            # below, exactly like any other failed parallel call.
+            auth = await self._authorize_and_prepare(
+                websocket, agent_id, tool_name, args, chat_id, user_id,
+                stream_params=stream_params)
+            if isinstance(auth, GateRefusal):
+                async def _refused(resp=auth.response):
+                    return resp
+                prepared.append((idx, tc, tool_name, agent_id, None, _refused()))
                 continue
 
-            if not agent_id or (agent_id not in self.agents and agent_id not in self.a2a_clients and agent_id not in self.local_agents):
-                async def _no_agent(tn=tool_name):
-                    return MCPResponse(error={"message": f"No agent for {tn}"})
-                prepared.append((idx, tc, tool_name, agent_id, None, _no_agent()))
-                continue
-
-            # 055 US2: streaming-capable tools in a parallel wave subscribe too.
-            await self._auto_subscribe_stream_artifacts(
-                websocket, chat_id, user_id, tool_name, stream_params)
-
-            prepared.append((idx, tc, tool_name, agent_id, args, None))
+            prepared.append((idx, tc, tool_name, agent_id, auth.args, None))
 
         if not prepared:
             return []
@@ -6742,7 +7448,10 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 else:
                     serial_items.append((idx, tool_name, agent_id, args))
             else:
-                parallel_items.append((idx, tool_name, self._execute_with_retry(websocket, agent_id, tool_name, args)))
+                # 056 US3: audit parity holds on this branch too (040 FR-032
+                # routed only the concurrency-safety branches through the
+                # audited wrapper; flag-off dispatches were unaudited).
+                parallel_items.append((idx, tool_name, self._execute_with_retry_audited(websocket, agent_id, tool_name, args, chat_id)))
 
         # Collect results in original order
         results_by_idx: Dict[int, Any] = {}
@@ -6777,6 +7486,28 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # Reassemble in original order
         ordered = [results_by_idx.get(i) for i in range(len(tool_calls))]
         tool_names = [tc.function.name for tc in tool_calls]
+
+        # 056 US3: the authorizer now acquires the concurrency cap for
+        # long-running parallel dispatches — release slots for errored/absent
+        # results here, since no terminal ToolProgress will arrive to do it
+        # (mirrors the single path's release-on-error).
+        args_by_idx = {p[0]: p[4] for p in prepared if p[4] is not None}
+        for _idx, _res in enumerate(ordered):
+            _errored = (
+                _res is None or isinstance(_res, Exception)
+                or (getattr(_res, "error", None) is not None))
+            if not _errored:
+                continue
+            _cap_id = (args_by_idx.get(_idx) or {}).get("_cap_job_id")
+            if not _cap_id:
+                continue
+            _entry = self._pending_cap_entries.pop(_cap_id, None)
+            if _entry:
+                try:
+                    await self.concurrency_cap.release(_entry[0], _entry[1], _cap_id)
+                except Exception:
+                    logger.debug("cap release failed", exc_info=True)
+            await self._release_hop_cap_slot(_cap_id)
 
         results = ordered
         
@@ -7003,6 +7734,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # Create a future for the response
         future = asyncio.get_event_loop().create_future()
         self.pending_requests[request_id] = future
+        # 056 US1: record this dispatch so a mediated hop from the executing
+        # agent resolves its context/authority against OUR record.
+        self._register_dispatch_context(request_id, agent_id, args, ui_websocket)
 
         # Register UI socket for progress forwarding
         if ui_websocket and flags.is_enabled("progress_streaming"):
@@ -7027,6 +7761,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         finally:
             self.pending_requests.pop(request_id, None)
             self.pending_ui_sockets.pop(request_id, None)
+            self._dispatch_context.pop(request_id, None)
 
     async def _execute_in_process(self, agent_id: str, tool_name: str, args: Dict, timeout: float = 30.0, ui_websocket=None) -> Optional[MCPResponse]:
         """Execute a tool call against a built-in agent running IN-PROCESS (feature 040).
@@ -7061,6 +7796,10 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         )
         future = asyncio.get_event_loop().create_future()
         self.pending_requests[request_id] = future
+        # 056 US1: record this dispatch so a mediated hop from the executing
+        # agent resolves its context/authority against OUR record. Registered
+        # against the ORIGINAL args (the deep copy is scrubbed in-agent).
+        self._register_dispatch_context(request_id, agent_id, args, ui_websocket)
         if ui_websocket and flags.is_enabled("progress_streaming"):
             self.pending_ui_sockets[request_id] = ui_websocket
 
@@ -7104,6 +7843,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 pass
             self.pending_requests.pop(request_id, None)
             self.pending_ui_sockets.pop(request_id, None)
+            self._dispatch_context.pop(request_id, None)
 
     async def _execute_via_a2a(self, agent_id: str, tool_name: str, args: Dict, timeout: float = 30.0) -> Optional[MCPResponse]:
         """Execute a tool call via A2A JSON-RPC (external agents).
@@ -9014,6 +9754,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     await self.concurrency_cap.release(u_id, a_id, cap_job_id)
                 except Exception:
                     logger.debug("cap release failed", exc_info=True)
+            await self._release_hop_cap_slot(cap_job_id)
 
     def _sockets_on_chat(self, user_id: str, chat_id: str) -> List[Any]:
         """Every socket ``user_id`` currently has open on ``chat_id`` (for

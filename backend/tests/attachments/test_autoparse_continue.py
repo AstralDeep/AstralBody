@@ -30,15 +30,28 @@ class _Att:
     attachment_id = "a1"
 
 
+def _machine_seam(ns):
+    """056 US2: model the orchestrator's machine-turn authority seam on a
+    SimpleNamespace stand-in (no durable consent in tests → AuthoritySkip, so
+    the turn runs unbound exactly as it does in dev posture)."""
+    async def derive_machine_authority(**kwargs):
+        from orchestrator.chain_authority import AuthoritySkip
+        return AuthoritySkip("missing_consent", "test double")
+    ns.derive_machine_authority = derive_machine_authority
+    ns._bind_machine_turn = lambda vws, authority: None
+    ns._unbind_machine_turn = lambda vws: None
+    return ns
+
+
 def _orch(db, calls):
     async def handle_chat_message(ws, message, chat_id, *, user_id=None, attachments=None, **kw):
         calls.append({"message": message, "chat_id": chat_id,
                       "user_id": user_id, "attachments": attachments})
 
-    return types.SimpleNamespace(
+    return _machine_seam(types.SimpleNamespace(
         history=types.SimpleNamespace(db=db),
         handle_chat_message=handle_chat_message,
-    )
+    ))
 
 
 def _patch_repo(monkeypatch):

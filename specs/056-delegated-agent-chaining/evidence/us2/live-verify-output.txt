@@ -1,0 +1,24 @@
+durable consent captured (real user_offline_grant row): 7c96ec99-6dbd-43e4-9151-085705ad6d03
+  is_valid: True
+job created with offline_grant_id linked: True
+
+== 1. Scheduled run under PRODUCTION posture with consent ==
+  run outcome: success
+  RFC 8693 exchange subject token: fresh-consent-token
+  dispatched tool: web-research-1 web_search
+  dispatched under delegation token: delegated-from-consent
+  PASS — a machine turn now acts delegated in production
+
+== 2. Machine-principal attribution (FR-014 / SC-005) ==
+  [agent_tool_call ] tool.web_search.start      principal=machine:scheduled_job    human=u-sched-6c95cd87 consent_ref=7c96ec99-6dbd-43e4-9151-085705ad6d03
+  [agent_tool_call ] tool.web_search.end        principal=machine:scheduled_job    human=u-sched-6c95cd87 consent_ref=7c96ec99-6dbd-43e4-9151-085705ad6d03
+  PASS — machine:scheduled_job + owning human + consent ref; zero 'legacy'
+
+== 3. Revocation → next run pauses with ONE notification (SC-004) ==
+  run 1 after revocation: outcome=skipped_auth, tools dispatched=0
+  run 2 after revocation: outcome=skipped_auth, tools dispatched=0
+  run 3 after revocation: outcome=skipped_auth, tools dispatched=0
+  notifications sent across 3 firings: 1
+  PASS — 0% dispatch after revocation, exactly one notification
+
+US2 LIVE VERIFICATION: ALL CHECKS PASSED

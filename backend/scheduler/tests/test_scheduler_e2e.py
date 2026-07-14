@@ -52,9 +52,12 @@ def _orch(current_scopes):
     calls = {"notify": []}
 
     async def run_scheduled_turn(*, user_id, chat_id, instruction, agent_id,
-                                 access_token, allowed_scopes, correlation_id):
+                                 access_token, allowed_scopes, correlation_id,
+                                 authority=None):
+        # 056 US2: the runner now threads the consent-derived MachineAuthority.
         calls["run"] = {"allowed_scopes": list(allowed_scopes), "access_token": access_token,
-                        "instruction": instruction, "chat_id": chat_id, "user_id": user_id}
+                        "instruction": instruction, "chat_id": chat_id, "user_id": user_id,
+                        "authority_principal": getattr(authority, "principal", None)}
         return "did the thing"
 
     async def notify_user(user_id, payload):

@@ -116,6 +116,7 @@ def _make_fake(history, user_id, llm_content=NARRATION):
         pending_ui_sockets={},
         _job_context={},
         _pending_cap_entries={},
+        _hop_cap_entries={},
         concurrency_cap=_FakeCap(),
         _safe_send=_safe_send,
         _call_llm=_call_llm,
@@ -124,7 +125,8 @@ def _make_fake(history, user_id, llm_content=NARRATION):
     )
     for name in ("_handle_tool_progress", "_finalize_long_running_job",
                  "_build_job_result_component", "_narrate_job_result",
-                 "_sockets_on_chat", "send_ui_upsert", "send_ui_render"):
+                 "_sockets_on_chat", "send_ui_upsert", "send_ui_render",
+                 "_release_hop_cap_slot"):
         setattr(fake, name, types.MethodType(getattr(Orchestrator, name), fake))
     fake._sent = sent
     return fake

@@ -10,12 +10,14 @@ from typing import Dict, Type
 from security_benchmark.adapters.agentdojo import AgentDojoAdapter
 from security_benchmark.adapters.asb import ASBAdapter
 from security_benchmark.adapters.base import BenchmarkAdapter
+from security_benchmark.adapters.chained import ChainedAttackAdapter
 from security_benchmark.adapters.injecagent import InjecAgentAdapter
 
 REGISTRY: Dict[str, Type[BenchmarkAdapter]] = {
     AgentDojoAdapter.name: AgentDojoAdapter,
     ASBAdapter.name: ASBAdapter,
     InjecAgentAdapter.name: InjecAgentAdapter,
+    ChainedAttackAdapter.name: ChainedAttackAdapter,
 }
 
 

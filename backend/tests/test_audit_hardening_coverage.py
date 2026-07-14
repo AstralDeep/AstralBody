@@ -114,6 +114,11 @@ class _CredScrubFakeOrch:
         self.pending_requests = {}
         self.pending_ui_sockets = {}
         self.stream_manager = None
+        # 056: dispatch-context bookkeeping surface used by _execute_in_process
+        self._dispatch_context = {}
+        from orchestrator.orchestrator import Orchestrator as _O
+        self._register_dispatch_context = types.MethodType(
+            _O._register_dispatch_context, self)
 
     async def handle_agent_message(self, websocket, message):
         # Route the agent's loopback frame to the pending future (mirrors prod).

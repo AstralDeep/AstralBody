@@ -1,0 +1,45 @@
+== 1. Decompose a broad request into 3 isolated sub-tasks ==
+  [ok          ] Program A  agents=['web-research-1'] digest='Findings for audit grant budget for Program '
+  [ok          ] Program B  agents=['web-research-1'] digest='Findings for audit grant budget for Program '
+  [quarantined ] Program C  agents=['web-research-1'] digest='' detail=its result contained prompt-injection markers and was quarantined; it was not delivered
+  PASS — isolated, concurrent, provenance-tagged digests
+
+== 2. MAS scan ENFORCED: the poisoned sub-task is quarantined ==
+  quarantined: its result contained prompt-injection markers and was quarantined; it was not delivered
+  PASS — payload never entered the planner's context
+
+== 3. Hierarchical progress rides EXISTING chat_status frames ==
+  frame types emitted: {'audit_append', 'chat_status'}
+  sample: ['Program A — running', 'Program B — running', 'Program C — running']
+  unmanifested (new) frame types: NONE
+  PASS — progress rides existing frames; every client renders it unchanged
+
+== 4. Global chain budget bounds the tree ==
+  budget max_hops=2 → ran 2, stopped 1
+  stop reason: chain budget exhausted (hop_budget_exhausted)
+  PASS — honest partial results, never runaway recursion
+
+== 5. The unattenuated peer path is GONE (SC-010) ==
+  BaseA2AAgent.call_peer_tool: REMOVED
+  BaseA2AAgent._call_peer_via_ws: REMOVED
+  BaseA2AAgent._call_peer_via_a2a: REMOVED
+  BaseA2AAgent.connect_to_peer: REMOVED
+  BaseA2AAgent._peer_listen_loop: REMOVED
+  PASS — agents cannot bypass orchestrator mediation
+
+== 6. Sub-task lifecycle on the hash chain ==
+  delegation.subtask.spawned         in_progress  
+  delegation.subtask.spawned         in_progress  
+  delegation.subtask.spawned         in_progress  
+  delegation.subtask.completed       success      
+  delegation.subtask.completed       success      
+  delegation.subtask.quarantined     failure      injection markers: ignore previous, reveal you
+  delegation.subtask.budget_stop     failure      hop_budget_exhausted
+  delegation.subtask.spawned         in_progress  
+  delegation.subtask.spawned         in_progress  
+  delegation.subtask.completed       success      
+  delegation.subtask.completed       success      
+
+  verify_chain: INTACT
+
+US4 LIVE VERIFICATION: ALL CHECKS PASSED

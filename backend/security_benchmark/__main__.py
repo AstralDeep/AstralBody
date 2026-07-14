@@ -21,10 +21,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="security_benchmark",
                                 description="ASR harness for the Astral trust envelope")
     p.add_argument("--mode", default="synthetic",
-                   choices=["synthetic", "in_process", "external"],
-                   help="synthetic (CI/offline default) | in_process (real gates) | external")
+                   choices=["synthetic", "in_process", "external", "chained_real"],
+                   help="synthetic (CI/offline default) | in_process (real gates) | "
+                        "external | chained_real (real 056 delegation gates)")
     p.add_argument("--benchmark", action="append", dest="benchmarks", default=[],
-                   help="benchmark id (repeatable): agentdojo | asb | injecagent")
+                   help="benchmark id (repeatable): agentdojo | asb | injecagent | chained")
     p.add_argument("--model", default="scripted-deterministic",
                    help="model label recorded in the run key (ASR is comparable only within a fixed model)")
     p.add_argument("--seed", type=int, default=0)

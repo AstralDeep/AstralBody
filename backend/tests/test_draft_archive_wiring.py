@@ -168,6 +168,20 @@ class FakeHistory:
 
 
 class FakeOrch:
+
+    # 056 US2: machine-turn classes derive their root authority at the
+    # orchestrator's shared seam; a stand-in must model it. No durable consent
+    # exists in these tests, so the honest answer is an AuthoritySkip (the turn
+    # runs unbound, exactly as it does in dev posture today).
+    async def derive_machine_authority(self, **kwargs):
+        from orchestrator.chain_authority import AuthoritySkip
+        return AuthoritySkip("missing_consent", "test double")
+
+    def _bind_machine_turn(self, vws, authority):
+        pass
+
+    def _unbind_machine_turn(self, vws):
+        pass
     def __init__(self, agents_dir, code=HIGH_SURROGATE_CODE):
         self.db = FakeDB()
         self.history = FakeHistory(self.db)

@@ -37,6 +37,10 @@ SWEEP_ALLOWLIST = {
     "ui_event", "register_ui", "register_agent", "mcp_request", "mcp_response",
     "llm_config_set", "llm_config_clear",
     "tool_stream_data", "tool_stream_end", "tool_stream_cancel",
+    # 056: agent-channel control frames for mediated hops (loopback / agent
+    # WS only — never sent to a UI client; ui_protocol.json intentionally
+    # unchanged, Constitution XII)
+    "agent_hop_request", "agent_hop_response",
     # JSON-schema / LLM request payload noise swept up by the literal regex
     "string", "object", "array", "function", "json_object", "json_schema", "raw",
 }

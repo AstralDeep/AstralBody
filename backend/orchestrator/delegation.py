@@ -449,6 +449,62 @@ def recursive_delegation_enabled() -> bool:
         return False
 
 
+def _child_signing_key() -> bytes:
+    """Signing key for orchestrator-minted child delegation tokens (056).
+
+    The orchestrator is both minter and verifier — hop authority is always
+    re-derived from the orchestrator's OWN dispatch record, never from an
+    agent-presented token — so this key never leaves the process. Prefers a
+    dedicated ``DELEGATION_CHILD_SIGNING_KEY``, falls back to the repo's
+    shared ``MEMORY_HMAC_KEY``, then to the dev mock secret (matching
+    ``_create_mock_delegation_token``'s construction for uniform decoding).
+    """
+    key = os.getenv("DELEGATION_CHILD_SIGNING_KEY") or os.getenv("MEMORY_HMAC_KEY")
+    if key:
+        return key.encode("utf-8")
+    return b"mock-delegation-secret"
+
+
+def encode_delegation_payload(payload: dict) -> str:
+    """Compact-encode a decoded delegation payload to the JWT-shaped form the
+    dispatch paths already carry (056 T015).
+
+    Same three-segment base64url + HMAC-SHA256 construction as
+    ``_create_mock_delegation_token`` so downstream token handling
+    (underscore-arg forwarding in-process/WS, Bearer header on the A2A path,
+    depth/scope decode) is uniform for flat and child tokens alike. No token
+    bytes are logged (FR-028).
+    """
+    header = {"alg": "HS256", "typ": "JWT"}
+    header_b64 = (
+        base64.urlsafe_b64encode(json.dumps(header).encode()).rstrip(b"=").decode())
+    payload_b64 = (
+        base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode())
+    signing_input = f"{header_b64}.{payload_b64}"
+    signature = hmac.new(
+        _child_signing_key(), signing_input.encode(), hashlib.sha256).digest()
+    sig_b64 = base64.urlsafe_b64encode(signature).rstrip(b"=").decode()
+    return f"{signing_input}.{sig_b64}"
+
+
+def decode_token_payload(token: str) -> Optional[dict]:
+    """Unverified payload decode of a compact JWT-shaped token (056).
+
+    Used ONLY on tokens the orchestrator itself minted or obtained from the
+    IdP (to seed its own dispatch record) — never to accept authority from an
+    agent-presented token. Returns ``None`` on any malformation (fail closed).
+    """
+    try:
+        if not token or token.count(".") != 2:
+            return None
+        payload_b64 = token.split(".")[1]
+        payload_b64 += "=" * (-len(payload_b64) % 4)
+        decoded = json.loads(base64.urlsafe_b64decode(payload_b64.encode()))
+        return decoded if isinstance(decoded, dict) else None
+    except Exception:
+        return None
+
+
 def attenuate_scopes(parent_scopes, requested_scopes) -> List[str]:
     """Intersect requested scopes with the parent's -- equal-or-narrower only.
 
