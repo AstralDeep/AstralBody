@@ -31,19 +31,23 @@ class WelcomePurgeTest {
     @Test
     fun turn_start_arming_purges_welcome_from_the_canvas() {
         // sendChat / the chat_message ui_event both arm through armTurn: the
-        // welcome goes in the same copy that sets pendingReplace.
+        // welcome goes in the same copy that sets pendingReplace, and the
+        // purged canvas is what the pre-turn snapshot (the timeline archive
+        // source) captures.
         val s = vm.armTurn(UiState(canvas = welcome + comp("A")))
         assertEquals(listOf("A"), s.canvas.map { it.id })
+        assertEquals(listOf("A"), s.preTurnCanvas.map { it.id })
         assertTrue(s.turnActive)
         assertTrue(s.pendingReplace)
     }
 
     @Test
     fun commit_never_archives_a_welcome_only_canvas() {
-        // The "Canvas 1" leak regression: even if a welcome-only canvas survives
-        // to commit (arming is the first line of defense), the archive guard
-        // drops it — the timeline never shows a welcome snapshot.
-        var s = UiState(canvas = welcome, turnActive = true, pendingReplace = true)
+        // The "Canvas 1" leak regression: even if a welcome-only pre-turn
+        // snapshot survives to commit (arming's purge is the first line of
+        // defense), the archive guard drops it — the timeline never shows a
+        // welcome snapshot.
+        var s = UiState(canvas = welcome, preTurnCanvas = welcome, turnActive = true, pendingReplace = true)
         s = vm.reduce(s, Inbound.UiUpsert(chatId = null, ops = listOf(CanvasOp("upsert", "A", comp("A")))))
         s = vm.reduce(s, Inbound.ChatStatus(status = "done", message = null))
         assertEquals(listOf("A"), s.canvas.map { it.id })
@@ -52,11 +56,22 @@ class WelcomePurgeTest {
 
     @Test
     fun commit_archives_only_the_non_welcome_components() {
-        var s = UiState(canvas = welcome + comp("old"), canvasLabel = "old turn", turnActive = true, pendingReplace = true)
+        // In-turn ops morph the live canvas (055 live rule), so the timeline
+        // archives the pre-turn snapshot — minus welcome.
+        var s =
+            UiState(
+                canvas = welcome + comp("old"),
+                preTurnCanvas = welcome + comp("old"),
+                canvasLabel = "old turn",
+                turnActive = true,
+                pendingReplace = true,
+            )
         s = vm.reduce(s, Inbound.UiUpsert(chatId = null, ops = listOf(CanvasOp("upsert", "A", comp("A")))))
         s = vm.reduce(s, Inbound.ChatStatus(status = "done", message = null))
         assertEquals(listOf(listOf("old")), s.canvasHistory.map { snap -> snap.components.map { it.id } })
         assertEquals("old turn", s.canvasHistory.single().label)
+        // Committed state == what the user saw at done: old + the live upsert.
+        assertEquals(listOf("old", "A"), s.canvas.map { it.id })
     }
 
     @Test

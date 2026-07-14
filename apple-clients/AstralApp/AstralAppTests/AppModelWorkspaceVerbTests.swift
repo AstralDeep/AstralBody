@@ -47,14 +47,14 @@ final class AppModelWorkspaceVerbTests: XCTestCase {
         XCTAssertEqual(model.canvas.map(\.componentId), ["wc_budget"])
     }
 
-    func testComponentDeletedMidTurnBuffersIntoPendingCanvas() {
+    func testComponentDeletedMidTurnAppliesLiveAndMirrorsIntoBuffer() {
         let model = AppModel()
-        model.canvas = [budgetCard]
+        model.canvas = [budgetCard, forecastCard]
         model.sendChat("working…")   // arms pendingReplace
-        model.pendingCanvas = [budgetCard, forecastCard]
+        model.pendingCanvas = [budgetCard, forecastCard]   // a buffered render holds both
         reduce(model, #"{"type":"component_deleted","component_id":"wc_forecast"}"#)
-        XCTAssertEqual(model.pendingCanvas.map(\.componentId), ["wc_budget"])
-        XCTAssertEqual(model.canvas.map(\.componentId), ["wc_budget"])   // committed canvas untouched mid-turn
+        XCTAssertEqual(model.canvas.map(\.componentId), ["wc_budget"])          // visible immediately
+        XCTAssertEqual(model.pendingCanvas.map(\.componentId), ["wc_budget"])   // commit state matches
     }
 
     // MARK: components_combined / components_condensed — replace morphs

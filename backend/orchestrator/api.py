@@ -47,7 +47,12 @@ from orchestrator.models import (
     DraftAgentCreateRequest, DraftAgentRefineRequest, AdminReviewRequest,
     DraftAgentResponse, DraftAgentListResponse,
 )
-from orchestrator.auth import get_current_user_id, require_user_id, get_current_user_payload
+from orchestrator.auth import (
+    get_current_user_id,
+    get_current_user_payload,
+    require_user_id,
+    require_user_id_or_web_session,
+)
 from shared.feature_flags import flags
 
 logger = logging.getLogger("API")
@@ -2179,7 +2184,7 @@ async def export_component_csv(
     component_id: str,
     chat_id: str,
     stored_only: int = 0,
-    user_id: str = Depends(require_user_id),
+    user_id: str = Depends(require_user_id_or_web_session),
 ):
     _flag_404("artifact_export")
     orch = _get_orchestrator(request)
@@ -2233,7 +2238,7 @@ async def export_component_csv(
 async def export_canvas_html(
     request: Request,
     chat_id: str,
-    user_id: str = Depends(require_user_id),
+    user_id: str = Depends(require_user_id_or_web_session),
 ):
     _flag_404("artifact_export")
     orch = _get_orchestrator(request)
@@ -2297,7 +2302,7 @@ class ShareCreateRequest(BaseModel):
 async def create_share(
     request: Request,
     body: ShareCreateRequest,
-    user_id: str = Depends(require_user_id),
+    user_id: str = Depends(require_user_id_or_web_session),
 ):
     _flag_404("artifact_sharing")
     orch = _get_orchestrator(request)
@@ -2352,7 +2357,7 @@ async def create_share(
     summary="List my share grants",
     description="Owner's grants, newest first — metadata only, never token material.",
 )
-async def list_shares(user_id: str = Depends(require_user_id)):
+async def list_shares(user_id: str = Depends(require_user_id_or_web_session)):
     _flag_404("artifact_sharing")
     from orchestrator.artifact_share import get_share_store
     grants = await get_share_store().list_grants(user_id)
@@ -2365,7 +2370,7 @@ async def list_shares(user_id: str = Depends(require_user_id)):
     description="Owner-scoped, idempotent, immediate — subsequent public opens refuse.",
     responses={404: {"model": ErrorResponse}},
 )
-async def revoke_share(share_id: int, user_id: str = Depends(require_user_id)):
+async def revoke_share(share_id: int, user_id: str = Depends(require_user_id_or_web_session)):
     _flag_404("artifact_sharing")
     from orchestrator.artifact_share import get_share_store
     found = await get_share_store().revoke(user_id, share_id)

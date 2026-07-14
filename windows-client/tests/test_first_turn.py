@@ -195,3 +195,64 @@ def test_done_after_content_keeps_canvas_no_hint(win):
     win._on_message({"type": "chat_status", "status": "done"})
     assert "A" in win.canvas._by_id
     assert win.canvas._empty is None
+
+
+# --- uniform cross-native rule: in-turn upserts apply LIVE --------------------
+# The originating device never buffers identity-keyed `ui_upsert` ops while a
+# turn is active — they morph the VISIBLE canvas immediately (same semantics
+# as out-of-turn), and the first live op clears the query-start skeleton. At
+# `done` the live canvas IS the committed state (no double-apply, no loss).
+# Windows has no in-turn buffer at all; these tests pin that posture through
+# the full `_on_message` routing.
+
+def test_in_turn_upsert_renders_immediately_and_clears_skeleton(win):
+    win._input.setText("build a table")
+    win._send()
+    assert win.canvas._skeleton is not None
+    win._on_message({"type": "ui_upsert", "ops": [
+        {"op": "upsert", "component_id": "A", "component": _card("A")}]})
+    # visible NOW, mid-turn — not parked in any pending buffer
+    assert "A" in win.canvas._by_id
+    assert win.canvas._lay.indexOf(win.canvas._by_id["A"]) != -1
+    assert win.canvas._skeleton is None      # first live op hides the skeleton
+    assert win.canvas.turn_active is True    # the turn itself is still open
+
+
+def test_done_after_live_upserts_commits_visible_canvas(win):
+    # No full render arrived this turn: the live canvas (with the applied
+    # upserts) IS the committed state at done — nothing re-applied or lost.
+    win._input.setText("build a table")
+    win._send()
+    win._on_message({"type": "ui_upsert", "ops": [
+        {"op": "upsert", "component_id": "A", "component": _card("A")}]})
+    wa = win.canvas._by_id["A"]
+    win._on_message({"type": "chat_status", "status": "done"})
+    assert win.canvas._by_id["A"] is wa      # exact widget survives the commit
+    assert win.canvas._empty is None
+    assert win.canvas._skeleton is None
+
+
+def test_in_turn_stream_frame_applies_live(win):
+    # Streaming ops follow the same live rule (they route through apply_ops).
+    win._input.setText("stream something")
+    win._send()
+    win._on_message({"type": "ui_stream_data", "stream_id": "s1", "seq": 1,
+                     "components": [{"type": "text", "content": "partial"}]})
+    assert "stream-s1" in win.canvas._by_id
+    assert win.canvas._skeleton is None
+
+
+def test_mid_stream_join_guard_reads_live_canvas(win):
+    # The stream_subscribed placeholder guard reads the LIVE identity map
+    # (canvas._by_id) — a node already rendered by an in-turn frame is what
+    # the user sees, so the ack must not blank it with a placeholder.
+    win._input.setText("stream something")
+    win._send()
+    win._on_message({"type": "ui_stream_data", "stream_id": "s1", "seq": 1,
+                     "components": [{"type": "text", "content": "partial"}]})
+    w = win.canvas._by_id["stream-s1"]
+    win._on_message({"type": "stream_subscribed", "stream_id": "s1",
+                     "tool_name": "ticker"})
+    assert win.canvas._by_id["stream-s1"] is w  # placeholder suppressed
+    assert win.canvas._rendered["stream-s1"] == {
+        "type": "text", "content": "partial"}
