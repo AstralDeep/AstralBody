@@ -6535,19 +6535,32 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 # realm missing the tools:* client scopes — every exchange
                 # failed invalid_scope and dispatch silently proceeded
                 # UNSCOPED. Production posture now fails closed with an
-                # actionable operator message; development keeps the
-                # fail-open behavior (warned once per agent) so local stacks
-                # without a fully configured realm still work.
-                err_msg = (
-                    "Tool execution is disabled: delegated authorization "
-                    "(RFC 8693 token exchange) is unavailable for agent "
-                    f"'{agent_id}'. An operator must register the tools:* "
-                    "client scopes on the identity provider (see "
-                    "docs/keycloak-realm-settings.md), or set "
-                    "DELEGATION_REQUIRED=false to accept unscoped dispatch."
-                )
+                # actionable message; development keeps the fail-open
+                # behavior (warned once per agent) so local stacks without a
+                # fully configured realm still work. The message has to name
+                # the actual fault: an unavailable exchange is the operator's
+                # to fix, while an empty scope set is this user's permissions
+                # — sending them to a correctly configured realm is a dead end.
+                permissions_fault = await self._delegation_denied_for_permissions(
+                    websocket, agent_id, user_id)
+                if permissions_fault:
+                    err_msg = (
+                        f"Tool execution is disabled: you haven't granted '{agent_id}' "
+                        "any tool permissions, so it cannot act on your behalf. "
+                        "Enable the agent's tools under Settings → Agents & permissions."
+                    )
+                else:
+                    err_msg = (
+                        "Tool execution is disabled: delegated authorization "
+                        "(RFC 8693 token exchange) is unavailable for agent "
+                        f"'{agent_id}'. An operator must register the tools:* "
+                        "client scopes on the identity provider (see "
+                        "docs/keycloak_agent_delegation_setup.md), or set "
+                        "DELEGATION_REQUIRED=false to accept unscoped dispatch."
+                    )
                 logger.error(
-                    "Delegation required but unavailable: agent=%s user=%s — refusing dispatch",
+                    "Delegation required but unavailable (%s): agent=%s user=%s — refusing dispatch",
+                    "no_enabled_scopes" if permissions_fault else "exchange_unavailable",
                     agent_id, user_id,
                 )
                 return GateRefusal(
@@ -7954,6 +7967,31 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             return False
         return os.getenv("ASTRAL_ENV", "").strip().lower() != "development"
 
+    async def _delegation_denied_for_permissions(
+        self, websocket, agent_id: str, user_id: str
+    ) -> bool:
+        """Whether a failed mint is this user's permissions, not the IdP's fault.
+
+        An empty effective scope list means the user has granted this agent no
+        runnable tool, so the exchange is refused locally (``no_enabled_scopes``)
+        rather than sent to Keycloak with an empty ``scope``. The two causes
+        need different refusals — telling a user to go fix a correctly
+        configured realm is a dead end.
+
+        A turn with no bound user token (an unconsented machine turn) is NOT a
+        permissions fault even though its scope set is also empty: nothing was
+        ever exchanged. Only consulted on the refusal path.
+        """
+        try:
+            session = self.ui_sessions.get(websocket, {}) or {}
+            if not session.get("_raw_token"):
+                return False
+            scopes = await asyncio.to_thread(
+                self.tool_permissions.get_enabled_scope_names, user_id, agent_id)
+            return not scopes
+        except Exception:
+            return False
+
     async def _get_delegation_token(self, websocket, agent_id: str, user_id: str) -> Optional[str]:
         """Generate an RFC 8693 delegation token scoped to safe, allowed tools.
 
@@ -7992,6 +8030,15 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 raw_token, agent_id, allowed_tools, user_id, enabled_scopes
             )
             if "error" in result:
+                if result.get("error") == "no_enabled_scopes":
+                    # Not an IdP fault and not agent-wide: this user granted
+                    # this agent nothing runnable. Per-user, so it must NOT
+                    # mark the agent as "exchange failing" — that would
+                    # downgrade a later, genuine realm failure to a debug line.
+                    logger.warning(
+                        "Delegation refused: user=%s has no enabled tool scopes for agent=%s",
+                        user_id, agent_id)
+                    return None
                 # Feature 030: log loudly ONCE per agent instead of warning on
                 # every call — a misconfigured realm previously produced an
                 # identical warning per tool dispatch (pure noise) while the
@@ -8002,7 +8049,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     self._delegation_failed_agents.add(agent_id)
                     logger.error(
                         "RFC 8693 token exchange failing for agent=%s (logged once; "
-                        "see docs/keycloak-realm-settings.md): %s", agent_id, result)
+                        "see docs/keycloak_agent_delegation_setup.md): %s", agent_id, result)
                 else:
                     logger.debug(f"Delegation token exchange failed for agent={agent_id}: {result}")
                 return None

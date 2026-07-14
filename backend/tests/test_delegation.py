@@ -122,6 +122,101 @@ class TestDelegationInfoExtraction:
         assert info is None
 
 
+class _FakeResp:
+    def __init__(self, status, body):
+        self.status, self._body = status, body
+
+    async def json(self):
+        return self._body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+
+class _FakeSession:
+    """Captures the token-endpoint POST instead of hitting the network."""
+
+    captured = None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    def post(self, url, data=None):
+        _FakeSession.captured = (url, data)
+        return _FakeResp(200, {
+            "access_token": "exchanged-token",
+            "token_type": "Bearer",
+            "expires_in": 300,
+            "scope": data["scope"],
+            "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+        })
+
+
+class TestExchangeGuards:
+    """The exchange must never send Keycloak an empty ``scope`` form field —
+    a present-but-empty param fails 400 invalid_scope ('Invalid scopes: '),
+    which reads like a realm misconfiguration (the safe-agent empty-scope
+    production regression). The guard sits above the mock/real branch so dev
+    stacks fail the same way production does."""
+
+    def _real_service(self, monkeypatch):
+        monkeypatch.setenv("USE_MOCK_AUTH", "false")
+        monkeypatch.setenv("KEYCLOAK_AUTHORITY", "https://kc.example/realms/T")
+        monkeypatch.setenv("KEYCLOAK_CLIENT_ID", "astral-frontend")
+        monkeypatch.setenv("KEYCLOAK_CLIENT_SECRET", "secret")
+        return DelegationService()
+
+    @pytest.mark.asyncio
+    async def test_empty_scope_refused_locally(self, monkeypatch):
+        service = self._real_service(monkeypatch)
+
+        def _no_http(*args, **kwargs):
+            raise AssertionError(
+                "token endpoint must not be called with an empty scope")
+
+        monkeypatch.setattr(
+            "orchestrator.delegation.aiohttp.ClientSession", _no_http)
+        result = await service.exchange_token_for_agent(
+            "user-token", "web-research-1",
+            allowed_tools=["web_search"], enabled_scopes=[])
+        assert result["error"] == "no_enabled_scopes"
+
+    @pytest.mark.asyncio
+    async def test_empty_scope_refused_in_mock_mode_too(self, monkeypatch):
+        """Mock mode must not mint where production refuses — otherwise a
+        permission regression is green on every dev stack and fail-closes
+        only in production (how the original defect escaped)."""
+        monkeypatch.setenv("USE_MOCK_AUTH", "true")
+        service = DelegationService()
+        result = await service.exchange_token_for_agent(
+            "user-token", "web-research-1", allowed_tools=["web_search"],
+            user_id="u1", enabled_scopes=[])
+        assert result["error"] == "no_enabled_scopes"
+        assert "access_token" not in result
+
+    @pytest.mark.asyncio
+    async def test_nonempty_scope_reaches_keycloak(self, monkeypatch):
+        service = self._real_service(monkeypatch)
+        _FakeSession.captured = None
+        monkeypatch.setattr(
+            "orchestrator.delegation.aiohttp.ClientSession", _FakeSession)
+        result = await service.exchange_token_for_agent(
+            "user-token", "web-research-1",
+            allowed_tools=["web_search", "fetch_page"],
+            enabled_scopes=["tools:read", "tools:search"])
+        assert result["access_token"] == "exchanged-token"
+        url, form = _FakeSession.captured
+        assert url.endswith("/protocol/openid-connect/token")
+        assert form["scope"] == "tools:read tools:search"
+        assert form["audience"] == "astral-agent-service"
+
+
 class TestToolScopeCheck:
     def test_tool_in_scope(self):
         scopes = ["tool:get_system_status", "tool:modify_data"]

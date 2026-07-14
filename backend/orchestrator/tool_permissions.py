@@ -327,6 +327,12 @@ class ToolPermissionManager:
         )
         if scope_row is not None:
             return bool(scope_row["enabled"])
+        if required_scope not in VALID_SCOPES:
+            # A tool declaring an unknown scope has no grantable permission
+            # surface (registration warns and says as much) and no scope the
+            # delegation mint could assert — allowing it here would admit a
+            # call the token can never carry authority for.
+            return False
         if self._is_safe_agent(agent_id) and self._safe_flip_allowed(agent_id):
             return True
         return False
@@ -581,12 +587,48 @@ class ToolPermissionManager:
         ]
 
     def get_enabled_scope_names(self, user_id: str, agent_id: str) -> List[str]:
-        """Return list of enabled scope names for the user/agent.
+        """Return the scope names a delegation token for this pair may assert.
 
-        Used when building delegation tokens.
+        This is the scope authority behind every RFC 8693 mint (the flat
+        exchange and the recursive-hop child mint both read it), so it must
+        agree with the gate that actually admits a tool call: a scope is
+        asserted exactly when the user can run at least one tool that requires
+        it, per :meth:`is_tool_allowed`. A raw read of ``agent_scopes`` does
+        NOT satisfy that — two dispatch-allowing paths write no scope row at
+        all (feature 040's safe-agent baseline, and feature 013's
+        per-(tool, kind) ``tool_overrides`` grants) — and a token minted from
+        such a read carries an empty ``scope`` parameter, which Keycloak
+        rejects with ``invalid_scope``, fail-closing every tool call in
+        production posture.
+
+        Deriving per tool also keeps the token from over-asserting: a scope
+        whose tools the user explicitly opted out of is not minted, so the
+        attenuation lives in the token itself and not only in the gate.
+        Explicit *enabled* scope rows are always asserted — the user granted
+        them agent-wide, whether or not a registered tool currently maps to
+        them.
         """
-        scopes = self.get_agent_scopes(user_id, agent_id)
-        return [scope for scope, enabled in scopes.items() if enabled]
+        rows = self.db.fetch_all(
+            "SELECT scope, enabled FROM agent_scopes WHERE user_id = ? AND agent_id = ?",
+            (user_id, agent_id),
+        )
+        enabled = {
+            row["scope"] for row in rows
+            if bool(row["enabled"]) and row["scope"] in VALID_SCOPES
+        }
+        scope_map = self._tool_scope_map.get(agent_id, {})
+        if scope_map:
+            for tool_name, required_scope in scope_map.items():
+                if required_scope in enabled or required_scope not in VALID_SCOPES:
+                    continue
+                if self.is_tool_allowed(user_id, agent_id, tool_name):
+                    enabled.add(required_scope)
+        elif self._is_safe_agent(agent_id) and self._safe_flip_allowed(agent_id):
+            # Agent registered no tool→scope map (not connected this boot):
+            # dispatch resolves its tools at the tools:read default, so the
+            # token has to carry the same.
+            enabled.add("tools:read")
+        return [scope for scope in VALID_SCOPES if scope in enabled]
 
     # ── Backward Compatibility ──────────────────────────────────────────
 

@@ -40,9 +40,9 @@ def orch():
     return o
 
 
-async def _auth(orch, tool="t1", agent="a1", *, user="u1", chat="c1", args=None):
+async def _auth(orch, tool="t1", agent="a1", *, user="u1", chat="c1", args=None, ws=None):
     return await orch._authorize_and_prepare(
-        MagicMock(), agent, tool, dict(args or {}), chat, user)
+        ws or MagicMock(), agent, tool, dict(args or {}), chat, user)
 
 
 def _msg(outcome) -> str:
@@ -190,6 +190,32 @@ async def test_delegation_required_refuses_without_token(orch, monkeypatch):
     assert "delegated authorization" in _msg(out)
     assert out.render_target == "chat"
     assert out.response.ui_components is None
+
+
+@pytest.mark.asyncio
+async def test_delegation_refusal_names_permissions_not_the_realm(orch, monkeypatch):
+    """An empty effective scope set on an authenticated turn is the user's
+    permissions, not a realm misconfiguration — pointing them at the IdP is a
+    dead end."""
+    monkeypatch.setenv("DELEGATION_REQUIRED", "true")
+    ws = MagicMock()
+    orch.ui_sessions[ws] = {"_raw_token": "user-token"}
+    orch.tool_permissions.get_enabled_scope_names = MagicMock(return_value=[])
+    out = await _auth(orch, ws=ws)
+    msg = _msg(out)
+    assert "tool permissions" in msg
+    assert "Agents & permissions" in msg
+    assert "identity provider" not in msg
+
+
+@pytest.mark.asyncio
+async def test_unbound_turn_refusal_names_the_exchange(orch, monkeypatch):
+    """No bound user token (an unconsented machine turn) is an authority
+    problem, not a permissions one — even though its scope set is also empty."""
+    monkeypatch.setenv("DELEGATION_REQUIRED", "true")
+    orch.tool_permissions.get_enabled_scope_names = MagicMock(return_value=[])
+    out = await _auth(orch)
+    assert "delegated authorization" in _msg(out)
 
 
 @pytest.mark.asyncio
