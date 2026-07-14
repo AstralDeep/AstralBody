@@ -681,6 +681,12 @@ class Orchestrator:
         # 056 US1/US4 (FR-021): per-turn global chain budgets keyed by chat id
         # (reset at each turn start; lazily created on first hop).
         self._chain_budgets: Dict[str, Any] = {}
+        # 058 (BYO agents): user-agent tunnel sockets keyed by (owner_sub,
+        # agent_id). A user's desktop-hosted agent tunnels its frames over the
+        # owner's authenticated UI socket; this maps each tunneled agent to its
+        # TunnelSocket adapter so dispatch routes back to the client. Cleared on
+        # UI disconnect (honest-offline).
+        self._tunnel_sockets: Dict[tuple, Any] = {}
         # Maps cap_job_id -> {user_id, agent_id, chat_id, tool_name} for long-running
         # jobs, so a job's progress + terminal result can be routed to (and
         # persisted in) the originating CHAT — not a single ephemeral socket —
@@ -929,6 +935,61 @@ class Orchestrator:
     # AGENT MANAGEMENT
     # =========================================================================
 
+    async def _handle_agent_tunnel(self, ui_ws, msg):
+        """058 (Mode 1 transport): unwrap a user agent's frame tunneled over its
+        owner's authenticated UI socket and route it to the agent-message router
+        via a stable TunnelSocket. The owner is the AUTHENTICATED session ``sub``
+        — never anything the frame presents (FR-015). Flag-gated (byo_agents);
+        inert when off (behavior byte-identical to today)."""
+        if not flags.is_enabled("byo_agents"):
+            return
+        from shared.local_transport import TunnelSocket
+        claims = self.ui_sessions.get(ui_ws) or {}
+        owner_sub = claims.get("sub")
+        payload = getattr(msg, "payload", None) or {}
+        agent_id = payload.get("agent_id")
+        inner = payload.get("frame")
+        if not owner_sub or not agent_id or not inner:
+            logger.debug("agent_tunnel: missing owner/agent/frame — ignoring")
+            return
+        key = (owner_sub, agent_id)
+        sock = self._tunnel_sockets.get(key)
+        if sock is None:
+            sock = TunnelSocket(ui_ws, owner_sub, agent_id, self._safe_send)
+            sock.host_session_id = payload.get("host_session_id")
+            self._tunnel_sockets[key] = sock
+        elif getattr(sock, "ui_websocket", None) is not ui_ws:
+            # Reconnect on a different socket: supersede the stale one.
+            sock.ui_websocket = ui_ws
+            sock.host_session_id = payload.get("host_session_id")
+        frame_text = inner if isinstance(inner, str) else json.dumps(inner)
+        await self.handle_agent_message(sock, frame_text)
+
+    async def _teardown_owner_tunnels(self, ui_ws):
+        """058 (honest-offline, FR-010/FR-011): on UI disconnect, take every user
+        agent tunneled over this socket OFFLINE — drop its TunnelSocket and live
+        registration so a subsequent invocation returns a prompt honest-offline
+        response. Notifies the owner's other sockets best-effort."""
+        owner_sub = (self.ui_sessions.get(ui_ws) or {}).get("sub")
+        gone = [(k, s) for k, s in list(self._tunnel_sockets.items())
+                if getattr(s, "ui_websocket", None) is ui_ws]
+        for key, sock in gone:
+            agent_id = key[1]
+            self._tunnel_sockets.pop(key, None)
+            if self.agents.get(agent_id) is sock:
+                self.agents.pop(agent_id, None)
+            for other in list(self.ui_clients):
+                if other is ui_ws or self._get_user_id(other) != owner_sub:
+                    continue
+                try:
+                    await self._safe_send(other, json.dumps(
+                        {"type": "agent_offline", "agent_id": agent_id}))
+                except Exception:
+                    logger.debug("agent_offline notify failed", exc_info=True)
+        if gone:
+            logger.info("058: %d user agent(s) offline on UI disconnect (owner=%s)",
+                        len(gone), owner_sub)
+
     async def register_agent(self, websocket, msg: RegisterAgent):
         """Register a specialist agent and store its capabilities."""
         card = msg.agent_card
@@ -936,24 +997,62 @@ class Orchestrator:
             logger.warning("RegisterAgent with no card")
             return
 
-        # 028 FR-016 — agent connections are authenticated. In production
-        # (ASTRAL_ENV != development) a missing/invalid key refuses the
-        # registration outright (fail closed); dev mode stays keyless.
-        from orchestrator.auth import validate_agent_api_key
-        if not validate_agent_api_key(getattr(msg, "api_key", None) or ""):
-            logger.warning(
-                "Refusing agent registration for '%s': missing or invalid agent "
-                "API key (028 FR-016 fail-closed)", card.agent_id)
-            if websocket is not None:
-                try:
-                    await websocket.close(code=1008, reason="agent authentication required")
-                except Exception:
-                    logger.debug("close after refused agent registration failed", exc_info=True)
-            return
+        # 058 (BYO agents) — a user-agent TUNNEL registration is authenticated by
+        # the OWNER's UI session (not the shared AGENT_API_KEY). Owner-binding is
+        # the security decision: derive the owner from the authenticated socket
+        # and refuse unless the registry vouches for (owner, agent_id, runnable
+        # status). Non-tunnel agents (built-in loopback, external WS) keep the
+        # 028 shared-key check.
+        is_tunnel = bool(getattr(websocket, "is_user_agent_tunnel", False))
+        if is_tunnel:
+            from orchestrator.user_agents import authorize_registration
+            owner_sub = getattr(websocket, "owner_sub", None)
+            reserved = frozenset(getattr(self.history.db, "_FIRST_PARTY_PUBLIC_AGENT_IDS", ()) or ())
+            ok, reason = await asyncio.to_thread(
+                authorize_registration, self.history.db, owner_sub, card.agent_id,
+                reserved_ids=reserved)
+            if not ok:
+                logger.warning(
+                    "Refusing user-agent tunnel registration '%s' (owner=%s): %s",
+                    card.agent_id, owner_sub, reason)
+                if websocket is not None:
+                    try:
+                        await websocket.close(code=1008, reason="user-agent registration refused")
+                    except Exception:
+                        logger.debug("close after refused user-agent registration failed", exc_info=True)
+                return
+        else:
+            # 028 FR-016 — agent connections are authenticated. In production
+            # (ASTRAL_ENV != development) a missing/invalid key refuses the
+            # registration outright (fail closed); dev mode stays keyless.
+            from orchestrator.auth import validate_agent_api_key
+            if not validate_agent_api_key(getattr(msg, "api_key", None) or ""):
+                logger.warning(
+                    "Refusing agent registration for '%s': missing or invalid agent "
+                    "API key (028 FR-016 fail-closed)", card.agent_id)
+                if websocket is not None:
+                    try:
+                        await websocket.close(code=1008, reason="agent authentication required")
+                    except Exception:
+                        logger.debug("close after refused agent registration failed", exc_info=True)
+                return
 
         if websocket is not None:
             self.agents[card.agent_id] = websocket
         self.agent_cards[card.agent_id] = card
+
+        # 058: a tunnel registration is the delivered, validated user agent
+        # connecting inward → go live (status='live', host session, companion
+        # agent_ownership row is_public=FALSE) and record the owner-scoped socket.
+        if is_tunnel:
+            from orchestrator import user_agents as _ua
+            self._tunnel_sockets[(getattr(websocket, "owner_sub", None), card.agent_id)] = websocket
+            try:
+                await asyncio.to_thread(
+                    _ua.go_live, self.history.db, card.agent_id,
+                    host_session_id=getattr(websocket, "host_session_id", None))
+            except Exception:
+                logger.warning("go_live failed for user agent %s", card.agent_id, exc_info=True)
 
         # Extract capabilities for routing and tool→scope mapping
         caps = []
@@ -1113,8 +1212,15 @@ class Orchestrator:
         if await asyncio.to_thread(self._is_draft_agent, card.agent_id):
             return
 
-        # Notify all UI clients (include per-user scopes, tool_scope_map, and security flags)
-        for ui in self.ui_clients:
+        # Notify UI clients (per-user scopes, tool_scope_map, security flags). For
+        # a private user-agent tunnel registration, notify ONLY the owner's
+        # sockets — never advertise a private agent to other users (FR-019).
+        notify_targets = self.ui_clients
+        if is_tunnel:
+            _owner_sub = getattr(websocket, "owner_sub", None)
+            notify_targets = [ui for ui in self.ui_clients
+                              if self._get_user_id(ui) == _owner_sub]
+        for ui in notify_targets:
             try:
                 user_id = self._get_user_id(ui)
                 scopes = await asyncio.to_thread(
@@ -1954,6 +2060,12 @@ class Orchestrator:
                                 "type": "chat_status", "status": "done",
                                 "message": "Discovery failed"
                             }))
+
+                elif msg.action == "agent_tunnel":
+                    # 058 (BYO agents, Mode 1 transport): a user's desktop-hosted
+                    # agent tunnels its frames over the owner's authenticated UI
+                    # socket. Unwrap and route to the agent-message router.
+                    await self._handle_agent_tunnel(websocket, msg)
 
                 elif msg.action == "get_history":
                     # Feature 037: show the server-driven skeleton while the
@@ -7782,6 +7894,25 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
     async def _dispatch_tool_call(self, agent_id: str, tool_name: str, args: Dict, timeout: float, ui_websocket) -> Optional[MCPResponse]:
         """Internal: actually dispatch the tool call (in-process → WebSocket → A2A)."""
+        # 058 (honest-offline, FR-011): a user-created agent runs on the owner's
+        # desktop and connects inward over the tunnel — it has no server-reachable
+        # URL. When its host is closed it is simply offline; short-circuit to a
+        # prompt, honest offline response rather than the reconnect/A2A dance
+        # (which would hang or mislead for a NAT'd user agent). Only queried on the
+        # already-disconnected path, so it adds no cost to live dispatches.
+        if agent_id not in self.agents and agent_id not in self.local_agents:
+            try:
+                from orchestrator import user_agents as _ua
+                if await asyncio.to_thread(_ua.is_user_agent, self.history.db, agent_id):
+                    return MCPResponse(
+                        request_id=f"req_{tool_name}_{_uuid.uuid4().hex}",
+                        error={"message": (
+                            f"'{agent_id}' is offline — it runs on your device and its "
+                            f"client isn't connected right now. Reopen the client that "
+                            f"hosts it and try again."),
+                            "retryable": False, "offline": True})
+            except Exception:
+                logger.debug("user-agent offline check failed", exc_info=True)
         # Feature 040 (US1): bundled first-party agents run IN-PROCESS — no
         # network hop. Selected by a positive registry check; external A2A
         # agents and draft subprocesses fall through to the paths below.
@@ -10611,6 +10742,13 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     await self.stream_manager.detach(websocket)
                 except Exception as e:
                     logger.warning(f"stream_manager.detach failed: {e}")
+            # 058 (honest-offline): take this socket's tunneled user agents
+            # offline BEFORE dropping its session (teardown reads the owner sub
+            # from ui_sessions). No-op when no user agent is tunneled here.
+            try:
+                await self._teardown_owner_tunnels(websocket)
+            except Exception:
+                logger.debug("user-agent tunnel teardown failed", exc_info=True)
             self._ws_active_chat.pop(id(websocket), None)
             self._ws_timeline_mode.pop(id(websocket), None)
             self._ws_welcome.pop(id(websocket), None)
@@ -10645,6 +10783,13 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     await self.stream_manager.detach(websocket)
                 except Exception as e:
                     logger.warning(f"stream_manager.detach failed: {e}")
+            # 058 (honest-offline): take this socket's tunneled user agents
+            # offline BEFORE dropping its session (teardown reads the owner sub
+            # from ui_sessions). No-op when no user agent is tunneled here.
+            try:
+                await self._teardown_owner_tunnels(websocket)
+            except Exception:
+                logger.debug("user-agent tunnel teardown failed", exc_info=True)
             self._ws_active_chat.pop(id(websocket), None)
             self._ws_timeline_mode.pop(id(websocket), None)
             self._ws_welcome.pop(id(websocket), None)

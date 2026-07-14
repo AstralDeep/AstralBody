@@ -48,3 +48,42 @@ class LoopbackSocket:
 
     async def close(self, *args: Any, **kwargs: Any) -> None:  # parity no-op
         return None
+
+
+class TunnelSocket:
+    """Feature 058 — agent-connection adapter for a user agent whose frames
+    tunnel over the owner's authenticated UI WebSocket (Mode 1 transport).
+
+    To the orchestrator's agent dispatch it looks like a normal agent WebSocket
+    (``.send``); each outbound frame is wrapped in an ``agent_tunnel`` envelope
+    (tagged with ``agent_id`` so a host running several agents demuxes correctly)
+    and delivered to the client over its UI socket via ``send_fn``. Inbound frames
+    from the client are unwrapped by the orchestrator's ``agent_tunnel`` handler
+    and fed to ``handle_agent_message`` with this same socket.
+
+    Carries the AUTHENTICATED owner ``sub`` (from the UI session) so registration
+    owner-binding derives authority from the orchestrator's own record, never from
+    anything the agent presents.
+    """
+
+    def __init__(self, ui_websocket: Any, owner_sub: str, agent_id: str,
+                 send_fn: Any) -> None:
+        self.ui_websocket = ui_websocket
+        self.owner_sub = owner_sub
+        self.agent_id = agent_id
+        self._send_fn = send_fn  # async fn(ui_ws, text) — e.g. Orchestrator._safe_send
+        self.client = ("tunnel", 0)
+        self.is_user_agent_tunnel = True
+
+    async def send(self, text: str) -> None:
+        """Deliver an outbound agent frame (a tool-call request) TO the client
+        host, wrapped in an agent_tunnel envelope tagged with this agent's id."""
+        await self._send_fn(self.ui_websocket, json.dumps({
+            "type": "agent_tunnel", "agent_id": self.agent_id, "frame": text,
+        }))
+
+    async def send_text(self, text: str) -> None:  # parity with FastAPI sockets
+        await self.send(text)
+
+    async def close(self, *args: Any, **kwargs: Any) -> None:  # parity no-op
+        return None
