@@ -7,7 +7,11 @@ Provides:
 - Legacy agent card (/.well-known/agent-card.json) for backward compat
 - Official A2A agent card (/a2a/.well-known/agent-card.json via a2a-sdk routes)
 - Health check endpoint (/health)
-- Agent-to-agent peer communication via WebSocket
+- Orchestrator-mediated agent-to-agent hops via ``AgentRuntime.call_agent_tool``
+  (feature 056). The direct peer-call path was RETIRED — it forwarded the
+  caller's delegation token unattenuated and bypassed the orchestrator's gate
+  stack; agents can no longer open peer transports (see the "Agent-to-Agent
+  Communication" section below).
 """
 import asyncio
 import inspect
