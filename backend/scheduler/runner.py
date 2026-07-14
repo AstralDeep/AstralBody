@@ -19,11 +19,18 @@ import logging
 import uuid
 from typing import Any, Dict, List, Optional
 
+from orchestrator.tool_permissions import VALID_SCOPES
+
 from .cron import compute_next_run_ms
 
 logger = logging.getLogger("scheduler.runner")
 
-VALID_SCOPES = ["tools:read", "tools:write", "tools:search", "tools:system"]
+# ``VALID_SCOPES`` is the canonical scope vocabulary (six entries since 027/039
+# added tools:files and tools:execute), imported from tool_permissions so a
+# scheduled job never silently loses a scope the user actually granted. The
+# stale four-entry copy that used to live here dropped tools:files/tools:execute,
+# pausing legitimate jobs with a false "permissions no longer enabled" notice
+# and 400-ing the REST create path.
 
 #: Honest, actionable copy per authority-skip reason (056 FR-013).
 _SKIP_SUMMARY = {

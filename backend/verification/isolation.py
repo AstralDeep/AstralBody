@@ -59,6 +59,13 @@ def principal_id(run_id: str, persona: str, role: str = "primary") -> str:
     return f"{NAMESPACE_PREFIX}{safe_run}_{persona}_{role}"
 
 
+def _like_escape(s: str) -> str:
+    """Escape SQL ``LIKE`` metacharacters so a literal prefix is matched
+    literally (paired with ``ESCAPE '\\'``). Without this, the underscores in
+    the ``__verif__`` prefix and the run separator are single-char wildcards."""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def make_principal(run_id: str, persona: str, role: str = "primary",
                    roles: List[str] | None = None) -> Principal:
     return Principal(user_id=principal_id(run_id, persona, role), roles=roles or ["user"])
@@ -81,11 +88,15 @@ def teardown(db, run_id: str) -> int:
         never raises — a failed teardown must not fail a run).
     """
     safe_run = run_id.replace(NAMESPACE_PREFIX, "")
-    like = f"{NAMESPACE_PREFIX}{safe_run}_%"
+    # Match the exact ``<prefix><run>_`` boundary then any suffix, with LIKE
+    # metacharacters in the literal escaped — otherwise ``__verif__abc_%``
+    # (every ``_`` a wildcard) also matched run "abcd"'s principals, so a
+    # teardown for one run silently deleted a concurrent run's rows.
+    like = f"{_like_escape(f'{NAMESPACE_PREFIX}{safe_run}_')}%"
     ran = 0
     for table in _DELETABLE_USER_TABLES:
         try:
-            db.execute(f"DELETE FROM {table} WHERE user_id LIKE ?", (like,))
+            db.execute(f"DELETE FROM {table} WHERE user_id LIKE ? ESCAPE '\\'", (like,))
             ran += 1
         except Exception:  # pragma: no cover - table may not exist in a given schema
             logger.debug("teardown: skipped %s", table, exc_info=True)

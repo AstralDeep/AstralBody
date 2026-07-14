@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from agentic_settings import SCHEDULE_MAX_ACTIVE_JOBS_PER_USER, SCHEDULE_MIN_INTERVAL_SECONDS
 from orchestrator.auth import get_current_user_payload, require_user_id
+from orchestrator.tool_permissions import VALID_SCOPES as _CANONICAL_SCOPES
 from audit.hooks import record_generic
 
 from .cron import ScheduleError, compute_next_run_ms
@@ -31,7 +32,10 @@ logger = logging.getLogger("Scheduler.API")
 
 schedule_router = APIRouter(prefix="/api/schedule", tags=["Schedule"])
 
-_VALID_SCOPES = {"tools:read", "tools:write", "tools:search", "tools:system"}
+# Canonical scope vocabulary (six entries) — see scheduler/runner.py. The stale
+# four-entry copy that used to live here rejected valid create requests naming
+# tools:files or tools:execute with HTTP 400.
+_VALID_SCOPES = set(_CANONICAL_SCOPES)
 
 
 class ScheduleCreateRequest(BaseModel):

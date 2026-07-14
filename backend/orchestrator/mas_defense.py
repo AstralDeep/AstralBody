@@ -28,15 +28,51 @@ import hashlib
 import hmac
 import json
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, Iterable, List, Optional, Tuple
 
-#: Inter-agent payload markers that suggest a prompt-injection / exfil / escalation
-#: relayed between agents (composes with C-S4 datamarking on prompt ingress).
-_ATTACK_MARKERS = (
-    "ignore previous", "ignore all previous", "disregard your instructions",
-    "you are now", "new instructions:", "system prompt", "exfiltrate",
-    "send to", "reveal your", "api_key", "database_url", "act as admin",
+#: Inter-agent payload markers that suggest a prompt-injection / exfil /
+#: escalation relayed between agents (composes with C-S4 datamarking on prompt
+#: ingress). Each entry is ``(label, pattern)``. The patterns are DIRECTIVE-
+#: framed, not bare substrings: a page or digest that merely *mentions* "system
+#: prompt", carries a "send to a friend" button, or documents an ``api_key``
+#: field is benign and must NOT be flagged — otherwise, now that the scan
+#: ENFORCES a quarantine on inter-agent hop results and sub-task digests (056
+#: FR-007), legitimate web-research/summarization output silently vanishes.
+#: An INJECTION says "ignore your instructions", "reveal your system prompt",
+#: "send it to <url>" — an imperative aimed at the model — and those still fire.
+_ATTACK_PATTERNS: Tuple[Tuple[str, "re.Pattern[str]"], ...] = (
+    ("ignore previous",
+     re.compile(r"\bignore\s+(?:all\s+|any\s+|the\s+)?(?:previous|prior|earlier|preceding|above)\b", re.I)),
+    ("disregard instructions",
+     re.compile(r"\bdisregard\s+(?:your|all|the|any|previous|prior|preceding)?\s*"
+                r"(?:instructions?|prompts?|rules?|guidelines?|directions?)\b", re.I)),
+    ("new instructions",
+     re.compile(r"\bnew\s+instructions?\s*[:\-]", re.I)),
+    ("you are now",
+     re.compile(r"\byou\s+are\s+now\s+(?:a\s+|an\s+|in\s+)?"
+                r"(?:dan\b|jailbroken|jailbreak|unrestricted|developer\s+mode|"
+                r"admin(?:istrator)?\b|root\b|god\s+mode|do\s+anything\s+now)", re.I)),
+    ("act as admin",
+     re.compile(r"\bact\s+as\s+(?:an?\s+)?(?:admin(?:istrator)?|root|superuser|system|developer\s+mode)\b", re.I)),
+    ("exfiltrate",
+     re.compile(r"\bexfiltrat(?:e|es|ing|ion)\b", re.I)),
+    ("system prompt",
+     re.compile(r"\b(?:reveal|show|print|repeat|display|output|leak|share|expose|dump|"
+                r"ignore|forget|reset|override|disclose)\b[^.\n]{0,40}?\bsystem\s+prompt\b", re.I)),
+    ("reveal your",
+     re.compile(r"\breveal\s+your\s+(?:system|instructions?|prompt|api|secret|password|"
+                r"token|key|credentials?|config(?:uration)?)\b", re.I)),
+    ("api_key",
+     re.compile(r"\b(?:reveal|leak|send|exfiltrate|share|show|print|give|output|return|"
+                r"dump|expose|steal|email|post|upload|your)\b[^.\n]{0,25}?\bapi[_\s-]?keys?\b", re.I)),
+    ("database_url",
+     re.compile(r"\b(?:reveal|leak|send|exfiltrate|share|show|print|give|output|return|"
+                r"dump|expose|steal|email|post|upload)\b[^.\n]{0,25}?\bdatabase[_\s-]?url\b", re.I)),
+    ("send to",
+     re.compile(r"\bsend\b[^.\n]{0,40}?\bto\s+(?:https?://|[\w.+-]+@[\w.-]+|"
+                r"the\s+(?:attacker|following\s+(?:url|address|email|endpoint)))", re.I)),
 )
 
 
@@ -100,13 +136,15 @@ class ScanFinding:
 
 def scan_message(payload: Any) -> List[ScanFinding]:
     """TAMAS-style red-team scan of an inter-agent payload for injection / exfil
-    / escalation markers. Returns the findings (empty == clean)."""
+    / escalation DIRECTIVES. Returns the findings (empty == clean). Matches
+    imperative injection framing, not topical mentions, so benign retrieved
+    content is not quarantined (see ``_ATTACK_PATTERNS``)."""
     text = (payload if isinstance(payload, str)
-            else json.dumps(payload, default=str)).lower()
+            else json.dumps(payload, default=str))
     out: List[ScanFinding] = []
-    for marker in _ATTACK_MARKERS:
-        if marker in text:
-            out.append(ScanFinding(marker))
+    for label, pattern in _ATTACK_PATTERNS:
+        if pattern.search(text):
+            out.append(ScanFinding(label))
     return out
 
 

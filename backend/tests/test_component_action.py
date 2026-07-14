@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from orchestrator.history import HistoryManager
 from orchestrator.workspace import WorkspaceManager
-from orchestrator.orchestrator import Orchestrator
+from orchestrator.orchestrator import Orchestrator, PreparedDispatch
 
 
 class _FakeWS:
@@ -86,6 +86,16 @@ def _make_fake(history, user_id, *, allowed=True, security_flags=None, exec_resu
         exec_calls.append((agent_id, tool_name, args))
         return exec_result
 
+    # A deterministic component action now routes its dispatch through the
+    # shared authorizer (FR-036 gate parity). The full gate stack needs the
+    # whole orchestrator; this passthrough grants and returns the prepared
+    # args, so the flow under test (re-execute → upsert → snapshot) is
+    # unchanged while a real deployment still runs policy/taint/HITL/hooks.
+    async def _authorize_and_prepare(ws, agent_id, tool_name, args,
+                                     chat_id=None, user_id=None, **kw):
+        return PreparedDispatch(args=args, stream_params=dict(args),
+                                cap_job_id=None, delegation_token=None)
+
     fake = types.SimpleNamespace(
         workspace=WorkspaceManager(history),
         history=history,
@@ -103,6 +113,7 @@ def _make_fake(history, user_id, *, allowed=True, security_flags=None, exec_resu
         _safe_send=_safe_send,
         send_ui_render=send_ui_render,
         _execute_with_retry=_execute_with_retry,
+        _authorize_and_prepare=_authorize_and_prepare,
     )
     for name in ("_send_or_replace_components", "send_ui_upsert",
                  "_handle_component_action", "_audit_workspace_denial",

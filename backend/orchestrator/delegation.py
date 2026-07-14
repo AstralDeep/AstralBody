@@ -310,16 +310,25 @@ class DelegationService:
         Returns:
             True if the tool is in scope.
         """
-        # Check scope-level claim first (e.g., "tools:read" in scopes)
-        if required_scope and required_scope in scopes:
-            # Also verify the specific tool is listed (belt-and-suspenders)
-            tool_scopes = [s for s in scopes if s.startswith("tool:")]
-            if not tool_scopes:
-                return True  # No tool-level constraints, scope-level is sufficient
-            return f"tool:{tool_name}" in tool_scopes
-
-        # Fallback: check tool-level claim directly
         tool_scopes = [s for s in scopes if s.startswith("tool:")]
+
+        # When the tool declares a required scope, that scope-level claim MUST
+        # be present. A required-but-absent scope is a denial — it must NEVER
+        # fall through to the tool-level fallback, which returns True whenever
+        # the token carries no ``tool:`` entries (the case for every
+        # Keycloak-issued / minted child token). Falling through let a chained
+        # hop launder authority the child delegation never held (a monotonic-
+        # attenuation / no-escalation violation, Constitution VII).
+        if required_scope:
+            if required_scope not in scopes:
+                return False
+            # Scope-level claim present. If the token ALSO enumerates
+            # tool-level claims, the specific tool must be among them;
+            # otherwise scope-level authority is sufficient.
+            return (not tool_scopes) or (f"tool:{tool_name}" in tool_scopes)
+
+        # No required scope known: fall back to tool-level claims when present,
+        # otherwise (a purely scope-level token) treat it as sufficient.
         if not tool_scopes:
             return True
         return f"tool:{tool_name}" in tool_scopes
@@ -364,6 +373,11 @@ class DelegationDepthExceeded(RecursiveDelegationError):
     """Raised when minting a child would exceed the maximum chain depth."""
 
 
+class DelegationConfigError(RecursiveDelegationError):
+    """Raised when child-delegation minting is attempted in production posture
+    without a real signing key configured (fail-closed, Constitution X)."""
+
+
 def recursive_delegation_enabled() -> bool:
     """Return whether recursive delegation is enabled (FF_RECURSIVE_DELEGATION).
 
@@ -384,12 +398,22 @@ def _child_signing_key() -> bytes:
     re-derived from the orchestrator's OWN dispatch record, never from an
     agent-presented token — so this key never leaves the process. Prefers a
     dedicated ``DELEGATION_CHILD_SIGNING_KEY``, falls back to the repo's
-    shared ``MEMORY_HMAC_KEY``, then to the dev mock secret (matching
-    ``_create_mock_delegation_token``'s construction for uniform decoding).
+    shared ``MEMORY_HMAC_KEY``. In production posture (``ASTRAL_ENV`` !=
+    development) neither being set is fail-closed: signing a minted child with
+    the committed dev constant would make every child delegation forgeable by
+    anyone with the public repo (Constitution X). Only development posture
+    falls back to the mock secret (matching ``_create_mock_delegation_token``
+    for uniform local decoding).
     """
     key = os.getenv("DELEGATION_CHILD_SIGNING_KEY") or os.getenv("MEMORY_HMAC_KEY")
     if key:
         return key.encode("utf-8")
+    from orchestrator.session_store import is_dev_mode
+    if not is_dev_mode():
+        raise DelegationConfigError(
+            "child delegation minting requires DELEGATION_CHILD_SIGNING_KEY "
+            "(or MEMORY_HMAC_KEY) to be set in production posture — refusing "
+            "to sign with the committed development constant.")
     return b"mock-delegation-secret"
 
 
@@ -494,6 +518,32 @@ def actor_chain(token: dict) -> List[str]:
     terminates the chain.
     """
     return _walk_actor_chain(token)[0]
+
+
+def normalize_hop_parent(payload: dict, initiating_agent_id: str) -> dict:
+    """Shape a stored dispatch parent token into a chain-mintable root (056).
+
+    A first-hop delegated token obtained from Keycloak (production posture)
+    carries the human ``sub`` but NO RFC 8693 ``act`` actor claim — Keycloak's
+    token exchange does not populate one for our client configuration. Minting
+    a child off such a token yields an actor chain that is MISSING the
+    initiating agent, so ``verify_delegation_chain`` rejects it as broken /
+    length-inconsistent — every agent-to-agent hop then fails closed in
+    production while the mock-token test suite (which hand-sets ``act.sub``)
+    passes. Synthesize the absent depth-0 actor node from the agent the token
+    was ACTUALLY delegated to — known from the orchestrator's OWN dispatch
+    record, never agent-supplied (FR-001). A token that already carries a
+    well-formed delegation actor chain (a mock root or an already-minted child)
+    is returned unchanged, so dev/test behavior is identical.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    act = payload.get("act")
+    if isinstance(act, dict) and isinstance(act.get("sub"), str) and act["sub"]:
+        return payload  # already a well-formed delegation actor chain
+    normalized = dict(payload)
+    normalized["act"] = {"sub": f"agent:{initiating_agent_id}"}
+    return normalized
 
 
 def mint_child_delegation(parent: dict, child_agent_id: str,

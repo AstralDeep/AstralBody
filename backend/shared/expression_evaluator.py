@@ -91,6 +91,13 @@ class ExpressionEvaluator:
         if use_ast_validation:
             self._validate_expression()
         
+    @staticmethod
+    def _is_dunder(name: str) -> bool:
+        """A double-underscore (dunder) identifier — the gateway to every
+        attribute-based sandbox escape (``__class__``, ``__globals__``,
+        ``__dict__``, ``__builtins__``, ``__import__`` …)."""
+        return isinstance(name, str) and name.startswith("__")
+
     def _validate_expression(self) -> None:
         """
         Validate expression AST for security.
@@ -108,9 +115,30 @@ class ExpressionEvaluator:
                     f"Unsafe operation detected: {node_type.__name__} "
                     f"at line {node.lineno if hasattr(node, 'lineno') else '?'}"
                 )
-            
+
+            # Refuse dunder access ANYWHERE. Every AST-based sandbox escape
+            # routes through a double-underscore attribute or name —
+            # ``().__class__``, ``x.__globals__``, or
+            # ``math.__dict__['__builtins__']['eval']`` — so a bare
+            # ``ast.Attribute`` that is not the callee of a Call (previously
+            # unvalidated) reaches the real module/type internals. No
+            # legitimate row expression references a dunder, so deny outright.
+            if isinstance(node, ast.Attribute) and self._is_dunder(node.attr):
+                raise ValueError(f"Disallowed attribute: {node.attr}")
+            if isinstance(node, ast.Name) and self._is_dunder(node.id):
+                raise ValueError(f"Disallowed name: {node.id}")
+
             # Additional checks for Call nodes
             if isinstance(node, ast.Call):
+                # The callee must be a plain name or an attribute access —
+                # never the result of a subscript, call, or lambda. A Call
+                # whose func is an ``ast.Subscript`` (e.g. ``d['eval'](...)``)
+                # otherwise slips past BOTH the Name and Attribute allowlists
+                # below and reaches arbitrary callables.
+                if not isinstance(node.func, (ast.Name, ast.Attribute)):
+                    raise ValueError(
+                        "Disallowed call target: only named functions and "
+                        "attribute methods may be called")
                 # Check function name
                 if isinstance(node.func, ast.Name):
                     func_name = node.func.id
