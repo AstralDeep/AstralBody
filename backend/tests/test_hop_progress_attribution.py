@@ -7,12 +7,11 @@ Apple) renders it unchanged and ``ui_protocol.json`` needs no edit.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import sys
 import types
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
