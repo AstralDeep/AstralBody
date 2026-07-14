@@ -14,6 +14,15 @@ Today a user gets a custom capability only when the assistant notices a gap mid-
 
 Authoring itself mirrors how this very project is built: an **agent constitution** states the non-negotiable contracts a user agent must satisfy, and the client walks the author through **Specify → Clarify → Plan → Tasks → Analyze** so that a non-expert produces an agent that plugs into the platform on the first try instead of iterating against runtime failures.
 
+## Transport model (two modes)
+
+How a user's agent maintains its persistent connection to the orchestrator is a **pluggable transport**, with two supported modes chosen by deployment scale — the per-user security model (owner-binding + human-anchored delegation + boundary re-verification) is identical in both, because transport carries frames and machine identity, never per-user authority.
+
+- **Mode 1 — direct tunnel (v1 default).** The user's desktop agent's frames ride the client's **already-authenticated, already-persistent** connection to the orchestrator. This is the right fit for the personal-agent case: one user, one desktop, an agent that lives beside the client and goes offline when it closes. It adds no new dependency and solves the reachability/persistence problem by *reuse* rather than by standing up new infrastructure.
+- **Mode 2 — Cresco edge mesh (for the broader edge-compute story).** When the deployment is heading toward a **cross-device / edge-compute agent mesh** — many devices per user or org, fabric-managed compute, device telemetry, agents that must persist and be addressed across a fleet of edge nodes — the connection is carried by a **Cresco fabric** (CrescoEdge), which is purpose-built for exactly that: secure, persistent, NAT-traversing, multi-tenant edge-agent connectivity under central controllers. Cresco is treated as **external infrastructure** — the same posture the platform already sanctioned in feature 050 (`specs/050-cresco-integration-decision/`), where the orchestrator reaches the fabric through a first-party Python `wsapi` bridge and **no JVM/broker enters the product image**. In this mode the user's desktop participates in the Cresco mesh and its agent frames route through the fabric to the orchestrator's 050 bridge; the platform's owner-binding, RFC 8693 delegation, and boundary re-verification run unchanged on top (Cresco supplies transport + machine/tenant identity only — it has no per-user consent/permission/audit model).
+
+Mode 1 is the default and the scope of this feature's implementation; Mode 2 is the sanctioned path the transport seam is designed to accept when an edge-mesh initiative justifies the fabric. The choice never weakens the security model.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Create an agent and run it on my own device (Priority: P1)
@@ -127,7 +136,7 @@ A user can see the agents they have created, edit/revise one (which re-runs the 
 
 **Client-side execution**
 
-- **FR-008**: A user-created agent MUST run on the user's own device and MUST NOT run as a process hosted on the orchestrator/central server. Agent hosting is a device capability: in this feature the host is a desktop client (Windows, macOS) running the agent as a real local process; the design MUST NOT preclude adding on-device mobile/web runtimes later.
+- **FR-008**: A user-created agent MUST run on the user's own device and MUST NOT run as a process hosted on the orchestrator/central server. Agent hosting is a device capability: in this feature the host is a desktop client (Windows, macOS) running the agent as a **separate local process the client supervises** (not inside the client's own process); the design MUST NOT preclude adding on-device mobile/web runtimes later.
 - **FR-009**: A user-created agent MUST connect inward to the orchestrator using the platform's existing agent-registration/transport path and be routable like any other registered agent for that user.
 - **FR-010**: A user-created agent MUST go offline when the client that hosts it closes or disconnects, with no server-side fallback, keep-alive, or re-hosting.
 - **FR-011**: Invoking an offline user agent MUST return an honest "offline/unavailable" response promptly, never an indefinite hang or a misleading error.
@@ -135,7 +144,7 @@ A user can see the agents they have created, edit/revise one (which re-runs the 
 
 **Two-layer security**
 
-- **FR-013**: The user's device MUST gate what the local agent can do (local sandbox), constraining it to the user's own resources and authority.
+- **FR-013**: The generated agent MUST run in a **local process isolated from the client itself** — the client supervises it as a separate, restricted child process so the generated code cannot read the client's own memory, session tokens, or files the agent was not granted. Its authority is bounded to the user's own resources (the local layer protects the user's machine from their own generated agent; it is not the cross-user boundary — that is FR-014).
 - **FR-014**: The orchestrator MUST treat every user-created agent as untrusted and MUST independently re-verify every action it attempts across the boundary against the owning user's CURRENT permissions and scopes, fail-closed.
 - **FR-015**: The boundary MUST NOT accept authority, identity, or scope from anything the agent presents; the acting principal and grants MUST be derived from the orchestrator's own record of the owning user.
 - **FR-016**: A user agent MUST NOT be able to read, reference, or act on another user's data, or invoke a tool/scope the owning user does not hold — any such attempt MUST be denied and audited.
@@ -166,6 +175,7 @@ A user can see the agents they have created, edit/revise one (which re-runs the 
 - **FR-029**: The feature MUST honor the platform's fail-closed production posture; any unverifiable step (creation, execution, boundary check) MUST refuse rather than proceed.
 - **FR-030**: The feature MUST introduce zero or minimal new third-party runtime dependencies, consistent with the dependency-management principle.
 - **FR-031**: Any authoring/management chrome MUST follow the server-driven UI model (primitives defined centrally, rendered by the orchestrator, adapted per device) and the cross-client theming/layout rules.
+- **FR-032**: The persistent agent↔orchestrator connection MUST be a **pluggable transport** (see Transport model). The v1 default MUST be the direct tunnel over the client's existing authenticated connection (zero new dependency). A **Cresco edge-mesh** transport MUST be supportable for the broader cross-device/edge-compute scenario under the feature-050 external-infrastructure posture (no JVM/broker in the product image; the orchestrator reaches the fabric via the Python `wsapi` bridge; the user runs/participates in the fabric as external infrastructure). Whichever transport is used, the owner-binding, delegation, and boundary re-verification MUST run unchanged, and adopting Cresco MUST NOT introduce any new dependency into the orchestrator/product image.
 
 ### Key Entities *(include if feature involves data)*
 
@@ -195,6 +205,8 @@ A user can see the agents they have created, edit/revise one (which re-runs the 
 - Agent hosting is a device capability resolved per the Clarifications: desktop clients (Windows, macOS) are the v1 host; the web client, Android, and iOS author and manage agents whose execution binds to the user's desktop host. On-device mobile/web runtimes are a future extension the design must not preclude.
 - A user with no desktop host running can still author and manage agents; those agents are simply offline until a desktop host is available — consistent with the offline-on-client-close model.
 - Personal user agents are expected to be modest in scope (personal utilities and integrations), not high-availability shared services — consistent with offline-on-client-close.
+- The transport is pluggable (Transport model): v1 ships Mode 1 (direct tunnel). Mode 2 (Cresco edge mesh) reuses feature 050's external-infrastructure posture and its Python `wsapi` bridge; operating the Cresco fabric is the operator's/user's responsibility, and Cresco adds no dependency to the orchestrator/product image.
+- The generated agent runs in a client-supervised child process (local process isolation), reusing the desktop client's already-pinned runtime — no new runtime dependency for the host.
 - The agent constitution is authored and versioned in the repository (like the project constitution), and is the single source the Analyze gate checks against.
 - Watch is excluded because it is a companion surface without an agent-hosting or full-authoring role.
 
@@ -207,3 +219,7 @@ A user can see the agents they have created, edit/revise one (which re-runs the 
 - **Q: What form does a user agent take, and how is it sandboxed locally?** → **A: The platform's existing (Python) agent form, reusing the current agent-registration, code-generation, and self-test machinery, sandboxed on the user's desktop host.** A separate portable capability form is out of scope for this feature (folded into the future on-device-runtime extension above).
 
 - **Q: How should the guided Specify → Clarify → Plan → Tasks → Analyze journey feel?** → **A: Hybrid — the client's assistant drafts a structured artifact for each phase, which the author reviews and edits before proceeding.** Clarify and Analyze remain mandatory gates.
+
+- **Q: What is the persistent transport between the desktop agent and the orchestrator, and how does Cresco fit?** → **A: A pluggable transport with two modes (see Transport model). v1 default = the direct tunnel over the client's existing authenticated connection (zero new dependency). Cresco edge mesh = the sanctioned transport for the broader cross-device/edge-compute scenario, treated as external infrastructure per feature 050 (no JVM/broker in the product image; orchestrator reaches the fabric via the Python `wsapi` bridge). Cresco carries transport + machine identity only; the per-user owner-binding, delegation, and boundary re-verification run unchanged.** Note: adopting Cresco as the *desktop* transport by bundling a JVM Cresco agent into the shipped client is a NEW dependency question beyond feature 050's server-side clearance — the 050-compliant path is a user-run/operator-run external fabric.
+
+- **Q: How is the generated agent isolated on the user's own machine (local sandbox)?** → **A: The client supervises it as a separate, restricted child process — not in-process — so the generated code cannot reach the client's own memory, tokens, or ungranted files.** This local layer bounds blast radius to the user's own resources; it is distinct from the cross-user boundary (the orchestrator re-verification), which is what protects other users.

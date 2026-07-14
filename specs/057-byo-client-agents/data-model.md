@@ -26,6 +26,7 @@ The durable registry row for one user-authored, client-hosted agent. **Distinct 
 | `host_session_id` | TEXT | Disambiguates duplicate/reconnect instances (edge case). |
 | `host_last_seen_at` | TIMESTAMPTZ | Heartbeat freshness; feeds the derived running/offline state (never authoritative alone). |
 | `is_public` | BOOLEAN NOT NULL DEFAULT FALSE **CHECK (`is_public` = FALSE)** | Privacy-by-construction structural (FR-019/020, Constitution K). |
+| `deleted_at` | TIMESTAMPTZ | NULL unless soft-deleted (see delete semantics). |
 | `created_at` / `updated_at` | TIMESTAMPTZ | Standard. |
 
 **Derived (not stored)**: `running` ⇔ `agent_id ∈ orchestrator.self.agents` **AND** `host_last_seen_at` is fresh. Persisting liveness would drift on crash (FR-010 is offline-on-close, no server-side persistence).
@@ -69,11 +70,15 @@ The human `owner_user_id`; the sole principal the boundary derives grants from. 
 authoring ──(Clarify+Analyze pass, code generated)──▶ validated
 validated ──(delivered to host + registered inward)──▶ live
 live ──(revision authored)──▶ authoring         (prior live version keeps running until the revision validates — FR-026)
-live ──(owner disable / delete)──▶ disabled
+live ──(owner disables)──▶ disabled
+disabled ──(owner re-enables / re-validates)──▶ validated
+any ──(owner deletes)──▶ disabled + soft-deleted   (see delete semantics below)
 any ──(constitution MAJOR bump)──▶ revalidation_required=TRUE  (boundary fail-closed refuses routing until re-Analyze passes — FR-028, Constitution L)
 ```
 
 `running`/`offline` is orthogonal and derived (socket presence), independent of `status`.
+
+**Delete semantics (resolved)**: delete is a **soft delete** — the host agent is stopped, routing/visibility is removed, and the row is marked `status='disabled'` with a `deleted_at` timestamp; the `user_agent` row and its `audit_events` are retained for the tamper-evident trail (Constitution VII). A hard purge of soft-deleted rows is a separate operator/retention concern, not a user action. (`deleted_at TIMESTAMPTZ` is an additive nullable column on `user_agent`.)
 
 ## Validation rules (from requirements)
 

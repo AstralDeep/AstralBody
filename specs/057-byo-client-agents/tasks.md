@@ -24,7 +24,7 @@ Setup → Foundational → **US1** (Phase A, MVP) → **US3** (Phase B, boundary
 
 ## Phase 0: Transport Decision (gates US1 transport tasks T008–T016)
 
-- [ ] T000 Decide the persistent agent↔orchestrator transport: confirm the **v1 default = UI-socket tunnel** (zero new dep; the client already holds a persistent authenticated socket) vs. a **Cresco edge-mesh transport** (CrescoEdge `agent` on the desktop → mesh → controller → the feature-050 `wsapi` bridge → orchestrator). Timebox a spike per `research.md` D1 and `contracts/agent-tunnel.md`; if Cresco is chosen it lands under the 050 external-infrastructure posture (JVM never in the product image; server reaches the fabric via the Python `wsapi` bridge only; owner-binding + delegation + boundary re-verification unchanged on top). Record the decision in `research.md` before implementing the tunnel. **Owner decision required.**
+- [ ] T000 Confirm the transport per the spec's Transport model (FR-032): **v1 default = the direct tunnel** over the client's existing authenticated connection (zero new dep) is the implementation scope of this feature. The **Cresco edge-mesh** transport (Mode 2) is the sanctioned path for the broader cross-device/edge-compute scenario and is built against the same seam later, under the feature-050 external-infrastructure posture. **Scope the two Cresco postures explicitly (X1)**: (a) *050-compliant* — a user/operator-run **external** Cresco fabric reached via the Python `wsapi` bridge (no new orchestrator/product-image dependency); (b) *client-bundled JVM Cresco agent* — a NEW client-side dependency **beyond** 050's server-side clearance, requiring its own Constitution V decision before adoption. Owner-binding + delegation + boundary re-verification run unchanged in either. Record the confirmed default in `research.md`.
 
 ---
 
@@ -39,7 +39,7 @@ Setup → Foundational → **US1** (Phase A, MVP) → **US3** (Phase B, boundary
 
 **⚠️ CRITICAL**: no user-story work begins until this phase completes.
 
-- [ ] T003 Add the `user_agent` table + additive `draft_agents` columns (`phase`, `clarify_answers`, `plan_json`, `analyze_result`, `constitution_version`, `host_binding`) + `origin='byo_client'`; bump `SCHEMA_REVISION 055.002 → 057.001`; add guarded `_migrate_revalidate_on_constitution_change`; `is_public BOOLEAN CHECK(is_public=FALSE)` — all idempotent per `data-model.md` in `backend/shared/database.py`
+- [ ] T003 Add the `user_agent` table (incl. `deleted_at TIMESTAMPTZ` for soft-delete) + additive `draft_agents` columns (`phase`, `clarify_answers`, `plan_json`, `analyze_result`, `constitution_version`, `host_binding`) + `origin='byo_client'`; bump `SCHEMA_REVISION 055.002 → 057.001`; add guarded `_migrate_revalidate_on_constitution_change`; `is_public BOOLEAN CHECK(is_public=FALSE)` — all idempotent per `data-model.md` in `backend/shared/database.py`
 - [ ] T004 [P] Add `backend/orchestrator/agent_constitution.py` loader: `AGENT_CONSTITUTION_VERSION` (semver from header) + `load_checklist()` → the A–L principle list, resolving the baked asset `__file__`-relative (mirror `knowledge_synthesis.AUTHORED_KNOWLEDGE_DIR`; do NOT hand-copy prose)
 - [ ] T005 [P] Add the `user_agent` registry accessors (create / get / list-by-owner / set-status / set-host-liveness) in a new `backend/orchestrator/user_agents.py`, keyed on canonical `owner_user_id` (OIDC `sub`); write the companion `agent_ownership` row (`is_public=FALSE`) on go-live
 - [ ] T006 [P] Add the `can_user_use_agent(user_id, agent_id) = is_public OR owner_user_id == user_id` predicate in `backend/orchestrator/tool_permissions.py` (reads `user_agent`/`agent_ownership`)
@@ -56,18 +56,19 @@ Setup → Foundational → **US1** (Phase A, MVP) → **US3** (Phase B, boundary
 
 ### Tests for User Story 1
 
-- [ ] T007 [P] [US1] Integration test: owner-tunnel register → dispatch through the existing gate stack → disconnect → honest-offline dispatch, in `backend/tests/test_byo_tunnel.py`
+- [ ] T007 [P] [US1] Integration test: owner-tunnel register → dispatch through the existing gate stack → **assert the tool-call audit row attributes the action to the owning human (FR-012, finding U1)** → disconnect → honest-offline dispatch, in `backend/tests/test_byo_tunnel.py`
 
 ### Implementation for User Story 1
 
-- [ ] T008 [US1] UI-socket **agent-frame tunnel**: unwrap an `agent_tunnel {frame}` UI envelope and feed `handle_agent_message` via a `.send`-shaped adapter (LoopbackSocket pattern), in `backend/orchestrator/orchestrator.py` (per `contracts/agent-tunnel.md`)
+- [ ] T008 [US1] Direct-tunnel **agent-frame transport** behind a small **transport-adapter seam** (so Mode 2 can be added without touching owner-binding/dispatch, FR-032): unwrap an `agent_tunnel {frame}` envelope on the client's authenticated connection and feed `handle_agent_message` via a `.send`-shaped adapter (LoopbackSocket pattern), in `backend/orchestrator/orchestrator.py` (per `contracts/agent-tunnel.md`)
 - [ ] T009 [US1] **Owner-binding** at `RegisterAgent` over an owner tunnel: resolve owner from `ui_sessions[ws].sub` (never from the card); refuse unless `user_agent.owner_user_id == sub` AND `status ∈ {validated, live}` AND `revalidation_required == FALSE`; store an owner-scoped registry keyed `(owner_sub, agent_id)`; supersede a stale socket on reconnect — in `orchestrator.py`; add the additive owner-auth field to `RegisterAgent` in `backend/shared/protocol.py`
 - [ ] T010 [US1] **Owner==user tool-list visibility** filter in `_collect_eligible` so a private user agent is invisible to non-owners independent of scope rows (FR-019, scenario 4), in `backend/orchestrator/orchestrator.py`
 - [ ] T011 [US1] **Honest-offline**: on tunnel disconnect deregister `(owner_sub, agent_id)` + emit `agent_offline`; short-circuit dispatch of an offline user agent to a prompt honest-offline `MCPResponse` (replace the `agent_urls` reconnect fallback for user agents), in `orchestrator.py`
 - [ ] T012 [US1] Add the UI-facing `agent_offline` / `host_status` frame to `backend/shared/ui_protocol.json` + a liveness heartbeat so drops are caught within seconds (SC-005)
 - [ ] T013 [US1] **Code-delivery seam**: after `generate_code`, package the 3-file bundle and push `agent_bundle_deliver` over the owner tunnel; **do NOT** call `start_draft_agent` (Popen) for byo agents; on inward register set `status='live'`, stamp `constitution_version`, insert the `agent_ownership` row — in `backend/orchestrator/agent_lifecycle.py` + `agentic_creation.py` (per `contracts/user-agent-registry.md`)
+- [ ] T013b [US1] **Relocate the self-test off the live-server path (finding G1, SC-002)**: any pre-delivery self-test runs as an **explicitly ephemeral, bounded** orchestrator sandbox that is torn down immediately, **or** on the desktop host with the result reported back over the tunnel — never leaving a persistent user-agent process on the orchestrator (`_self_test_draft`/`start_draft_agent` must not become the live agent) — in `backend/orchestrator/agent_lifecycle.py`
 - [ ] T014 [US1] **Minimal one-shot authoring path** (deliberate entry, `origin='byo_client'`): `create_draft` → existing static gates (`code_security` + `agent_validator`) → `generate_code` → deliver; stamp `AGENT_CONSTITUTION_VERSION`; mark `validated` (full 5-phase Analyze is US2), in `backend/orchestrator/agentic_creation.py`
-- [ ] T015 [US1] **Windows host**: generalize `win_agent.start_agent_thread` to write + run a delivered user bundle as an in-process daemon thread; dial in + tunnel over the client's authenticated WS; stop the agent on client close — in `windows-client/win_agent/` (+ `windows-client/astral_client/app.py`)
+- [ ] T015 [US1] **Windows host**: write + run a delivered user bundle as a **separate, client-supervised child process** (re-invoke `sys.executable`/the frozen exe with a worker-entry flag — NOT an in-process daemon thread, so the generated code cannot reach the client's own memory/tokens/files, finding C1/FR-013); relay its frames through the client's authenticated tunnel; supervise lifecycle + stop on client close — in `windows-client/win_agent/` (+ `windows-client/astral_client/app.py`)
 - [ ] T016 [US1] **Codegen target**: make the generated bundle self-contained for the desktop-host runtime (not the backend `shared` package) OR ship a compatible host shim — `backend/orchestrator/agent_generator.py` + `windows-client`
 - [ ] T017 [US1] Add an SC-002 guard/test asserting **zero user-agent processes on the orchestrator host** after go-live, in `backend/tests/test_byo_offserver.py`
 
@@ -151,11 +152,19 @@ Setup → Foundational → **US1** (Phase A, MVP) → **US3** (Phase B, boundary
 
 - [ ] T038 [US5] List my agents with derived running/offline status on the `agent_authoring` surface in `backend/webrender/chrome/surfaces/authoring.py`
 - [ ] T039 [US5] Revise: re-enter authoring at `specify`; re-pass Analyze; the prior live version keeps running until the revision registers (reuse `apply_revision` rollback semantics, host-side) — `backend/orchestrator/agent_authoring.py` + `agent_lifecycle.py`
-- [ ] T040 [US5] Delete: stop the host agent + remove routing/registry rows — `backend/orchestrator/agent_authoring.py` + `orchestrator.py` + `user_agents.py`
+- [ ] T040 [US5] Delete (**soft**, finding I1): stop the host agent, remove routing/visibility, set `status='disabled'` + `deleted_at` (retain the row + `audit_events` for the tamper-evident trail, Constitution VII) — `backend/orchestrator/agent_authoring.py` + `orchestrator.py` + `user_agents.py`
 - [ ] T041 [US5] Constitution-version re-validation: the guarded migration sets `revalidation_required`; the tunnel/registration check refuses routing until re-Analyze passes (FR-028) — `backend/shared/database.py` + `orchestrator.py`
 - [ ] T042 [US5] Confirm no share/publish/transfer path exists (surface has no control; `is_public CHECK=FALSE` enforced) — `authoring.py` + verify against `data-model.md`
 
 **Checkpoint**: full private lifecycle; the public path remains a manual repo contribution only.
+
+---
+
+## Phase 9: Cresco edge-mesh transport (Mode 2 — DEFERRED, FR-032)
+
+**Deferred**: implemented only when a broader cross-device/edge-compute mesh initiative is greenlit. Built against the T008 transport seam; owner-binding + delegation + boundary re-verification are unchanged.
+
+- [ ] T047 [DEFERRED] Cresco Mode-2 transport adapter: route agent frames via a user/operator-run **external** Cresco fabric through the feature-050 Python `wsapi` bridge (reuse `backend/agents/cresco/` wsapi client posture); no JVM/broker in the product image; the desktop participates in the fabric. Gated on a Constitution-V decision if any client-bundled JVM is contemplated (per T000 posture (b)). References `specs/050-cresco-integration-decision/`.
 
 ---
 
@@ -196,7 +205,7 @@ Setup → Foundational → **US1** (Phase A, MVP) → **US3** (Phase B, boundary
 
 ## Task summary
 
-- **Total**: 47 tasks (T000–T046)
-- **Transport decision**: 1 (T000, owner decision) · **Setup**: 2 · **Foundational**: 4 · **US1**: 11 · **US3**: 6 · **US2**: 7 · **US4**: 6 · **US5**: 6 · **Polish**: 4
+- **Total**: 49 tasks (T000–T047)
+- **Transport decision**: 1 (T000) · **Setup**: 2 · **Foundational**: 4 · **US1**: 12 (incl. T013b) · **US3**: 6 · **US2**: 7 · **US4**: 6 · **US5**: 6 · **Cresco Mode 2 (deferred)**: 1 (T047) · **Polish**: 4
 - **Tests**: T007, T017, T018, T024, T025, T034, T037 (security-critical + parity + lifecycle)
 - **MVP scope**: US1 (T001–T017)
