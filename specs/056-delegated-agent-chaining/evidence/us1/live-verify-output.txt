@@ -1,0 +1,39 @@
+in-process agents registered: ['connectors-1', 'dice-roller-1', 'general-1', 'journal-review-1', 'medical-1', 'ml-services-1', 'summarizer-1', 'weather-1', 'web-research-1']
+
+== Driving summarizer.summarize_url — its tool hops to web_research.fetch_page ==
+summarize_url returned in 3.5s; error=True
+   (summary step: No LLM credentials are configured, so the text could not be summarized. Configur )
+
+== audit rows for u-live-747ad770: 14 ==
+  [agent_tool_call ] tool.summarize_url.start     outcome=in_progress principal=u-live-747ad770
+  [delegation      ] delegation.hop.mint          outcome=in_progress principal=agent:web-research-1
+  [delegation      ] delegation.hop.enforce       outcome=success     principal=agent:web-research-1
+  [agent_tool_call ] tool.fetch_page.start        outcome=in_progress principal=agent:summarizer-1
+  [agent_tool_call ] tool.fetch_page.end          outcome=success     principal=agent:summarizer-1
+  [delegation      ] delegation.hop.mint          outcome=in_progress principal=agent:web-research-1
+  [delegation      ] delegation.hop.enforce       outcome=success     principal=agent:web-research-1
+  [agent_tool_call ] tool.fetch_page.start        outcome=in_progress principal=agent:summarizer-1
+  [agent_tool_call ] tool.fetch_page.end          outcome=success     principal=agent:summarizer-1
+  [delegation      ] delegation.hop.mint          outcome=in_progress principal=agent:web-research-1
+  [delegation      ] delegation.hop.enforce       outcome=success     principal=agent:web-research-1
+  [agent_tool_call ] tool.fetch_page.start        outcome=in_progress principal=agent:summarizer-1
+  [agent_tool_call ] tool.fetch_page.end          outcome=success     principal=agent:summarizer-1
+  [agent_tool_call ] tool.summarize_url.end       outcome=failure     principal=u-live-747ad770
+
+== the hop's attenuated child authority (from the audit record) ==
+  human authorizer : u-live-747ad770
+  acting agent     : agent:web-research-1
+  parent actor     : agent:summarizer-1
+  actor chain      : ['agent:web-research-1', 'agent:summarizer-1']
+  delegation depth : 1
+  granted scopes   : ['tool:fetch_page', 'tool:web_search', 'tools:read', 'tools:search']
+  enforce outcome  : success
+  correlated rows  : ['delegation.hop.mint', 'delegation.hop.enforce', 'tool.fetch_page.start', 'tool.fetch_page.end']
+
+  verify_chain: INTACT (hash chain covers every hop record)
+
+== negative path: revoke web_research permission, re-drive ==
+  hop records now: 9 (was 6); AUDITED DENIALS: 3
+  → explicit opt-out denied the hop, the denial is audited, summarize_url fell back to its own fetch, and the session stayed alive (resp is not None: True )
+
+US1 LIVE VERIFICATION: hop executed under attenuated child authority, fully reconstructable from the audit log.

@@ -246,12 +246,16 @@ class ToolDispatchAudit:
         self, *, claims: Optional[Dict[str, Any]], agent_id: Optional[str],
         tool_name: str, chat_id: Optional[str],
         args_meta: Optional[Dict[str, Any]] = None,
+        correlation_id: Optional[str] = None,
     ):
         self._claims = claims
         self._agent_id = agent_id
         self._tool_name = tool_name
         self._chat_id = chat_id
-        self._correlation_id = make_correlation_id()
+        # 056 US1: a chained hop passes its delegation.hop.mint/.enforce
+        # correlation id here so the hop's tool.start/end pair shares it —
+        # the whole hop reconstructs from one id (SC-003).
+        self._correlation_id = correlation_id or make_correlation_id()
         self._started_at = now_utc()
         self._args_meta = self._sanitize_args_meta(args_meta or {})
         # 056 FR-014: machine-turn records carry the run's authorizing consent

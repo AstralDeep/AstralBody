@@ -51,6 +51,11 @@ class _FakeOrch:
         self.pending_ui_sockets = {}
         self.stream_manager = None
         self.seen_frames = []  # every frame the loopback routed back
+        # 056: dispatch-context bookkeeping surface used by _execute_in_process
+        self._dispatch_context = {}
+        from orchestrator.orchestrator import Orchestrator as _O
+        self._register_dispatch_context = types.MethodType(
+            _O._register_dispatch_context, self)
 
     async def handle_agent_message(self, websocket, message):
         from shared.protocol import Message, MCPResponse, ToolProgress

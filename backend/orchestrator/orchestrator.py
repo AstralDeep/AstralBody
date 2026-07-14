@@ -50,6 +50,7 @@ from shared.protocol import (
     Message, MCPRequest, MCPResponse, UIEvent, UIRender, UIUpdate,
     RegisterAgent, RegisterUI, AgentCard, ToolProgress,
     ToolStreamData, ToolStreamEnd, ToolStreamCancel,
+    AgentHopRequest, AgentHopResponse,
     validate_streaming_metadata,
 )
 from astralprims import (
@@ -622,6 +623,10 @@ class PreparedDispatch(NamedTuple):
     stream_params: Dict[str, Any]
     cap_job_id: Optional[str]
     delegation_token: Optional[str]
+    # 056 US1: on a chained hop, the correlation id shared by the hop's
+    # delegation.hop.mint/.enforce records — threaded into ToolDispatchAudit
+    # so the hop's tool.start/end pair shares it too (SC-003 reconstruction).
+    hop_correlation_id: Optional[str] = None
 
 
 class GateRefusal(NamedTuple):
@@ -635,6 +640,9 @@ class GateRefusal(NamedTuple):
     response: MCPResponse
     render_components: Optional[List[Dict[str, Any]]] = None
     render_target: Optional[str] = None
+    # 056: True when the refusal already emitted its own delegation hop record
+    # (the child-mint/enforce refusals do), so the wrapper does not double-audit.
+    hop_audited: bool = False
 
 
 class Orchestrator:
@@ -662,6 +670,17 @@ class Orchestrator:
         # initiating agent's (user, agent) slot; this maps cap_job_id → that
         # second slot so every release site frees both sides.
         self._hop_cap_entries: Dict[str, tuple] = {}
+        # 056 US1: orchestrator-side record of every in-flight agent dispatch
+        # (request_id → user/chat/ui-socket/agent/decoded parent token). A
+        # mediated hop request resolves its authority against THIS record —
+        # never against agent-supplied identity — closing the confused-deputy
+        # seam. Entries live exactly as long as their dispatch.
+        self._dispatch_context: Dict[str, Dict[str, Any]] = {}
+        # Strong refs to in-flight hop-mediation tasks (asyncio keeps weak refs).
+        self._background_hop_tasks: set = set()
+        # 056 US1/US4 (FR-021): per-turn global chain budgets keyed by chat id
+        # (reset at each turn start; lazily created on first hop).
+        self._chain_budgets: Dict[str, Any] = {}
         # Maps cap_job_id -> {user_id, agent_id, chat_id, tool_name} for long-running
         # jobs, so a job's progress + terminal result can be routed to (and
         # persisted in) the originating CHAT — not a single ephemeral socket —
@@ -1284,6 +1303,16 @@ class Orchestrator:
                     self.pending_requests[req_id].set_result(msg)
                 else:
                     logger.warning(f"Received response for unknown request: {req_id}")
+
+            elif isinstance(msg, AgentHopRequest):
+                # 056 US1: an agent requests a MEDIATED hop to a peer tool.
+                # Mediation runs as its own task so the (possibly loopback)
+                # control frame returns immediately and deep hop chains never
+                # nest inside this router's stack.
+                task = asyncio.create_task(
+                    self._handle_agent_hop_request(websocket, msg))
+                self._background_hop_tasks.add(task)
+                task.add_done_callback(self._background_hop_tasks.discard)
 
             elif isinstance(msg, ToolProgress):
                 # Long-running job progress. Handled UNCONDITIONALLY — this branch
@@ -4200,6 +4229,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 self._active_request = {}
             if chat_id:
                 self._active_request[chat_id] = message
+                # 056 (FR-021): a fresh turn gets a fresh global chain budget
+                # (lazily re-created on the turn's first chained hop).
+                self._chain_budgets.pop(chat_id, None)
 
             # 033 turn coordination (flag-gated + fail-open via turn_hooks):
             # flow tool-budget (C-S1), dual ledger (C-N7), skill recall (C-N10),
@@ -6136,6 +6168,36 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         parent_token: Optional[Dict[str, Any]] = None,
         initiating_agent_id: Optional[str] = None,
     ):
+        """Run the gate stack, auditing a HOP's refusal (056 SC-002).
+
+        Thin wrapper over :meth:`_run_gate_stack`. A chained hop refused by any
+        gate — including the ones that refuse before the delegation step
+        (security flag, permission/opt-out, policy, taint, supervisor, HITL,
+        cap) — emits a ``delegation.hop.mint`` failure record, so 100% of
+        gate-violating hop attempts carry audit evidence. Direct dispatch is
+        unchanged (no hop record, exactly as today).
+        """
+        outcome = await self._run_gate_stack(
+            websocket, agent_id, tool_name, args, chat_id, user_id,
+            stream_params=stream_params, parent_token=parent_token,
+            initiating_agent_id=initiating_agent_id)
+        if parent_token is not None and isinstance(outcome, GateRefusal) \
+                and not outcome.hop_audited:
+            from audit.recorder import make_correlation_id
+            await self._record_hop_audit(
+                operation="mint", outcome="failure", parent=parent_token,
+                child=None, callee_agent_id=agent_id or "", tool_name=tool_name,
+                chat_id=chat_id, correlation_id=make_correlation_id(),
+                detail=(outcome.response.error or {}).get("message", "")[:200])
+        return outcome
+
+    async def _run_gate_stack(
+        self, websocket, agent_id: Optional[str], tool_name: str, args: Dict,
+        chat_id: str = None, user_id: str = None, *,
+        stream_params: Optional[Dict] = None,
+        parent_token: Optional[Dict[str, Any]] = None,
+        initiating_agent_id: Optional[str] = None,
+    ):
         """Run the FULL single-path gate stack once (056 US3, FR-017/SC-006).
 
         Shared by ``execute_single_tool``, ``execute_parallel_tools``, and
@@ -6380,7 +6442,19 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # RFC 8693 delegation: generate a scoped token excluding system-blocked tools
         # The delegation token constrains what the agent can do even if it's compromised
         delegation_token: Optional[str] = None
-        if user_id and agent_id:
+        hop_correlation_id: Optional[str] = None
+        if user_id and agent_id and parent_token is not None:
+            # 056 US1 (FR-001/FR-002): a chained hop NEVER reuses the parent's
+            # token and never falls back to the flat exchange — it acts under
+            # a freshly minted, strictly-narrower child, or is refused. Real
+            # minting runs in every posture (dev included, D17.2).
+            minted = await self._mint_child_for_hop(
+                parent_token, agent_id, tool_name, user_id, chat_id)
+            if isinstance(minted, GateRefusal):
+                return minted
+            delegation_token, hop_correlation_id = minted
+            args["_delegation_token"] = delegation_token
+        elif user_id and agent_id:
             delegation_token = await self._get_delegation_token(websocket, agent_id, user_id)
             if delegation_token:
                 args["_delegation_token"] = delegation_token
@@ -6509,10 +6583,18 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             stream_params=stream_params,
             cap_job_id=cap_job_id,
             delegation_token=delegation_token,
+            hop_correlation_id=hop_correlation_id,
         )
 
-    async def execute_single_tool(self, websocket, tool_call, tool_to_agent: Dict, chat_id: str = None, user_id: str = None, tool_to_unqualified: Optional[Dict[str, str]] = None) -> Optional[MCPResponse]:
-        """Execute a single tool call and render its UI components. Returns the Result object."""
+    async def execute_single_tool(self, websocket, tool_call, tool_to_agent: Dict, chat_id: str = None, user_id: str = None, tool_to_unqualified: Optional[Dict[str, str]] = None, parent_token: Optional[Dict[str, Any]] = None, initiating_agent_id: Optional[str] = None) -> Optional[MCPResponse]:
+        """Execute a single tool call and render its UI components. Returns the Result object.
+
+        056 US1: a mediated chained hop re-enters HERE (via
+        ``_handle_agent_hop_request``) with ``parent_token`` (the initiator's
+        decoded delegation payload, from the orchestrator's own dispatch
+        record) and ``initiating_agent_id`` — switching the delegation step to
+        a strictly-narrower child mint and charging both sides' concurrency
+        slots. Absent both kwargs, behavior is the unchanged direct path."""
         # The LLM may have emitted a qualified name (e.g. "forecaster-1__submit_dataset")
         # when two agents own a tool of the same id. Resolve the bare skill id so the
         # owning agent receives the name it actually registered.
@@ -6594,7 +6676,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # logic lives there; this path keeps its immediate per-call delivery.
         auth = await self._authorize_and_prepare(
             websocket, agent_id, tool_name, args, chat_id, user_id,
-            stream_params=stream_params)
+            stream_params=stream_params, parent_token=parent_token,
+            initiating_agent_id=initiating_agent_id)
         if isinstance(auth, GateRefusal):
             if auth.render_components:
                 if auth.render_target:
@@ -6610,11 +6693,21 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # Audit: record the tool dispatch (in_progress → success/failure)
         from audit.hooks import ToolDispatchAudit
         claims = self.ui_sessions.get(websocket) if websocket is not None else None
+        if claims is None and websocket is not None:
+            # 056 US2 (FR-014): machine turns carry a synthetic machine-context
+            # marker on their virtual socket — record them attributed, never
+            # dropped as "legacy".
+            claims = getattr(websocket, "machine_claims", None)
+        if initiating_agent_id and isinstance(claims, dict):
+            # 056 US1: a hop's tool-call rows name the ACTING agent via the
+            # RFC 8693 act claim while the human stays the actor_user_id.
+            claims = {**claims, "act": {"sub": f"agent:{initiating_agent_id}"}}
         async with ToolDispatchAudit(
             claims=claims,
             agent_id=agent_id,
             tool_name=tool_name,
             chat_id=chat_id,
+            correlation_id=auth.hop_correlation_id,
             args_meta={k: v for k, v in args.items() if not (isinstance(k, str) and k.startswith("_"))},
         ) as _audit_ctx:
             result = await self._execute_with_retry(websocket, agent_id, tool_name, args)
@@ -6719,6 +6812,317 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
     # Scopes considered safe for concurrent execution (read-only operations)
     _PARALLEL_SAFE_SCOPES = frozenset({"tools:read", "tools:search"})
     _MAX_PARALLEL_CONCURRENCY = 10
+
+    def _chain_budget_for(self, chat_id: Optional[str]):
+        """The turn's global chain budget (056 FR-021), lazily created and
+        reset at each turn start. Bounds cumulative depth, total hop count,
+        and wall clock across ALL nesting in the turn (interactive or
+        machine)."""
+        from orchestrator.chain_authority import ChainBudget
+        key = chat_id or "_global"
+        budget = self._chain_budgets.get(key)
+        if budget is None:
+            budget = ChainBudget(turn_id=f"turn_{_uuid.uuid4().hex[:8]}", chat_id=chat_id)
+            self._chain_budgets[key] = budget
+        return budget
+
+    def _register_dispatch_context(self, request_id: str, agent_id: str,
+                                   args: Dict, ui_websocket) -> None:
+        """Record the orchestrator-side context of an in-flight dispatch
+        (056 US1). A mediated hop from the executing agent resolves user,
+        chat, UI socket, and — critically — the PARENT delegation authority
+        from this record, never from anything the agent presents (FR-001)."""
+        try:
+            from orchestrator import delegation as _dg
+            token = args.get("_delegation_token") if isinstance(args, dict) else None
+            self._dispatch_context[request_id] = {
+                "agent_id": agent_id,
+                "user_id": args.get("user_id") if isinstance(args, dict) else None,
+                "chat_id": args.get("session_id") if isinstance(args, dict) else None,
+                "ui_websocket": ui_websocket,
+                "parent_token": _dg.decode_token_payload(token) if token else None,
+            }
+        except Exception:  # never let bookkeeping break a dispatch
+            logger.debug("dispatch context registration failed", exc_info=True)
+
+    async def _record_hop_audit(self, *, operation: str, outcome: str,
+                                parent: Optional[Dict], child: Optional[Dict],
+                                callee_agent_id: str, tool_name: str,
+                                chat_id: Optional[str], correlation_id: str,
+                                detail: Optional[str] = None,
+                                requested_scopes=None, granted_scopes=None) -> None:
+        """Append one hop provenance record to the hash-chained audit under
+        the ``delegation`` event class (056 T018, FR-026). Paired records
+        (``delegation.hop.mint`` / ``delegation.hop.enforce``) share the hop's
+        correlation_id with the hop's own tool-call pair, so a full chain is
+        reconstructable from the log alone. Carries actor/scope/depth
+        metadata only — NEVER token bytes (FR-028)."""
+        from audit.recorder import get_recorder, now_utc
+        from audit.schemas import AuditEventCreate
+        from orchestrator import delegation as _dg
+        rec = get_recorder()
+        if rec is None:
+            return
+        base = _dg.delegation_chain_audit_record(
+            parent or {}, child or {}, operation=operation, tool=tool_name)
+        human = base.get("human_authorizer")
+        acting = base.get("acting_agent") or f"agent:{callee_agent_id}"
+        if not human:
+            logger.warning("hop audit skipped: no human authorizer (op=%s tool=%s)",
+                           operation, tool_name)
+            return
+        inputs_meta: Dict[str, Any] = {
+            "parent_actor": base.get("parent_actor"),
+            "acting_agent": acting,
+            "delegation_depth": base.get("delegation_depth"),
+            "actor_chain": base.get("actor_chain"),
+        }
+        if requested_scopes is not None:
+            inputs_meta["requested_scopes"] = sorted(requested_scopes)[:16]
+        if granted_scopes is not None:
+            inputs_meta["granted_scopes"] = sorted(granted_scopes)[:16]
+        try:
+            await rec.record(AuditEventCreate(
+                actor_user_id=human,
+                auth_principal=acting,
+                agent_id=callee_agent_id,
+                event_class="delegation",
+                action_type=f"delegation.hop.{operation}",
+                description=f"delegation hop {operation}: {tool_name} on {callee_agent_id}",
+                conversation_id=chat_id,
+                correlation_id=correlation_id,
+                outcome=outcome,
+                outcome_detail=detail,
+                inputs_meta=inputs_meta,
+                started_at=now_utc(),
+            ))
+        except Exception:
+            logger.debug("hop audit record failed", exc_info=True)
+
+    async def _mint_child_for_hop(self, parent_token: Dict, agent_id: str,
+                                  tool_name: str, user_id: str,
+                                  chat_id: Optional[str]):
+        """Mint + verify the child authority for one hop (056 T015/T016/T017).
+
+        Returns ``(encoded_child_token, hop_correlation_id)`` on success or a
+        :class:`GateRefusal` (per-call, fail-closed, audited — never
+        session-terminating). The child satisfies the 048 invariants: scopes =
+        intersection(parent, requested), expiry ≤ parent, depth = parent + 1
+        (refused past the bound), actor chain terminating at the human. An
+        empty intersection against a non-empty request refuses outright
+        (FR-005, D3) rather than dispatching a do-nothing token. Credentials
+        are NEVER carried on the token — the per-(user, callee) credential
+        injection already ran in the authorizer (FR-008).
+        """
+        from audit.recorder import make_correlation_id
+        from orchestrator import delegation as _dg
+        corr = make_correlation_id()
+
+        # Requested scopes for the callee — the same (user, callee) resolution
+        # the flat single-hop mint uses: the callee's non-blocked, user-enabled
+        # tools plus the user's enabled scope-level claims.
+        card = self.agent_cards.get(agent_id)
+        agent_flags = self.security_flags.get(agent_id, {})
+
+        def _scope_reads():
+            allowed = []
+            for skill in (card.skills if card else []):
+                if skill.id in agent_flags and agent_flags[skill.id].get("blocked"):
+                    continue
+                if not self.tool_permissions.is_tool_allowed(user_id, agent_id, skill.id):
+                    continue
+                allowed.append(skill.id)
+            return allowed, self.tool_permissions.get_enabled_scope_names(user_id, agent_id)
+
+        allowed_tools, enabled_scopes = await asyncio.to_thread(_scope_reads)
+        requested = list(enabled_scopes or []) + [f"tool:{t}" for t in allowed_tools]
+
+        def _refusal(message_text: str) -> GateRefusal:
+            alert = Alert(message=message_text, variant="warning")
+            return GateRefusal(
+                response=MCPResponse(
+                    error={"message": message_text, "retryable": False},
+                    ui_components=[alert.to_dict()]),
+                render_components=[alert.to_dict()],
+                hop_audited=True)  # this path emitted its own hop record
+
+        try:
+            child = _dg.mint_child_delegation(parent_token, agent_id, requested)
+        except _dg.DelegationDepthExceeded as exc:
+            logger.warning("delegation.hop.mint refused depth_exceeded callee=%s tool=%s chat=%s",
+                           agent_id, tool_name, chat_id)
+            await self._record_hop_audit(
+                operation="mint", outcome="failure", parent=parent_token,
+                child=None, callee_agent_id=agent_id, tool_name=tool_name,
+                chat_id=chat_id, correlation_id=corr, detail="depth_exceeded",
+                requested_scopes=requested)
+            return _refusal(
+                f"Chained hop refused: delegation depth limit reached ({exc}).")
+
+        granted = (child.get("scope") or "").split()
+        if requested and not granted:
+            logger.warning("delegation.hop.mint refused empty_intersection callee=%s tool=%s chat=%s",
+                           agent_id, tool_name, chat_id)
+            await self._record_hop_audit(
+                operation="mint", outcome="failure", parent=parent_token,
+                child=child, callee_agent_id=agent_id, tool_name=tool_name,
+                chat_id=chat_id, correlation_id=corr, detail="empty_intersection",
+                requested_scopes=requested, granted_scopes=granted)
+            return _refusal(
+                f"Chained hop refused: none of the scopes '{tool_name}' needs "
+                f"are within the parent delegation's authority.")
+
+        await self._record_hop_audit(
+            operation="mint", outcome="in_progress", parent=parent_token,
+            child=child, callee_agent_id=agent_id, tool_name=tool_name,
+            chat_id=chat_id, correlation_id=corr,
+            requested_scopes=requested, granted_scopes=granted)
+
+        required_scope = ""
+        try:
+            required_scope = self.tool_permissions.get_tool_scope(agent_id, tool_name) or ""
+        except Exception:
+            required_scope = ""
+        ok, reason = _dg.authorize_chained_tool_call(child, tool_name, required_scope)
+        if not ok:
+            logger.warning("delegation.hop.enforce refused reason=%r callee=%s tool=%s chat=%s",
+                           reason, agent_id, tool_name, chat_id)
+            await self._record_hop_audit(
+                operation="enforce", outcome="failure", parent=parent_token,
+                child=child, callee_agent_id=agent_id, tool_name=tool_name,
+                chat_id=chat_id, correlation_id=corr, detail=reason,
+                granted_scopes=granted)
+            return _refusal(f"Chained hop refused: {reason}.")
+
+        await self._record_hop_audit(
+            operation="enforce", outcome="success", parent=parent_token,
+            child=child, callee_agent_id=agent_id, tool_name=tool_name,
+            chat_id=chat_id, correlation_id=corr, granted_scopes=granted)
+        logger.info("delegation.hop.minted callee=%s tool=%s depth=%s chat=%s corr=%s",
+                    agent_id, tool_name, child.get("delegation_depth"), chat_id, corr)
+        return _dg.encode_delegation_payload(child), corr
+
+    async def _handle_agent_hop_request(self, websocket, msg: "AgentHopRequest") -> None:
+        """Mediate one agent-initiated hop (056 US1, FR-001/FR-003/FR-029).
+
+        Resolves the initiator's user/chat/UI-socket/parent-authority from the
+        orchestrator's OWN dispatch record (never agent-supplied), charges the
+        turn's global chain budget, and re-enters ``execute_single_tool`` so
+        the hop passes the FULL single-path gate stack under a freshly minted
+        child delegation. Every refusal is per-call, honest, and audited —
+        the initiating agent's session is never torn down (FR-028). Reserved
+        ``__``-pseudo-agent ids are refused before dispatch, so the meta-tool
+        exemption is structurally unavailable to hops (FR-003/FR-018).
+        """
+        from orchestrator import delegation as _dg
+        hop_id = msg.request_id or ""
+        callee = msg.callee_agent_id or ""
+        tool_name = msg.tool_name or ""
+        initiator = msg.initiator_agent_id or ""
+
+        async def _refuse(message_text: str, *, ctx=None, detail=None, parent=None):
+            if detail is not None:
+                from audit.recorder import make_correlation_id
+                await self._record_hop_audit(
+                    operation="mint", outcome="failure",
+                    parent=parent or {"sub": (ctx or {}).get("user_id")},
+                    child=None, callee_agent_id=callee, tool_name=tool_name,
+                    chat_id=(ctx or {}).get("chat_id"),
+                    correlation_id=make_correlation_id(), detail=detail)
+            await self._deliver_hop_response(websocket, hop_id, MCPResponse(
+                request_id=hop_id,
+                error={"message": message_text, "retryable": False}))
+
+        try:
+            if not _dg.recursive_delegation_enabled():
+                # Flag off ⇒ the chaining seam does not exist (FR-009).
+                return await _refuse(
+                    "Agent-to-agent chaining is disabled (FF_RECURSIVE_DELEGATION off).")
+            ctx = self._dispatch_context.get(msg.parent_request_id or "")
+            if ctx is None or ctx.get("agent_id") != initiator:
+                logger.warning(
+                    "delegation.hop refused unknown_parent initiator=%s callee=%s tool=%s",
+                    initiator, callee, tool_name)
+                return await _refuse(
+                    "Hop refused: no active parent dispatch for this request.",
+                    detail="unknown_parent")
+            if not callee or callee.startswith("__"):
+                logger.warning(
+                    "delegation.hop refused reserved_callee initiator=%s callee=%s",
+                    initiator, callee)
+                return await _refuse(
+                    f"Hop refused: '{callee}' is not a dispatchable agent.",
+                    ctx=ctx, detail="reserved_callee",
+                    parent=ctx.get("parent_token"))
+            parent = ctx.get("parent_token")
+            if not parent:
+                # No parent authority to attenuate — refuse rather than mint
+                # ambient authority (FR-001); dev-mode hops exercise real
+                # minting too (D17.2), so the refusal is identical everywhere.
+                logger.warning(
+                    "delegation.hop refused no_parent_authority initiator=%s callee=%s",
+                    initiator, callee)
+                return await _refuse(
+                    "Hop refused: the initiating dispatch carries no delegated "
+                    "authority to attenuate.", ctx=ctx, detail="no_parent_authority")
+            budget = self._chain_budget_for(ctx.get("chat_id"))
+            reason = budget.charge(_dg._token_depth(parent) + 1)
+            if reason is not None:
+                logger.warning(
+                    "delegation.hop refused budget_stop reason=%s initiator=%s callee=%s chat=%s",
+                    reason, initiator, callee, ctx.get("chat_id"))
+                return await _refuse(
+                    f"Hop refused: chain budget exhausted ({reason}).",
+                    ctx=ctx, detail=f"budget_stop:{reason}", parent=parent)
+
+            logger.info(
+                "delegation.hop.request initiator=%s callee=%s tool=%s chat=%s depth=%s",
+                initiator, callee, tool_name, ctx.get("chat_id"),
+                _dg._token_depth(parent) + 1)
+            from types import SimpleNamespace
+            tc = SimpleNamespace(function=SimpleNamespace(
+                name=tool_name, arguments=json.dumps(dict(msg.arguments or {}))))
+            resp = await self.execute_single_tool(
+                ctx.get("ui_websocket"), tc, {tool_name: callee},
+                ctx.get("chat_id"), user_id=ctx.get("user_id"),
+                parent_token=parent, initiating_agent_id=initiator)
+            if resp is None:
+                resp = MCPResponse(
+                    request_id=hop_id,
+                    error={"message": "hop produced no result", "retryable": True})
+            await self._deliver_hop_response(websocket, hop_id, resp)
+        except Exception as exc:
+            logger.exception("hop mediation failed (hop=%s)", hop_id)
+            await self._deliver_hop_response(websocket, hop_id, MCPResponse(
+                request_id=hop_id,
+                error={"message": f"hop mediation error: {exc}", "retryable": False}))
+
+    async def _deliver_hop_response(self, initiator_ws, hop_id: str,
+                                    resp: MCPResponse) -> None:
+        """Deliver a mediated hop's outcome to the initiating agent (056 US1).
+
+        In-process initiators awaited a future registered on their loopback
+        socket — resolve it directly. Networked initiators receive an
+        ``agent_hop_response`` frame over their existing control socket."""
+        futures = getattr(initiator_ws, "_hop_futures", None)
+        if isinstance(futures, dict):
+            fut = futures.pop(hop_id, None)
+            if fut is not None and not fut.done():
+                fut.set_result(resp)
+                return
+        send = getattr(initiator_ws, "send", None)
+        if send is None:
+            logger.warning("no route to deliver hop response %s", hop_id)
+            return
+        try:
+            frame = AgentHopResponse(request_id=hop_id, response={
+                "result": resp.result,
+                "error": resp.error,
+                "ui_components": resp.ui_components,
+            })
+            await send(frame.to_json())
+        except Exception:
+            logger.warning("hop response delivery failed for %s", hop_id, exc_info=True)
 
     async def _release_hop_cap_slot(self, cap_job_id: str) -> None:
         """Release the initiating agent's slot of a dual-charged hop (056
@@ -7172,6 +7576,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # Create a future for the response
         future = asyncio.get_event_loop().create_future()
         self.pending_requests[request_id] = future
+        # 056 US1: record this dispatch so a mediated hop from the executing
+        # agent resolves its context/authority against OUR record.
+        self._register_dispatch_context(request_id, agent_id, args, ui_websocket)
 
         # Register UI socket for progress forwarding
         if ui_websocket and flags.is_enabled("progress_streaming"):
@@ -7196,6 +7603,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         finally:
             self.pending_requests.pop(request_id, None)
             self.pending_ui_sockets.pop(request_id, None)
+            self._dispatch_context.pop(request_id, None)
 
     async def _execute_in_process(self, agent_id: str, tool_name: str, args: Dict, timeout: float = 30.0, ui_websocket=None) -> Optional[MCPResponse]:
         """Execute a tool call against a built-in agent running IN-PROCESS (feature 040).
@@ -7230,6 +7638,10 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         )
         future = asyncio.get_event_loop().create_future()
         self.pending_requests[request_id] = future
+        # 056 US1: record this dispatch so a mediated hop from the executing
+        # agent resolves its context/authority against OUR record. Registered
+        # against the ORIGINAL args (the deep copy is scrubbed in-agent).
+        self._register_dispatch_context(request_id, agent_id, args, ui_websocket)
         if ui_websocket and flags.is_enabled("progress_streaming"):
             self.pending_ui_sockets[request_id] = ui_websocket
 
@@ -7273,6 +7685,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 pass
             self.pending_requests.pop(request_id, None)
             self.pending_ui_sockets.pop(request_id, None)
+            self._dispatch_context.pop(request_id, None)
 
     async def _execute_via_a2a(self, agent_id: str, tool_name: str, args: Dict, timeout: float = 30.0) -> Optional[MCPResponse]:
         """Execute a tool call via A2A JSON-RPC (external agents).

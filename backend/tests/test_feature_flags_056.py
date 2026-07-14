@@ -7,10 +7,12 @@ authority (consent-derived offline-grant threading) rides the existing
 ``scheduler_execution`` flag, which stays dark pending the T057 offline-grant
 security review. Both MUST default off (fail closed) so that flag-off behavior
 is byte-identical to the single-hop path (FR-009, FR-016, SC-009).
-"""
-import importlib
 
-import shared.feature_flags as feature_flags
+NOTE: these tests construct fresh ``FeatureFlags()`` instances rather than
+reloading the module — a reload would rebind the process-global ``flags``
+singleton out from under every module that imported it.
+"""
+from shared.feature_flags import FeatureFlags
 
 
 def _fresh_flags(monkeypatch, **env):
@@ -18,7 +20,7 @@ def _fresh_flags(monkeypatch, **env):
         monkeypatch.delenv(var, raising=False)
     for var, value in env.items():
         monkeypatch.setenv(var, value)
-    return importlib.reload(feature_flags).flags
+    return FeatureFlags()
 
 
 def test_recursive_delegation_defaults_off(monkeypatch):
@@ -48,8 +50,3 @@ def test_no_new_056_flag_registered(monkeypatch):
     assert "recursive_delegation" in names
     assert "scheduler_execution" in names
     assert not any("chain" in n or n.startswith("056") for n in names)
-
-
-def teardown_module(module):
-    # Restore the module-level singleton for later tests in the same session.
-    importlib.reload(feature_flags)

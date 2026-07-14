@@ -11,11 +11,9 @@ Provides:
 """
 import asyncio
 import inspect
-import json
 import os
 import sys
 import logging
-import time
 import uuid
 import socket
 from typing import Set, Dict, Optional, Any, List
@@ -116,11 +114,6 @@ class BaseA2AAgent:
 
         # Build agent cards (includes public key JWK in metadata)
         self.card = self._build_agent_card()
-
-        # Peer connections for agent-to-agent communication
-        self.peer_connections: Dict[str, Any] = {}  # agent_id -> websocket connection
-        self.peer_pending: Dict[str, asyncio.Future] = {}  # request_id -> Future
-        self._peer_registry: Dict[str, str] = {}  # agent_id -> ws_url
 
         # Security validator for A2A requests
         self._security_validator = A2ASecurityValidator()
@@ -280,11 +273,11 @@ class BaseA2AAgent:
                         # streaming generator. Cancel the task; the generator's
                         # `finally` block runs to free upstream subscriptions.
                         await self._handle_stream_cancel(parsed)
-                    elif parsed.type == "peer_registry":
-                        # Orchestrator broadcasting peer agent URLs
-                        data = json.loads(message)
-                        self._peer_registry = data.get("agents", {})
-                        self._logger.info(f"Updated peer registry: {list(self._peer_registry.keys())}")
+                    elif parsed.type == "agent_hop_response":
+                        # 056 US1: outcome of a mediated hop this agent's
+                        # runtime requested via call_agent_tool — resolve the
+                        # awaiting future registered on this socket.
+                        self._resolve_hop_response(websocket, parsed)
                 except Exception as e:
                     self._logger.error(f"Error processing message: {e}")
 
@@ -646,199 +639,38 @@ class BaseA2AAgent:
             raise
 
     # =========================================================================
-    # Agent-to-Agent Communication
+    # Agent-to-Agent Communication (mediated only — feature 056)
     # =========================================================================
+    # The direct peer-call path (connect_to_peer / _peer_listen_loop /
+    # call_peer_tool / _call_peer_via_ws / _call_peer_via_a2a and the peer
+    # connection registry) was RETIRED by feature 056 (FR-010, D12): it
+    # forwarded the caller's delegation token UNATTENUATED to the peer — a
+    # confused-deputy seam — and bypassed the orchestrator's gate stack
+    # entirely. The sanctioned replacement is the ORCHESTRATOR-MEDIATED hop:
+    # a tool calls ``kwargs["_runtime"].call_agent_tool(...)``, which routes
+    # an agent_hop_request control frame to the orchestrator; the hop runs
+    # under a freshly minted, strictly-narrower child delegation through the
+    # full single-path gate stack. Agents cannot open peer transports.
 
-    async def connect_to_peer(self, agent_id: str, ws_url: str):
-        """Connect to a peer agent via WebSocket for direct communication."""
-        import websockets
-        try:
-            ws = await websockets.connect(ws_url, max_size=50 * 1024 * 1024)
-            self.peer_connections[agent_id] = ws
-            # Start listening for responses
-            asyncio.create_task(self._peer_listen_loop(agent_id, ws))
-            self._logger.info(f"Connected to peer agent: {agent_id} at {ws_url}")
-        except Exception as e:
-            self._logger.error(f"Failed to connect to peer {agent_id}: {e}")
+    def _resolve_hop_response(self, websocket, parsed) -> None:
+        """Resolve a mediated hop's awaiting future (056 US1).
 
-    async def _peer_listen_loop(self, agent_id: str, ws):
-        """Listen for responses from a peer agent."""
-        import websockets.exceptions
-        try:
-            async for message in ws:
-                try:
-                    msg = Message.from_json(message)
-                    if isinstance(msg, MCPResponse):
-                        req_id = msg.request_id
-                        if req_id in self.peer_pending:
-                            self.peer_pending[req_id].set_result(msg)
-                except Exception as e:
-                    self._logger.error(f"Error processing peer message: {e}")
-        except websockets.exceptions.ConnectionClosed:
-            self._logger.info(f"Peer {agent_id} disconnected")
-        finally:
-            self.peer_connections.pop(agent_id, None)
-
-    async def call_peer_tool(
-        self,
-        agent_id: str,
-        tool_name: str,
-        arguments: Dict[str, Any],
-        delegation_token: Optional[str] = None,
-        timeout: float = 30.0,
-    ) -> Optional[MCPResponse]:
-        """Call a tool on a peer agent — WebSocket first, A2A fallback.
-
-        Strategy:
-        1. Try WebSocket (fast, bidirectional, preferred for internal agents)
-        2. If WebSocket fails or is unavailable, fall back to A2A JSON-RPC
-        """
-        request_id = f"peer_{tool_name}_{int(time.time() * 1000)}"
-
-        # Step 1: Try WebSocket
-        ws_result = await self._call_peer_via_ws(
-            agent_id, tool_name, arguments, delegation_token, request_id, timeout
-        )
-        if ws_result is not None:
-            # If it succeeded or failed with a non-retryable error, return it
-            if not (ws_result.error and ws_result.error.get("retryable")):
-                return ws_result
-            # Retryable error — try A2A fallback
-            self._logger.info(f"WebSocket peer call to {agent_id} failed (retryable), trying A2A fallback")
-
-        # Step 2: Fall back to A2A JSON-RPC
-        a2a_result = await self._call_peer_via_a2a(
-            agent_id, tool_name, arguments, delegation_token, request_id, timeout
-        )
-        if a2a_result is not None:
-            return a2a_result
-
-        # Both transports failed — return the WS error if we got one, else generic error
-        if ws_result is not None:
-            return ws_result
-        return MCPResponse(
-            request_id=request_id,
-            error={"message": f"Cannot reach peer {agent_id} via WebSocket or A2A", "retryable": False},
-        )
-
-    async def _call_peer_via_ws(
-        self,
-        agent_id: str,
-        tool_name: str,
-        arguments: Dict[str, Any],
-        delegation_token: Optional[str],
-        request_id: str,
-        timeout: float,
-    ) -> Optional[MCPResponse]:
-        """Attempt to call a peer tool via WebSocket. Returns None if no WS available."""
-        # Auto-connect if needed
-        if agent_id not in self.peer_connections:
-            ws_url = self._peer_registry.get(agent_id)
-            if ws_url:
-                await self.connect_to_peer(agent_id, ws_url)
-
-        if agent_id not in self.peer_connections:
-            return None  # No WebSocket available — caller should try A2A
-
-        request = MCPRequest(
-            request_id=request_id,
-            method="tools/call",
-            params={"name": tool_name, "arguments": arguments},
-        )
-        if delegation_token:
-            request.params["_delegation_token"] = delegation_token
-
-        future = asyncio.get_event_loop().create_future()
-        self.peer_pending[request_id] = future
-
-        try:
-            ws = self.peer_connections[agent_id]
-            await ws.send(request.to_json())
-            result = await asyncio.wait_for(future, timeout=timeout)
-            return result
-        except asyncio.TimeoutError:
-            self._logger.error(f"WebSocket peer call timed out: {tool_name} on {agent_id}")
-            return MCPResponse(
-                request_id=request_id,
-                error={"message": "Peer tool call timed out via WebSocket", "retryable": True},
-            )
-        except Exception as e:
-            self._logger.error(f"WebSocket peer call error: {e}")
-            return MCPResponse(
-                request_id=request_id,
-                error={"message": str(e), "retryable": True},
-            )
-        finally:
-            self.peer_pending.pop(request_id, None)
-
-    async def _call_peer_via_a2a(
-        self,
-        agent_id: str,
-        tool_name: str,
-        arguments: Dict[str, Any],
-        delegation_token: Optional[str],
-        request_id: str,
-        timeout: float,
-    ) -> Optional[MCPResponse]:
-        """Attempt to call a peer tool via A2A JSON-RPC. Returns None if no A2A endpoint."""
-        peer_url = self._peer_registry.get(agent_id)
-        if not peer_url:
-            return None
-
-        try:
-            import httpx
-            import uuid as uuid_mod
-            from google.protobuf.json_format import MessageToDict
-            from a2a.types import Message as A2AMessage, Role
-            from shared.a2a_bridge import make_data_part
-
-            # Build A2A JSON-RPC request
-            a2a_url = f"{peer_url}/a2a" if not peer_url.endswith("/a2a") else peer_url
-            msg = A2AMessage(
-                message_id=str(uuid_mod.uuid4()),
-                role=Role.ROLE_USER,
-                parts=[make_data_part({
-                    "method": "tools/call",
-                    "name": tool_name,
-                    "arguments": {k: v for k, v in arguments.items() if not k.startswith("_")},
-                })],
-            )
-
-            # Send via httpx (simple JSON-RPC POST)
-            headers = {"Content-Type": "application/json"}
-            if delegation_token:
-                headers["Authorization"] = f"Bearer {delegation_token}"
-
-            jsonrpc_payload = {
-                "jsonrpc": "2.0",
-                "method": "message/send",
-                "id": request_id,
-                "params": {"message": MessageToDict(msg, preserving_proto_field_name=True)},
-            }
-
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                resp = await client.post(a2a_url, json=jsonrpc_payload, headers=headers)
-                resp.raise_for_status()
-                data = resp.json()
-
-            if "error" in data:
-                return MCPResponse(
-                    request_id=request_id,
-                    error={"message": data["error"].get("message", "A2A error"), "retryable": False},
-                )
-
-            result_data = data.get("result", {})
-            # Extract text/data from A2A response parts
-            if isinstance(result_data, dict):
-                return MCPResponse(request_id=request_id, result=result_data)
-            return MCPResponse(request_id=request_id, result=str(result_data))
-
-        except Exception as e:
-            self._logger.error(f"A2A peer call to {agent_id} failed: {e}")
-            return MCPResponse(
-                request_id=request_id,
-                error={"message": f"A2A fallback failed: {e}", "retryable": False},
-            )
+        The orchestrator delivers an ``agent_hop_response`` frame over this
+        agent's own control socket; the future was registered on that socket
+        by ``AgentRuntime.call_agent_tool``. Unknown/settled hop ids are
+        logged and dropped (the awaiter has its own timeout)."""
+        futures = getattr(websocket, "_hop_futures", None)
+        fut = futures.pop(parsed.request_id, None) if isinstance(futures, dict) else None
+        if fut is None or fut.done():
+            self._logger.warning("hop response for unknown/settled hop %s", parsed.request_id)
+            return
+        r = parsed.response or {}
+        fut.set_result(MCPResponse(
+            request_id=parsed.request_id,
+            result=r.get("result"),
+            error=r.get("error"),
+            ui_components=r.get("ui_components"),
+        ))
 
     # =========================================================================
     # Server Setup & Run

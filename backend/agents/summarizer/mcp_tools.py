@@ -444,14 +444,79 @@ def summarize_text(text: str = "", focus: Optional[str] = None, **kwargs) -> Dic
     }
 
 
+def _fetch_via_peer(url: str, kwargs: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+    """Fetch a page by a MEDIATED hop to web_research's fetch_page (056 US1).
+
+    web_research owns the product's page-retrieval capability (egress policy,
+    redirect re-validation, readability extraction). Rather than maintaining a
+    second copy of it, the summarizer asks for that capability by name — the
+    orchestrator mediates the hop under a strictly-narrower child delegation
+    and the same gate stack a direct call would face.
+
+    Returns ``(title, text)`` on success, or ``None`` when chaining is
+    unavailable or the hop is refused — the caller then falls back to its own
+    local fetch, so behavior with ``FF_RECURSIVE_DELEGATION`` off (or for a
+    user without web_research permission) is exactly what it is today.
+    """
+    import asyncio
+
+    runtime = kwargs.get("_runtime")
+    if runtime is None or not hasattr(runtime, "call_agent_tool"):
+        return None
+    try:
+        # Tools run in a worker thread (mcp_server dispatches via to_thread);
+        # bridge to the agent's event loop the same way long-running jobs do.
+        future = asyncio.run_coroutine_threadsafe(
+            runtime.call_agent_tool(
+                "web-research-1", "fetch_page", {"url": url}, timeout=30.0),
+            runtime.loop)
+        resp = future.result(timeout=35)
+    except Exception as e:
+        logger.info("summarize_url: peer fetch hop unavailable (%s) — "
+                    "falling back to local fetch", e)
+        return None
+    if resp is None or getattr(resp, "error", None):
+        reason = (getattr(resp, "error", None) or {}).get("message", "refused")
+        logger.info("summarize_url: peer fetch hop refused (%s) — "
+                    "falling back to local fetch", reason)
+        return None
+    data = resp.result if isinstance(resp.result, dict) else {}
+    text = ""
+    for comp in (resp.ui_components or []):
+        # fetch_page returns a Card whose second Text child is the page text.
+        if isinstance(comp, dict) and comp.get("type") == "card":
+            children = comp.get("content") or []
+            texts = [c.get("content", "") for c in children
+                     if isinstance(c, dict) and c.get("type") == "text"]
+            if len(texts) >= 2:
+                text = texts[1]
+                break
+    if not text.strip():
+        return None
+    return str(data.get("title") or ""), text
+
+
 def summarize_url(url: str = "", **kwargs) -> Dict[str, Any]:
-    """Fetch a URL (egress-gated, 1 MB / 15 s) and summarize its readable text."""
+    """Fetch a URL (egress-gated, 1 MB / 15 s) and summarize its readable text.
+
+    056 US1: the fetch is delegated to web_research's ``fetch_page`` through an
+    orchestrator-mediated hop when chaining is available, so the product has
+    ONE page-retrieval capability rather than two. Falls back to the local
+    fetch when the hop is unavailable or refused (fail-open — flag-off behavior
+    is unchanged).
+    """
     url = str(url or "").strip()
     if not url:
         return create_ui_response([
             Alert(variant="error", title="Summarization failed",
                   message="A non-empty 'url' is required."),
         ])
+
+    hopped = _fetch_via_peer(url, kwargs)
+    if hopped is not None:
+        title, text = hopped
+        return _summarize_fetched(url, title, text, kwargs)
+
     try:
         resp = _fetch_url(url)
     except ResponseTooLargeError:
@@ -468,6 +533,12 @@ def summarize_url(url: str = "", **kwargs) -> Dict[str, Any]:
         ])
 
     title, text = _extract_text(resp)
+    return _summarize_fetched(url, title, text, kwargs)
+
+
+def _summarize_fetched(url: str, title: str, text: str,
+                       kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Summarize page text retrieved for ``url`` (by hop or local fetch)."""
     if not text.strip():
         return create_ui_response([
             Alert(variant="error", title="Summarization failed",

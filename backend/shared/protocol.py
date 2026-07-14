@@ -62,6 +62,10 @@ class Message:
             return LLMConfigAck(**data)
         elif msg_type == 'llm_usage_report':
             return LLMUsageReport(**data)
+        elif msg_type == 'agent_hop_request':
+            return AgentHopRequest(**data)
+        elif msg_type == 'agent_hop_response':
+            return AgentHopResponse(**data)
         return Message(**data)
 
 # --- MCP Protocol Wrappers ---
@@ -102,6 +106,38 @@ class MCPResponse(Message):
     # The orchestrator stamps this onto the response after the audit
     # context closes; agents do not set it.
     correlation_id: Optional[str] = None
+
+@dataclass
+class AgentHopRequest(Message):
+    """056 US1 — an agent's request for a MEDIATED hop to a peer agent's tool.
+
+    Sent by ``AgentRuntime.call_agent_tool`` over the agent's existing control
+    channel (the in-process loopback for built-ins, the agent WebSocket for
+    networked agents) — never a peer connection. The orchestrator resolves the
+    hop against its OWN dispatch record for ``parent_request_id`` (the
+    initiator supplies no authority) and re-enters the full single-path gate
+    stack under a freshly minted child delegation. Backend-internal: not part
+    of the client UI protocol (ui_protocol.json unchanged).
+    """
+    type: str = "agent_hop_request"
+    request_id: str = ""
+    parent_request_id: str = ""
+    initiator_agent_id: str = ""
+    callee_agent_id: str = ""
+    tool_name: str = ""
+    arguments: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class AgentHopResponse(Message):
+    """056 US1 — the mediated hop's outcome, delivered back to the initiator.
+
+    ``response`` carries the peer MCPResponse fields (result/error/
+    ui_components). For in-process initiators the orchestrator resolves the
+    awaiting future directly; this frame is the networked-agent delivery.
+    """
+    type: str = "agent_hop_response"
+    request_id: str = ""
+    response: Optional[Dict[str, Any]] = None
 
 # --- UI Protocol ---
 @dataclass
