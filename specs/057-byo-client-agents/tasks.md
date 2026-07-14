@@ -30,8 +30,8 @@ Setup → Foundational → **US1** (Phase A, MVP) → **US3** (Phase B, boundary
 
 ## Phase 1: Setup (Shared Infrastructure)
 
-- [ ] T001 [P] Add `FF_BYO_AGENTS` feature flag (default **off**, fail-closed) in `backend/shared/feature_flags.py`
-- [ ] T002 [P] Create `backend/agent_constitution/agent_constitution.md` as a **byte-identical** copy of `specs/057-byo-client-agents/agent-constitution.md`, plus `backend/agent_constitution/README.md` documenting provenance + the byte-identity invariant (baked into the image; `.specify/`/`specs/` are not — `Dockerfile:49`)
+- [X] T001 [P] Add `FF_BYO_AGENTS` feature flag (default **off**, fail-closed) in `backend/shared/feature_flags.py`
+- [X] T002 [P] Create `backend/agent_constitution/agent_constitution.md` as a **byte-identical** copy of `specs/057-byo-client-agents/agent-constitution.md`, plus `backend/agent_constitution/README.md` documenting provenance + the byte-identity invariant (baked into the image; `.specify/`/`specs/` are not — `Dockerfile:49`)
 
 ---
 
@@ -39,10 +39,10 @@ Setup → Foundational → **US1** (Phase A, MVP) → **US3** (Phase B, boundary
 
 **⚠️ CRITICAL**: no user-story work begins until this phase completes.
 
-- [ ] T003 Add the `user_agent` table (incl. `deleted_at TIMESTAMPTZ` for soft-delete) + additive `draft_agents` columns (`phase`, `clarify_answers`, `plan_json`, `analyze_result`, `constitution_version`, `host_binding`) + `origin='byo_client'`; bump `SCHEMA_REVISION 055.002 → 057.001`; add guarded `_migrate_revalidate_on_constitution_change`; `is_public BOOLEAN CHECK(is_public=FALSE)` — all idempotent per `data-model.md` in `backend/shared/database.py`
-- [ ] T004 [P] Add `backend/orchestrator/agent_constitution.py` loader: `AGENT_CONSTITUTION_VERSION` (semver from header) + `load_checklist()` → the A–L principle list, resolving the baked asset `__file__`-relative (mirror `knowledge_synthesis.AUTHORED_KNOWLEDGE_DIR`; do NOT hand-copy prose)
-- [ ] T005 [P] Add the `user_agent` registry accessors (create / get / list-by-owner / set-status / set-host-liveness) in a new `backend/orchestrator/user_agents.py`, keyed on canonical `owner_user_id` (OIDC `sub`); write the companion `agent_ownership` row (`is_public=FALSE`) on go-live
-- [ ] T006 [P] Add the `can_user_use_agent(user_id, agent_id) = is_public OR owner_user_id == user_id` predicate in `backend/orchestrator/tool_permissions.py` (reads `user_agent`/`agent_ownership`)
+- [X] T003 Add the `user_agent` table (incl. `deleted_at TIMESTAMPTZ` for soft-delete) + additive `draft_agents` columns (`phase`, `clarify_answers`, `plan_json`, `analyze_result`, `constitution_version`, `host_binding`) + `origin='byo_client'`; bump `SCHEMA_REVISION 055.002 → 057.001`; add guarded `_migrate_revalidate_on_constitution_change`; `is_public BOOLEAN CHECK(is_public=FALSE)` — all idempotent per `data-model.md` in `backend/shared/database.py`
+- [X] T004 [P] Add `backend/orchestrator/agent_constitution.py` loader: `AGENT_CONSTITUTION_VERSION` (semver from header) + `load_checklist()` → the A–L principle list, resolving the baked asset `__file__`-relative (mirror `knowledge_synthesis.AUTHORED_KNOWLEDGE_DIR`; do NOT hand-copy prose)
+- [X] T005 [P] Add the `user_agent` registry accessors (create / get / list-by-owner / set-status / set-host-liveness) in a new `backend/orchestrator/user_agents.py`, keyed on canonical `owner_user_id` (OIDC `sub`); write the companion `agent_ownership` row (`is_public=FALSE`) on go-live
+- [X] T006 [P] Add the `can_user_use_agent(user_id, agent_id) = is_public OR owner_user_id == user_id` predicate in `backend/orchestrator/tool_permissions.py` (reads `user_agent`/`agent_ownership`)
 
 **Checkpoint**: schema, flag, constitution loader, registry, and the isolation predicate exist. User stories can begin.
 

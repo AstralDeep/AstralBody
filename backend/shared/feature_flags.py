@@ -139,6 +139,15 @@ class FeatureFlags:
             # fallback chat is created before the turn. Kill switch — OFF
             # restores originator-only frames byte-identically. Default ON.
             "bg_continuity": self._read("FF_BG_CONTINUITY", True),
+            # 057-byo-client-agents: user-authored agents that run on the user's
+            # OWN desktop (never the orchestrator) and connect inward, authored
+            # through a guided Specify→Clarify→Plan→Tasks→Analyze flow validated
+            # against a separate agent constitution. FAIL CLOSED — default OFF;
+            # with the flag off no tunnel/registration/authoring path is reachable
+            # and behavior is byte-identical to today. The untrusted-at-the-
+            # boundary re-verification reuses the existing gate stack. See
+            # specs/057-byo-client-agents/.
+            "byo_agents": self._read("FF_BYO_AGENTS", False),
         }
 
     @staticmethod
