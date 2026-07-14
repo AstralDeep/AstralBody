@@ -27,7 +27,7 @@ description: "Task list for feature 058 — BYO client-side agents runtime, host
 - [ ] T007 [US1] **Self-test relocation** (was 057 T013b, G1/SC-002): any pre-delivery self-test is ephemeral/torn-down orchestrator sandbox OR host-side with the result reported back — never a persistent server-side agent — `backend/orchestrator/agent_lifecycle.py`
 - [ ] T008 [US1] **Codegen target** (was 057 T016): generated bundle is self-contained for the desktop-host runtime (not the backend `shared` package) OR the host ships a compatible shim — `backend/orchestrator/agent_generator.py` + `windows-client`
 - [ ] T009 [US1] **Minimal one-shot authoring path** (was 057 T014): deliberate entry, `origin='byo_client'`, `create_draft` → existing static gates → `generate_code` → deliver; register the `user_agent` row + stamp `AGENT_CONSTITUTION_VERSION` + mark validated (full 5-phase is Phase 4) — `agentic_creation.py`
-- [ ] T010 [P] [US1] Integration test (was 057 T007, U1): owner-tunnel register → dispatch through the existing gate stack → **assert the audit row attributes the action to the owning human** → disconnect → honest-offline — `backend/tests/test_byo_tunnel.py`
+- [X] T010 [P] [US1] Integration test (was 057 T007, U1): owner-tunnel register → dispatch through the existing gate stack → **assert the audit row attributes the action to the owning human** → disconnect → honest-offline — `backend/tests/test_byo_tunnel.py`
 - [ ] T011 [US1] SC-002 guard/test: assert **zero user-agent processes on the orchestrator host** after go-live — `backend/tests/test_byo_offserver.py`
 
 ## Phase 2: Windows desktop host runtime (US1 client)
