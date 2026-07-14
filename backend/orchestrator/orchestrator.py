@@ -4093,6 +4093,18 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 tool_to_unqualified[_dc_name] = _dc_name
             desktop_codegen_injected = True
 
+        # 056 US4 — planning decomposition: the delegate_subtasks meta-tool lets
+        # the planner split a broad request into bounded, isolated sub-tasks
+        # instead of micro-planning every step itself. Flag-gated
+        # (FF_RECURSIVE_DELEGATION); same exclusions as the other meta-tools.
+        from orchestrator import subtasks as _subtasks
+        if _subtasks.should_inject(draft_agent_id) and not is_text_only:
+            for _st_def in _subtasks.meta_tool_definitions():
+                _st_name = _st_def["function"]["name"]
+                tools_desc.append(_st_def)
+                tool_to_agent[_st_name] = _subtasks.META_AGENT_ID
+                tool_to_unqualified[_st_name] = _st_name
+
         if not tools_desc and draft_agent_id:
             _perm_memo.__exit__(None, None, None)
             await self.send_ui_render(websocket, [
@@ -4176,7 +4188,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             if flags.is_enabled("skill_packs") and hasattr(self, 'knowledge_index'):
                 try:
                     from orchestrator import skill_packs
-                    _meta = {"__orchestrator__", "__scheduler__", "__memory__", "__desktop_codegen__"}
+                    _meta = {"__orchestrator__", "__scheduler__", "__memory__",
+                             "__desktop_codegen__", "__subtasks__"}
                     _agents_in_play = {a for a in tool_to_agent.values() if a and a not in _meta}
                     _digest = skill_packs.build_skill_digest(self.knowledge_index, _agents_in_play)
                     if _digest:
@@ -4191,7 +4204,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             # Meta-tools (orchestrator/scheduler/memory pseudo-agents) are
             # excluded — they are not user "skills".
             personalization_skill_lines: List[str] = []
-            _meta_agent_ids = {"__orchestrator__", "__scheduler__", "__memory__",
+            _meta_agent_ids = {"__orchestrator__", "__scheduler__", "__memory__", "__subtasks__",
                                "__desktop_codegen__"}
             for _td in tools_desc:
                 try:
@@ -6728,6 +6741,20 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             return await desktop_codegen.handle_meta_tool(
                 self, tool_name, args, user_id=user_id, chat_id=chat_id, websocket=websocket
             )
+        if agent_id == "__subtasks__":
+            # 056 US4 — planner decomposition into bounded isolated sub-tasks.
+            # A sub-task may use only the tools THIS turn offered (never a
+            # superset — FR-020); the handler's own gates and the sub-turns'
+            # full gate stacks do the rest.
+            from orchestrator import subtasks as _st
+            args["_parent_tools"] = sorted(
+                {t for t in (tool_to_unqualified or {}).values()
+                 if not str(tool_to_agent.get(t, "")).startswith("__")}
+                or {t for t, a in (tool_to_agent or {}).items()
+                    if not str(a).startswith("__")})
+            return await _st.handle_meta_tool(
+                self, tool_name, args, user_id=user_id, chat_id=chat_id, websocket=websocket
+            )
 
         # 056 US3 (FR-017): the FULL gate stack runs in the shared authorizer
         # so single, parallel, and chained dispatch refuse identically. Gate
@@ -7148,12 +7175,60 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 resp = MCPResponse(
                     request_id=hop_id,
                     error={"message": "hop produced no result", "retryable": True})
+            else:
+                resp = await self._scan_hop_payload(
+                    resp, initiator=initiator, callee=callee, tool_name=tool_name,
+                    ctx=ctx, parent=parent)
             await self._deliver_hop_response(websocket, hop_id, resp)
         except Exception as exc:
             logger.exception("hop mediation failed (hop=%s)", hop_id)
             await self._deliver_hop_response(websocket, hop_id, MCPResponse(
                 request_id=hop_id,
                 error={"message": f"hop mediation error: {exc}", "retryable": False}))
+
+    async def _scan_hop_payload(self, resp: MCPResponse, *, initiator: str,
+                                callee: str, tool_name: str, ctx: Dict,
+                                parent: Optional[Dict]) -> MCPResponse:
+        """Scan a hop RESULT before it enters the initiating agent's context
+        (056 FR-007/D11).
+
+        Chaining turns one agent's output into another agent's input — exactly
+        the multi-agent flow the C-S14 scanner was built for, where it has been
+        advisory (logged, delivered anyway) on the tool path. On an inter-agent
+        hop it ENFORCES: a finding quarantines the payload (it is NOT delivered
+        upstream), records an audited reason, and returns an honest error to the
+        requesting agent, which can work around it. Fail-open on scanner error —
+        a broken scanner must not break dispatch.
+
+        Deliberately NOT gated on ``FF_MAS_DEFENSE`` (which gates the advisory
+        tool-path scan): scanning inter-agent payloads is a core guarantee of
+        chaining, so it rides the chaining flag itself — with
+        ``FF_RECURSIVE_DELEGATION`` off no hop exists and nothing changes.
+        """
+        from audit.recorder import make_correlation_id
+        from orchestrator import mas_defense
+        if resp.error is not None:
+            return resp
+        try:
+            payload = resp.result if resp.result is not None else resp.ui_components
+            findings = mas_defense.scan_message(payload)
+        except Exception:  # pragma: no cover — scanner is pure/stdlib
+            logger.debug("hop payload scan failed — delivering", exc_info=True)
+            return resp
+        if not findings:
+            return resp
+        markers = sorted({f.marker for f in findings})
+        logger.warning(
+            "delegation.hop.quarantine initiator=%s callee=%s tool=%s markers=%s chat=%s",
+            initiator, callee, tool_name, markers, ctx.get("chat_id"))
+        await self._record_hop_audit(
+            operation="enforce", outcome="failure", parent=parent, child=None,
+            callee_agent_id=callee, tool_name=tool_name,
+            chat_id=ctx.get("chat_id"), correlation_id=make_correlation_id(),
+            detail=f"quarantined: injection markers {', '.join(markers)[:120]}")
+        msg = (f"The result of '{tool_name}' was quarantined: it contained "
+               f"prompt-injection markers and was not delivered.")
+        return MCPResponse(error={"message": msg, "retryable": False})
 
     async def _deliver_hop_response(self, initiator_ws, hop_id: str,
                                     resp: MCPResponse) -> None:
@@ -7304,6 +7379,16 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 from orchestrator import desktop_codegen
                 prepared.append((idx, tc, tool_name, agent_id, None,
                                  desktop_codegen.handle_meta_tool(
+                                     self, tool_name, args, user_id=user_id,
+                                     chat_id=chat_id, websocket=websocket)))
+                continue
+            if agent_id == "__subtasks__":
+                from orchestrator import subtasks as _st
+                args["_parent_tools"] = sorted(
+                    {t for t, a in (tool_to_agent or {}).items()
+                     if not str(a).startswith("__")})
+                prepared.append((idx, tc, tool_name, agent_id, None,
+                                 _st.handle_meta_tool(
                                      self, tool_name, args, user_id=user_id,
                                      chat_id=chat_id, websocket=websocket)))
                 continue
