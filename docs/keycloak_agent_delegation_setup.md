@@ -174,10 +174,14 @@ scope and (b) be assigned to the **requesting** client, or the exchange fails
      the audience/actor client.
 
 > [!IMPORTANT]
-> Assign the scopes to `astral-frontend`, not only `astral-agent-service`. A user
-> who has never enabled a per-agent scope may exchange with an empty scope (which
-> succeeds), but the moment any tool scope is requested Keycloak rejects it unless
-> `astral-frontend` carries that scope. The native login clients
+> Assign the scopes to `astral-frontend`, not only `astral-agent-service`.
+> Keycloak rejects any requested scope the requesting client does not carry —
+> including a present-but-empty `scope` parameter, which fails with
+> `invalid_scope` and the telltale empty-tailed message `Invalid scopes: `.
+> The orchestrator therefore never sends an empty scope: it derives the scope
+> list from the user's effective permissions (explicit grants plus the
+> feature-040 safe-agent baseline) and refuses the exchange locally
+> (`no_enabled_scopes`) when that list is empty. The native login clients
 > (`astral-mobile`/`astral-desktop`/`astral-watch`) do **not** need these scopes —
 > they never perform the exchange; only the confidential `astral-frontend` client
 > does.

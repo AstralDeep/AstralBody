@@ -581,12 +581,34 @@ class ToolPermissionManager:
         ]
 
     def get_enabled_scope_names(self, user_id: str, agent_id: str) -> List[str]:
-        """Return list of enabled scope names for the user/agent.
+        """Return the enabled scope names for the user/agent.
 
-        Used when building delegation tokens.
+        Used when building delegation tokens. Mirrors the per-scope
+        resolution :meth:`is_tool_allowed` applies at dispatch (feature 040):
+        an explicit ``agent_scopes`` row decides its own scope either way,
+        and a row-absent scope on a safe + public/ownerless agent defaults
+        to enabled, restricted to the scopes the agent's registered tools
+        actually declare. Without the mirror, a safe-baseline user (who has
+        no rows at all) passes dispatch but produces an empty token-exchange
+        ``scope`` parameter, which Keycloak rejects with ``invalid_scope`` —
+        fail-closing every tool call in production posture.
         """
-        scopes = self.get_agent_scopes(user_id, agent_id)
-        return [scope for scope, enabled in scopes.items() if enabled]
+        rows = self.db.fetch_all(
+            "SELECT scope, enabled FROM agent_scopes WHERE user_id = ? AND agent_id = ?",
+            (user_id, agent_id),
+        )
+        explicit = {row["scope"]: bool(row["enabled"]) for row in rows}
+        safe_defaults: List[str] = []
+        if self._is_safe_agent(agent_id) and self._safe_flip_allowed(agent_id):
+            # Dispatch parity, not the 030 consent grant: the safe flip in
+            # _resolve_tool_allowed allows write-scoped tools too, so no
+            # tools:write exclusion — the token must cover what dispatch
+            # permits or chained hops empty-intersect on the missing scope.
+            safe_defaults = self.scopes_required_by_tools(agent_id, exclude=())
+        return [
+            scope for scope in VALID_SCOPES
+            if explicit.get(scope, scope in safe_defaults)
+        ]
 
     # ── Backward Compatibility ──────────────────────────────────────────
 

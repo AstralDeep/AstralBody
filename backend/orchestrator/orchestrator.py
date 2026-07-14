@@ -6543,7 +6543,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     "(RFC 8693 token exchange) is unavailable for agent "
                     f"'{agent_id}'. An operator must register the tools:* "
                     "client scopes on the identity provider (see "
-                    "docs/keycloak-realm-settings.md), or set "
+                    "docs/keycloak_agent_delegation_setup.md), or set "
                     "DELEGATION_REQUIRED=false to accept unscoped dispatch."
                 )
                 logger.error(
@@ -8002,7 +8002,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     self._delegation_failed_agents.add(agent_id)
                     logger.error(
                         "RFC 8693 token exchange failing for agent=%s (logged once; "
-                        "see docs/keycloak-realm-settings.md): %s", agent_id, result)
+                        "see docs/keycloak_agent_delegation_setup.md): %s", agent_id, result)
                 else:
                     logger.debug(f"Delegation token exchange failed for agent={agent_id}: {result}")
                 return None

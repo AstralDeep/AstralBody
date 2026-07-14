@@ -96,6 +96,68 @@ def test_safe_private_agent_denies_fresh_user(db, pm):
     assert pm.is_tool_allowed(user_id, agent_id, "some_tool") is False
 
 
+# ── Feature 040 ∩ RFC 8693: the safe baseline must mirror into the ─────────
+# ── delegation-token scope derivation (empty-scope regression) ─────────────
+
+
+def test_safe_agent_scope_names_for_fresh_user(db, pm):
+    user_id, agent_id = _fresh_ids()
+    db.upsert_agent_safe(agent_id, True, marked_by="pytest")
+    db.set_agent_ownership(agent_id, "o@e.com", is_public=True)
+    pm.register_tool_scopes(
+        agent_id, {"web_search": "tools:search", "fetch_page": "tools:read"})
+    # Fresh user, no rows: dispatch allows via the safe flip, so the
+    # delegation mint must request the tool-map scopes — never scope="".
+    assert pm.is_tool_allowed(user_id, agent_id, "web_search") is True
+    assert pm.get_enabled_scope_names(user_id, agent_id) == [
+        "tools:read", "tools:search"]
+
+
+def test_safe_agent_scope_names_respect_explicit_optout(db, pm):
+    user_id, agent_id = _fresh_ids()
+    db.upsert_agent_safe(agent_id, True, marked_by="pytest")
+    db.set_agent_ownership(agent_id, "o@e.com", is_public=True)
+    pm.register_tool_scopes(
+        agent_id, {"web_search": "tools:search", "fetch_page": "tools:read"})
+    # An explicit opt-out row wins for ITS scope; row-absent scopes keep the
+    # safe default (per-scope mirror of _resolve_tool_allowed).
+    pm.set_agent_scopes(user_id, agent_id, {"tools:search": False})
+    assert pm.get_enabled_scope_names(user_id, agent_id) == ["tools:read"]
+
+
+def test_non_safe_agent_scope_names_stay_empty(db, pm):
+    user_id, agent_id = _fresh_ids()
+    pm.register_tool_scopes(agent_id, {"web_search": "tools:search"})
+    assert pm.get_enabled_scope_names(user_id, agent_id) == []
+
+
+def test_safe_private_agent_scope_names_stay_empty(db, pm):
+    user_id, agent_id = _fresh_ids()
+    db.upsert_agent_safe(agent_id, True, marked_by="pytest")
+    db.set_agent_ownership(agent_id, "o@e.com", is_public=False)
+    pm.register_tool_scopes(agent_id, {"web_search": "tools:search"})
+    # Safe but PRIVATE: the flip is withheld at dispatch, so the mint must
+    # not manufacture scopes either.
+    assert pm.get_enabled_scope_names(user_id, agent_id) == []
+
+
+def test_safe_agent_scope_names_default_read_without_tool_map(db, pm):
+    user_id, agent_id = _fresh_ids()
+    db.upsert_agent_safe(agent_id, True, marked_by="pytest")
+    db.set_agent_ownership(agent_id, "o@e.com", is_public=True)
+    # No registered tool map: dispatch defaults unmapped tools to tools:read,
+    # so the mint mirrors that.
+    assert pm.get_enabled_scope_names(user_id, agent_id) == ["tools:read"]
+
+
+def test_explicit_enabled_scope_names_unchanged(db, pm):
+    user_id, agent_id = _fresh_ids()
+    pm.set_agent_scopes(
+        user_id, agent_id, {"tools:read": True, "tools:write": True})
+    assert pm.get_enabled_scope_names(user_id, agent_id) == [
+        "tools:read", "tools:write"]
+
+
 @pytest.mark.asyncio
 async def test_mark_safe_requires_admin(db):
     from orchestrator import agent_trust

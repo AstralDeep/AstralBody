@@ -111,15 +111,32 @@ class DelegationService:
 
         token_url = f"{self.authority}/protocol/openid-connect/token"
 
-        # Keycloak's astral-agent-service client only registers the four
-        # scope-level claims (tools:read, tools:write, tools:search,
-        # tools:system). Per-tool `tool:<name>` scopes are not pre-registered
-        # and Keycloak rejects them with 400 invalid_scope. Per-tool
-        # authorization is already enforced by the orchestrator's
-        # ``allowed_tools`` filter at dispatch time, and ``is_tool_in_scope``
-        # treats the scope-level claim as sufficient when no per-tool claims
-        # are present in the JWT — so we send only scope-level claims here.
+        # Keycloak registers only the scope-level claims (the six VALID_SCOPES
+        # entries — see docs/keycloak_agent_delegation_setup.md, Step 7).
+        # Per-tool `tool:<name>` scopes are not pre-registered and Keycloak
+        # rejects them with 400 invalid_scope. Per-tool authorization is
+        # already enforced by the orchestrator's ``allowed_tools`` filter at
+        # dispatch time, and ``is_tool_in_scope`` treats the scope-level claim
+        # as sufficient when no per-tool claims are present in the JWT — so we
+        # send only scope-level claims here.
         combined_scopes = " ".join(enabled_scopes or [])
+        if not combined_scopes:
+            # A present-but-empty ``scope`` form field is rejected by Keycloak
+            # with 400 invalid_scope ("Invalid scopes: ") — a signature that
+            # reads like a realm misconfiguration. No enabled scopes means
+            # there is no authority to delegate; refuse locally instead of
+            # round-tripping a request that cannot succeed.
+            logger.error(
+                f"Refusing token exchange for agent '{agent_id}': the user "
+                f"has no effective tool scopes for this agent"
+            )
+            return {
+                "error": "no_enabled_scopes",
+                "error_description": (
+                    "no enabled tool scopes for this user/agent pair — "
+                    "delegation would carry no authority"
+                ),
+            }
 
         # RFC 8693 §2.1 — Token Exchange Request parameters
         form_data = {
