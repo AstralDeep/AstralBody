@@ -139,3 +139,46 @@ async def test_per_owner_ingress_cap_isolates_a_flooding_owner(orch, monkeypatch
     assert over[:5] == [False] * 5            # first 5 within budget
     assert all(over[5:])                       # 6th+ dropped (over cap)
     assert orch._tunnel_ingress_over_cap("otherB") is False   # other owner unaffected
+
+
+async def test_deliver_bundle_to_owner_host(orch):
+    # T006: bundle is pushed to the owner's desktop host over its UI socket.
+    ws = FakeUI()
+    orch.ui_sessions[ws] = {"sub": OWNER}
+    orch.ui_clients.append(ws)
+    n = await orch.deliver_agent_bundle(OWNER, AID, {"greeter_agent.py": "code"}, "0.1.0")
+    assert n == 1
+    env = json.loads(ws.sent[-1])
+    assert env["type"] == "agent_bundle_deliver" and env["agent_id"] == AID
+    assert env["files"] == {"greeter_agent.py": "code"} and env["constitution_version"] == "0.1.0"
+    # No host online for a different owner → delivered to 0 sockets.
+    assert await orch.deliver_agent_bundle("nobody-online", AID, {}, None) == 0
+
+
+async def test_delete_user_agent_soft_deletes_and_stops_host(orch):
+    # T028/FR-027: soft delete — stop host, drop routing, retain row + audit.
+    ws = FakeUI()
+    orch.ui_sessions[ws] = {"sub": OWNER}
+    await _tunnel(orch, ws, _reg_frame())
+    orch.ui_clients.append(ws)
+    assert AID in orch.agents
+    ws.sent.clear()
+    assert await orch.delete_user_agent(OWNER, AID) is True
+    assert AID not in orch.agents                                    # routing removed
+    row = ua.get_user_agent(orch.history.db, AID)
+    assert row["status"] == "disabled" and row["deleted_at"] is not None   # soft-deleted, retained
+    assert any(json.loads(f).get("type") == "agent_stop" for f in ws.sent)  # host told to stop
+    # A different user cannot delete it.
+    assert await orch.delete_user_agent("someone-else", AID) is False
+
+
+async def test_list_owner_agents_excludes_foreign_and_deleted(orch):
+    # T026 data path: list returns only the owner's non-deleted agents.
+    ws = FakeUI()
+    orch.ui_sessions[ws] = {"sub": OWNER}
+    await _tunnel(orch, ws, _reg_frame())
+    mine = ua.list_user_agents(orch.history.db, OWNER)
+    assert [a["agent_id"] for a in mine] == [AID]
+    assert ua.list_user_agents(orch.history.db, "someone-else") == []
+    ua.soft_delete(orch.history.db, AID)
+    assert ua.list_user_agents(orch.history.db, OWNER) == []          # soft-deleted hidden

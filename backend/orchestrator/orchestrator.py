@@ -1016,6 +1016,60 @@ class Orchestrator:
         st[1] += 1
         return st[1] > self._TUNNEL_MAX_FRAMES_PER_WINDOW
 
+    async def deliver_agent_bundle(self, owner_sub, agent_id, files,
+                                   constitution_version=None):
+        """058 (code-delivery seam, T006/FR-004): push a generated user-agent
+        bundle to the owner's desktop host over its UI socket(s). The host writes
+        the files locally and runs the agent as a supervised CHILD PROCESS, which
+        then dials back in over the tunnel (register → go_live). The orchestrator
+        NEVER runs the agent as a subprocess (SC-002). Returns the number of owner
+        sockets the bundle was delivered to (0 ⇒ no desktop host online)."""
+        frame = json.dumps({
+            "type": "agent_bundle_deliver",
+            "agent_id": agent_id,
+            "files": files,
+            "constitution_version": constitution_version,
+        })
+        delivered = 0
+        for ui in list(self.ui_clients):
+            if self._get_user_id(ui) != owner_sub:
+                continue
+            try:
+                await self._safe_send(ui, frame)
+                delivered += 1
+            except Exception:
+                logger.debug("agent_bundle_deliver send failed", exc_info=True)
+        if delivered == 0:
+            logger.warning("058: no desktop host online for owner=%s to deliver agent %s",
+                           owner_sub, agent_id)
+        return delivered
+
+    async def delete_user_agent(self, owner_sub, agent_id):
+        """058 (soft delete, T028/FR-027): stop the host agent, remove routing +
+        the tunnel socket, and soft-delete the registry row (status='disabled' +
+        deleted_at; the row + audit are RETAINED, Constitution VII). Refuses
+        (returns False) unless the agent is this owner's user agent."""
+        from shared.local_transport import TunnelSocket
+        from orchestrator import user_agents as _ua
+        row = await asyncio.to_thread(_ua.get_user_agent, self.history.db, agent_id)
+        if row is None or row.get("owner_user_id") != owner_sub:
+            return False
+        self._tunnel_sockets.pop((owner_sub, agent_id), None)
+        if isinstance(self.agents.get(agent_id), TunnelSocket):
+            self.agents.pop(agent_id, None)
+        self.agent_cards.pop(agent_id, None)
+        for ui in list(self.ui_clients):
+            if self._get_user_id(ui) != owner_sub:
+                continue
+            try:
+                await self._safe_send(ui, json.dumps(
+                    {"type": "agent_stop", "agent_id": agent_id}))
+            except Exception:
+                logger.debug("agent_stop send failed", exc_info=True)
+        await asyncio.to_thread(_ua.soft_delete, self.history.db, agent_id)
+        logger.info("058: soft-deleted user agent %s (owner=%s)", agent_id, owner_sub)
+        return True
+
     async def register_agent(self, websocket, msg: RegisterAgent):
         """Register a specialist agent and store its capabilities."""
         card = msg.agent_card

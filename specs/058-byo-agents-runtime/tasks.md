@@ -23,7 +23,7 @@ description: "Task list for feature 058 — BYO client-side agents runtime, host
 - [X] T003 [US1] **Owner-namespaced identity + collision refusal** (was 057 T023): refuse a `RegisterAgent` id that is reserved (`__*`), a built-in/public id, or another user's id; add owner-token binding alongside `AGENT_API_KEY` in `backend/orchestrator/auth.py`
 - [X] T004 [US1] Add the UI-facing `agent_offline` / `host_status` frame to `backend/shared/ui_protocol.json` + a liveness heartbeat so drops are caught within seconds (was 057 T012, SC-005)
 - [X] T005 [US1] **Honest-offline** (was 057 T011, FR-003): on tunnel disconnect deregister `(owner_sub, agent_id)` + emit `agent_offline`; short-circuit dispatch of an offline user agent to a prompt honest-offline `MCPResponse` (replace the `agent_urls` reconnect fallback for user agents) — `orchestrator.py`
-- [ ] T006 [US1] **Code-delivery seam** (was 057 T013, FR-004): after `generate_code`, package the 3-file bundle and push `agent_bundle_deliver` over the owner tunnel; do NOT call `start_draft_agent` (Popen) for byo agents; on inward register call `user_agents.go_live` (status='live', stamp constitution_version, insert agent_ownership row) — `backend/orchestrator/agent_lifecycle.py` + `agentic_creation.py`
+- [X] T006 [US1] **Code-delivery seam** (was 057 T013, FR-004): after `generate_code`, package the 3-file bundle and push `agent_bundle_deliver` over the owner tunnel; do NOT call `start_draft_agent` (Popen) for byo agents; on inward register call `user_agents.go_live` (status='live', stamp constitution_version, insert agent_ownership row) — `backend/orchestrator/agent_lifecycle.py` + `agentic_creation.py`
 - [ ] T007 [US1] **Self-test relocation** (was 057 T013b, G1/SC-002): any pre-delivery self-test is ephemeral/torn-down orchestrator sandbox OR host-side with the result reported back — never a persistent server-side agent — `backend/orchestrator/agent_lifecycle.py`
 - [ ] T008 [US1] **Codegen target** (was 057 T016): generated bundle is self-contained for the desktop-host runtime (not the backend `shared` package) OR the host ships a compatible shim — `backend/orchestrator/agent_generator.py` + `windows-client`
 - [ ] T009 [US1] **Minimal one-shot authoring path** (was 057 T014): deliberate entry, `origin='byo_client'`, `create_draft` → existing static gates → `generate_code` → deliver; register the `user_agent` row + stamp `AGENT_CONSTITUTION_VERSION` + mark validated (full 5-phase is Phase 4) — `agentic_creation.py`
@@ -58,11 +58,11 @@ description: "Task list for feature 058 — BYO client-side agents runtime, host
 
 ## Phase 6: Lifecycle (US5)
 
-- [ ] T026 [US5] List my agents with derived running/offline status on the `agent_authoring` surface (was 057 T038) — `authoring.py`
+- [X] T026 [US5] List my agents with derived running/offline status on the `agent_authoring` surface (was 057 T038) — `authoring.py`
 - [ ] T027 [US5] Revise: re-enter authoring; re-pass Analyze; prior live version keeps running until the revision registers (host-side rollback) (was 057 T039) — `agent_authoring.py` + `agent_lifecycle.py`
-- [ ] T028 [US5] Delete (soft): stop the host agent, remove routing/visibility, `user_agents.soft_delete` (retain row + audit) (was 057 T040) — `agent_authoring.py` + `orchestrator.py`
-- [ ] T029 [US5] Constitution-version re-validation flow: the 057 guarded migration sets `revalidation_required`; the tunnel/registration check refuses routing until re-Analyze passes (was 057 T041, FR-028)
-- [ ] T030 [US5] Confirm no share/publish/transfer path (was 057 T042) — `authoring.py`
+- [X] T028 [US5] Delete (soft): stop the host agent, remove routing/visibility, `user_agents.soft_delete` (retain row + audit) (was 057 T040) — `agent_authoring.py` + `orchestrator.py`
+- [X] T029 [US5] Constitution-version re-validation flow: the 057 guarded migration sets `revalidation_required`; the tunnel/registration check refuses routing until re-Analyze passes (was 057 T041, FR-028)
+- [X] T030 [US5] Confirm no share/publish/transfer path (was 057 T042) — `authoring.py`
 - [ ] T031 [P] [US5] Lifecycle test (was 057 T037): owner-only list, revise-requires-revalidation, delete-stops-host, no-share, cross-user invisibility — `backend/tests/test_byo_lifecycle.py`
 
 ## Phase 7: Polish
