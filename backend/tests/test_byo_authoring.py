@@ -8,8 +8,6 @@ import os
 import sys
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from shared.database import Database  # noqa: E402
@@ -29,7 +27,7 @@ def _fake_orch():
     return o
 
 
-async def test_analyze_violation_blocks_generation(orch=None):
+async def test_analyze_violation_blocks_generation():
     o = _fake_orch()
     res = await aa.author_and_deliver(
         o, user_id="u-block", agent_name="Sharer",
