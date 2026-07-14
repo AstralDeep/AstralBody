@@ -4,9 +4,11 @@
   "push_types": [
     {"name": "agent_creation_progress", "category": "creation"},
     {"name": "agent_list", "category": "bootstrap"},
+    {"name": "agent_offline", "category": "agents"},
     {"name": "agent_permissions", "category": "permissions"},
     {"name": "agent_permissions_updated", "category": "permissions"},
     {"name": "agent_registered", "category": "bootstrap"},
+    {"name": "agent_tunnel", "category": "agents"},
     {"name": "audit_append", "category": "audit"},
     {"name": "auth_required", "category": "auth"},
     {"name": "chat_created", "category": "chat"},
@@ -51,6 +53,7 @@
     {"name": "workspace_timeline_mode", "category": "chat"}
   ],
   "accept_actions": [
+    "agent_tunnel",
     "authorize_action", "cancel_task", "chat_message", "chrome_admin_proposal_decide",
     "chrome_admin_step_archive", "chrome_admin_step_restore", "chrome_admin_step_save",
     "chrome_agent_enabled", "chrome_attachment_delete", "chrome_audit_page", "chrome_close",

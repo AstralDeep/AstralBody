@@ -129,3 +129,13 @@ async def test_no_delegation_token_handed_to_tunnel_agent(orch):
         pytest.skip(f"gate refused in this env: {auth.response.error if auth.response else auth}")
     assert isinstance(auth, PreparedDispatch)
     assert "_delegation_token" not in auth.args
+
+
+async def test_per_owner_ingress_cap_isolates_a_flooding_owner(orch, monkeypatch):
+    # T013 (FR-017/SC-008): a flooding owner is capped after the window budget;
+    # a different owner has an independent budget and is unaffected.
+    monkeypatch.setattr(type(orch), "_TUNNEL_MAX_FRAMES_PER_WINDOW", 5)
+    over = [orch._tunnel_ingress_over_cap("floodA") for _ in range(8)]
+    assert over[:5] == [False] * 5            # first 5 within budget
+    assert all(over[5:])                       # 6th+ dropped (over cap)
+    assert orch._tunnel_ingress_over_cap("otherB") is False   # other owner unaffected

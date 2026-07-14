@@ -687,6 +687,10 @@ class Orchestrator:
         # TunnelSocket adapter so dispatch routes back to the client. Cleared on
         # UI disconnect (honest-offline).
         self._tunnel_sockets: Dict[tuple, Any] = {}
+        # 058 (per-owner ingress bound, FR-017/SC-008): fixed-window frame-rate
+        # counter per owner sub on the agent tunnel, so a flooding/runaway user
+        # agent degrades only its own owner. {owner_sub: [window_start, count]}.
+        self._tunnel_ingress: Dict[str, list] = {}
         # Maps cap_job_id -> {user_id, agent_id, chat_id, tool_name} for long-running
         # jobs, so a job's progress + terminal result can be routed to (and
         # persisted in) the originating CHAT — not a single ephemeral socket —
@@ -952,6 +956,10 @@ class Orchestrator:
         if not owner_sub or not agent_id or not inner:
             logger.debug("agent_tunnel: missing owner/agent/frame — ignoring")
             return
+        if self._tunnel_ingress_over_cap(owner_sub):
+            logger.warning("058: dropping tunnel frame from owner=%s agent=%s — over ingress cap",
+                           owner_sub, agent_id)
+            return
         key = (owner_sub, agent_id)
         sock = self._tunnel_sockets.get(key)
         if sock is None:
@@ -989,6 +997,24 @@ class Orchestrator:
         if gone:
             logger.info("058: %d user agent(s) offline on UI disconnect (owner=%s)",
                         len(gone), owner_sub)
+
+    #: Max agent-tunnel frames per owner per window before dropping (058 FR-017).
+    _TUNNEL_MAX_FRAMES_PER_WINDOW = int(os.getenv("BYO_TUNNEL_MAX_FRAMES_PER_S", "50"))
+    _TUNNEL_WINDOW_S = 1.0
+
+    def _tunnel_ingress_over_cap(self, owner_sub: str) -> bool:
+        """Per-owner fixed-window frame-rate cap on the agent tunnel (058
+        FR-017/SC-008). Returns True once this owner exceeds the window's frame
+        budget — the caller drops the frame, so a flooding/runaway user agent
+        degrades only its own owner, never the platform or other users. Each owner
+        has an independent counter."""
+        now = time.monotonic()
+        st = self._tunnel_ingress.get(owner_sub)
+        if st is None or (now - st[0]) >= self._TUNNEL_WINDOW_S:
+            self._tunnel_ingress[owner_sub] = [now, 1]
+            return False
+        st[1] += 1
+        return st[1] > self._TUNNEL_MAX_FRAMES_PER_WINDOW
 
     async def register_agent(self, websocket, msg: RegisterAgent):
         """Register a specialist agent and store its capabilities."""
