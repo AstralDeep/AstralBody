@@ -115,11 +115,16 @@ async def test_two_hop_reconstruction_and_tamper_evidence(orch, recorder, db):
                        callee="agent-c", tool="tool_c", hop_id="hop-2")
     assert resp2.result == "ok"
 
-    # Give the Recorder's off-thread inserts a moment to land.
-    for _ in range(50):
-        rows = db.fetch_all(
+    # Give the Recorder's off-thread inserts a moment to land. The DB reads go
+    # through asyncio.to_thread so the 052 event-loop-blocking guard (enforced
+    # in CI via LOOP_GUARD_ENFORCE=1) does not flag them.
+    def _read_rows():
+        return db.fetch_all(
             "SELECT * FROM audit_events WHERE actor_user_id = ? "
             "ORDER BY recorded_at ASC, event_id ASC", (user,))
+
+    for _ in range(50):
+        rows = await asyncio.to_thread(_read_rows)
         if len(rows) >= 8:
             break
         await asyncio.sleep(0.1)
@@ -152,26 +157,31 @@ async def test_two_hop_reconstruction_and_tamper_evidence(orch, recorder, db):
         assert any(k.startswith("tool.") and k.endswith(".end") for k in kinds)
 
     # ---- Tamper evidence (verify_chain) ----
+    # All DB work runs off the event loop (LOOP_GUARD_ENFORCE=1 in CI).
     repo = AuditRepository(db)
-    assert repo.verify_chain(user) is None  # intact before tampering
+    assert await asyncio.to_thread(repo.verify_chain, user) is None  # intact
     victim = enforce[-1]["event_id"]
-    # audit_events is trigger-protected append-only (a DB-level UPDATE is
-    # refused outright — itself part of the tamper-evidence posture). To
-    # prove the HASH CHAIN also detects tampering, simulate an attacker with
-    # direct storage access: a raw superuser session with triggers disabled.
-    import psycopg2
-    raw = psycopg2.connect(
-        host=os.getenv("DB_HOST", "localhost"),
-        port=os.getenv("DB_PORT", "5432"),
-        dbname=os.getenv("DB_NAME", "astraldeep"),
-        user=os.getenv("DB_USER", "astral"),
-        password=os.getenv("DB_PASSWORD", "astral_dev"))
-    try:
-        cur = raw.cursor()
-        cur.execute("SET session_replication_role = replica")
-        cur.execute("UPDATE audit_events SET description = 'tampered' "
-                    "WHERE event_id = %s", (victim,))
-        raw.commit()
-    finally:
-        raw.close()
-    assert repo.verify_chain(user) == victim
+
+    def _tamper():
+        # audit_events is trigger-protected append-only (a DB-level UPDATE is
+        # refused outright — itself part of the tamper-evidence posture). To
+        # prove the HASH CHAIN also detects tampering, simulate an attacker with
+        # direct storage access: a raw superuser session with triggers disabled.
+        import psycopg2
+        raw = psycopg2.connect(
+            host=os.getenv("DB_HOST", "localhost"),
+            port=os.getenv("DB_PORT", "5432"),
+            dbname=os.getenv("DB_NAME", "astraldeep"),
+            user=os.getenv("DB_USER", "astral"),
+            password=os.getenv("DB_PASSWORD", "astral_dev"))
+        try:
+            cur = raw.cursor()
+            cur.execute("SET session_replication_role = replica")
+            cur.execute("UPDATE audit_events SET description = 'tampered' "
+                        "WHERE event_id = %s", (victim,))
+            raw.commit()
+        finally:
+            raw.close()
+
+    await asyncio.to_thread(_tamper)
+    assert await asyncio.to_thread(repo.verify_chain, user) == victim
