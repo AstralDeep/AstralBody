@@ -42,11 +42,16 @@ final class ManifestDriftTests: XCTestCase {
         XCTAssertEqual(Set(manifest.component_types),
                        Set(ClientDispositions.allComponentTypes),
                        "component_types drift — update Dispositions.swift + parity matrix")
-        XCTAssertEqual(manifest.push_types.count, 47)
+        // 51 = 47 + the four feature-058 BYO host frames (agent_bundle_deliver,
+        //        agent_offline, agent_stop, agent_tunnel) — ignored on Apple
+        //        (author-only clients; macOS hosting is feature 059).
+        XCTAssertEqual(manifest.push_types.count, 51)
         XCTAssertEqual(manifest.component_types.count, 35)
         // 73 = 67 + the four feature-054 chrome_llm_sys_* admin actions
         //        + the two feature-055 component_refine/component_restore actions.
-        XCTAssertEqual(manifest.accept_actions.count, 73)
+        // 87 = 73 + the feature-058 BYO authoring + agent-management chrome actions
+        //        (chrome_author_* / chrome_agent_*).
+        XCTAssertEqual(manifest.accept_actions.count, 87)
     }
 
     func testEveryClientDispositionsEveryFrameAndComponent() throws {
