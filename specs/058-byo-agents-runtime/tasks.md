@@ -49,8 +49,8 @@ description: "Task list for feature 058 — BYO client-side agents runtime, host
 
 ## Phase 5: Cross-client parity (US4)
 
-- [ ] T020 [P] [US4] Android author+manage parity via the SDUI chrome path (was 057 T031) — `android-client`
-- [ ] T021 [P] [US4] Apple parity: iOS author-only; macOS MAS build author-only (was 057 T032) — `apple-clients`
+- [X] T020 [P] [US4] Android author+manage parity via the SDUI chrome path (was 057 T031) — **PROVEN LIVE 2026-07-15** on the Android emulator (Mac): the full 5-phase flow (Specify→Clarify→Plan→Tasks→Analyze→Generate) rendered natively via the 043 SDUI chrome path — every component type (text/alert/card/button/badge/param_picker) drew with **zero `[type]` placeholders**; the Clarify **hard gate** refused a blank advance (behavioral, cited the count + first question), the Analyze **structural gate** withheld Generate until pass, and Generate on a phone produced the honest **`no_host`** message. (Env quirk: the emulator's stylus-handwriting hijacks text fields — `settings put secure stylus_handwriting_enabled 0`.) — `android-client`
+- [ ] T021 [P] [US4] Apple parity: iOS author-only; macOS MAS build author-only (was 057 T032) — **PARTIAL 2026-07-15**: AstralApp **builds** for the iOS sim + runs signed-in, top-bar order matches web/Android; the authoring-surface **render is NOT yet verified** — the iOS Simulator's Metal content is opaque to macOS accessibility and takes no synthetic taps (no `idb`; `cliclick` events don't register), so it needs a couple of human taps (gear → "My agents"). — `apple-clients`
 - [X] T022 [P] [US4] Web author+manage parity via `render()` HTML (was 057 T033) — **PROVEN LIVE 2026-07-14**: the full 5-phase author + generate + manage flow was driven end-to-end in the web client (Settings → "My agents"), delivering to a Windows host.
 - [X] T023 [US4] Verify **watch exclusion** (was 057 T034) + guard test — `backend/tests/test_byo_watch_excluded.py`: "My agents" is the single flag-gated authoring affordance in `menu_model`; `watch` is absent from `chrome_events._NATIVE_SDUI_DEVICE_TYPES` (the device list that gates chrome-menu delivery + surface render), keeping the surface off the wrist (FR-023). Host-marking has no server-side device gate (watch host exclusion is client-side — no host UI on the wrist); noted in the test.
 - [X] T024 [US4] FR-024 non-host messaging: delivery now targets **host-capable sockets only** (`_agent_host_sockets`; additive `RegisterUI.agent_host`/`host_session_id` + mark-by-demonstration) — a browser tab never receives a code bundle; the `no_host` branch tells the truth ("open your desktop client and re-run Generate") — `orchestrator.py`, `authoring.py`
@@ -59,7 +59,7 @@ description: "Task list for feature 058 — BYO client-side agents runtime, host
 ## Phase 6: Lifecycle (US5)
 
 - [X] T026 [US5] List my agents with derived running/offline status on the `agent_authoring` surface (was 057 T038) — `authoring.py`
-- [ ] T027 [US5] Revise: re-enter authoring; re-pass Analyze; prior live version keeps running until the revision registers (host-side rollback) (was 057 T039) — `agent_authoring.py` + `agent_lifecycle.py`
+- [X] T027 [US5] Revise: re-enter authoring; re-pass Analyze; prior live version keeps running until the revision registers (host-side rollback) (was 057 T039). Server half was already in place (`agent_authoring.revise` keeps the same `agent_id`, deliberately does NOT flip `revalidation_required`). **Host half implemented + tested 2026-07-15** (`windows-client/win_agent/byo_host.py`): the old **stop-then-start** `deliver()` is replaced by **staging + swap-on-ack** — a revision stages under `<agent_id>.pending` and runs alongside the live child; promote (swap the on-disk dir, retire the old child) only on the revised child's `agent_registered` ack; on timeout/crash reap the pending child + keep the running version. Pending-aware teardown (stop_all/remove/rehydrate). **4 new tests; 41 byo_host + 421 windows-client green, ruff clean** (commit `a96846a`). NOT live-verified on a running host (no macOS host, no Windows machine this session) → see feature **059**. — `windows-client/win_agent/byo_host.py`
 - [X] T028 [US5] Delete (soft): stop the host agent, remove routing/visibility, `user_agents.soft_delete` (retain row + audit) (was 057 T040) — `agent_authoring.py` + `orchestrator.py`
 - [X] T029 [US5] Constitution-version re-validation flow: the 057 guarded migration sets `revalidation_required`; the tunnel/registration check refuses routing until re-Analyze passes (was 057 T041, FR-028)
 - [X] T030 [US5] Confirm no share/publish/transfer path (was 057 T042) — `authoring.py`
@@ -114,3 +114,25 @@ Keycloak logins, not a bug.
   BYO codegen used the unset system LLM instead of the owner's; the owner couldn't use the tool they
   authored (permission baseline). (offline-on-close still to observe.)
 - [ ] **T034-partial** full-suite smoke with `FF_BYO_AGENTS` on AND off (flag-off byte-identical).
+
+## Session 2026-07-15 (Mac resume) — status
+
+Picked up on the Mac. **T020 (Android render parity) PROVEN LIVE** on the emulator — the full
+5-phase authoring flow renders natively with zero `[type]` placeholders, both gates behave
+(Clarify hard-gate + Analyze structural), and Generate on a phone gives the honest `no_host`
+message (detail on T020 above). **T027 host-side rollover implemented + tested** (staging +
+swap-on-ack; a failed revision keeps the running agent; 41 byo_host + 421 windows-client green —
+commit `a96846a`).
+
+**T021 (Apple) — partial:** AstralApp builds for the iOS sim (incl. the iOS chat keyboard fix —
+auto-dismiss on send + a Done accessory bar, commit `8658650`), runs signed-in, top-bar order
+matches web/Android; the authoring-surface **render is not yet verified** (the iOS Simulator's
+Metal content is opaque to macOS accessibility and takes no synthetic taps — needs a couple of
+human taps: gear → "My agents").
+
+**macOS agent host** does not exist (apple-clients is author-only; the App Sandbox forbids child
+processes), so live revise/offline-on-close can't be exercised on a Mac without building one.
+Specced as new feature **059** (`specs/059-macos-agent-host/`, specify step only).
+
+Also committed: android gradle sync (`ca3ff53`). Remaining 058 opens: **T021** (Apple authoring
+render), **T034** (flag on/off smoke), offline-on-close live-observe.
