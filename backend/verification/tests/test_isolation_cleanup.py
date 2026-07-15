@@ -41,7 +41,11 @@ def test_teardown_deletes_namespaced_rows_only():
     # Every DELETE is scoped by the run's namespace LIKE pattern.
     for sql, params in db.deletes:
         assert sql.strip().upper().startswith("DELETE FROM")
-        assert params and params[0] == "__verif__run9_%"
+        # PR #137 escapes the LIKE metacharacters (`_like_escape`, paired with
+        # `ESCAPE '\'`): the underscores in `__verif__…` would otherwise be
+        # single-char wildcards and over-match. The teardown param is therefore
+        # the escaped literal pattern.
+        assert params and params[0] == r"\_\_verif\_\_run9\_%"
 
 
 def test_teardown_never_raises_on_bad_table():
