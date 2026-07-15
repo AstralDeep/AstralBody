@@ -56,6 +56,14 @@ REGISTER_TIMEOUT_S = float(os.getenv("BYO_REGISTER_TIMEOUT_S", "20"))
 #: re-checked against the root before a single byte is written (`_agent_dir`).
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$")
 
+#: A revision reuses the SAME agent_id, so its new bundle is staged under
+#: `<agent_id>.pending` beside the live one: the revised child runs from there
+#: and the directories are swapped only once it has registered inward (T027
+#: host-side rollover). A failed revision therefore never touches the version the
+#: owner is relying on. rehydrate() skips these — a staging dir is not an agent id,
+#: and a crash mid-revision must not resurrect a half-written one on next launch.
+_PENDING_SUFFIX = ".pending"
+
 
 def agents_root() -> str:
     """`%LOCALAPPDATA%/AstralDeep/agents` (contract §5); `~/.astraldeep/agents`
@@ -137,6 +145,10 @@ class ByoAgentHost:
         # (stamped on `user_agent.host_session_id` at registration).
         self.host_session_id = uuid.uuid4().hex
         self._children: Dict[str, _Child] = {}
+        #: In-flight revisions, keyed by the same agent_id as the live child they
+        #: will replace. A pending child runs from a `.pending` staging dir and is
+        #: promoted into `_children` (retiring the old one) only on its ack.
+        self._pending: Dict[str, _Child] = {}
         self._lock = threading.Lock()
         self._rehydrated = False
 
@@ -188,14 +200,38 @@ class ByoAgentHost:
         return True
 
     def on_agent_registered(self, agent_id: str) -> None:
-        """The server accepted the child's registration — disarm the silence
-        timeout (see REGISTER_TIMEOUT_S)."""
+        """The server accepted a registration — disarm the silence timeout (see
+        REGISTER_TIMEOUT_S). If a revision was in flight for this id, the ack is
+        the rollover signal: promote the revised child and retire the old one
+        (T027). The swap + kill run OFF-lock — `_kill` closes the old child's
+        stdin, whose stdout pump then re-enters `_on_child_exit` and the lock."""
+        promote = None
+        timer = None
         with self._lock:
-            child = self._children.get(agent_id)
-            if child is None or child.registered:
-                return
-            child.registered = True
-            timer, child.timer = child.timer, None
+            pending = self._pending.get(agent_id)
+            if pending is not None and not pending.registered:
+                old = self._children.get(agent_id)
+                pending.registered = True
+                ptimer, pending.timer = pending.timer, None
+                self._pending.pop(agent_id, None)
+                self._children[agent_id] = pending  # inbound now routes to the new child
+                promote = (old, pending, ptimer)
+            else:
+                child = self._children.get(agent_id)
+                if child is None or child.registered:
+                    return
+                child.registered = True
+                timer, child.timer = child.timer, None
+        if promote is not None:
+            old, pending, ptimer = promote
+            if ptimer is not None:
+                ptimer.cancel()
+            self._swap_dirs(pending)   # live dir now holds the revised bundle
+            if old is not None:
+                self._kill(old)        # retire the old version only now
+            logger.info("byo agent %s revised — rolled over to the new version", agent_id)
+            self._notify(f"Your agent “{agent_id}” was updated to the new version.", "info")
+            return
         if timer is not None:
             timer.cancel()
         logger.info("byo agent %s registered", agent_id)
@@ -216,7 +252,7 @@ class ByoAgentHost:
             children = [c for c in self._children.values() if c.alive() and c.register_frame]
         for child in children:
             child.registered = False
-            self._arm_register_timeout(child.agent_id)
+            self._arm_register_timeout(child)
             self._tunnel_out(child.agent_id, child.register_frame)
         if children:
             logger.info("re-registered %d byo agent(s) after reconnect", len(children))
@@ -248,6 +284,12 @@ class ByoAgentHost:
         for agent_id in entries:
             if agent_id in known:
                 continue
+            if agent_id.endswith(_PENDING_SUFFIX):
+                # A staging dir orphaned by a crash mid-revision: its name is not a
+                # real agent id, and running it would resurrect a half-written
+                # revision. Clean it up, never start it.
+                self._discard_staging(os.path.join(self._base_dir, agent_id))
+                continue
             directory = self._agent_dir(agent_id)
             if not directory or not os.path.isfile(os.path.join(directory, "agent_main.py")):
                 continue
@@ -260,7 +302,13 @@ class ByoAgentHost:
     # --- lifecycle --------------------------------------------------------- #
 
     def deliver(self, agent_id: str, files: dict, constitution_version=None) -> Optional[str]:
-        """Write a delivered bundle and start it. Returns the agent dir, or None."""
+        """Write a delivered bundle and start it. Returns the agent dir, or None.
+
+        A delivery for an agent that is CURRENTLY RUNNING is a revision: the new
+        bundle is staged and started alongside the live one, which keeps serving
+        until the revised child registers (T027, `_deliver_revision`). Otherwise
+        (first delivery, or the previous child already exited) it replaces in place.
+        """
         directory = self._agent_dir(agent_id)
         if directory is None:
             logger.warning("refusing bundle with unusable agent_id %r", agent_id)
@@ -269,12 +317,40 @@ class ByoAgentHost:
             logger.warning("refusing empty bundle for %s", agent_id)
             return None
 
-        self.stop(agent_id)  # a redelivery (revision) replaces the running child
+        with self._lock:
+            live = self._children.get(agent_id)
+            is_revision = live is not None and live.alive()
+        if is_revision:
+            return self._deliver_revision(agent_id, files, directory)
+
+        self.stop(agent_id)              # replace a dead/leftover child, if any
+        self._discard_pending(agent_id)  # drop any stray in-flight revision
+        if not self._write_bundle(agent_id, directory, files):
+            return None
+        logger.info("wrote %d bundle file(s) for %s -> %s", len(files), agent_id, directory)
+        self._start(agent_id, directory)
+        return directory
+
+    def _deliver_revision(self, agent_id: str, files: dict, live_dir: str) -> Optional[str]:
+        """Stage a revision beside the running agent and start it WITHOUT touching
+        the live child; the swap happens later, on the revised child's ack
+        (`on_agent_registered`), or is discarded on timeout (T027)."""
+        self._discard_pending(agent_id)      # supersede an earlier in-flight revision
+        staging = live_dir + _PENDING_SUFFIX
+        self._discard_staging(staging)       # clear a leftover staging dir
+        if not self._write_bundle(agent_id, staging, files):
+            return None
+        logger.info("staged a revision of %s (%d file(s)) -> %s", agent_id, len(files), staging)
+        self._start(agent_id, staging, pending=True)
+        return staging
+
+    def _write_bundle(self, agent_id: str, directory: str, files: dict) -> bool:
+        """Write a flat {filename: source} bundle into `directory`. Returns success."""
         try:
             os.makedirs(directory, exist_ok=True)
             for name, source in files.items():
-                # The bundle is a FLAT {filename: source} map; anything that
-                # tries to escape the agent's own directory is not a filename.
+                # The bundle is a FLAT {filename: source} map; anything that tries
+                # to escape the agent's own directory is not a filename.
                 if not isinstance(name, str) or not isinstance(source, str):
                     continue
                 if os.path.basename(name) != name or name in (".", ".."):
@@ -282,16 +358,13 @@ class ByoAgentHost:
                     continue
                 with open(os.path.join(directory, name), "w", encoding="utf-8") as fh:
                     fh.write(source)
+            return True
         except OSError:
             logger.exception("could not write the bundle for %s", agent_id)
             self._notify(f"Couldn't save your agent “{agent_id}” to this PC.", "error")
-            return None
+            return False
 
-        logger.info("wrote %d bundle file(s) for %s -> %s", len(files), agent_id, directory)
-        self._start(agent_id, directory)
-        return directory
-
-    def _start(self, agent_id: str, directory: str) -> None:
+    def _start(self, agent_id: str, directory: str, pending: bool = False) -> None:
         try:
             proc = self._spawn(worker_argv(directory))
         except Exception:  # noqa: BLE001 — a failed spawn is a user-visible failure
@@ -301,7 +374,7 @@ class ByoAgentHost:
 
         child = _Child(agent_id, proc, directory)
         with self._lock:
-            self._children[agent_id] = child
+            (self._pending if pending else self._children)[agent_id] = child
 
         for name, stream, pump in (
             ("stdout", proc.stdout, self._pump_stdout),
@@ -317,8 +390,9 @@ class ByoAgentHost:
 
         # Armed at spawn, not at the first stdout frame: a child that dies before
         # it ever writes `register_agent` must fail here too, not hang forever.
-        self._arm_register_timeout(agent_id)
-        logger.info("started byo agent %s (pid=%s)", agent_id, getattr(proc, "pid", "?"))
+        self._arm_register_timeout(child)
+        logger.info("started byo agent %s (pid=%s)%s", agent_id, getattr(proc, "pid", "?"),
+                    " [revision, staged]" if pending else "")
 
     def stop(self, agent_id: str) -> bool:
         """Terminate one child and forget it. Idempotent."""
@@ -336,6 +410,7 @@ class ByoAgentHost:
         Distinct from `stop()`, which is the internal "replace this child" used by
         re-delivery and by client shutdown — those must KEEP the bundle.
         """
+        self._discard_pending(agent_id)  # a deleted agent kills any in-flight revision too
         stopped = self.stop(agent_id)
         directory = self._agent_dir(agent_id)
         if directory and os.path.isdir(directory):
@@ -348,18 +423,65 @@ class ByoAgentHost:
 
     def stop_all(self) -> None:
         """Client is closing: every user agent dies with it (contract §5) — the
-        server sees the socket drop and takes them honestly offline."""
+        server sees the socket drop and takes them honestly offline. In-flight
+        revision children die too (else a mid-revision close orphans one), and
+        their staging dirs are cleaned up; live bundles stay on disk."""
         with self._lock:
             children = list(self._children.values())
+            pending = list(self._pending.values())
             self._children.clear()
-        for child in children:
+            self._pending.clear()
+        for child in children + pending:
             self._kill(child)
-        if children:
-            logger.info("stopped %d byo agent(s) on client close", len(children))
+        for child in pending:
+            self._discard_staging(child.dir)
+        if children or pending:
+            logger.info("stopped %d byo agent(s)%s on client close", len(children),
+                        f" (+{len(pending)} in-flight revision)" if pending else "")
 
     def running(self) -> List[str]:
         with self._lock:
             return [a for a, c in self._children.items() if c.alive()]
+
+    # --- revision staging (T027) ------------------------------------------- #
+
+    def _discard_pending(self, agent_id: str) -> None:
+        """Drop any in-flight revision for `agent_id`: kill its child and remove
+        the staging dir. Used when a newer revision supersedes it, on delete, and
+        before a fresh (non-revision) delivery."""
+        with self._lock:
+            child = self._pending.pop(agent_id, None)
+        if child is None:
+            return
+        self._kill(child)
+        self._discard_staging(child.dir)
+
+    def _discard_staging(self, staging: str) -> None:
+        """Remove a `.pending` staging dir. The suffix guard is a safety net: this
+        must never be able to delete a live bundle."""
+        if staging and staging.endswith(_PENDING_SUFFIX) and os.path.isdir(staging):
+            try:
+                shutil.rmtree(staging)
+            except OSError:
+                logger.exception("could not remove staging dir %s", staging)
+
+    def _swap_dirs(self, pending: _Child) -> None:
+        """Promote the staged revision on disk: replace the live bundle dir with
+        the staging dir the (now registered) revised child runs from. The child
+        imported its code at start-up, so it holds no handle on the dir and the
+        rename is safe even while it runs; afterwards the live dir name matches
+        the agent_id again, so rehydrate() finds it on the next launch."""
+        live_dir = self._agent_dir(pending.agent_id)
+        staging = pending.dir
+        if not live_dir or staging == live_dir:
+            return
+        try:
+            if os.path.isdir(live_dir):
+                shutil.rmtree(live_dir)
+            os.replace(staging, live_dir)   # atomic within the agents root
+            pending.dir = live_dir
+        except OSError:
+            logger.exception("byo %s: could not swap in the revised bundle", pending.agent_id)
 
     # --- pipes ------------------------------------------------------------- #
 
@@ -434,25 +556,44 @@ class ByoAgentHost:
 
     # --- failure handling --------------------------------------------------- #
 
-    def _arm_register_timeout(self, agent_id: str) -> None:
+    def _arm_register_timeout(self, child: _Child) -> None:
         timer = threading.Timer(
-            self._register_timeout, self._registration_timed_out, args=(agent_id,)
+            self._register_timeout, self._registration_timed_out, args=(child,)
         )
         timer.daemon = True
         with self._lock:
-            child = self._children.get(agent_id)
-            if child is None:
-                return
+            if child.registered:
+                return  # already acked before we could arm
             child.timer = timer
         timer.start()
 
-    def _registration_timed_out(self, agent_id: str) -> None:
+    def _registration_timed_out(self, child: _Child) -> None:
+        agent_id = child.agent_id
         with self._lock:
-            child = self._children.get(agent_id)
-            if child is None or child.registered:
+            if child.registered:
                 return
-            self._children.pop(agent_id, None)
+            if self._pending.get(agent_id) is child:
+                self._pending.pop(agent_id, None)
+                is_pending = True
+            elif self._children.get(agent_id) is child:
+                self._children.pop(agent_id, None)
+                is_pending = False
+            else:
+                return  # already removed / promoted / replaced deliberately
         self._kill(child)
+        if is_pending:
+            # A revision that never registered: keep the version the owner is
+            # relying on, drop only the staged one (T027 — a failed revision must
+            # never take the running agent down).
+            self._discard_staging(child.dir)
+            logger.warning("byo %s: revision not accepted in time — kept the running version",
+                           agent_id)
+            self._notify(
+                f"Your update to “{agent_id}” wasn't accepted; the previous version is "
+                "still running.",
+                "warning",
+            )
+            return
         logger.warning("byo %s: no agent_registered ack — reaped the child", agent_id)
         self._notify(
             f"Your agent “{agent_id}” couldn't start: the server didn't accept it. "
@@ -463,18 +604,31 @@ class ByoAgentHost:
     def _on_child_exit(self, child: _Child) -> None:
         """stdout closed: the child is gone. No auto-respawn in v1 — an agent
         that is not running should look offline, not flap (contract §5)."""
+        agent_id = child.agent_id
         with self._lock:
-            known = self._children.get(child.agent_id)
-            if known is not child:
-                return  # already stopped/replaced deliberately
-            self._children.pop(child.agent_id, None)
-            timer, child.timer = child.timer, None
+            if self._pending.get(agent_id) is child:
+                self._pending.pop(agent_id, None)
+                timer, child.timer = child.timer, None
+                is_pending = True
+            elif self._children.get(agent_id) is child:
+                self._children.pop(agent_id, None)
+                timer, child.timer = child.timer, None
+                is_pending = False
+            else:
+                return  # already stopped / replaced / promoted deliberately
         if timer is not None:
             timer.cancel()
         code = child.proc.poll()
-        logger.warning("byo agent %s exited (code=%s)", child.agent_id, code)
+        if is_pending:
+            # A revision child that died before registering: drop the staging dir,
+            # leave the running (old) version untouched.
+            self._discard_staging(child.dir)
+            logger.warning("byo %s: revision child exited before registering (code=%s)",
+                           agent_id, code)
+            return
+        logger.warning("byo agent %s exited (code=%s)", agent_id, code)
         if child.registered:
-            self._notify(f"Your agent “{child.agent_id}” stopped running.", "warning")
+            self._notify(f"Your agent “{agent_id}” stopped running.", "warning")
 
     def _kill(self, child: _Child) -> None:
         if child.timer is not None:

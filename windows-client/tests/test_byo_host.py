@@ -394,6 +394,99 @@ def test_agent_registered_disarms_the_timeout(tmp_path):
     h.host.stop_all()
 
 
+# --- revision: zero-downtime host-side rollover (T027) ----------------------
+
+def test_revision_keeps_the_old_child_until_the_new_one_registers(host, tmp_path):
+    """A revision reuses the same agent_id. Killing the old child before the new
+    one is live (pre-T027 stop-then-start) leaves the user with no running agent
+    if the revision fails. Instead the old child keeps serving until the revised
+    child registers inward, then the host rolls over."""
+    host.host.deliver(AGENT, BUNDLE)
+    old = host.proc
+    old.stdout.feed(json.dumps(REG))
+    assert host.wait_for(lambda: host.tunnelled())
+    host.host.on_agent_registered(AGENT)
+    assert host.host.running() == [AGENT]
+    host.sent.clear()
+
+    v2 = dict(BUNDLE, **{"agent_main.py": "print('v2')\n"})
+    host.host.deliver(AGENT, v2)
+
+    # the old child still runs, a second (pending) child is spawned alongside it
+    assert not old.terminated
+    assert host.host.running() == [AGENT]
+    new = next(p for p in host.procs.values() if p is not old)
+    assert new.poll() is None
+    # the live bundle on disk is still the OLD version while the revision is pending
+    assert (tmp_path / AGENT / "agent_main.py").read_text(encoding="utf-8") == "print('hi')\n"
+
+    # the revised child registers inward -> the server acks -> roll over
+    new.stdout.feed(json.dumps(REG))
+    assert host.wait_for(
+        lambda: any(json.loads(p["frame"]).get("type") == "register_agent"
+                    for a, p in host.sent if a == "agent_tunnel"))
+    host.host.on_agent_registered(AGENT)
+
+    assert old.terminated                    # the old child is retired only now
+    assert host.host.running() == [AGENT]    # no gap in service
+    assert (tmp_path / AGENT / "agent_main.py").read_text(encoding="utf-8") == "print('v2')\n"
+
+
+def test_a_failed_revision_does_not_kill_the_running_agent(tmp_path):
+    """The revised child never sends agent_registered (a refused/late revision).
+    The silence reaper must retire the PENDING child only — the live agent the
+    user is relying on keeps running, on the old bundle."""
+    h = _Host(tmp_path, register_timeout=0.15)
+    h.host.deliver(AGENT, BUNDLE)
+    old = h.proc
+    h.host.on_agent_registered(AGENT)
+    assert h.host.running() == [AGENT]
+
+    h.host.deliver(AGENT, dict(BUNDLE, **{"agent_main.py": "print('v2')\n"}))
+    new = next(p for p in h.procs.values() if p is not old)
+
+    assert h.wait_for(lambda: new.terminated, timeout=3)  # the pending child is reaped
+    assert not old.terminated                             # the live agent is untouched
+    assert h.host.running() == [AGENT]
+    assert (tmp_path / AGENT / "agent_main.py").read_text(encoding="utf-8") == "print('hi')\n"
+    h.host.stop_all()
+
+
+def test_client_close_stops_an_in_flight_revision_child(host, tmp_path):
+    """A revision still awaiting its ack when the client closes must not orphan
+    the pending child — the exact orphan T027's zero-downtime path could create."""
+    host.host.deliver(AGENT, BUNDLE)
+    old = host.proc
+    host.host.on_agent_registered(AGENT)
+    host.host.deliver(AGENT, dict(BUNDLE, **{"agent_main.py": "print('v2')\n"}))
+    new = next(p for p in host.procs.values() if p is not old)
+    assert not old.terminated and not new.terminated  # both running during the revision
+
+    host.host.stop_all()
+
+    assert old.terminated and new.terminated
+    assert host.host.running() == []
+    assert not (tmp_path / (AGENT + ".pending")).exists()   # staging cleaned up
+    assert (tmp_path / AGENT / "agent_main.py").exists()    # live bundle survives close
+
+
+def test_rehydrate_ignores_a_stale_staging_dir(tmp_path):
+    """A staging dir orphaned by a crash mid-revision must never be run as an agent
+    (its name is not a real, owner-namespaced agent_id) and is cleaned up."""
+    (tmp_path / AGENT).mkdir()
+    (tmp_path / AGENT / "agent_main.py").write_text("x\n", encoding="utf-8")
+    staging = tmp_path / (AGENT + ".pending")
+    staging.mkdir()
+    (staging / "agent_main.py").write_text("x\n", encoding="utf-8")
+
+    h = _Host(tmp_path)
+    h.host.on_ui_connected()
+
+    assert h.host.running() == [AGENT]   # only the real agent, not the staging dir
+    assert not staging.exists()          # the stale staging dir is removed
+    h.host.stop_all()
+
+
 # --- worker argv + the real worker entry (contract §4) ----------------------
 
 def test_worker_argv_from_source_passes_the_script(monkeypatch):
