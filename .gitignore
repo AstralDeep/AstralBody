@@ -33,6 +33,7 @@ docker_logs_fixes_known_remaining.md
 
 .claude/
 .kilocode/
+.specify/integrations/.cache/
 
 # General
 .DS_Store
