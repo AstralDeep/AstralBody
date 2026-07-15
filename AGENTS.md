@@ -149,7 +149,14 @@ Tests are necessary, not sufficient. Exercise changed UI behavior against the li
 
 When available, the local knowledge vault is at `../../../Karpathy-my-g`. Use `index.md` to route, then read the relevant concept/entity pages, the tail of `log.md`, and any active `sessions/resume-*.md`. The vault is project memory, not current-state authority; verify its claims against the live repositories.
 
-Do not edit the vault incidentally. If the user asks for a durable checkpoint or wiki maintenance, first read that vault's `CLAUDE.md`; never edit `raw/`, revise existing wiki pages instead of appending contradictions, update `index.md` and `log.md`, and keep the vault commit separate from product-repository commits.
+The user has established an always-on checkpoint rule: whenever a major checkpoint occurs — a
+branch is pushed for handoff, a spec/plan/tasks phase finishes, a PR opens or merges, a feature or
+release changes state, or a durable decision is made — update the vault before declaring the
+checkpoint complete. First read that vault's `CLAUDE.md`, refresh the repository anchor, revise the
+affected curated pages (never `raw/`), update `index.md` and `log.md`, then commit and push the vault
+when its remote is available. The machine-written `sessions/` breadcrumb is not a substitute for the
+curated update. Keep the vault commit separate from product-repository commits, and report explicitly
+if the vault commit or push is blocked.
 
 ## Handoff standard
 
