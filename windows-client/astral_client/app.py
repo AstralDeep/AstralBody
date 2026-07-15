@@ -67,8 +67,21 @@ from .renderer import (
 from .streaming import stream_error_ops, stream_frame_to_ops, subscribe_ack_ops
 from .chrome import chrome_render_notice
 from . import rest
+from win_agent.byo_host import HOST_FRAME_TYPES, ByoAgentHost
 
 logger = logging.getLogger("astral.client")
+
+#: Windows shell identity. The taskbar groups windows — and chooses the button's
+#: icon — by this id; without it a source run inherits python.exe's identity (and
+#: python.exe's icon). Keep it stable: changing it splits pinned taskbar entries.
+APP_USER_MODEL_ID = "AstralDeep.WindowsClient"
+
+
+def app_icon_path() -> str:
+    """Absolute path to the bundled .ico. ``assets/`` sits beside the source tree
+    in dev and is extracted to ``sys._MEIPASS`` in a frozen build."""
+    base = getattr(sys, "_MEIPASS", os.path.join(os.path.dirname(__file__), ".."))
+    return os.path.join(base, "assets", "astraldeep.ico")
 
 
 def normalize_error(msg: dict) -> str:
@@ -899,8 +912,10 @@ class TopBar(QFrame):
         self.new_btn = QPushButton("＋ New")
         self.new_btn.setObjectName("primary")
         self.new_btn.clicked.connect(on_new_chat)
-        # Recent chats (the web's history icon) — reopen a past conversation.
-        self.recent_btn = QPushButton("🕓 Recent chats")
+        # Recent chats — reopen a past conversation. Speech-bubble glyph, NOT a
+        # clock: the clock belongs to the server-model "Workspace timeline"
+        # control that sits right beside it (same call as android RootScaffold).
+        self.recent_btn = QPushButton("💬 Recent chats")
         self.recent_btn.clicked.connect(on_recent)
         # Settings gear → dropdown built from the server-owned menu model.
         self.settings_btn = QPushButton("⚙ Settings")
@@ -916,20 +931,25 @@ class TopBar(QFrame):
             b.setCursor(Qt.CursorShape.PointingHandCursor)
 
         # Feature 044 (T038): server-model top-bar action controls (pulse,
-        # timeline, …) render as buttons in this holder, left of the gear. Each
-        # emits its chrome_open{surface} via on_open_surface. Rebuilt from the
-        # chrome menu model; empty until it arrives.
+        # timeline, …) render as buttons in this holder. Each emits its
+        # chrome_open{surface} via on_open_surface. Rebuilt from the chrome menu
+        # model; empty until it arrives.
         self._actions_holder = QWidget()
         self._actions_lay = QHBoxLayout(self._actions_holder)
         self._actions_lay.setContentsMargins(0, 0, 0, 0)
         self._actions_lay.setSpacing(6)
         self._action_buttons: List[QPushButton] = []
 
+        # Constitution XII — the bar is one shared definition; no client may
+        # reorder it. Web/Android/Apple all run
+        #   brand · New chat · Recent chats · <server-model actions> · Settings
+        # and the server-model cluster goes AFTER the client-local buttons, not
+        # before them. Pinned by tests/test_top_bar.py.
         lay.addWidget(self._mark)
         lay.addStretch(1)
-        lay.addWidget(self._actions_holder)
         lay.addWidget(self.new_btn)
         lay.addWidget(self.recent_btn)
+        lay.addWidget(self._actions_holder)   # server-model actions (pulse, timeline)
         lay.addWidget(self.settings_btn)
 
         # Until the server model arrives, offer just Sign out (always safe).
@@ -1457,6 +1477,9 @@ class MainWindow(QMainWindow):
     _silent_refresh_done = Signal(object)
     # Window-first startup login resolved off-thread -> GUI thread (dict outcome).
     _login_resolved = Signal(object)
+    # BYO agent host notice (058), marshalled from a child-pump/timer thread ->
+    # GUI thread (text, level). The host must never touch a widget directly.
+    _byo_notice = Signal(str, str)
 
     def __init__(self, url: str, token: str, session=None, login_params=None,
                  connect: bool = True):
@@ -1517,6 +1540,25 @@ class MainWindow(QMainWindow):
                 _wa.start_agent_thread(port=self._win_agent_port)
             except Exception:
                 pass
+
+        # Feature 058: this PC hosts the user's OWN agents as supervised child
+        # processes. Unlike the built-in tools agent above (an in-process server
+        # the orchestrator dials into), a BYO agent never holds a socket — its
+        # frames tunnel over THIS authenticated UI socket, and the client is a
+        # dumb pipe between the child's stdio and the server.
+        self._byo = ByoAgentHost(
+            send_event=lambda action, payload: self.client.send_event(action, payload),
+            notify=self._byo_notice.emit,
+        )
+        # Teardown hangs off APPLICATION shutdown, not off closeEvent: sign-out
+        # calls QApplication.quit(), which leaves the event loop WITHOUT
+        # delivering a close event to any widget — so a closeEvent-only hook
+        # would orphan every child (LLM-written user code!) on the user's PC.
+        # aboutToQuit fires on every exit path; stop_all is idempotent, so the
+        # closeEvent call below stays harmless.
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._byo.stop_all)
 
         self.topbar = TopBar(
             _user_from_token(token),
@@ -1629,9 +1671,21 @@ class MainWindow(QMainWindow):
         self._reauth_done.connect(self._on_reauth_done)
         self._silent_refresh_done.connect(self._on_silent_refresh_done)
         self._login_resolved.connect(self._on_login_resolved)
+        self._byo_notice.connect(self._show_banner)
         self._signing_out_done = False
         self._connected_once = False
         self._start_integrity_check()
+
+    def closeEvent(self, event) -> None:
+        """058: the user's agents die with the client — no orphaned child process
+        keeps running (and no agent looks 'live' to the server) after the window
+        is gone. The server sees the socket drop and takes them honestly offline.
+        """
+        try:
+            self._byo.stop_all()
+        except Exception:  # noqa: BLE001 — never block the close
+            logger.debug("byo stop_all failed on close", exc_info=True)
+        super().closeEvent(event)
 
     def _wrap(self, inner: QWidget, title: str) -> QWidget:
         w = QWidget()
@@ -2100,6 +2154,13 @@ class MainWindow(QMainWindow):
             self.client.stop()
         except Exception:
             pass
+        # 058: the user's agents die with the session. Explicit (not just via the
+        # aboutToQuit hook) because quit() outside a running event loop is a
+        # no-op, and an orphaned child process would outlive the sign-out.
+        try:
+            self._byo.stop_all()
+        except Exception:  # noqa: BLE001 — never block sign-out
+            logger.debug("byo stop_all failed on sign-out", exc_info=True)
         QApplication.instance().quit()
 
     # --- outbound -------------------------------------------------------- #
@@ -2205,6 +2266,10 @@ class MainWindow(QMainWindow):
                 self._win_agent_registered = True
                 url = f"http://{self._win_agent_host}:{self._win_agent_port}"
                 self.client.send_event("register_external_agent", {"url": url})
+            # 058: same reason as the win_agent re-registration above — the server
+            # pops `agents[agent_id]` when the socket dies, so every still-running
+            # BYO child must re-send its register_agent or it stays unreachable.
+            self._byo.on_ui_connected()
             # Pull chrome state so the native dialogs + CTA are accurate.
             self.client.send_event("discover_agents", {})
             self.client.send_event("get_history", {})
@@ -2594,6 +2659,13 @@ class MainWindow(QMainWindow):
             # so a restart honors the stored preset.
             self._user_prefs = msg.get("preferences") or {}
             self._apply_theme_pref(self._user_prefs.get("theme"))
+        elif t in HOST_FRAME_TYPES:
+            # 058: bundle delivery / tunnel / stop for the agents THIS PC hosts.
+            self._byo.handle_frame(msg)
+        elif t == "agent_registered":
+            # 058: the only ack a BYO registration ever gets — a refusal is
+            # silence (contract §6), so the host reaps on its absence.
+            self._byo.on_agent_registered(msg.get("agent_id") or "")
         else:
             # Feature 044 (FR-002): classified-ignore is logged, not silent; a
             # type that is neither handled nor classified is a drift signal.
@@ -2991,13 +3063,27 @@ def configure(app: QApplication) -> None:
     app.setFont(QFont(family, 10))
     app.setStyleSheet(T.APP_STYLESHEET + T.ROOT_BG_STYLE)
 
+    # Windows groups taskbar buttons (and picks their icon) by AppUserModelID.
+    # Run from source, the host process is python.exe, so the shell shows the
+    # PYTHON icon no matter what setWindowIcon says — an explicit id detaches us
+    # from that group. No-op/absent off Windows, so the whole call is guarded.
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except Exception:  # noqa: BLE001 — cosmetic; never block startup
+        pass
+
     # Window/taskbar icon: assets/ sits next to the source tree in dev and is
-    # extracted to sys._MEIPASS in a frozen build. Best-effort — a missing
-    # asset must never block startup.
-    base = getattr(sys, "_MEIPASS", os.path.join(os.path.dirname(__file__), ".."))
-    ico = os.path.join(base, "assets", "astraldeep.ico")
+    # extracted to sys._MEIPASS in a frozen build. Regenerate from the shared
+    # brand master with Scripts/generate_win_icon.py — never hand-edit.
+    ico = app_icon_path()
     if os.path.exists(ico):
         app.setWindowIcon(QIcon(ico))
+    else:
+        # The AstralBody->AstralDeep rename hand-patched this filename in three
+        # places; `if exists` alone would make the next miss silent.
+        logger.warning("app icon missing at %s — window/taskbar icon unset", ico)
 
 
 def _http_base(ws_url: str) -> str:

@@ -40,6 +40,15 @@ VALIDATING = "validating"
 LIVE = "live"
 ERROR = "error"
 
+# Generation targets (058 T008)
+BACKEND_TARGET = "backend"   # 027: server-hosted, run here as a subprocess
+BYO_TARGET = "byo"           # 058: self-contained bundle, run on the owner's desktop
+
+#: ``draft_agents.origin`` of a user-authored, client-hosted agent. Its code is
+#: NEVER executed on this host (058 SC-002) — the draft row exists only to carry
+#: the authoring journey.
+BYO_ORIGIN = "byo_client"
+
 
 class AgentLifecycleManager:
     """Manages draft agent creation, testing, approval, and promotion to live."""
@@ -114,8 +123,16 @@ class AgentLifecycleManager:
     async def _validate_and_fix(self, draft_id: str, slug: str,
                                  tools_code: str, agent_name: str,
                                  description: str, websocket=None,
-                                 max_retries: int = 2) -> tuple:
+                                 max_retries: int = 2,
+                                 static_only: bool = False,
+                                 config_resolver=None) -> tuple:
         """Run spec validation with auto-fix retry loop.
+
+        ``static_only`` (BYO, 058 G1/SC-002): the code under test is USER-AUTHORED
+        and must never run on this host, so it is validated by pure AST inspection
+        — registry shape, return contract, import allowlist. The orchestrator does
+        not import it, exec it, or call its tools. Runtime behavior is the desktop
+        host's business.
 
         Returns (final_code, validation_report).
         """
@@ -127,11 +144,15 @@ class AgentLifecycleManager:
                 VALIDATING,
             )
 
-            report = self.validator.validate(tools_code, slug, self._agents_dir)
-            self._append_log(
+            if static_only:
+                report = self.validator.validate_static(tools_code, slug)
+            else:
+                report = self.validator.validate(tools_code, slug, self._agents_dir)
+            await asyncio.to_thread(
+                self._append_log,
                 draft_id,
                 f"Spec validation {'passed' if report.passed else 'failed'}: "
-                f"{report.tools_passed}/{report.tools_tested} tools passed"
+                f"{report.tools_passed}/{report.tools_tested} tools passed",
             )
 
             if report.passed:
@@ -158,22 +179,31 @@ class AgentLifecycleManager:
                     f"Auto-fixing validation errors (attempt {attempt + 1}/{max_retries})...",
                     VALIDATING,
                 )
-                self._append_log(draft_id, f"Auto-fix attempt {attempt + 1}: {fix_prompt[:200]}")
+                await asyncio.to_thread(self._append_log, draft_id, f"Auto-fix attempt {attempt + 1}: {fix_prompt[:200]}")
 
                 try:
-                    tools_code = await self.generator.refine_tools_file(
+                    # The candidate is NOT promoted until it compiles. Assigning
+                    # it to ``tools_code`` first meant a syntax-broken refinement
+                    # (whose `continue` skips the disk write) became the value the
+                    # function RETURNS — and on the BYO path that in-memory value
+                    # is exactly what ships to the owner's host.
+                    candidate = await self.generator.refine_tools_file(
                         current_code=tools_code,
                         user_message=fix_prompt,
                         agent_name=agent_name,
                         description=description,
+                        self_contained=static_only,
+                        config_resolver=config_resolver,
                     )
 
                     # Syntax check the fix
                     try:
-                        compile(tools_code, f"{slug}/mcp_tools.py", "exec")
+                        compile(candidate, f"{slug}/mcp_tools.py", "exec")
                     except SyntaxError as e:
-                        self._append_log(draft_id, f"Auto-fix produced syntax error: {e}")
-                        continue  # Try again
+                        await asyncio.to_thread(self._append_log, draft_id, f"Auto-fix produced syntax error: {e}")
+                        continue  # Try again — keep the last COMPILING code
+
+                    tools_code = candidate
 
                     # Write the fixed code
                     tools_file = os.path.join(self._agents_dir, slug, "mcp_tools.py")
@@ -181,10 +211,20 @@ class AgentLifecycleManager:
                         fh.write(tools_code)
 
                 except Exception as e:
-                    self._append_log(draft_id, f"Auto-fix failed: {e}")
+                    await asyncio.to_thread(self._append_log, draft_id, f"Auto-fix failed: {e}")
                     break
 
         return tools_code, report
+
+    @staticmethod
+    def _byo_import_violations(files: Dict[str, str]) -> List[str]:
+        """Forbidden backend-coupling imports found anywhere in a BYO bundle."""
+        from orchestrator.agent_generator import byo_import_violations
+        found = []
+        for fname, code in files.items():
+            for pattern in byo_import_violations(code):
+                found.append(f"{fname}: {pattern}")
+        return found
 
     def _remove_draft_marker(self, slug: str):
         """Remove the .draft marker file when an agent is promoted to live."""
@@ -229,10 +269,15 @@ class AgentLifecycleManager:
             raise ValueError("Agent name must be under 100 characters")
 
         slug = self._sanitize_slug(agent_name)
-        slug = self._ensure_unique_slug(slug)
+        # 052 event-loop hygiene: this is an async method, so its DB work is
+        # offloaded off the event loop (the sync-DB-on-the-loop guard, empty
+        # allowlist, otherwise flags it — and blocking the loop here stalls every
+        # concurrent request during a draft create).
+        slug = await asyncio.to_thread(self._ensure_unique_slug, slug)
         draft_id = str(uuid.uuid4())
 
-        self.db.create_draft_agent(
+        await asyncio.to_thread(
+            self.db.create_draft_agent,
             draft_id=draft_id,
             user_id=user_id,
             agent_name=agent_name.strip(),
@@ -244,13 +289,28 @@ class AgentLifecycleManager:
         )
 
         logger.info(f"Created draft agent '{agent_name}' (id={draft_id}, slug={slug}) for user {user_id}")
-        return self.db.get_draft_agent(draft_id)
+        return await asyncio.to_thread(self.db.get_draft_agent, draft_id)
 
     # Generate Code
 
-    async def generate_code(self, draft_id: str, websocket=None) -> Dict[str, Any]:
-        """Generate the 3 agent files for a draft."""
-        draft = self.db.get_draft_agent(draft_id)
+    async def generate_code(self, draft_id: str, websocket=None, *,
+                            target: str = BACKEND_TARGET,
+                            agent_id: Optional[str] = None) -> Dict[str, Any]:
+        """Generate the 3 agent files for a draft.
+
+        Args:
+            target: ``backend`` (027 — server-hosted: agent.py + mcp_server.py +
+                mcp_tools.py, run as a subprocess here) or ``byo`` (058 — the
+                self-contained desktop bundle: agent_main.py + mcp_tools.py +
+                manifest.json, delivered to the owner's host and never run here).
+            agent_id: the identity to bake into the generated card. Defaults to
+                the slug-derived ``<slug>-1``; BYO passes the owner-namespaced id.
+
+        Returns the draft row, plus a ``files`` key holding the FINAL bundle
+        (post auto-fix) on success. Callers deliver from that key — the generated
+        source is otherwise only reachable off disk.
+        """
+        draft = await asyncio.to_thread(self.db.get_draft_agent, draft_id)
         if not draft:
             raise ValueError(f"Draft {draft_id} not found")
 
@@ -261,27 +321,73 @@ class AgentLifecycleManager:
         skill_tags = json.loads(draft["skill_tags"]) if draft.get("skill_tags") else []
         packages = json.loads(draft["packages"]) if draft.get("packages") else []
 
+        # 058 SC-002 — the sandbox/exec decision is a property of the ROW, not of
+        # the caller's argument. Keying it on ``target`` alone let any caller that
+        # omits it (e.g. the REST endpoint POST /api/agents/drafts/{id}/generate)
+        # run a BYO draft's user-authored code in-process. Derive it from origin,
+        # and refuse target=backend for a BYO draft outright — the same structural
+        # refusal start_draft_agent/approve_agent make.
+        is_byo_origin = draft.get("origin") == BYO_ORIGIN
+        if is_byo_origin and target != BYO_TARGET:
+            raise ValueError(
+                f"Draft {draft_id} is a BYO agent — it can only be generated as a "
+                f"self-contained bundle for the owner's desktop host, never as a "
+                f"server-hosted ('{target}') agent (058 SC-002)."
+            )
+        is_byo = is_byo_origin or (target == BYO_TARGET)
+        agent_id = agent_id or self.generator.default_agent_id(slug)
+
+        # BYO codegen uses the OWNER's LLM, not the admin-managed system credential.
+        # A user authoring their own private agent is an INTERACTIVE turn on their
+        # own socket — the same LLM that drafted every authoring phase — so their
+        # code is generated with their model too. (The generator's default resolver
+        # is the system config, which feature 054 reserves for background work and
+        # which is unset on deployments that never configured a system LLM.) Falls
+        # back to the system resolver when we can't identify the owner (e.g. a
+        # server-side call with no socket).
+        codegen_resolver = None
+        if is_byo and websocket is not None and self.orchestrator is not None:
+            _orch = self.orchestrator
+            try:
+                _uid = _orch._llm_context_user_id(websocket)
+                if _uid:
+                    codegen_resolver = lambda: _orch._llm_store.get_sync(_uid)  # noqa: E731
+            except Exception:
+                logger.debug("byo codegen: owner LLM resolution unavailable, "
+                             "falling back to system resolver", exc_info=True)
+
         # Update status
-        self.db.update_draft_agent(draft_id, status=GENERATING)
-        self._append_log(draft_id, "Starting code generation...")
+        await asyncio.to_thread(self.db.update_draft_agent, draft_id, status=GENERATING)
+        await asyncio.to_thread(self._append_log, draft_id, "Starting code generation...")
 
         try:
             # Step 1: Generate template files (no LLM needed)
             await self._send_progress(websocket, draft_id, "generating_template",
                                        "Generating agent template files...", GENERATING)
-            self._append_log(draft_id, "Generating template files...")
+            await asyncio.to_thread(self._append_log, draft_id, "Generating template files...")
 
-            template_files = self.generator.generate_template_files(
-                agent_name=agent_name,
-                description=description,
-                slug=slug,
-                skill_tags=skill_tags,
-            )
+            if is_byo:
+                from orchestrator.agent_constitution import AGENT_CONSTITUTION_VERSION
+                template_files = self.generator.generate_byo_files(
+                    agent_name=agent_name,
+                    description=description,
+                    agent_id=agent_id,
+                    skill_tags=skill_tags,
+                    constitution_version=AGENT_CONSTITUTION_VERSION,
+                )
+            else:
+                template_files = self.generator.generate_template_files(
+                    agent_name=agent_name,
+                    description=description,
+                    slug=slug,
+                    skill_tags=skill_tags,
+                    agent_id=agent_id,
+                )
 
             # Step 2: Generate tools via LLM
             await self._send_progress(websocket, draft_id, "generating_tools",
                                        "Generating tool implementations with AI...", GENERATING)
-            self._append_log(draft_id, "Generating tool implementations...")
+            await asyncio.to_thread(self._append_log, draft_id, "Generating tool implementations...")
 
             # Inject knowledge context if available
             knowledge_context = ""
@@ -306,6 +412,8 @@ class AgentLifecycleManager:
                 tools_spec=tools_spec,
                 packages=packages,
                 knowledge_context=knowledge_context,
+                self_contained=is_byo,
+                config_resolver=codegen_resolver,
             )
 
             all_files = {**template_files, "mcp_tools.py": tools_code}
@@ -313,32 +421,51 @@ class AgentLifecycleManager:
             # Step 2.5: Syntax validation on ALL generated files
             await self._send_progress(websocket, draft_id, "syntax_check",
                                        "Validating Python syntax...", GENERATING)
-            self._append_log(draft_id, "Validating syntax of generated files...")
+            await asyncio.to_thread(self._append_log, draft_id, "Validating syntax of generated files...")
 
             for fname, code in all_files.items():
+                if not fname.endswith(".py"):
+                    continue          # BYO ships a manifest.json alongside the code
                 try:
                     compile(code, f"{slug}/{fname}", "exec")
                 except SyntaxError as e:
                     error_msg = f"Syntax error in {fname} (line {e.lineno}): {e.msg}"
                     logger.error(f"Generated code has syntax error: {error_msg}")
-                    self.db.update_draft_agent(
+                    await asyncio.to_thread(
+                        self.db.update_draft_agent,
                         draft_id, status=ERROR,
                         error_message=error_msg,
                     )
                     await self._send_progress(websocket, draft_id, "syntax_error",
                                                error_msg, ERROR)
-                    self._append_log(draft_id, f"SYNTAX ERROR: {error_msg}")
-                    return self.db.get_draft_agent(draft_id)
+                    await asyncio.to_thread(self._append_log, draft_id, f"SYNTAX ERROR: {error_msg}")
+                    return await asyncio.to_thread(self.db.get_draft_agent, draft_id)
+
+            # Step 2.6 (BYO): the bundle must be self-contained — the desktop host
+            # ships no backend package, so a `from shared…` import is a dead agent
+            # on the user's machine. Gate the LLM's file, don't just ask for it.
+            if is_byo:
+                bad = self._byo_import_violations(all_files)
+                if bad:
+                    error_msg = ("Generated bundle is not self-contained "
+                                 f"(forbidden imports: {bad}). Not delivered.")
+                    await asyncio.to_thread(self.db.update_draft_agent, draft_id, status=ERROR,
+                                            error_message=error_msg)
+                    await self._send_progress(websocket, draft_id, "not_self_contained",
+                                               error_msg, ERROR)
+                    await asyncio.to_thread(self._append_log, draft_id, f"BYO GATE: {error_msg}")
+                    return await asyncio.to_thread(self.db.get_draft_agent, draft_id)
 
             # Step 3: Security analysis
             await self._send_progress(websocket, draft_id, "security_scan",
                                        "Running security analysis...", GENERATING)
-            self._append_log(draft_id, "Running security analysis on generated code...")
+            await asyncio.to_thread(self._append_log, draft_id, "Running security analysis on generated code...")
 
             report = self.security.analyze(tools_code, filename=f"{slug}/mcp_tools.py")
 
             if not report.passed and report.max_severity == Severity.CRITICAL:
-                self.db.update_draft_agent(
+                await asyncio.to_thread(
+                    self.db.update_draft_agent,
                     draft_id,
                     status=ERROR,
                     security_report=json.dumps(report.to_dict()),
@@ -347,13 +474,13 @@ class AgentLifecycleManager:
                 await self._send_progress(websocket, draft_id, "security_failed",
                                            "Security analysis found critical issues. Code was not written.",
                                            ERROR, detail=report.to_dict())
-                self._append_log(draft_id, f"Security analysis FAILED: {report.recommendation}")
-                return self.db.get_draft_agent(draft_id)
+                await asyncio.to_thread(self._append_log, draft_id, f"Security analysis FAILED: {report.recommendation}")
+                return await asyncio.to_thread(self.db.get_draft_agent, draft_id)
 
             # Step 4: Write files to disk
             await self._send_progress(websocket, draft_id, "writing_files",
                                        "Writing agent files...", GENERATING)
-            self._append_log(draft_id, "Writing agent files to disk...")
+            await asyncio.to_thread(self._append_log, draft_id, "Writing agent files to disk...")
 
             agent_dir = os.path.join(self._agents_dir, slug)
             os.makedirs(agent_dir, exist_ok=True)
@@ -372,17 +499,35 @@ class AgentLifecycleManager:
                 with open(filepath, "w", encoding="utf-8") as f:
                     f.write(content)
 
-            # Step 5: Spec validation (with auto-fix retry)
+            # Step 5: Spec validation (with auto-fix retry). The 027 validator
+            # RUNS the generated tools; BYO (user-authored) code is validated
+            # STATICALLY and is never imported, exec'd, or called on this host
+            # (058 G1/SC-002).
             tools_code, validation_report = await self._validate_and_fix(
                 draft_id=draft_id, slug=slug, tools_code=tools_code,
                 agent_name=agent_name, description=description,
-                websocket=websocket,
+                websocket=websocket, static_only=is_byo,
+                config_resolver=codegen_resolver,
             )
+
+            # An auto-fix round could reintroduce a backend import — re-gate the
+            # code we are actually about to hand the host.
+            if is_byo:
+                bad = self._byo_import_violations({"mcp_tools.py": tools_code})
+                if bad:
+                    error_msg = ("Auto-fixed bundle is not self-contained "
+                                 f"(forbidden imports: {bad}). Not delivered.")
+                    await asyncio.to_thread(self.db.update_draft_agent, draft_id, status=ERROR,
+                                            error_message=error_msg)
+                    await self._send_progress(websocket, draft_id, "not_self_contained",
+                                               error_msg, ERROR)
+                    await asyncio.to_thread(self._append_log, draft_id, f"BYO GATE: {error_msg}")
+                    return await asyncio.to_thread(self.db.get_draft_agent, draft_id)
 
             # Step 5.5: Extract required credentials declared by LLM
             required_creds = self._extract_required_credentials(tools_code)
             if required_creds:
-                self._append_log(draft_id, f"Detected {len(required_creds)} required credential(s)")
+                await asyncio.to_thread(self._append_log, draft_id, f"Detected {len(required_creds)} required credential(s)")
                 await self._send_progress(
                     websocket, draft_id, "credentials_detected",
                     f"This agent requires {len(required_creds)} credential(s). You'll need to provide them before testing.",
@@ -404,7 +549,7 @@ class AgentLifecycleManager:
                     "You can still test manually or refine the agent."
                 )
 
-            self.db.update_draft_agent(draft_id, **update_kwargs)
+            await asyncio.to_thread(self.db.update_draft_agent, draft_id, **update_kwargs)
 
             status_msg = (
                 "Agent files generated and validated successfully!"
@@ -419,17 +564,23 @@ class AgentLifecycleManager:
                                            "security": report.to_dict() if report.findings else None,
                                            "validation": validation_report.to_dict(),
                                        })
-            self._append_log(draft_id, "Code generation complete!")
+            await asyncio.to_thread(self._append_log, draft_id, "Code generation complete!")
 
-            return self.db.get_draft_agent(draft_id)
+            # Hand the caller the FINAL bundle (mcp_tools.py may have been
+            # auto-fixed since it was written). Without this the generated source
+            # is only reachable off disk, and the BYO delivery seam — which has no
+            # disk to reach for — would ship an empty bundle.
+            state = dict(await asyncio.to_thread(self.db.get_draft_agent, draft_id) or {})
+            state["files"] = {**template_files, "mcp_tools.py": tools_code}
+            return state
 
         except Exception as e:
             logger.error(f"Code generation failed for draft {draft_id}: {e}")
-            self.db.update_draft_agent(draft_id, status=ERROR, error_message=str(e))
+            await asyncio.to_thread(self.db.update_draft_agent, draft_id, status=ERROR, error_message=str(e))
             await self._send_progress(websocket, draft_id, "error",
                                        f"Code generation failed: {e}", ERROR)
-            self._append_log(draft_id, f"ERROR: {e}")
-            return self.db.get_draft_agent(draft_id)
+            await asyncio.to_thread(self._append_log, draft_id, f"ERROR: {e}")
+            return await asyncio.to_thread(self.db.get_draft_agent, draft_id)
 
     # Start Draft Agent for Testing
 
@@ -475,9 +626,19 @@ class AgentLifecycleManager:
         would clobber the user's saved permissions and reset a public agent to
         private.
         """
-        draft = self.db.get_draft_agent(draft_id)
+        draft = await asyncio.to_thread(self.db.get_draft_agent, draft_id)
         if not draft:
             raise ValueError(f"Draft {draft_id} not found")
+
+        # 058 SC-002 — a BYO agent's code is the USER'S, and it runs on the
+        # user's desktop host. Refuse structurally rather than trusting every
+        # call site (the boot relaunch nearly Popen'd these): there is no
+        # legitimate path that starts a byo_client draft on this host.
+        if draft.get("origin") == BYO_ORIGIN:
+            raise ValueError(
+                f"Refusing to start BYO agent draft {draft_id} on the orchestrator "
+                "host — user agents run on the owner's desktop client (058 SC-002)."
+            )
 
         if draft["status"] not in (GENERATED, TESTING, APPROVED, LIVE):
             raise ValueError(f"Cannot start agent in status '{draft['status']}'. Generate code first.")
@@ -492,12 +653,12 @@ class AgentLifecycleManager:
         # Stop existing process if any
         await self.stop_draft_agent(draft_id)
 
-        port = self._find_next_port()
+        port = await asyncio.to_thread(self._find_next_port)
         python_exe = sys.executable
 
         await self._send_progress(websocket, draft_id, "starting_agent",
                                    f"Starting agent on port {port}...", TESTING)
-        self._append_log(draft_id, f"Starting agent on port {port}...")
+        await asyncio.to_thread(self._append_log, draft_id, f"Starting agent on port {port}...")
 
         # When enabled, wrap the generated-code child in an OS-level sandbox —
         # resource limits (fork-time preexec), a temp-scoped filesystem, and a
@@ -528,7 +689,7 @@ class AgentLifecycleManager:
         )
         self._draft_processes[draft_id] = proc
 
-        self.db.update_draft_agent(draft_id, status=TESTING, port=port)
+        await asyncio.to_thread(self.db.update_draft_agent, draft_id, status=TESTING, port=port)
 
         # Wait for agent to start up, then actively discover it with the orchestrator
         agent_id = f"{slug.replace('_', '-')}-1"
@@ -546,10 +707,10 @@ class AgentLifecycleManager:
                     if stderr_out:
                         error_msg += f": {stderr_out[:500]}"
                     logger.error(error_msg)
-                    self.db.update_draft_agent(draft_id, status=ERROR, error_message=error_msg)
+                    await asyncio.to_thread(self.db.update_draft_agent, draft_id, status=ERROR, error_message=error_msg)
                     await self._send_progress(websocket, draft_id, "error", error_msg, ERROR)
-                    self._append_log(draft_id, f"ERROR: {error_msg}")
-                    return self.db.get_draft_agent(draft_id)
+                    await asyncio.to_thread(self._append_log, draft_id, f"ERROR: {error_msg}")
+                    return await asyncio.to_thread(self.db.get_draft_agent, draft_id)
 
                 try:
                     await self.orchestrator.discover_agent(agent_url)
@@ -565,14 +726,15 @@ class AgentLifecycleManager:
         # Set ownership to creator (private by default). Skipped on relaunch
         # (align_scopes=False) so a user-set public flag is not reset.
         if align_scopes:
-            user = self.db.get_user(draft["user_id"])
+            user = await asyncio.to_thread(self.db.get_user, draft["user_id"])
             owner_email = user.get("email", draft["user_id"]) if user else draft["user_id"]
-            self.db.set_agent_ownership(agent_id, owner_email=owner_email, is_public=False)
+            await asyncio.to_thread(self.db.set_agent_ownership, agent_id, owner_email=owner_email, is_public=False)
 
         # Draft agents: all scopes ENABLED so the user can test tools.
         # Scopes get disabled when the agent is approved/moved to live.
         if self.orchestrator and align_scopes:
-            self.orchestrator.tool_permissions.set_agent_scopes(
+            await asyncio.to_thread(
+                self.orchestrator.tool_permissions.set_agent_scopes,
                 draft["user_id"], agent_id,
                 {"tools:read": True, "tools:write": True, "tools:search": True, "tools:system": True}
             )
@@ -584,9 +746,10 @@ class AgentLifecycleManager:
             # "scopes are enabled" but tools still blocked. Force the per-tool
             # rows to match the draft's True scope state so both layers agree.
             try:
-                tool_scope_map = self.orchestrator.tool_permissions.get_tool_scope_map(agent_id)
+                tool_scope_map = await asyncio.to_thread(self.orchestrator.tool_permissions.get_tool_scope_map, agent_id)
                 for tool_name, required_scope in tool_scope_map.items():
-                    self.orchestrator.tool_permissions.set_tool_permission(
+                    await asyncio.to_thread(
+                        self.orchestrator.tool_permissions.set_tool_permission,
                         draft["user_id"], agent_id, tool_name, required_scope, True
                     )
             except Exception as e:  # pragma: no cover — defensive
@@ -596,19 +759,19 @@ class AgentLifecycleManager:
             await self._send_progress(websocket, draft_id, "agent_started",
                                        f"Agent running on port {port} and registered with orchestrator.",
                                        TESTING)
-            self._append_log(draft_id, f"Agent started and discovered on port {port}")
+            await asyncio.to_thread(self._append_log, draft_id, f"Agent started and discovered on port {port}")
         else:
             await self._send_progress(websocket, draft_id, "agent_started",
                                        f"Agent running on port {port} but not yet discovered. It may take a moment.",
                                        TESTING)
-            self._append_log(draft_id, f"Agent started on port {port} (discovery pending)")
+            await asyncio.to_thread(self._append_log, draft_id, f"Agent started on port {port} (discovery pending)")
 
-        return self.db.get_draft_agent(draft_id)
+        return await asyncio.to_thread(self.db.get_draft_agent, draft_id)
 
     async def stop_draft_agent(self, draft_id: str) -> None:
         """Stop a running draft agent subprocess and unregister from orchestrator."""
         # Unregister from orchestrator so re-discovery works after refinement
-        draft = self.db.get_draft_agent(draft_id)
+        draft = await asyncio.to_thread(self.db.get_draft_agent, draft_id)
         if draft and self.orchestrator:
             slug = draft["agent_slug"]
             agent_id = f"{slug.replace('_', '-')}-1"
@@ -653,20 +816,22 @@ class AgentLifecycleManager:
     async def refine_agent(self, draft_id: str, user_message: str,
                             websocket=None) -> Dict[str, Any]:
         """Refine an agent's tools based on user feedback."""
-        draft = self.db.get_draft_agent(draft_id)
+        draft = await asyncio.to_thread(self.db.get_draft_agent, draft_id)
         if not draft:
             raise ValueError(f"Draft {draft_id} not found")
 
         slug = draft["agent_slug"]
+        is_byo = draft.get("origin") == BYO_ORIGIN
         tools_file = os.path.join(self._agents_dir, slug, "mcp_tools.py")
 
         if not os.path.exists(tools_file):
             raise FileNotFoundError("Agent tools file not found. Generate code first.")
 
-        # Stop running agent
+        # Stop running agent (a BYO draft never has one — start_draft_agent
+        # refuses byo_client origin — but the call is a harmless no-op).
         await self.stop_draft_agent(draft_id)
 
-        self.db.update_draft_agent(draft_id, status=GENERATING)
+        await asyncio.to_thread(self.db.update_draft_agent, draft_id, status=GENERATING)
         await self._send_progress(websocket, draft_id, "refining",
                                    "Refining agent based on your feedback...", GENERATING)
 
@@ -692,6 +857,7 @@ class AgentLifecycleManager:
                 user_message=user_message,
                 agent_name=draft["agent_name"],
                 description=draft["description"],
+                self_contained=is_byo,
             )
 
             # Syntax validation
@@ -699,13 +865,14 @@ class AgentLifecycleManager:
                 compile(new_code, f"{slug}/mcp_tools.py", "exec")
             except SyntaxError as e:
                 error_msg = f"Refined code has syntax error (line {e.lineno}): {e.msg}"
-                self.db.update_draft_agent(
+                await asyncio.to_thread(
+                    self.db.update_draft_agent,
                     draft_id, status=ERROR, error_message=error_msg,
                     refinement_history=json.dumps(history),
                 )
                 await self._send_progress(websocket, draft_id, "syntax_error",
                                            error_msg, ERROR)
-                return self.db.get_draft_agent(draft_id)
+                return await asyncio.to_thread(self.db.get_draft_agent, draft_id)
 
             # Security analysis
             await self._send_progress(websocket, draft_id, "security_scan",
@@ -714,7 +881,8 @@ class AgentLifecycleManager:
             report = self.security.analyze(new_code, filename=f"{slug}/mcp_tools.py")
 
             if not report.passed and report.max_severity == Severity.CRITICAL:
-                self.db.update_draft_agent(
+                await asyncio.to_thread(
+                    self.db.update_draft_agent,
                     draft_id,
                     status=ERROR,
                     security_report=json.dumps(report.to_dict()),
@@ -724,18 +892,25 @@ class AgentLifecycleManager:
                 await self._send_progress(websocket, draft_id, "security_failed",
                                            "Security analysis found critical issues in updated code.",
                                            ERROR, detail=report.to_dict())
-                return self.db.get_draft_agent(draft_id)
+                return await asyncio.to_thread(self.db.get_draft_agent, draft_id)
 
             # Write updated code
             with open(tools_file, "w", encoding="utf-8") as f:
                 f.write(new_code)
 
-            # Spec validation on refined code
-            validation_report = self.validator.validate(new_code, slug, self._agents_dir)
-            self._append_log(
+            # Spec validation on refined code. The 027 validator EXECUTES the
+            # tools, so a BYO draft's (user-authored) code gets the STATIC
+            # validator instead — this entry point is reachable with any draft id
+            # its owner holds, and user code never runs on this host (058 G1).
+            if is_byo:
+                validation_report = self.validator.validate_static(new_code, slug)
+            else:
+                validation_report = self.validator.validate(new_code, slug, self._agents_dir)
+            await asyncio.to_thread(
+                self._append_log,
                 draft_id,
                 f"Post-refinement validation: "
-                f"{validation_report.tools_passed}/{validation_report.tools_tested} tools passed"
+                f"{validation_report.tools_passed}/{validation_report.tools_tested} tools passed",
             )
 
             history.append({
@@ -752,7 +927,8 @@ class AgentLifecycleManager:
             # Re-extract credentials from refined code
             required_creds = self._extract_required_credentials(new_code)
 
-            self.db.update_draft_agent(
+            await asyncio.to_thread(
+                self.db.update_draft_agent,
                 draft_id,
                 status=GENERATED,
                 security_report=json.dumps(report.to_dict()) if report.findings else None,
@@ -774,17 +950,17 @@ class AgentLifecycleManager:
                                            "security": report.to_dict() if report.findings else None,
                                            "validation": validation_report.to_dict(),
                                        })
-            self._append_log(draft_id, f"Refinement complete: {user_message[:100]}")
+            await asyncio.to_thread(self._append_log, draft_id, f"Refinement complete: {user_message[:100]}")
 
-            return self.db.get_draft_agent(draft_id)
+            return await asyncio.to_thread(self.db.get_draft_agent, draft_id)
 
         except Exception as e:
             logger.error(f"Refinement failed for draft {draft_id}: {e}")
-            self.db.update_draft_agent(draft_id, status=ERROR, error_message=str(e),
-                                        refinement_history=json.dumps(history))
+            await asyncio.to_thread(self.db.update_draft_agent, draft_id, status=ERROR, error_message=str(e),
+                                    refinement_history=json.dumps(history))
             await self._send_progress(websocket, draft_id, "error",
                                        f"Refinement failed: {e}", ERROR)
-            return self.db.get_draft_agent(draft_id)
+            return await asyncio.to_thread(self.db.get_draft_agent, draft_id)
 
     # Auto-Fix Tool Errors
 
@@ -917,9 +1093,19 @@ class AgentLifecycleManager:
 
     async def approve_agent(self, draft_id: str, websocket=None) -> Dict[str, Any]:
         """Run comprehensive analysis and approve/reject the agent."""
-        draft = self.db.get_draft_agent(draft_id)
+        draft = await asyncio.to_thread(self.db.get_draft_agent, draft_id)
         if not draft:
             raise ValueError(f"Draft {draft_id} not found")
+
+        # 058 — a BYO agent does not go live through the server-side approval
+        # flow (it goes live when the owner's host registers it inward), and this
+        # path both exec's the tools in-process and Popens them. Refuse: the draft
+        # id is the user's own, so this entry point is otherwise reachable.
+        if draft.get("origin") == BYO_ORIGIN:
+            raise ValueError(
+                f"Draft {draft_id} is a BYO agent — it goes live by registering "
+                "from the owner's desktop host, not by server-side approval (058)."
+            )
 
         slug = draft["agent_slug"]
         tools_file = os.path.join(self._agents_dir, slug, "mcp_tools.py")
@@ -927,10 +1113,10 @@ class AgentLifecycleManager:
         if not os.path.exists(tools_file):
             raise FileNotFoundError("Agent files not found. Generate code first.")
 
-        self.db.update_draft_agent(draft_id, status=ANALYZING)
+        await asyncio.to_thread(self.db.update_draft_agent, draft_id, status=ANALYZING)
         await self._send_progress(websocket, draft_id, "analyzing",
                                    "Running comprehensive security analysis...", ANALYZING)
-        self._append_log(draft_id, "Starting approval analysis...")
+        await asyncio.to_thread(self._append_log, draft_id, "Starting approval analysis...")
 
         try:
             # Step 1: Full code security analysis
@@ -949,27 +1135,30 @@ class AgentLifecycleManager:
             try:
                 compile(tools_code, f"{slug}/mcp_tools.py", "exec")
             except SyntaxError as e:
-                self.db.update_draft_agent(
+                await asyncio.to_thread(
+                    self.db.update_draft_agent,
                     draft_id, status=REJECTED,
                     security_report=json.dumps(report.to_dict()),
                     error_message=f"Syntax error in generated code: {e}",
                 )
                 await self._send_progress(websocket, draft_id, "rejected",
                                            f"Code has syntax errors: {e}", REJECTED)
-                return self.db.get_draft_agent(draft_id)
+                return await asyncio.to_thread(self.db.get_draft_agent, draft_id)
 
             # Step 3: Spec validation
             await self._send_progress(websocket, draft_id, "spec_validation",
                                        "Validating tools against spec...", ANALYZING)
 
             validation_report = self.validator.validate(tools_code, slug, self._agents_dir)
-            self.db.update_draft_agent(
+            await asyncio.to_thread(
+                self.db.update_draft_agent,
                 draft_id,
                 validation_report=json.dumps(validation_report.to_dict()),
             )
 
             if not validation_report.passed:
-                self.db.update_draft_agent(
+                await asyncio.to_thread(
+                    self.db.update_draft_agent,
                     draft_id, status=PENDING_REVIEW,
                     security_report=json.dumps(report.to_dict()),
                     error_message=(
@@ -984,12 +1173,13 @@ class AgentLifecycleManager:
                                                "security": report.to_dict(),
                                                "validation": validation_report.to_dict(),
                                            })
-                self._append_log(draft_id, "Sent to review: spec validation failed")
-                return self.db.get_draft_agent(draft_id)
+                await asyncio.to_thread(self._append_log, draft_id, "Sent to review: spec validation failed")
+                return await asyncio.to_thread(self.db.get_draft_agent, draft_id)
 
             # Step 4: Decision based on security findings
             if report.max_severity == Severity.CRITICAL:
-                self.db.update_draft_agent(
+                await asyncio.to_thread(
+                    self.db.update_draft_agent,
                     draft_id, status=REJECTED,
                     security_report=json.dumps(report.to_dict()),
                     error_message="Critical security issues detected. Agent rejected.",
@@ -997,19 +1187,20 @@ class AgentLifecycleManager:
                 await self._send_progress(websocket, draft_id, "rejected",
                                            "Agent rejected: critical security issues found.",
                                            REJECTED, detail=report.to_dict())
-                self._append_log(draft_id, "REJECTED: Critical security issues")
-                return self.db.get_draft_agent(draft_id)
+                await asyncio.to_thread(self._append_log, draft_id, "REJECTED: Critical security issues")
+                return await asyncio.to_thread(self.db.get_draft_agent, draft_id)
 
             elif report.max_severity == Severity.HIGH:
-                self.db.update_draft_agent(
+                await asyncio.to_thread(
+                    self.db.update_draft_agent,
                     draft_id, status=PENDING_REVIEW,
                     security_report=json.dumps(report.to_dict()),
                 )
                 await self._send_progress(websocket, draft_id, "pending_review",
                                            "Agent requires admin review before going live.",
                                            PENDING_REVIEW, detail=report.to_dict())
-                self._append_log(draft_id, "Sent to admin review queue (high-severity findings)")
-                return self.db.get_draft_agent(draft_id)
+                await asyncio.to_thread(self._append_log, draft_id, "Sent to admin review queue (high-severity findings)")
+                return await asyncio.to_thread(self.db.get_draft_agent, draft_id)
 
             else:
                 # Clean or medium/low only → auto-approve
@@ -1054,25 +1245,27 @@ class AgentLifecycleManager:
                         "start. Try again or refine the agent.",
                         ERROR,
                     )
-                    self._append_log(draft_id, "APPROVE: subprocess failed to start; left in error state")
-                    return self.db.get_draft_agent(draft_id)
+                    await asyncio.to_thread(self._append_log, draft_id, "APPROVE: subprocess failed to start; left in error state")
+                    return await asyncio.to_thread(self.db.get_draft_agent, draft_id)
 
                 # Re-assert ownership in case start_draft_agent was skipped
                 # (process already running) — ownership must always exist
                 # for a live agent so it shows up in send_dashboard.
-                user = self.db.get_user(draft["user_id"])
+                user = await asyncio.to_thread(self.db.get_user, draft["user_id"])
                 owner_email = user.get("email", draft["user_id"]) if user else draft["user_id"]
-                self.db.set_agent_ownership(agent_id, owner_email=owner_email, is_public=False)
+                await asyncio.to_thread(self.db.set_agent_ownership, agent_id, owner_email=owner_email, is_public=False)
 
                 # Restore LIVE status (guaranteed final write in this branch)
-                self.db.update_draft_agent(
+                await asyncio.to_thread(
+                    self.db.update_draft_agent,
                     draft_id, status=LIVE,
                     security_report=json.dumps(report.to_dict()) if report.findings else None,
                 )
 
                 # Live agents: all scopes DISABLED — user must explicitly enable
                 if self.orchestrator:
-                    self.orchestrator.tool_permissions.set_agent_scopes(
+                    await asyncio.to_thread(
+                        self.orchestrator.tool_permissions.set_agent_scopes,
                         draft["user_id"], agent_id,
                         {"tools:read": False, "tools:write": False, "tools:search": False, "tools:system": False}
                     )
@@ -1080,7 +1273,7 @@ class AgentLifecycleManager:
                 await self._send_progress(websocket, draft_id, "approved",
                                            "Agent approved and is now live!", LIVE,
                                            detail=report.to_dict() if report.findings else None)
-                self._append_log(draft_id, "APPROVED: Agent is now live")
+                await asyncio.to_thread(self._append_log, draft_id, "APPROVED: Agent is now live")
                 logger.info(
                     f"approve_agent: auto-promoted draft {draft_id} -> "
                     f"agent_id={agent_id} owner={owner_email}"
@@ -1109,14 +1302,14 @@ class AgentLifecycleManager:
                                     f"client: {broadcast_err}"
                                 )
 
-                return self.db.get_draft_agent(draft_id)
+                return await asyncio.to_thread(self.db.get_draft_agent, draft_id)
 
         except Exception as e:
             logger.error(f"Approval analysis failed for draft {draft_id}: {e}")
-            self.db.update_draft_agent(draft_id, status=ERROR, error_message=str(e))
+            await asyncio.to_thread(self.db.update_draft_agent, draft_id, status=ERROR, error_message=str(e))
             await self._send_progress(websocket, draft_id, "error",
                                        f"Approval analysis failed: {e}", ERROR)
-            return self.db.get_draft_agent(draft_id)
+            return await asyncio.to_thread(self.db.get_draft_agent, draft_id)
 
     # Admin Review
 

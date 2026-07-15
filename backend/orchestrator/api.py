@@ -1309,6 +1309,18 @@ async def generate_draft(
     if draft["user_id"] != user_id:
         raise HTTPException(status_code=403, detail="Not your draft agent")
 
+    # 058 SC-002 — this endpoint generates for the SERVER-HOSTED (027) target,
+    # which validates by executing the generated tools here. A BYO draft's code
+    # is the user's and never runs on this host: it is generated + delivered
+    # through the authoring flow (chrome_author_generate) only.
+    from orchestrator.agent_lifecycle import BYO_ORIGIN
+    if draft.get("origin") == BYO_ORIGIN:
+        raise HTTPException(
+            status_code=400,
+            detail=("This is a user-hosted (BYO) agent. Generate it from the agent "
+                    "authoring flow — it is delivered to your desktop client, not "
+                    "run on the server."))
+
     lifecycle = _get_lifecycle(request)
     # Find user's WebSocket for progress updates
     ws = _find_user_websocket(orch, user_id)

@@ -55,7 +55,10 @@ def test_settings_control_is_menu_kind_no_action():
 # ── menu groups + items ──────────────────────────────────────────────────────
 
 def test_account_and_help_groups_exact_order_and_labels():
-    m = build_menu_model(["user"], pulse_enabled=False)
+    # byo_enabled=False pins the pre-058 inventory (the "My agents" item is
+    # flag-gated, like Pulse — its presence/absence is covered in
+    # tests/test_byo_authoring_flow.py).
+    m = build_menu_model(["user"], pulse_enabled=False, byo_enabled=False)
     assert [g.key for g in m.menu] == ["account", "help"]  # no admin for non-admin
     account = m.menu[0]
     assert account.label == "Account"

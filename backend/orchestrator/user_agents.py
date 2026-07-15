@@ -123,6 +123,43 @@ def soft_delete(db, agent_id: str) -> None:
     )
 
 
+#: Reserved id prefixes/stems a user agent may never register as (Constitution H).
+_RESERVED_PREFIXES = ("__",)
+
+
+def authorize_registration(db, owner_sub: str, agent_id: str, *,
+                           reserved_ids: Optional[frozenset] = None):
+    """Owner-binding decision for a user-agent tunnel registration (058 T002,
+    FR-002/FR-015). Returns ``(ok, reason)``, fail-closed.
+
+    The owner is the authenticated session ``sub`` (never a card field). A
+    registration is admitted ONLY when the ``user_agent`` row exists, is owned by
+    ``owner_sub``, is in a runnable ``status`` (``validated``/``live``), and is not
+    flagged ``revalidation_required``. Reserved/colliding ids are refused
+    (Constitution H). This is the single security decision the tunnel registration
+    path depends on; it derives authority solely from the orchestrator's own
+    record."""
+    if not owner_sub or not agent_id:
+        return False, "missing owner or agent id"
+    if agent_id.startswith(_RESERVED_PREFIXES):
+        return False, "reserved agent id"
+    if reserved_ids and agent_id in reserved_ids:
+        return False, "agent id collides with a built-in or reserved agent"
+    try:
+        ua = get_user_agent(db, agent_id)
+    except Exception:
+        return False, "registry lookup failed"
+    if ua is None:
+        return False, "no user-agent registry record for this agent id"
+    if ua.get("owner_user_id") != owner_sub:
+        return False, "agent is owned by a different user"
+    if ua.get("status") not in ("validated", "live"):
+        return False, f"agent is not ready to run (status={ua.get('status')})"
+    if ua.get("revalidation_required"):
+        return False, "agent must re-pass Analyze before it can run again"
+    return True, ""
+
+
 def can_user_use_agent(db, user_id: str, agent_id: str) -> bool:
     """User-agent owner-isolation predicate.
 

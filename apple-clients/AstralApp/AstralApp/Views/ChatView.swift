@@ -529,6 +529,13 @@ private struct InputBar: View {
                 photoItem = nil
             }
         }
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Done") { focused = false }
+                    .fontWeight(.semibold)
+            }
+        }
         #endif
     }
 
@@ -542,7 +549,7 @@ private struct InputBar: View {
         guard canSend else { return }
         model.sendChat(input)
         input = ""
-        focused = true
+        focused = false   // auto-dismiss the keyboard after a message is sent
     }
 }
 

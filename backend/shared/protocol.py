@@ -472,6 +472,14 @@ class RegisterUI(Message):
     # False (default) for fresh interactive logins and for older clients
     # that pre-date this feature. Drives the audit action_type selection.
     resumed: bool = False
+    # Feature 058 (BYO agents): this socket belongs to a DESKTOP HOST able to
+    # write a delivered agent bundle to disk and supervise it as a child
+    # process. Additive + default False, so a browser tab (which must never be
+    # handed a code bundle) is a non-host by omission, exactly like every
+    # pre-058 client. `host_session_id` identifies the host instance across
+    # reconnects; it is echoed on the agent_tunnel frames the host relays.
+    agent_host: bool = False
+    host_session_id: Optional[str] = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self))

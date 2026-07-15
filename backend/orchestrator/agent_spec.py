@@ -65,19 +65,34 @@ VALID_COMPONENT_TYPES: Set[str] = set(PRIMITIVES_SPEC.keys())
 
 # ─── Required imports block ─────────────────────────────────────────────
 
-REQUIRED_IMPORTS_BLOCK = """import os
-import sys
-from typing import Dict, Any, List, Optional
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
-
-from astralprims import (
+_ASTRALPRIMS_IMPORT = """from astralprims import (
     Text, Card, Table, Container, MetricCard, ProgressBar,
     Alert, Grid, BarChart, LineChart, PieChart, PlotlyChart, List_,
     Collapsible, Divider, CodeBlock, Image, Tabs,
     FileDownload, FileUpload, Button, Input, ColorPicker,
     create_ui_response
 )"""
+
+#: Server-hosted (027) agents live inside the backend package layout, so the
+#: generated file bootstraps sys.path to reach it.
+REQUIRED_IMPORTS_BLOCK = f"""import os
+import sys
+from typing import Dict, Any, List, Optional
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+
+{_ASTRALPRIMS_IMPORT}"""
+
+#: BYO (058) bundles run on the OWNER'S desktop, where astralprims is
+#: pip-installed and there is no backend package to reach for. The sys.path shim
+#: is not merely useless there — it is REFUSED by the self-containment gate
+#: (``agent_generator.BYO_FORBIDDEN_PATTERNS``), so a prompt that mandated it
+#: would make BYO codegen structurally unable to succeed. Keep this block and the
+#: gate in agreement (test_byo_prompt_required_imports_pass_the_byo_gate in
+#: tests/test_byo_authoring.py pins it).
+BYO_REQUIRED_IMPORTS_BLOCK = f"""from typing import Dict, Any, List, Optional
+
+{_ASTRALPRIMS_IMPORT}"""
 
 # ─── Working example ────────────────────────────────────────────────────
 
@@ -155,18 +170,23 @@ COMPONENT_REFERENCE = _build_component_reference()
 
 # ─── LLM prompt section generator ───────────────────────────────────────
 
-def generate_llm_prompt_section() -> str:
+def generate_llm_prompt_section(self_contained: bool = False) -> str:
     """Generate the complete UI component specification for LLM prompts.
 
     Used by both generate_tools_file() and refine_tools_file() to ensure
     the LLM always has correct, up-to-date component information.
+
+    ``self_contained`` (BYO, 058): emit the required-imports block WITHOUT the
+    backend ``sys.path`` shim — the bundle runs on the owner's desktop, and the
+    self-containment gate REFUSES any file containing ``sys.path.insert``.
     """
+    imports_block = BYO_REQUIRED_IMPORTS_BLOCK if self_contained else REQUIRED_IMPORTS_BLOCK
     return f"""## UI COMPONENT SYSTEM — YOU MUST FOLLOW THIS EXACTLY
 
 ### Required Imports
 Your file MUST start with these imports (after any package imports):
 ```python
-{REQUIRED_IMPORTS_BLOCK}
+{imports_block}
 ```
 
 ### Available UI Components

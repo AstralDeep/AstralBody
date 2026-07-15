@@ -193,3 +193,16 @@ def test_register_frame_carries_session_id(qapp):
     assert frame["session_id"] == "win-client"
     c.session_id = "chat-42"
     assert c._register_frame()["session_id"] == "chat-42"
+
+
+def test_register_frame_declares_host_capability(qapp):
+    """058: the desktop client hosts BYO agents, so it must declare itself
+    host-capable at register_ui — else the first bundle delivery finds no host
+    (mark-by-demonstration is chicken-and-egg)."""
+    c = OrchestratorClient("ws://127.0.0.1:9/ws", "tok")
+    frame = c._register_frame()
+    assert frame["agent_host"] is True
+    assert "agent_host" in frame["capabilities"]
+    assert frame["host_session_id"] == c.host_session_id and c.host_session_id
+    # stable across reconnects (re-register must not mint a new id)
+    assert c._register_frame()["host_session_id"] == frame["host_session_id"]

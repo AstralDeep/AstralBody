@@ -51,6 +51,13 @@ public struct ClientDispositions: Sendable {
         "agent_permissions": "acks for web workspace verbs; natives re-discover",
         "agent_permissions_updated": "acks for web workspace verbs; natives re-discover",
         "agent_registered": "agent lifecycle acks have no native surface (matches Android)",
+        // Feature 058 BYO host frames — only a HOSTING desktop acts on these; the
+        // Apple clients are author-only (macOS hosting is deferred to feature 059),
+        // so they ignore them, exactly as the Android ProtocolManifest does.
+        "agent_bundle_deliver": "BYO code delivery — only a hosting desktop receives it; author-only clients ignore (matches Android)",
+        "agent_offline": "BYO host-liveness signal — no native host surface; author-only (matches Android)",
+        "agent_stop": "BYO host frame — Apple clients never host a user agent (matches Android)",
+        "agent_tunnel": "BYO agent frames — relayed only by a hosting desktop; author-only clients ignore (matches Android)",
         "audit_append": "admin audit surface is web-only (044); natives fetch audit via REST",
         "chat_deleted": "cross-tab concern; natives are single-window (044)",
         "chrome_render": "raw-HTML chrome region is web-only; natives use chrome_surface",
@@ -185,8 +192,9 @@ public struct ClientDispositions: Sendable {
     ]
 
     public static let allPushTypes: [String] = [
-        "agent_creation_progress", "agent_list", "agent_permissions",
-        "agent_permissions_updated", "agent_registered", "audit_append",
+        "agent_bundle_deliver", "agent_creation_progress", "agent_list",
+        "agent_offline", "agent_permissions", "agent_permissions_updated",
+        "agent_registered", "agent_stop", "agent_tunnel", "audit_append",
         "auth_required", "chat_created", "chat_deleted", "chat_loaded",
         "chat_status", "chat_step", "chrome_menu", "chrome_render",
         "chrome_surface", "combine_error", "combine_status",

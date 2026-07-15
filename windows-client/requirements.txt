@@ -12,5 +12,10 @@ pyperclip==1.11.0
 # never a backend/orchestrator runtime dependency, Constitution V preserved).
 # Not installed in the dev venv (lazily imported); major-bounded for release.
 sigstore>=3.0,<4
+# BYO agents (058, CLIENT-ONLY — same posture as sigstore): a delivered agent
+# bundle's mcp_tools.py builds its UI with astralprims and CANNOT pip-install
+# anything, so the host's interpreter (this exe, re-invoked as --byo-worker)
+# must already carry it. First-party package; not a backend/orchestrator dep.
+astralprims>=0.2.0
 # build only:
 # pyinstaller==6.21.0

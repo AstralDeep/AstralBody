@@ -43,6 +43,9 @@ SURFACE_MODULES = {
     "attachments": "webrender.chrome.surfaces.attachments",
     # Feature 033 (C-U8) — Pulse "morning digest" (flag-gated, default OFF).
     "pulse": "webrender.chrome.surfaces.pulse",
+    # Feature 058 — BYO agent authoring + management (flag-gated, default OFF:
+    # the surface and every one of its handlers refuse when FF_BYO_AGENTS is off).
+    "agent_authoring": "webrender.chrome.surfaces.authoring",
 }
 
 

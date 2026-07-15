@@ -63,8 +63,11 @@ def _index_exists(db, name: str) -> bool:
 
 
 def test_schema_revision_bumped():
+    """055 bumped the revision; later features bump it further. What 055 pins is
+    that the revision is AT LEAST its own (a regression below it would put
+    already-marked databases back on the fast path and skip 055's migrations)."""
     from shared.database import SCHEMA_REVISION
-    assert SCHEMA_REVISION == "055.002"
+    assert SCHEMA_REVISION >= "055.002"
 
 
 def test_component_version_table_and_index(db):

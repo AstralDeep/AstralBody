@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import uuid
 from collections import deque
 from typing import Any, Optional
 
@@ -81,6 +82,13 @@ class OrchestratorClient(QObject):
         # task replay server-side (feature 055); "win-client" is the no-chat
         # default this client has always sent.
         self.session_id: str = "win-client"
+        # This desktop client can HOST BYO agents (feature 058): it declares
+        # itself host-capable at register_ui so the orchestrator delivers a
+        # generated bundle here. Without this the very first delivery finds no
+        # host and reports no_host — the mark-by-demonstration fallback is
+        # chicken-and-egg (no bundle ⇒ no tunnel frame ⇒ never marked). Stable
+        # for the client's lifetime so it survives reconnects.
+        self.host_session_id: str = uuid.uuid4().hex
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._ws = None
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -167,7 +175,11 @@ class OrchestratorClient(QObject):
         return {
             "type": "register_ui",
             "token": self.token,
-            "capabilities": ["render", "stream"],
+            # "agent_host" in capabilities AND the explicit flag both mark this
+            # socket host-capable server-side (orchestrator reads either).
+            "capabilities": ["render", "stream", "agent_host"],
+            "agent_host": True,
+            "host_session_id": self.host_session_id,
             "session_id": self.session_id,
             "device": self.device,
             "resumed": False,

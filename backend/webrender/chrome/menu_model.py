@@ -147,6 +147,11 @@ _ACCOUNT_ITEMS: Tuple[MenuItem, ...] = (
     MenuItem("audit", "Audit log", "audit"),
     MenuItem("theme", "Theme", "theme"),
 )
+# Feature 058 — the ONLY affordance that opens BYO authoring. Flag-gated
+# (FF_BYO_AGENTS, default OFF) exactly like Pulse: with the flag off the item is
+# absent from every client's menu, and the surface + its handlers refuse anyway
+# (defence in depth — a menu is a hint, never an authorization).
+_BYO_AGENTS_ITEM = MenuItem("my-agents", "My agents", "agent_authoring")
 _HELP_ITEMS: Tuple[MenuItem, ...] = (
     MenuItem("tour", "Take the tour", "tour"),
     MenuItem("guide", "User guide", "guide"),
@@ -171,10 +176,21 @@ def _resolve_pulse(pulse_enabled: Optional[bool]) -> bool:
         return False
 
 
+def _resolve_byo(byo_enabled: Optional[bool]) -> bool:
+    if byo_enabled is not None:
+        return bool(byo_enabled)
+    try:
+        from shared.feature_flags import flags
+        return bool(flags.is_enabled("byo_agents"))
+    except Exception:
+        return False
+
+
 def build_menu_model(
     roles: Optional[List[str]] = None,
     *,
     pulse_enabled: Optional[bool] = None,
+    byo_enabled: Optional[bool] = None,
     include_admin: bool = True,
     include_tour: bool = True,
 ) -> ChromeModel:
@@ -185,6 +201,8 @@ def build_menu_model(
             group. Anything falsy ⇒ no admin group.
         pulse_enabled: override for the Pulse control's presence (tests). When
             ``None``, resolved from ``FF_PULSE_DIGEST`` via ``dreaming.pulse``.
+        byo_enabled: override for the "My agents" (BYO authoring) item's presence
+            (tests). When ``None``, resolved from ``FF_BYO_AGENTS``.
         include_admin: whether the ADMIN TOOLS group is eligible at all. The web
             passes ``True`` (admins see it). Native clients (Windows/Android)
             pass ``False`` — admin settings are web-only, so the group is omitted
@@ -198,6 +216,7 @@ def build_menu_model(
     roles = roles or []
     is_admin = "admin" in roles and include_admin
     show_pulse = _resolve_pulse(pulse_enabled)
+    show_byo = _resolve_byo(byo_enabled)
 
     topbar: List[TopBarControl] = [
         TopBarControl("brand", "brand"),
@@ -221,8 +240,9 @@ def build_menu_model(
     help_items = _HELP_ITEMS if include_tour else tuple(
         i for i in _HELP_ITEMS if i.surface != "tour"
     )
+    account_items = _ACCOUNT_ITEMS + ((_BYO_AGENTS_ITEM,) if show_byo else ())
     groups: List[MenuGroup] = [
-        MenuGroup("account", "Account", _ACCOUNT_ITEMS),
+        MenuGroup("account", "Account", account_items),
         MenuGroup("help", "Help", help_items),
     ]
     if is_admin:
@@ -235,6 +255,7 @@ def menu_model_dict(
     roles: Optional[List[str]] = None,
     *,
     pulse_enabled: Optional[bool] = None,
+    byo_enabled: Optional[bool] = None,
     include_admin: bool = True,
     include_tour: bool = True,
 ) -> Dict:
@@ -247,6 +268,7 @@ def menu_model_dict(
     return build_menu_model(
         roles,
         pulse_enabled=pulse_enabled,
+        byo_enabled=byo_enabled,
         include_admin=include_admin,
         include_tour=include_tour,
     ).to_dict()

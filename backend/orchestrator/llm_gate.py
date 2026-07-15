@@ -86,7 +86,13 @@ async def push_setup_dialog(orch, websocket, user_id: str) -> None:
     if dtype == _WATCH:
         return
     roles = _roles_for(orch, websocket)
-    params = {"first_run": True}
+    # WHICH account is this? The dialog is per-user and server-side, so a user
+    # signed in on a second device under a DIFFERENT Keycloak account otherwise
+    # sees a bare "set up your AI provider" and concludes their config failed to
+    # sync. Name the principal. (Claims only — no logic change.)
+    claims = (getattr(orch, "ui_sessions", None) or {}).get(websocket) or {}
+    principal = (claims.get("preferred_username") or claims.get("email") or "")
+    params = {"first_run": True, "principal": principal}
     if dtype in ("windows", "android", "ios", "macos"):
         from shared.protocol import ChromeSurface
         comps = list(await llm_surface.components(orch, user_id, roles, params) or [])

@@ -344,10 +344,21 @@ async def render(orch: Any, user_id: str, roles: Any, params: Any) -> str:
         clear_btn = ""
 
     if first_run:
+        # Name the signed-in account: the configuration is per-user and
+        # server-side, so someone signed in under a second identity must be able
+        # to see WHY they are being asked again (their other account's config is
+        # intact — this one has none).
+        who = str(params.get("principal") or "").strip()
+        identity = (
+            f'<p class="text-xs text-astral-muted">Signed in as '
+            f'<span class="text-astral-text font-medium">{esc(who)}</span>. This is '
+            "saved to your account and applies to all your devices.</p>"
+        ) if who else ""
         intro = (
             '<p class="text-sm text-astral-text">AstralDeep runs on the AI provider '
             "YOU connect — nothing is built in. Pick a provider, paste your API key, "
             "choose a model, and test the connection to get started.</p>"
+            f"{identity}"
             f'<p class="text-xs text-astral-muted">{esc(_LOCAL_RUNTIME_NOTE)}</p>'
         )
     else:
@@ -448,6 +459,13 @@ async def components(orch: Any, user_id: str, roles: Any, params: Any):
              "and save to get started." if first_run else
              "Your provider configuration is stored for your account (API key "
              "encrypted at rest) and applies to all of your devices.")
+    # Same identity context as the web dialog: on a second device under a
+    # different account, "set up your AI provider" with no name reads as a
+    # sync failure rather than a different sign-in.
+    who = str(params.get("principal") or "").strip()
+    if first_run and who:
+        intro += (f" Signed in as {who}. This is saved to your account and "
+                  "applies to all your devices.")
     out = [
         _sdui.text(intro, "caption"),
         _sdui.badge("configured" if saved is not None else "not configured",
