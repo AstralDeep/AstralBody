@@ -32,7 +32,17 @@ CLASSIFICATION: dict[str, str] = {
     "user_preferences": HANDLED,      # theme boot (044)
     "system_config": IGNORED,         # web dashboard payload; desktop uses agent_list
     "agent_list": HANDLED,
-    "agent_registered": IGNORED,      # discovery refresh follows via agent_list
+    # 058: the registration ack is the ONLY signal that a BYO agent's child
+    # process was accepted — a refusal is total silence (no NAK frame exists),
+    # so the host times out on its absence. Not ignorable any more.
+    "agent_registered": HANDLED,
+    # BYO client-side agents (058): this desktop IS the host. The four frames
+    # below are HANDLED, never ignored — an ignored agent frame would silently
+    # drop the user's own agent's traffic and look like a hang.
+    "agent_bundle_deliver": HANDLED,  # write the bundle + spawn the child
+    "agent_tunnel": HANDLED,          # inbound agent frame -> the child's stdin
+    "agent_stop": HANDLED,            # terminate the child, drop routing
+    "agent_offline": HANDLED,         # server dropped routing for one of ours
     # auth
     "auth_required": HANDLED,
     # canvas / SDUI

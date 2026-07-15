@@ -46,11 +46,16 @@ hiddenimports = (
     collect_submodules("PySide6.QtCharts")
     + collect_submodules("aiohttp")
     + collect_submodules("sigstore")
+    # Feature 058: the frozen exe IS the interpreter for every BYO agent worker
+    # (it re-invokes itself with --byo-worker), so the delivered bundle's only
+    # third-party import must resolve INSIDE the bundle — it can never pip-install.
+    + collect_submodules("astralprims")
     + ["PySide6.QtCharts", "websockets",
        "win_agent", "win_agent.agent", "win_agent.tools",
+       "win_agent.byo_host", "win_agent.byo_worker",
        "astral_client.phi_gate", "astral_client.audit_log", "astral_client.integrity",
        "astral_client.confirm",
-       "psutil", "pyperclip", "sigstore"]
+       "psutil", "pyperclip", "sigstore", "astralprims"]
 )
 
 # Trim heavy, unused Qt modules to keep the binary lean.
