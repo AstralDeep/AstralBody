@@ -1060,6 +1060,51 @@ class Orchestrator:
         return [ui for ui in list(self.ui_clients)
                 if self.is_agent_host_socket(ui) and self._get_user_id(ui) == owner_sub]
 
+    def _is_user_agent(self, agent_id) -> bool:
+        """True iff ``agent_id`` is a feature-057/058 user-created agent (has a
+        ``user_agent`` registry row). Sync DB read — call via ``asyncio.to_thread``
+        off the loop. Fails closed (False) so a lookup error never mislabels a
+        built-in as a user agent."""
+        if not agent_id:
+            return False
+        try:
+            from orchestrator.user_agents import get_user_agent
+            return get_user_agent(self.history.db, agent_id) is not None
+        except Exception:
+            return False
+
+    async def _audit_user_agent(self, actor_sub, action_type, description,
+                                agent_id, outcome="success"):
+        """058 (T035/FR-012): record a user-agent lifecycle/denial audit row,
+        attributed to the OWNING HUMAN. Best-effort, never raises — auditability
+        must not break a delivery/registration/dispatch. Mirrors the 027
+        ``agentic_creation._audit`` shape under the shared ``agent_lifecycle``
+        class so the two creation lifecycles reconstruct together."""
+        try:
+            from datetime import datetime, timezone
+
+            from audit.recorder import get_recorder
+            from audit.schemas import AuditEventCreate
+            rec = get_recorder()
+            if rec is None:
+                return
+            who = actor_sub or "unknown"
+            await rec.record(AuditEventCreate(
+                actor_user_id=who,
+                auth_principal=who,
+                agent_id=agent_id,
+                event_class="agent_lifecycle",
+                action_type=action_type,
+                description=(description or "user-agent event")[:1024] or "user-agent event",
+                correlation_id=str(_uuid.uuid4()),
+                outcome=outcome,
+                inputs_meta={},
+                started_at=datetime.now(timezone.utc),
+            ))
+        except Exception:
+            logger.debug("058: user-agent audit record failed (%s)", action_type,
+                         exc_info=True)
+
     async def deliver_agent_bundle(self, owner_sub, agent_id, files,
                                    constitution_version=None):
         """058 (code-delivery seam, T006/FR-004): push a generated user-agent
@@ -1090,6 +1135,11 @@ class Orchestrator:
         if delivered == 0:
             logger.warning("058: no desktop host online for owner=%s to deliver agent %s",
                            owner_sub, agent_id)
+        await self._audit_user_agent(
+            owner_sub, "agent.bundle_delivered",
+            f"Delivered user-agent bundle to {delivered} desktop host socket(s)"
+            + ("" if delivered else " — no desktop host online."),
+            agent_id, outcome=("success" if delivered else "failure"))
         return delivered
 
     async def delete_user_agent(self, owner_sub, agent_id):
@@ -1116,6 +1166,10 @@ class Orchestrator:
                 logger.debug("agent_stop send failed", exc_info=True)
         await asyncio.to_thread(_ua.soft_delete, self.history.db, agent_id)
         logger.info("058: soft-deleted user agent %s (owner=%s)", agent_id, owner_sub)
+        await self._audit_user_agent(
+            owner_sub, "agent.deleted",
+            "Soft-deleted user agent (row + audit retained, host stopped).",
+            agent_id)
         return True
 
     async def register_agent(self, websocket, msg: RegisterAgent):
@@ -1143,6 +1197,13 @@ class Orchestrator:
                 logger.warning(
                     "Refusing user-agent tunnel registration '%s' (owner=%s): %s",
                     card.agent_id, owner_sub, reason)
+                # T035/FR-012: a refused boundary registration must leave an
+                # audited trail (owner isolation / forged-id / reserved-id / stale
+                # status), not just a log line.
+                await self._audit_user_agent(
+                    owner_sub, "agent.registration_refused",
+                    f"Refused user-agent tunnel registration: {reason}",
+                    card.agent_id, outcome="failure")
                 if websocket is not None:
                     try:
                         await websocket.close(code=1008, reason="user-agent registration refused")
@@ -1179,6 +1240,10 @@ class Orchestrator:
                 await asyncio.to_thread(
                     _ua.go_live, self.history.db, card.agent_id,
                     host_session_id=getattr(websocket, "host_session_id", None))
+                await self._audit_user_agent(
+                    getattr(websocket, "owner_sub", None), "agent.went_live",
+                    "User agent registered inward and went live on its owner's host.",
+                    card.agent_id)
             except Exception:
                 logger.warning("go_live failed for user agent %s", card.agent_id, exc_info=True)
 
@@ -7100,6 +7165,18 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                         websocket, auth.render_components, target=auth.render_target)
                 else:
                     await self.send_ui_render(websocket, auth.render_components)
+            # T035/FR-012: a permission-denied dispatch returns BEFORE
+            # ToolDispatchAudit, so for a USER agent (untrusted-at-the-boundary)
+            # the denial would otherwise leave no audit row. Scope to user agents
+            # so the shared gate's behavior for built-ins/public is unchanged.
+            try:
+                if await asyncio.to_thread(self._is_user_agent, agent_id):
+                    await self._audit_user_agent(
+                        user_id, f"tool.{tool_name}.denied",
+                        "User-agent tool dispatch denied at the permission gate.",
+                        agent_id, outcome="failure")
+            except Exception:
+                logger.debug("058: denial audit skipped", exc_info=True)
             return auth.response
         args = auth.args
         stream_params = auth.stream_params

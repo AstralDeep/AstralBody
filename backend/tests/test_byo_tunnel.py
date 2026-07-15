@@ -155,8 +155,11 @@ async def test_deliver_bundle_to_owner_host(orch):
     orch.ui_clients.append(ws)
     n = await orch.deliver_agent_bundle(OWNER, AID, {"greeter_agent.py": "code"}, "0.1.0")
     assert n == 1
-    env = json.loads(ws.sent[-1])
-    assert env["type"] == "agent_bundle_deliver" and env["agent_id"] == AID
+    # The delivery frame is present (an audit_append metadata frame may follow it
+    # now that delivery is audited — find the bundle frame by type, not position).
+    frames = [json.loads(f) for f in ws.sent]
+    env = next(f for f in frames if f["type"] == "agent_bundle_deliver")
+    assert env["agent_id"] == AID
     assert env["files"] == {"greeter_agent.py": "code"} and env["constitution_version"] == "0.1.0"
     # No host online for a different owner → delivered to 0 sockets.
     assert await orch.deliver_agent_bundle("nobody-online", AID, {}, None) == 0
@@ -168,16 +171,24 @@ async def test_bundle_is_never_pushed_to_a_browser_tab(orch):
     tab = FakeUI()                      # a plain UI socket — NOT a desktop host
     orch.ui_sessions[tab] = {"sub": OWNER}
     orch.ui_clients.append(tab)
+
+    def _code_frames(sock):
+        # The security guarantee is that no CODE bundle reaches the tab. A delivery
+        # is audited, and an audit_append metadata frame legitimately fans out to
+        # the owner's UI sockets (incl. the tab) — that is not the user's code.
+        return [f for f in sock.sent
+                if json.loads(f)["type"] == "agent_bundle_deliver"]
+
     n = await orch.deliver_agent_bundle(OWNER, AID, {"mcp_tools.py": "secret code"}, "0.1.0")
     assert n == 0                        # honest 'no_host'
-    assert tab.sent == []                # and no code went to the tab
+    assert _code_frames(tab) == []       # and no code went to the tab
 
     host = _as_host(orch, FakeUI())
     orch.ui_sessions[host] = {"sub": OWNER}
     orch.ui_clients.append(host)
     assert await orch.deliver_agent_bundle(OWNER, AID, {"mcp_tools.py": "c"}, "0.1.0") == 1
-    assert tab.sent == []                # still nothing to the tab
-    assert json.loads(host.sent[-1])["type"] == "agent_bundle_deliver"
+    assert _code_frames(tab) == []       # still no code to the tab
+    assert len(_code_frames(host)) == 1  # the host got the bundle
 
 
 async def test_register_ui_marks_only_a_declared_host(monkeypatch):
