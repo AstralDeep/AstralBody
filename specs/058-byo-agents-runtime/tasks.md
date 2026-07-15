@@ -24,15 +24,15 @@ description: "Task list for feature 058 — BYO client-side agents runtime, host
 - [X] T004 [US1] Add the UI-facing `agent_offline` / `host_status` frame to `backend/shared/ui_protocol.json` + a liveness heartbeat so drops are caught within seconds (was 057 T012, SC-005)
 - [X] T005 [US1] **Honest-offline** (was 057 T011, FR-003): on tunnel disconnect deregister `(owner_sub, agent_id)` + emit `agent_offline`; short-circuit dispatch of an offline user agent to a prompt honest-offline `MCPResponse` (replace the `agent_urls` reconnect fallback for user agents) — `orchestrator.py`
 - [X] T006 [US1] **Code-delivery seam** (was 057 T013, FR-004): after `generate_code`, package the 3-file bundle and push `agent_bundle_deliver` over the owner tunnel; do NOT call `start_draft_agent` (Popen) for byo agents; on inward register call `user_agents.go_live` (status='live', stamp constitution_version, insert agent_ownership row) — `backend/orchestrator/agent_lifecycle.py` + `agentic_creation.py`
-- [ ] T007 [US1] **Self-test relocation** (was 057 T013b, G1/SC-002): any pre-delivery self-test is ephemeral/torn-down orchestrator sandbox OR host-side with the result reported back — never a persistent server-side agent — `backend/orchestrator/agent_lifecycle.py`
-- [ ] T008 [US1] **Codegen target** (was 057 T016): generated bundle is self-contained for the desktop-host runtime (not the backend `shared` package) OR the host ships a compatible shim — `backend/orchestrator/agent_generator.py` + `windows-client`
+- [X] T007 [US1] **Self-test relocation** (was 057 T013b, G1/SC-002): BYO validation is now **pure-AST static** (`agent_validator.validate_static` — registry shape + return-format + stdlib∪astralprims import allowlist; NEVER imports/exec/compiles the code). The exec-in-a-child path (`validator_worker.py`) is **deleted**; runtime behavior is the desktop host's business. Sandbox decision keys off the draft `origin`, not the caller's `target`. Empirically re-verified: the prior file-write+socket exploit runs zero code — `backend/orchestrator/agent_validator.py`, `agent_lifecycle.py`
+- [X] T008 [US1] **Codegen target** (was 057 T016): `AgentCodeGenerator.generate_byo_files` emits a **self-contained** bundle (`agent_main.py` deterministic JSON-lines-over-stdio runner + `manifest.json`; LLM `mcp_tools.py` imports only astralprims). `byo_import_violations` gate refuses `shared`/`agents.`/`sys.path.insert`; prompt & gate reconciled (BYO required-imports block carries no shim). Owner-namespaced `agent_id` baked in. **Proven via real subprocess smoke test** — `backend/orchestrator/agent_generator.py`, `agent_spec.py` + `windows-client/win_agent/byo_worker.py`
 - [X] T009 [US1] **Minimal one-shot authoring path** (was 057 T014): deliberate entry, `origin='byo_client'`, `create_draft` → existing static gates → `generate_code` → deliver; register the `user_agent` row + stamp `AGENT_CONSTITUTION_VERSION` + mark validated (full 5-phase is Phase 4) — `agentic_creation.py`
 - [X] T010 [P] [US1] Integration test (was 057 T007, U1): owner-tunnel register → dispatch through the existing gate stack → **assert the audit row attributes the action to the owning human** → disconnect → honest-offline — `backend/tests/test_byo_tunnel.py`
-- [ ] T011 [US1] SC-002 guard/test: assert **zero user-agent processes on the orchestrator host** after go-live — `backend/tests/test_byo_offserver.py`
+- [X] T011 [US1] SC-002 guard/test: assert **zero user-agent processes on the orchestrator host** after go-live — boot-relaunch query gained `AND (origin IS NULL OR origin <> 'byo_client')`, `start_draft_agent` **raises** on a byo draft (structural), and the origin is stamped before generate — `backend/tests/test_byo_offserver.py`
 
 ## Phase 2: Windows desktop host runtime (US1 client)
 
-- [ ] T012 [US1] **Windows host** (was 057 T015, C1/FR-003): write + run a delivered bundle as a **separate, client-supervised child process** (re-invoke `sys.executable`/frozen exe with a worker-entry flag — NOT in-process); relay frames through the client's authenticated tunnel; supervise lifecycle + stop on client close — `windows-client/win_agent/` (+ `astral_client/app.py`). **Requires live-client integration testing.**
+- [X] T012 [US1] **Windows host** (was 057 T015, C1/FR-003): `win_agent/byo_host.py` (supervisor: writes bundle → Popen child → pumps child stdout→`agent_tunnel`, inbound tunnel→child stdin; rehydrate-on-connect; re-register on reconnect; terminate on close/sign-out/`agent_stop`; registration-timeout reap; realpath traversal guard) + `win_agent/byo_worker.py` (`--byo-worker` re-invoke BEFORE Qt; frozen-build no-stdout rebind) + `astral_client/app.py` wiring + `main.py` branch + `astralprims` added to `requirements.txt`/`AstralDeep.spec`. **Seam proven via real subprocess smoke test** (register→tools/list→tools/call→real astralprims Card→−32601/−32603→exit 0). **Live author→deliver→run→offline E2E pending user sign-in.**
 
 ## Phase 3: Boundary hardening completion (US3)
 
@@ -43,9 +43,9 @@ description: "Task list for feature 058 — BYO client-side agents runtime, host
 ## Phase 4: Guided authoring UX (US2)
 
 - [X] T016 [US2] Wire the 057 Analyze gate **pre-generation** (was 057 T027, FR-003): call `agent_analyze.check` immediately before `generate_code`; on fail do not generate + do not advance; re-run on revision + revalidation — `agentic_creation.py`
-- [ ] T017 [US2] 5-phase authoring state machine over `draft_agents` (was 057 T028) — `backend/orchestrator/agent_authoring.py`
-- [ ] T018 [US2] `agent_authoring` chrome surface (was 057 T029, FR-005): `backend/webrender/chrome/surfaces/authoring.py` exporting BOTH `render()` (web) and `components()` (native); register in `surfaces/__init__.py`; `chrome_author_*` phase handlers; assistant-drafted + editable artifacts (per 057 `contracts/authoring-surface.md`)
-- [ ] T019 [US2] Hard-gate handlers (was 057 T030): `chrome_author_clarify` + `chrome_author_analyze` decline to advance with plain-language notices; `chrome_author_generate` reachable only post-Analyze-pass
+- [X] T017 [US2] 5-phase authoring state machine over `draft_agents` (was 057 T028): Specify→Clarify→Plan→Tasks→Analyze→generate, assistant-drafted (user's LLM) + human-editable, explicit advance, Analyze-approved tool list persisted to `tools_spec` and enforced as a superset gate on the generated `TOOL_REGISTRY` — `backend/orchestrator/agent_authoring.py`
+- [X] T018 [US2] `agent_authoring` chrome surface (was 057 T029, FR-005): `backend/webrender/chrome/surfaces/authoring.py` exports BOTH `render()` (web) and `components()` (native, feature-043 shape); registered in `surfaces/__init__.py`; `chrome_author_*` handlers; "My agents" menu item (flag-gated); every entry point re-checks `byo_enabled()` (FR-009). **Native-client live render pending (T020–T022).**
+- [X] T019 [US2] Hard-gate handlers (was 057 T030): clarify won't advance with unresolved questions; `chrome_author_analyze` runs `agent_analyze.check` and blocks generate on fail; generate is **structurally** unreachable pre-Analyze-pass; re-run on revision/revalidation
 
 ## Phase 5: Cross-client parity (US4)
 
@@ -53,7 +53,7 @@ description: "Task list for feature 058 — BYO client-side agents runtime, host
 - [ ] T021 [P] [US4] Apple parity: iOS author-only; macOS MAS build author-only (was 057 T032) — `apple-clients`
 - [ ] T022 [P] [US4] Web author+manage parity via `render()` HTML (was 057 T033)
 - [ ] T023 [US4] Verify **watch exclusion** (was 057 T034) + guard test — `backend/tests/test_byo_watch_excluded.py`
-- [ ] T024 [US4] FR-024 non-host messaging: "runs on your desktop host / offline when none online" driven by `host_last_seen_at` (was 057 T035) — `authoring.py`
+- [X] T024 [US4] FR-024 non-host messaging: delivery now targets **host-capable sockets only** (`_agent_host_sockets`; additive `RegisterUI.agent_host`/`host_session_id` + mark-by-demonstration) — a browser tab never receives a code bundle; the `no_host` branch tells the truth ("open your desktop client and re-run Generate") — `orchestrator.py`, `authoring.py`
 - [ ] T025 [US4] macOS host gating docs (was 057 T036): direct-download build hosts; MAS build author-only — `apple-clients` + `docs/`
 
 ## Phase 6: Lifecycle (US5)
@@ -63,7 +63,7 @@ description: "Task list for feature 058 — BYO client-side agents runtime, host
 - [X] T028 [US5] Delete (soft): stop the host agent, remove routing/visibility, `user_agents.soft_delete` (retain row + audit) (was 057 T040) — `agent_authoring.py` + `orchestrator.py`
 - [X] T029 [US5] Constitution-version re-validation flow: the 057 guarded migration sets `revalidation_required`; the tunnel/registration check refuses routing until re-Analyze passes (was 057 T041, FR-028)
 - [X] T030 [US5] Confirm no share/publish/transfer path (was 057 T042) — `authoring.py`
-- [ ] T031 [P] [US5] Lifecycle test (was 057 T037): owner-only list, revise-requires-revalidation, delete-stops-host, no-share, cross-user invisibility — `backend/tests/test_byo_lifecycle.py`
+- [X] T031 [P] [US5] Lifecycle test (was 057 T037): owner-only list, revise-requires-revalidation, delete-stops-host, no-share, cross-user invisibility — `backend/tests/test_byo_lifecycle.py`
 
 ## Phase 7: Polish
 
@@ -82,3 +82,35 @@ description: "Task list for feature 058 — BYO client-side agents runtime, host
 - Phase 3 (hardening) must land before production enablement.
 - Phases 4–6 build on the transport; Phase 7 last; Phase 8 deferred.
 - **Note:** Phase 1 T001/T002/T005/T006 (orchestrator connection surgery) and Phase 2 T012 (Windows host) require **live-client integration testing** — a running Windows client dialing in — which is the practical reason 057 deferred them here.
+
+## Session 2026-07-14 (Windows-machine resume) — status
+
+**MVP (Phase 1 + Phase 2) is code-complete and the T008↔T012 seam is proven** via a real
+subprocess smoke test (generate BYO bundle → run `byo_worker` as a child → register→tools/list→
+tools/call→real astralprims Card→−32601/−32603→exit 0). Remaining before "shipped": the **live
+author→deliver→run→offline E2E on a signed-in Windows client** (interactive; needs the user's LLM),
+and the native authoring-surface **render parity passes T020 (Android)/T021 (Apple)/T022 (web)**.
+
+Also landed this session (found + fixed 4 blockers via adversarial review, all re-verified "ship"):
+the empty-bundle + agent_id-mismatch defects, the prompt-vs-gate contradiction, unpersisted
+Analyze-approved tools, and (the deep one, proven empirically) BYO tool code executing unsandboxed
+in the orchestrator — now eradicated (static AST validation, exec path deleted).
+
+Out-of-band client fixes (separate user requests, not 058 tasks): **Android LLM-provider dropdown**
+(`param_picker` `select`+`checklist` branches — the field was already `kind:"select"` on the wire;
+Android was the sole under-renderer) + the 4 BYO frames classified IGNORED in Android's
+`ProtocolManifest` drift guard; **Windows top-bar order parity** (Constitution XII — actions cluster
+moved after New/Recent; Recent-chats clock→speech-bubble); **Windows app icon** regenerated from the
+brand master (was off-brand white bg); **LLM first-run dialog** now names the signed-in account
+("saved to your account, applies to all devices") — the "creds didn't sync" report was two different
+Keycloak logins, not a bug.
+
+- [X] **T012-live** [US1] Live E2E on a signed-in Windows host — **PROVEN 2026-07-14** (web-authored):
+  author → 5-phase + Analyze gate → generate (owner's GLM-5.2) → static-validate → **delivered to 1
+  desktop host socket** → child process Popen'd (`--byo-worker`) → registered inward over the tunnel →
+  passed boundary security re-review → **invoked from chat** (`generate_greeting_card → ua-greeter-58e0d4ff`,
+  agent_eval pass^1=1.000) → astralprims Card rendered in the workspace; "My agents" shows running/live.
+  Surfaced + fixed 3 seam bugs no unit test caught: client didn't declare `agent_host` at register_ui;
+  BYO codegen used the unset system LLM instead of the owner's; the owner couldn't use the tool they
+  authored (permission baseline). (offline-on-close still to observe.)
+- [ ] **T034-partial** full-suite smoke with `FF_BYO_AGENTS` on AND off (flag-off byte-identical).

@@ -87,6 +87,17 @@ class EndpointFilter(logging.Filter):
 logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
 
 
+#: Boot relaunch (027): live server-hosted generated agents are re-Popen'd here.
+#: BYO agents (058, origin ``byo_client``) are EXCLUDED — their code is the user's
+#: and runs on the user's desktop host; relaunching one would put a user agent
+#: process on the orchestrator host (SC-002). ``start_draft_agent`` refuses them
+#: too; this filter keeps us from even asking.
+LIVE_DRAFT_RELAUNCH_QUERY = (
+    "SELECT id, agent_name FROM draft_agents WHERE status = 'live' "
+    "AND (origin IS NULL OR origin <> 'byo_client')"
+)
+
+
 # Module-level singleton handle, set by Orchestrator.__init__. Used by
 # external callers (e.g., feedback.cli) that need to reach into the
 # running instance without going through FastAPI app.state.
@@ -661,6 +672,13 @@ class Orchestrator:
         self.agent_cards: Dict[str, AgentCard] = {}
         self.agent_capabilities: Dict[str, List[Dict]] = {}
         self.pending_requests: Dict[str, asyncio.Future] = {}
+        # request_id -> the agent id the request was DISPATCHED to. Response
+        # correlation is keyed on request_id alone, which is safe only while every
+        # responder is trusted; untrusted BYO agents now share this router, so the
+        # dispatch target is recorded and a response arriving from a DIFFERENT
+        # agent's socket is dropped (defense in depth — uuid4 request ids make it
+        # unguessable today, so this closes the seam rather than a live hole).
+        self._pending_request_agent: Dict[str, str] = {}
         self.pending_ui_sockets: Dict[str, Any] = {}  # request_id -> UI websocket (for progress forwarding)
         # 015-external-ai-agents: per-(user, agent) concurrency cap for long-running tools (FR-026).
         self.concurrency_cap = ConcurrencyCap(max_per_user_agent=3)
@@ -691,6 +709,13 @@ class Orchestrator:
         # counter per owner sub on the agent tunnel, so a flooding/runaway user
         # agent degrades only its own owner. {owner_sub: [window_start, count]}.
         self._tunnel_ingress: Dict[str, list] = {}
+        # 058 (code delivery, FR-004): the UI sockets that declared themselves
+        # DESKTOP HOSTS at register_ui — the only sockets a generated agent
+        # bundle is ever pushed to. {id(websocket): host_session_id}. A browser
+        # tab never appears here, so authoring in a tab with no desktop client
+        # running reports 'no_host' instead of pushing the user's generated code
+        # into the browser and calling it delivered.
+        self._agent_host_sockets: Dict[int, str] = {}
         # Maps cap_job_id -> {user_id, agent_id, chat_id, tool_name} for long-running
         # jobs, so a job's progress + terminal result can be routed to (and
         # persisted in) the originating CHAT — not a single ephemeral socket —
@@ -960,6 +985,14 @@ class Orchestrator:
             logger.warning("058: dropping tunnel frame from owner=%s agent=%s — over ingress cap",
                            owner_sub, agent_id)
             return
+        # A socket that RELAYS an agent's stdio frames is a desktop host by
+        # demonstration — it is supervising the child process right now. Mark it,
+        # so a host that predates the explicit register_ui `agent_host` field is
+        # still a valid delivery target (and a browser tab, which relays nothing,
+        # still never is).
+        _hosts = getattr(self, "_agent_host_sockets", None)
+        if _hosts is not None:
+            _hosts.setdefault(id(ui_ws), str(payload.get("host_session_id") or ""))
         key = (owner_sub, agent_id)
         sock = self._tunnel_sockets.get(key)
         if sock is None:
@@ -1016,14 +1049,31 @@ class Orchestrator:
         st[1] += 1
         return st[1] > self._TUNNEL_MAX_FRAMES_PER_WINDOW
 
+    def is_agent_host_socket(self, websocket) -> bool:
+        """058: did this UI socket declare itself a desktop AGENT HOST at
+        register_ui? Only such a socket can write a bundle to disk and supervise
+        it as a child process — and only such a socket is ever sent one."""
+        return id(websocket) in (getattr(self, "_agent_host_sockets", None) or {})
+
+    def owner_host_sockets(self, owner_sub) -> list:
+        """This owner's live DESKTOP-HOST sockets (never a browser tab)."""
+        return [ui for ui in list(self.ui_clients)
+                if self.is_agent_host_socket(ui) and self._get_user_id(ui) == owner_sub]
+
     async def deliver_agent_bundle(self, owner_sub, agent_id, files,
                                    constitution_version=None):
         """058 (code-delivery seam, T006/FR-004): push a generated user-agent
-        bundle to the owner's desktop host over its UI socket(s). The host writes
-        the files locally and runs the agent as a supervised CHILD PROCESS, which
-        then dials back in over the tunnel (register → go_live). The orchestrator
-        NEVER runs the agent as a subprocess (SC-002). Returns the number of owner
-        sockets the bundle was delivered to (0 ⇒ no desktop host online)."""
+        bundle to the owner's DESKTOP HOST sockets. The host writes the files
+        locally and runs the agent as a supervised CHILD PROCESS, which then dials
+        back in over the tunnel (register → go_live). The orchestrator NEVER runs
+        the agent as a subprocess (SC-002).
+
+        Only host-capable sockets are counted AND sent to: a browser tab cannot
+        run the bundle, and pushing generated code into one would be both a lie
+        ("delivered") and a needless spray of the user's code. Returns the number
+        of desktop-host sockets the bundle reached (0 ⇒ no host online; the caller
+        reports 'no_host' and the user re-runs Generate with the client open —
+        the server does NOT queue a re-delivery)."""
         frame = json.dumps({
             "type": "agent_bundle_deliver",
             "agent_id": agent_id,
@@ -1031,9 +1081,7 @@ class Orchestrator:
             "constitution_version": constitution_version,
         })
         delivered = 0
-        for ui in list(self.ui_clients):
-            if self._get_user_id(ui) != owner_sub:
-                continue
+        for ui in self.owner_host_sockets(owner_sub):
             try:
                 await self._safe_send(ui, frame)
                 delivered += 1
@@ -1475,6 +1523,23 @@ class Orchestrator:
     # MESSAGE HANDLING
     # =========================================================================
 
+    def _response_is_from_dispatch_target(self, req_id: str, websocket) -> bool:
+        """Is this ``mcp_response`` coming from the agent we sent the request to?
+
+        Correlation on ``request_id`` alone would let ANY connected agent resolve
+        another agent's pending future. Untrusted BYO agents now share this
+        router, so verify the responder: a loopback/tunnel socket carries its own
+        ``agent_id``, and a networked agent socket is the object registered in
+        ``self.agents`` under the dispatch target. An unrecorded request (tests,
+        legacy in-process resolutions) is left alone.
+        """
+        expected = (getattr(self, "_pending_request_agent", None) or {}).get(req_id)
+        if not expected:
+            return True
+        if getattr(websocket, "agent_id", None) == expected:
+            return True
+        return self.agents.get(expected) is websocket
+
     async def handle_agent_message(self, websocket, message: str):
         """Handle message from an agent."""
         try:
@@ -1486,6 +1551,13 @@ class Orchestrator:
             elif isinstance(msg, MCPResponse):
                 req_id = msg.request_id
                 if req_id in self.pending_requests:
+                    if not self._response_is_from_dispatch_target(req_id, websocket):
+                        logger.warning(
+                            "Dropping mcp_response for %s: it came from a socket "
+                            "that is not the agent the request was sent to (%s)",
+                            req_id,
+                            (getattr(self, "_pending_request_agent", None) or {}).get(req_id))
+                        return
                     self.pending_requests[req_id].set_result(msg)
                 else:
                     logger.warning(f"Received response for unknown request: {req_id}")
@@ -1577,6 +1649,19 @@ class Orchestrator:
                     logger.info(f"UI registered: {user_data.get('preferred_username', 'unknown')}")
                     user_data["_raw_token"] = token  # Store raw token for RFC 8693 delegation
                     self.ui_sessions[websocket] = user_data
+                    # 058: does this socket belong to a DESKTOP HOST (can it run a
+                    # delivered agent bundle as a child process)? Only such sockets
+                    # ever receive generated code — a browser tab must never be
+                    # pushed a code bundle. Declared explicitly (additive
+                    # `agent_host`, or an `agent_host` capability); absent ⇒ False.
+                    _hosts = getattr(self, "_agent_host_sockets", None)
+                    if _hosts is not None:
+                        if (bool(getattr(msg, "agent_host", False))
+                                or "agent_host" in (getattr(msg, "capabilities", None) or [])):
+                            _hosts[id(websocket)] = str(
+                                getattr(msg, "host_session_id", "") or "")
+                        else:
+                            _hosts.pop(id(websocket), None)
                     _register_started = time.monotonic()
                     user_id = user_data.get("sub", "legacy")
 
@@ -8071,6 +8156,12 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # Create a future for the response
         future = asyncio.get_event_loop().create_future()
         self.pending_requests[request_id] = future
+        # The agent this request is SENT to — a response from any other socket is
+        # dropped (see _response_is_from_dispatch_target). Guarded so a test
+        # double reusing this method with its own `self` keeps working.
+        _targets = getattr(self, "_pending_request_agent", None)
+        if _targets is not None:
+            _targets[request_id] = agent_id
         # 056 US1: record this dispatch so a mediated hop from the executing
         # agent resolves its context/authority against OUR record.
         self._register_dispatch_context(request_id, agent_id, args, ui_websocket)
@@ -8097,6 +8188,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                                error={"message": str(e), "retryable": True})
         finally:
             self.pending_requests.pop(request_id, None)
+            (getattr(self, "_pending_request_agent", None) or {}).pop(request_id, None)
             self.pending_ui_sockets.pop(request_id, None)
             self._dispatch_context.pop(request_id, None)
 
@@ -8137,6 +8229,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         )
         future = asyncio.get_event_loop().create_future()
         self.pending_requests[request_id] = future
+        _targets = getattr(self, "_pending_request_agent", None)
+        if _targets is not None:
+            _targets[request_id] = agent_id      # dispatch target (see above)
         # 056 US1: record this dispatch so a mediated hop from the executing
         # agent resolves its context/authority against OUR record. Registered
         # against the ORIGINAL args (the deep copy is scrubbed in-agent).
@@ -8183,6 +8278,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             except Exception:
                 pass
             self.pending_requests.pop(request_id, None)
+            (getattr(self, "_pending_request_agent", None) or {}).pop(request_id, None)
             self.pending_ui_sockets.pop(request_id, None)
             self._dispatch_context.pop(request_id, None)
 
@@ -10850,6 +10946,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 del self.ui_sessions[websocket]
             self._chat_locks.pop(id(websocket), None)
             self._registered_events.pop(id(websocket), None)
+            (getattr(self, "_agent_host_sockets", None) or {}).pop(id(websocket), None)
             # Feature 054: persisted LLM config SURVIVES disconnect by design;
             # only the per-socket gate marker is dropped.
             from orchestrator import llm_gate as _llm_gate
@@ -10891,6 +10988,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 del self.ui_sessions[websocket]
             self._chat_locks.pop(id(websocket), None)
             self._registered_events.pop(id(websocket), None)
+            (getattr(self, "_agent_host_sockets", None) or {}).pop(id(websocket), None)
             # Feature 054: persisted LLM config SURVIVES disconnect by design;
             # only the per-socket gate marker is dropped.
             from orchestrator import llm_gate as _llm_gate
@@ -11037,8 +11135,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         async def _relaunch_generated_agents():
             await asyncio.sleep(5)  # let the static-fleet monitor settle first
             try:
-                rows = await self.history.db.afetch_all(
-                    "SELECT id, agent_name FROM draft_agents WHERE status = 'live'")
+                rows = await self.history.db.afetch_all(LIVE_DRAFT_RELAUNCH_QUERY)
             except Exception:
                 logger.exception("relaunch: could not list live generated agents")
                 return

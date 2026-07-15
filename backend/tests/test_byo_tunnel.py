@@ -141,9 +141,16 @@ async def test_per_owner_ingress_cap_isolates_a_flooding_owner(orch, monkeypatch
     assert orch._tunnel_ingress_over_cap("otherB") is False   # other owner unaffected
 
 
+def _as_host(orch, ws, session="hs-1"):
+    """Mark a UI socket as a desktop AGENT HOST (what register_ui does when the
+    client declares ``agent_host``)."""
+    orch._agent_host_sockets[id(ws)] = session
+    return ws
+
+
 async def test_deliver_bundle_to_owner_host(orch):
     # T006: bundle is pushed to the owner's desktop host over its UI socket.
-    ws = FakeUI()
+    ws = _as_host(orch, FakeUI())
     orch.ui_sessions[ws] = {"sub": OWNER}
     orch.ui_clients.append(ws)
     n = await orch.deliver_agent_bundle(OWNER, AID, {"greeter_agent.py": "code"}, "0.1.0")
@@ -153,6 +160,49 @@ async def test_deliver_bundle_to_owner_host(orch):
     assert env["files"] == {"greeter_agent.py": "code"} and env["constitution_version"] == "0.1.0"
     # No host online for a different owner → delivered to 0 sockets.
     assert await orch.deliver_agent_bundle("nobody-online", AID, {}, None) == 0
+
+
+async def test_bundle_is_never_pushed_to_a_browser_tab(orch):
+    """A browser tab cannot run a child process. Counting it as 'delivered' both
+    lied to the user and sprayed their generated code into the browser."""
+    tab = FakeUI()                      # a plain UI socket — NOT a desktop host
+    orch.ui_sessions[tab] = {"sub": OWNER}
+    orch.ui_clients.append(tab)
+    n = await orch.deliver_agent_bundle(OWNER, AID, {"mcp_tools.py": "secret code"}, "0.1.0")
+    assert n == 0                        # honest 'no_host'
+    assert tab.sent == []                # and no code went to the tab
+
+    host = _as_host(orch, FakeUI())
+    orch.ui_sessions[host] = {"sub": OWNER}
+    orch.ui_clients.append(host)
+    assert await orch.deliver_agent_bundle(OWNER, AID, {"mcp_tools.py": "c"}, "0.1.0") == 1
+    assert tab.sent == []                # still nothing to the tab
+    assert json.loads(host.sent[-1])["type"] == "agent_bundle_deliver"
+
+
+async def test_register_ui_marks_only_a_declared_host(monkeypatch):
+    """The host capability is an EXPLICIT, additive register_ui declaration."""
+    import asyncio as _asyncio
+    import uuid as _uuid
+    monkeypatch.setenv("USE_MOCK_AUTH", "true")
+    from orchestrator.async_tasks import BackgroundTask, VirtualWebSocket
+    o = Orchestrator()
+    o._llm_store.set_sync("test_user", provider="custom", base_url="http://t.invalid/v1",
+                          model="m", api_key="k")
+
+    async def _register(**extra):
+        ws = VirtualWebSocket(BackgroundTask(task_id=_uuid.uuid4().hex, chat_id="",
+                                             user_id=""))
+        o._registered_events[id(ws)] = _asyncio.Event()
+        await o.handle_ui_message(ws, json.dumps(
+            {"type": "register_ui", "token": "dev-token", "device": {}, **extra}))
+        return ws
+
+    tab = await _register()                                   # a browser tab
+    host = await _register(agent_host=True, host_session_id="hs-9")
+    assert o.is_agent_host_socket(tab) is False
+    assert o.is_agent_host_socket(host) is True
+    assert o._agent_host_sockets[id(host)] == "hs-9"
 
 
 async def test_delete_user_agent_soft_deletes_and_stops_host(orch):

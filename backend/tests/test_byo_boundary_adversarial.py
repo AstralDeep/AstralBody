@@ -77,3 +77,39 @@ def test_owner_is_not_blocked_by_isolation(db):
     # the owner — the predicate returns True for the owner, so normal per-user
     # scope resolution proceeds (a granted scope would then allow).
     assert ua.can_user_use_agent(db, OWNER, UA_ID) is True
+
+
+def test_owner_may_use_their_agent_tool_without_a_scope_grant(db):
+    # Feature 057/058 (found live 2026-07-14): a user must be able to USE the
+    # agent they authored — a private user-agent has no permission UI to grant a
+    # scope, so requiring one made the authored tool unusable by its own creator
+    # (the chat LLM couldn't see it and fell back to agentic-creation). The owner
+    # now gets a deny→allow baseline on their own agent's validly-scoped tool.
+    tp = ToolPermissionManager(db=db)
+    tp.register_tool_scopes(UA_ID, {"greet": "tools:write"})
+    assert tp.is_tool_allowed(OWNER, UA_ID, "greet") is True
+    # …but a FOREIGN user is still denied (owner isolation is unchanged).
+    assert tp.is_tool_allowed(FOREIGN, UA_ID, "greet") is False
+
+
+def test_owner_baseline_yields_to_an_explicit_opt_out(db):
+    # The owner-allow baseline is exactly that — a baseline. An explicit opt-out
+    # (a stored agent_scopes row with enabled=False) still wins, same as the
+    # feature-040 safe-agent flip.
+    tp = ToolPermissionManager(db=db)
+    tp.register_tool_scopes(UA_ID, {"greet": "tools:write"})
+    db.execute(
+        "INSERT INTO agent_scopes (user_id, agent_id, scope, enabled) "
+        "VALUES (?, ?, ?, ?)",
+        (OWNER, UA_ID, "tools:write", False),
+    )
+    assert tp.is_tool_allowed(OWNER, UA_ID, "greet") is False
+
+
+def test_owner_baseline_does_not_leak_to_an_invalid_scope(db):
+    # A tool declaring a non-grantable scope has no authority the delegation mint
+    # could assert — the owner-allow baseline must not admit it (the VALID_SCOPES
+    # gate runs before the owner check).
+    tp = ToolPermissionManager(db=db)
+    tp.register_tool_scopes(UA_ID, {"weird": "tools:nonexistent"})
+    assert tp.is_tool_allowed(OWNER, UA_ID, "weird") is False

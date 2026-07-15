@@ -1,8 +1,23 @@
 """
 Agent Spec Validator — validates generated mcp_tools.py against the agent constitution.
 
-Checks: imports, TOOL_REGISTRY structure, tool execution with sample inputs,
-return format (_ui_components + _data), and component structure validation.
+Two validators, and the difference is the whole security story:
+
+* ``validate`` EXECUTES the code under test (module import + a call to every
+  tool with synthesized args). That is acceptable ONLY for the server-hosted 027
+  path, where the same code is about to be ``Popen``'d on this host anyway.
+* ``validate_static`` NEVER imports, execs, compiles-and-runs, or otherwise
+  evaluates the code. It is pure ``ast`` inspection: registry shape, return
+  format, and an IMPORT ALLOWLIST. This is the ONLY validator a BYO agent's
+  code may see (058 G1/SC-002) — user-authored code never runs centrally, so
+  the orchestrator (which holds DB credentials and Fernet keys) can never be
+  the thing that runs it. Runtime behavior is the desktop host's business: the
+  agent either registers on the owner's machine or it doesn't.
+
+The import allowlist is also a HOST-COMPATIBILITY gate: the desktop host ships
+only the standard library plus ``astralprims``, so a bundle that imports
+``requests`` would die at import on the user's machine with no ``register_agent``
+frame — surfacing only as the host's silence timeout. Refuse it at generation.
 """
 import ast
 import importlib.util
@@ -11,11 +26,52 @@ import os
 import sys
 from dataclasses import dataclass, field, asdict
 from enum import Enum
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Set, Tuple
 
 from orchestrator.agent_spec import VALID_COMPONENT_TYPES, PRIMITIVES_SPEC
 
 logger = logging.getLogger("AgentValidator")
+
+#: Everything a BYO bundle is allowed to import: the standard library (which the
+#: host's interpreter always has) plus astralprims (the one client-side
+#: third-party dependency, Constitution V carve-out).
+BYO_EXTRA_ALLOWED_IMPORTS: Set[str] = {"astralprims"}
+
+
+def byo_allowed_modules() -> Set[str]:
+    """The BYO import allowlist: stdlib ∪ {astralprims}."""
+    return set(getattr(sys, "stdlib_module_names", set())) | BYO_EXTRA_ALLOWED_IMPORTS
+
+
+def disallowed_imports(code: str) -> List[str]:
+    """Top-level module names imported by ``code`` that a BYO host cannot resolve.
+
+    AST-only (never imports the module). A relative import is reported as
+    ``.<name>``: the bundle is a flat 3-file directory with no package.
+    """
+    allowed = byo_allowed_modules()
+    try:
+        tree = ast.parse(code or "")
+    except SyntaxError:
+        return []          # the syntax error is reported by the caller
+    bad: List[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = (alias.name or "").split(".")[0]
+                if root and root not in allowed and root not in bad:
+                    bad.append(root)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                rel = "." * node.level + (node.module or "")
+                if rel not in bad:
+                    bad.append(rel)
+                continue
+            root = (node.module or "").split(".")[0]
+            if root and root not in allowed and root not in bad:
+                bad.append(root)
+    return bad
+
 
 # Exceptions that indicate structural code bugs (not transient failures)
 STRUCTURAL_EXCEPTIONS = (
@@ -87,8 +143,205 @@ class ValidationReport:
         }
 
 
+def registry_from_source(code: str) -> Dict[str, Dict[str, Any]]:
+    """The declared TOOL_REGISTRY of ``code``, read by AST (never executed).
+
+    ``{tool_name: {"description", "input_schema", "scope", "_function_name"}}``;
+    an unparseable/absent registry yields ``{}``. Callers use this to check what
+    the generator ACTUALLY produced against what Analyze approved.
+    """
+    try:
+        tree = ast.parse(code or "")
+    except SyntaxError:
+        return {}
+    registry, _ = AgentSpecValidator._static_registry(tree, ValidationReport())
+    return registry or {}
+
+
 class AgentSpecValidator:
     """Validates generated mcp_tools.py files against the agent constitution."""
+
+    # ── Static (BYO) validation — NEVER executes the code under test ─────────
+
+    def validate_static(self, code: str, slug: str = "") -> ValidationReport:
+        """Validate BYO agent code WITHOUT running it (058 G1/SC-002).
+
+        Pure ``ast`` inspection — no import, no exec, no compile-and-run. Checks:
+
+        1. the file parses;
+        2. every import resolves on the desktop host (stdlib ∪ astralprims) —
+           this is a GATE, not a warning: an ``import requests`` bundle would
+           die silently on the user's machine;
+        3. ``TOOL_REGISTRY`` exists as a module-level dict literal, is non-empty,
+           and every entry has ``function`` (a module-level def),
+           ``description``, ``input_schema`` and ``scope``;
+        4. every registered tool's body returns the ``_ui_components`` contract
+           (a dict literal carrying the key, or ``create_ui_response(...)``).
+
+        Tool *behavior* is deliberately NOT checked: it is the desktop host's
+        business, and checking it would mean running the user's code here.
+        """
+        report = ValidationReport()
+
+        try:
+            tree = ast.parse(code or "")
+        except SyntaxError as e:
+            report.add(ValidationSeverity.ERROR, "IMPORT",
+                       f"Syntax error prevents parsing: {e}")
+            return report
+
+        # (2) Import allowlist — the host ships stdlib + astralprims, nothing else.
+        for module in disallowed_imports(code):
+            report.add(ValidationSeverity.ERROR, "IMPORT",
+                       f"Imports '{module}', which the desktop host does not have. "
+                       "A user agent may import ONLY the Python standard library "
+                       "and 'astralprims'.")
+
+        self._validate_imports(code, report)   # astralprims-usage WARNING (shared)
+
+        # (3) Registry shape.
+        registry, functions = self._static_registry(tree, report)
+        if registry is None:
+            return report
+
+        for tool_name, entry in registry.items():
+            report.tools_tested += 1
+            fn_name = entry.get("_function_name")
+            ok = True
+
+            if not fn_name:
+                report.add(ValidationSeverity.ERROR, "REGISTRY",
+                           "Missing 'function' key (must name a module-level "
+                           "function defined in this file).", tool_name=tool_name)
+                ok = False
+            elif fn_name not in functions:
+                report.add(ValidationSeverity.ERROR, "REGISTRY",
+                           f"'function' names '{fn_name}', which is not a function "
+                           "defined in this file.", tool_name=tool_name)
+                ok = False
+
+            if not entry.get("description"):
+                report.add(ValidationSeverity.WARNING, "REGISTRY",
+                           "Missing 'description' key.", tool_name=tool_name)
+            if not isinstance(entry.get("input_schema"), dict):
+                report.add(ValidationSeverity.WARNING, "REGISTRY",
+                           "Missing or non-object 'input_schema' key.", tool_name=tool_name)
+            if not isinstance(entry.get("scope"), str) or not entry.get("scope"):
+                report.add(ValidationSeverity.WARNING, "REGISTRY",
+                           "Missing 'scope' key (defaults to tools:read).",
+                           tool_name=tool_name)
+
+            # (4) Return contract — statically, from the function's own body.
+            if ok and not self._returns_ui_contract(functions[fn_name]):
+                report.add(ValidationSeverity.ERROR, "RETURN_FORMAT",
+                           "The function never returns the required shape: a dict "
+                           "with '_ui_components' (and '_data'), or "
+                           "create_ui_response([...]).", tool_name=tool_name)
+                ok = False
+
+            schema = entry.get("input_schema") if isinstance(entry.get("input_schema"), dict) else {}
+            props = schema.get("properties") or {}
+            required = schema.get("required") or []
+            params = [
+                {"name": pname, "type": (pinfo or {}).get("type", "any"),
+                 "description": (pinfo or {}).get("description", ""),
+                 "required": pname in required}
+                for pname, pinfo in props.items() if isinstance(pinfo, dict)
+            ]
+            report.tools.append({
+                "name": tool_name,
+                "description": entry.get("description") or "",
+                "scope": entry.get("scope") or "tools:read",
+                "parameters": params,
+            })
+            if ok:
+                report.tools_passed += 1
+
+        return report
+
+    @staticmethod
+    def _static_registry(tree: ast.Module, report: ValidationReport
+                         ) -> Tuple[Optional[Dict[str, Dict[str, Any]]],
+                                    Dict[str, ast.AST]]:
+        """Extract TOOL_REGISTRY + the module-level function defs, via AST only.
+
+        Each returned entry is ``{"_function_name", "description", "input_schema",
+        "scope"}``; a non-literal value (e.g. a computed schema) reads as absent
+        rather than being evaluated.
+        """
+        functions: Dict[str, ast.AST] = {
+            n.name: n for n in tree.body
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+
+        node = None
+        for stmt in tree.body:
+            if isinstance(stmt, ast.Assign) and any(
+                    isinstance(t, ast.Name) and t.id == "TOOL_REGISTRY"
+                    for t in stmt.targets):
+                node = stmt.value
+        if node is None:
+            report.add(ValidationSeverity.ERROR, "REGISTRY",
+                       "TOOL_REGISTRY not found in mcp_tools.py. The file must "
+                       "define a module-level TOOL_REGISTRY dict.")
+            return None, functions
+        if not isinstance(node, ast.Dict):
+            report.add(ValidationSeverity.ERROR, "REGISTRY",
+                       "TOOL_REGISTRY must be a dict literal.")
+            return None, functions
+        if not node.keys:
+            report.add(ValidationSeverity.ERROR, "REGISTRY",
+                       "TOOL_REGISTRY is empty — no tools defined.")
+            return None, functions
+
+        registry: Dict[str, Dict[str, Any]] = {}
+        for key_node, val_node in zip(node.keys, node.values):
+            if not (isinstance(key_node, ast.Constant) and isinstance(key_node.value, str)):
+                report.add(ValidationSeverity.ERROR, "REGISTRY",
+                           "TOOL_REGISTRY keys must be string literals (tool names).")
+                continue
+            tool_name = key_node.value
+            if not isinstance(val_node, ast.Dict):
+                report.add(ValidationSeverity.ERROR, "REGISTRY",
+                           "TOOL_REGISTRY entry must be a dict literal.",
+                           tool_name=tool_name)
+                continue
+            entry: Dict[str, Any] = {}
+            for k, v in zip(val_node.keys, val_node.values):
+                if not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
+                    continue
+                if k.value == "function":
+                    if isinstance(v, ast.Name):
+                        entry["_function_name"] = v.id
+                    continue
+                try:
+                    entry[k.value] = ast.literal_eval(v)
+                except (ValueError, SyntaxError, TypeError):
+                    continue      # non-literal: read as absent, never evaluated
+            registry[tool_name] = entry
+
+        if not registry:
+            report.add(ValidationSeverity.ERROR, "REGISTRY",
+                       "TOOL_REGISTRY has no usable tool entries.")
+            return None, functions
+        return registry, functions
+
+    @staticmethod
+    def _returns_ui_contract(fn: ast.AST) -> bool:
+        """True when the function's body can return the ``_ui_components`` shape."""
+        for node in ast.walk(fn):
+            # Any dict literal in the body carrying the key — covers both a
+            # direct `return {...}` and a payload assembled into a local first.
+            if isinstance(node, ast.Dict):
+                for k in node.keys:
+                    if isinstance(k, ast.Constant) and k.value == "_ui_components":
+                        return True
+            # create_ui_response([...]) builds the same shape.
+            if isinstance(node, ast.Call):
+                fname = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+                if fname == "create_ui_response":
+                    return True
+        return False
 
     def validate(self, code: str, slug: str, agents_dir: str) -> ValidationReport:
         """Run the full validation pipeline on generated tool code.

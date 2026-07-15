@@ -346,7 +346,31 @@ class ToolPermissionManager:
             return False
         if self._is_safe_agent(agent_id) and self._safe_flip_allowed(agent_id):
             return True
+        # 4. Feature 057/058 — a user-created agent's OWNER may use its tools by
+        # default. They authored it through the mandatory Analyze gate, it is
+        # private-by-construction, and there is NO permission UI to grant a scope
+        # on it — so requiring an explicit grant would make an authored agent
+        # unusable by the very person who created it. Ownership was already proven
+        # at step 0 (can_user_use_agent). An explicit opt-out (a scope_row with
+        # enabled=False, handled above) still wins, the required scope must be
+        # valid (checked above so the delegation mint can assert it), and hard
+        # security flags remain an independent upstream gate.
+        if self._is_owned_user_agent(user_id, agent_id):
+            return True
         return False
+
+    def _is_owned_user_agent(self, user_id: str, agent_id: str) -> bool:
+        """Whether ``agent_id`` is a user-created agent owned by ``user_id``
+        (features 057/058). Only a genuine user-agent row with a matching owner
+        returns True; built-ins/public/drafts return False, so their baseline is
+        unchanged. Fails closed on any error."""
+        try:
+            from orchestrator.user_agents import get_user_agent
+            ua = get_user_agent(self.db, agent_id)
+        except Exception:
+            logger.debug("owned-user-agent check failed", exc_info=True)
+            return False
+        return bool(ua) and ua.get("owner_user_id") == user_id
 
     def _is_safe_agent(self, agent_id: str) -> bool:
         """Whether ``agent_id`` is an owner-approved 'safe' agent (feature 040).
