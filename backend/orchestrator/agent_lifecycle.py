@@ -985,7 +985,7 @@ class AgentLifecycleManager:
 
         Returns True if a fix was attempted, False if this agent isn't a draft.
         """
-        draft = await asyncio.to_thread(self._get_draft_by_agent_id, agent_id)
+        draft = self._get_draft_by_agent_id(agent_id)
         if not draft:
             return False
 
@@ -1016,7 +1016,7 @@ class AgentLifecycleManager:
         await self._send_progress(websocket, draft_id, "auto_fix",
                                    f"Auto-fixing tool '{tool_name}': {error_message[:100]}...",
                                    GENERATING)
-        await asyncio.to_thread(self._append_log, draft_id, f"Auto-fix triggered for '{tool_name}': {error_message[:200]}")
+        self._append_log(draft_id, f"Auto-fix triggered for '{tool_name}': {error_message[:200]}")
 
         try:
             # Stop the running agent
@@ -1067,7 +1067,7 @@ class AgentLifecycleManager:
                 "content": f"Auto-fix applied for tool '{tool_name}': {error_message[:200]}",
                 "timestamp": int(time.time() * 1000),
             })
-            await asyncio.to_thread(self.db.update_draft_agent, draft_id, refinement_history=json.dumps(history))
+            self.db.update_draft_agent(draft_id, refinement_history=json.dumps(history))
 
             # Restart agent with fixed code
             await self.start_draft_agent(draft_id, websocket)
@@ -1075,7 +1075,7 @@ class AgentLifecycleManager:
             await self._send_progress(websocket, draft_id, "auto_fix_complete",
                                        f"Auto-fix applied for tool '{tool_name}'. Agent restarted.",
                                        TESTING)
-            await asyncio.to_thread(self._append_log, draft_id, f"Auto-fix complete for '{tool_name}'")
+            self._append_log(draft_id, f"Auto-fix complete for '{tool_name}'")
             return True
 
         except Exception as e:
@@ -1316,15 +1316,14 @@ class AgentLifecycleManager:
     async def admin_review(self, draft_id: str, decision: str, admin_user_id: str,
                             notes: str = None, websocket=None) -> Dict[str, Any]:
         """Admin approves or rejects a draft agent pending review."""
-        draft = await asyncio.to_thread(self.db.get_draft_agent, draft_id)
+        draft = self.db.get_draft_agent(draft_id)
         if not draft:
             raise ValueError(f"Draft {draft_id} not found")
         if draft["status"] != PENDING_REVIEW:
             raise ValueError(f"Draft is not pending review (status: {draft['status']})")
 
         if decision == "approve":
-            await asyncio.to_thread(
-                self.db.update_draft_agent,
+            self.db.update_draft_agent(
                 draft_id, status=LIVE,
                 reviewed_by=admin_user_id,
                 review_notes=notes or "Approved by admin",
@@ -1333,30 +1332,28 @@ class AgentLifecycleManager:
             # Live agents: all scopes DISABLED — user must explicitly enable
             agent_id = f"{draft['agent_slug'].replace('_', '-')}-1"
             if self.orchestrator:
-                await asyncio.to_thread(
-                    self.orchestrator.tool_permissions.set_agent_scopes,
+                self.orchestrator.tool_permissions.set_agent_scopes(
                     draft["user_id"], agent_id,
                     {"tools:read": False, "tools:write": False, "tools:search": False, "tools:system": False}
                 )
-            await asyncio.to_thread(self._append_log, draft_id, f"Admin approved by {admin_user_id}")
+            self._append_log(draft_id, f"Admin approved by {admin_user_id}")
 
             # Start agent if not running
             if draft_id not in self._draft_processes or \
                self._draft_processes[draft_id].poll() is not None:
                 await self.start_draft_agent(draft_id, websocket)
 
-            return await asyncio.to_thread(self.db.get_draft_agent, draft_id)
+            return self.db.get_draft_agent(draft_id)
 
         elif decision == "reject":
-            await asyncio.to_thread(
-                self.db.update_draft_agent,
+            self.db.update_draft_agent(
                 draft_id, status=REJECTED,
                 reviewed_by=admin_user_id,
                 review_notes=notes or "Rejected by admin",
             )
             await self.stop_draft_agent(draft_id)
-            await asyncio.to_thread(self._append_log, draft_id, f"Admin rejected by {admin_user_id}: {notes or 'No reason given'}")
-            return await asyncio.to_thread(self.db.get_draft_agent, draft_id)
+            self._append_log(draft_id, f"Admin rejected by {admin_user_id}: {notes or 'No reason given'}")
+            return self.db.get_draft_agent(draft_id)
 
         else:
             raise ValueError(f"Invalid decision: {decision}. Must be 'approve' or 'reject'.")
@@ -1365,7 +1362,7 @@ class AgentLifecycleManager:
 
     async def delete_draft(self, draft_id: str) -> bool:
         """Delete a draft agent — stops process, removes files, deletes DB record."""
-        draft = await asyncio.to_thread(self.db.get_draft_agent, draft_id)
+        draft = self.db.get_draft_agent(draft_id)
         if not draft:
             return False
 
@@ -1407,7 +1404,7 @@ class AgentLifecycleManager:
                             logger.warning(f"Directory still locked: {agent_dir}")
 
         # Delete DB record
-        await asyncio.to_thread(self.db.delete_draft_agent, draft_id)
+        self.db.delete_draft_agent(draft_id)
 
         # Purge the permission/ownership rows the test flow created for the
         # draft's runtime agent id. Without this they leak after discard: a
@@ -1415,7 +1412,7 @@ class AgentLifecycleManager:
         # generated tools keep dispatching in normal chats and shadow
         # first-party tools.
         runtime_agent_id = slug.replace("_", "-") + "-1"
-        await asyncio.to_thread(self._purge_agent_permission_rows, runtime_agent_id)
+        self._purge_agent_permission_rows(runtime_agent_id)
 
         logger.info(f"Deleted draft agent {draft_id} ({draft['agent_name']})")
         return True
