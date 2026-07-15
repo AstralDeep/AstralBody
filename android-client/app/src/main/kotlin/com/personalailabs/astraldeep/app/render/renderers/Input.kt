@@ -20,6 +20,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -35,6 +36,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -47,12 +49,16 @@ import com.personalailabs.astraldeep.app.render.ThemeSink
 import com.personalailabs.astraldeep.app.ui.theme.channelSwatchOptions
 import com.personalailabs.astraldeep.app.ui.theme.hexToColor
 import com.personalailabs.astraldeep.core.sdui.Component
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 
 /** How long a ParamPicker shows "Saving…" before restoring its buttons when no
@@ -93,11 +99,116 @@ private fun InputPrimitive(
     )
 }
 
+// --- param_picker field rules (pure — JVM unit-tested) ----------------------
+
+/** One field attribute as a string; absent / non-primitive reads as null. */
+internal fun fieldStr(
+    f: JsonObject,
+    key: String,
+): String? = (f[key] as? JsonPrimitive)?.contentOrNull
+
+internal fun fieldKind(f: JsonObject): String = fieldStr(f, "kind") ?: "text"
+
+/**
+ * The option KEYS a `select`/`checklist` offers. The catalog is server-owned (the
+ * LLM provider presets, for one) — the client never invents, relabels or reorders
+ * options, and submits the key it was handed verbatim.
+ */
+internal fun fieldOptions(f: JsonObject): List<String> =
+    (f["options"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull } ?: emptyList()
+
+/** A `select` only becomes a dropdown when the server actually gave it options —
+ *  an empty menu is a dead control, so it degrades to the free-text field. */
+internal fun rendersAsDropdown(f: JsonObject): Boolean = fieldKind(f) == "select" && fieldOptions(f).isNotEmpty()
+
+/**
+ * The initially selected key of a `select`: the server default when it is on the
+ * menu, else the first option — a dropdown always shows *something*, and that
+ * something is what an untouched Save submits (parity with `<select>`, which
+ * selects its first `<option>` when none is marked selected). With no options the
+ * field is a text box, so the raw default carries through.
+ */
+internal fun selectInitial(
+    default: String?,
+    options: List<String>,
+): String =
+    when {
+        options.isEmpty() -> default.orEmpty()
+        default != null && default in options -> default
+        else -> options.first()
+    }
+
+/** The initially checked keys of a `checklist`: the server's default list ∩ its
+ *  options (an option-less default could never be unchecked, nor submitted). */
+internal fun checklistInitial(
+    default: JsonElement?,
+    options: List<String>,
+): Set<String> =
+    (default as? JsonArray)
+        ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+        ?.filterTo(mutableSetOf()) { it in options } ?: emptySet()
+
+/** Seed state for every field that holds a string: text/password/textarea/number
+ *  and `select` (which holds the selected option KEY). */
+internal fun initialTexts(fields: List<JsonObject>): Map<String, String> =
+    fields.mapNotNull { f ->
+        val name = fieldStr(f, "name") ?: return@mapNotNull null
+        when (fieldKind(f)) {
+            "boolean", "checklist" -> null
+            "select" -> name to selectInitial(fieldStr(f, "default"), fieldOptions(f))
+            else -> name to (fieldStr(f, "default") ?: "")
+        }
+    }.toMap()
+
+internal fun initialBools(fields: List<JsonObject>): Map<String, Boolean> =
+    fields.mapNotNull { f ->
+        val name = fieldStr(f, "name") ?: return@mapNotNull null
+        if (fieldKind(f) == "boolean") name to ((f["default"] as? JsonPrimitive)?.booleanOrNull ?: false) else null
+    }.toMap()
+
+internal fun initialChecks(fields: List<JsonObject>): Map<String, Set<String>> =
+    fields.mapNotNull { f ->
+        val name = fieldStr(f, "name") ?: return@mapNotNull null
+        if (fieldKind(f) == "checklist") name to checklistInitial(f["default"], fieldOptions(f)) else null
+    }.toMap()
+
+/**
+ * The `{fields: {...}}` submit payload (plus the action's extra payload). Each kind
+ * keeps its WIRE TYPE, because that is what the `chrome_*` handlers parse (web
+ * parity: client.js `collectFields`): boolean → bool, checklist → array of keys in
+ * server order, everything else → string — a `select` submits the option KEY, not
+ * its label, so the handlers keep working untouched.
+ */
+internal fun collectFields(
+    fields: List<JsonObject>,
+    texts: Map<String, String>,
+    bools: Map<String, Boolean>,
+    checks: Map<String, Set<String>>,
+    extra: JsonObject = JsonObject(emptyMap()),
+): JsonObject =
+    buildJsonObject {
+        putJsonObject("fields") {
+            fields.forEach { f ->
+                val name = fieldStr(f, "name") ?: return@forEach
+                when (fieldKind(f)) {
+                    "boolean" -> put(name, bools[name] ?: false)
+                    "checklist" -> {
+                        val on = checks[name] ?: emptySet()
+                        putJsonArray(name) { fieldOptions(f).filter { it in on }.forEach { add(it) } }
+                    }
+                    else -> put(name, texts[name] ?: "")
+                }
+            }
+        }
+        extra.forEach { (k, v) -> put(k, v) }
+    }
+
 /**
  * Feature 043 — a settings form. Renders each field (text / password / textarea /
- * boolean / select→text) with collected state and one or more action buttons that
- * post the SAME `{fields: {...}}` payload to a `chrome_*` handler (action-submit),
- * or the single `submit_action`. Falls back to the legacy single-action button.
+ * number / boolean / select / checklist) with collected state and one or more action
+ * buttons that post the SAME `{fields: {...}}` payload to a `chrome_*` handler
+ * (action-submit), or the single `submit_action`. Falls back to the legacy
+ * single-action button.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -106,43 +217,11 @@ private fun ParamPickerPrimitive(
     emit: Emit,
 ) {
     val fields = c.arr("fields")?.mapNotNull { it as? JsonObject } ?: emptyList()
-    val texts =
-        remember(c) {
-            mutableStateMapOf<String, String>().apply {
-                fields.forEach { f ->
-                    val name = (f["name"] as? JsonPrimitive)?.contentOrNull ?: return@forEach
-                    if ((f["kind"] as? JsonPrimitive)?.contentOrNull != "boolean") {
-                        put(name, (f["default"] as? JsonPrimitive)?.contentOrNull ?: "")
-                    }
-                }
-            }
-        }
-    val bools =
-        remember(c) {
-            mutableStateMapOf<String, Boolean>().apply {
-                fields.forEach { f ->
-                    val name = (f["name"] as? JsonPrimitive)?.contentOrNull ?: return@forEach
-                    if ((f["kind"] as? JsonPrimitive)?.contentOrNull == "boolean") {
-                        put(name, (f["default"] as? JsonPrimitive)?.booleanOrNull ?: false)
-                    }
-                }
-            }
-        }
+    val texts = remember(c) { mutableStateMapOf<String, String>().apply { putAll(initialTexts(fields)) } }
+    val bools = remember(c) { mutableStateMapOf<String, Boolean>().apply { putAll(initialBools(fields)) } }
+    val checks = remember(c) { mutableStateMapOf<String, Set<String>>().apply { putAll(initialChecks(fields)) } }
 
-    fun collect(extra: JsonObject) =
-        buildJsonObject {
-            putJsonObject("fields") {
-                fields.forEach { f ->
-                    val name = (f["name"] as? JsonPrimitive)?.contentOrNull ?: return@forEach
-                    if ((f["kind"] as? JsonPrimitive)?.contentOrNull == "boolean") {
-                        put(name, bools[name] ?: false)
-                    } else {
-                        put(name, texts[name] ?: "")
-                    }
-                }
-            }
-            extra.forEach { (k, v) -> put(k, v) }
-        }
+    fun collect(extra: JsonObject) = collectFields(fields, texts, bools, checks, extra)
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -153,26 +232,44 @@ private fun ParamPickerPrimitive(
                 Text(it, style = MaterialTheme.typography.titleSmall)
             }
             fields.forEach { f ->
-                val name = (f["name"] as? JsonPrimitive)?.contentOrNull ?: return@forEach
-                val label = (f["label"] as? JsonPrimitive)?.contentOrNull ?: name
-                val kind = (f["kind"] as? JsonPrimitive)?.contentOrNull ?: "text"
-                if (kind == "boolean") {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Switch(checked = bools[name] ?: false, onCheckedChange = { bools[name] = it })
-                        Text(label, modifier = Modifier.padding(start = 8.dp))
-                    }
-                } else {
-                    OutlinedTextField(
-                        value = texts[name] ?: "",
-                        onValueChange = { texts[name] = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text(label) },
-                        singleLine = kind != "textarea",
-                        visualTransformation =
-                            if (kind == "password") PasswordVisualTransformation() else VisualTransformation.None,
-                    )
+                val name = fieldStr(f, "name") ?: return@forEach
+                val label = fieldStr(f, "label") ?: name
+                val kind = fieldKind(f)
+                when {
+                    kind == "boolean" ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Switch(checked = bools[name] ?: false, onCheckedChange = { bools[name] = it })
+                            Text(label, modifier = Modifier.padding(start = 8.dp))
+                        }
+                    kind == "checklist" ->
+                        ChecklistField(
+                            label = label,
+                            options = fieldOptions(f),
+                            selected = checks[name] ?: emptySet(),
+                            onToggle = { opt ->
+                                val on = checks[name] ?: emptySet()
+                                checks[name] = if (opt in on) on - opt else on + opt
+                            },
+                        )
+                    rendersAsDropdown(f) ->
+                        SelectField(
+                            label = label,
+                            options = fieldOptions(f),
+                            selected = texts[name] ?: "",
+                            onSelect = { texts[name] = it },
+                        )
+                    else ->
+                        OutlinedTextField(
+                            value = texts[name] ?: "",
+                            onValueChange = { texts[name] = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text(label) },
+                            singleLine = kind != "textarea",
+                            visualTransformation =
+                                if (kind == "password") PasswordVisualTransformation() else VisualTransformation.None,
+                        )
                 }
-                (f["help"] as? JsonPrimitive)?.contentOrNull?.let {
+                fieldStr(f, "help")?.let {
                     Text(
                         it,
                         style = MaterialTheme.typography.labelSmall,
@@ -226,6 +323,96 @@ private fun ParamPickerPrimitive(
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * A `select` field — an exposed dropdown, NOT a free-text box (the LLM provider
+ * setup made the difference user-visible: you picked a provider on every other
+ * client and typed `openai` by hand here). Shows the current option and opens the
+ * server's list on tap; the picked KEY is what gets submitted. Same
+ * Box + [DropdownMenu] idiom as [ColorPickerPrimitive].
+ */
+@Composable
+private fun SelectField(
+    label: String,
+    options: List<String>,
+    selected: String,
+    onSelect: (String) -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Box {
+            Row(
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(4.dp))
+                        .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(4.dp))
+                        .clickable(role = Role.DropdownList) { open = true }
+                        .padding(horizontal = 12.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(selected, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                Text("▾", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                options.forEach { opt ->
+                    DropdownMenuItem(
+                        text = { Text(opt, color = MaterialTheme.colorScheme.onSurface) },
+                        onClick = {
+                            open = false
+                            onSelect(opt)
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * A `checklist` field — toggle chips (web parity: the aria-pressed chip row), so the
+ * submit carries a LIST of keys. As a text field it submitted a String and every
+ * handler expecting a list broke on Android alone.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ChecklistField(
+    label: String,
+    options: List<String>,
+    selected: Set<String>,
+    onToggle: (String) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (options.isEmpty()) {
+            Text(
+                "(no options provided)",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                options.forEach { opt ->
+                    FilterChip(
+                        selected = opt in selected,
+                        onClick = { onToggle(opt) },
+                        label = { Text(opt) },
+                    )
                 }
             }
         }

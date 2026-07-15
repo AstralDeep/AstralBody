@@ -82,6 +82,14 @@ object ProtocolManifest {
             "audit_append" to IGNORED,
             // creation (draft cards carry state in-chat)
             "agent_creation_progress" to IGNORED,
+            // BYO client agents (058): the tunnel/bundle/stop frames are the DESKTOP
+            // HOST's transport — Android authors and manages agents but never hosts
+            // one, so a phone must never act on them. agent_offline is the host-liveness
+            // notice; the authoring surface derives that state server-side today.
+            "agent_tunnel" to IGNORED,
+            "agent_bundle_deliver" to IGNORED,
+            "agent_stop" to IGNORED,
+            "agent_offline" to IGNORED,
             // scheduler notifications + errors (044)
             "notification" to HANDLED,
             "error" to HANDLED,
