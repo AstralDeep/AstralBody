@@ -38,7 +38,7 @@ description: "Task list for feature 058 — BYO client-side agents runtime, host
 
 - [X] T013 [US3] **Per-owner ingress bound** (was 057 T021, FR-017/SC-008): rate + in-flight-frame cap on user-agent tunnels (extend `concurrency_cap`/`ChainBudget`), scoped to external user-agent sockets only — `orchestrator.py`
 - [X] T014 [US3] **No secrets to untrusted agents** (was 057 T022): do not attach `_delegation_token` bytes / per-user secrets on the direct dispatch path for user-hosted agents (mirror the 054 in-process-only rule) — `orchestrator.py`
-- [ ] T015 [P] [US3] **Transport adversarial suite** (was 057 T018 remainder): forged identity/token over the tunnel, undeclared-tool, flood, offline — each denied fail-closed + audited — extend `backend/tests/test_byo_boundary_adversarial.py`
+- [X] T015 [P] [US3] **Transport adversarial suite** (was 057 T018 remainder): `backend/tests/test_byo_transport_adversarial.py` — undeclared-tool (non-owner denied fail-closed; get_tool_scope never inherits a declared scope), forged identity in the register frame (another user's id / built-in id / reserved `__*` all refused by `authorize_registration`), pre-validation + revalidation-required status gates. Flood/offline already in `test_byo_tunnel.py`; denial-audit now covered by T035.
 
 ## Phase 4: Guided authoring UX (US2)
 
@@ -51,10 +51,10 @@ description: "Task list for feature 058 — BYO client-side agents runtime, host
 
 - [ ] T020 [P] [US4] Android author+manage parity via the SDUI chrome path (was 057 T031) — `android-client`
 - [ ] T021 [P] [US4] Apple parity: iOS author-only; macOS MAS build author-only (was 057 T032) — `apple-clients`
-- [ ] T022 [P] [US4] Web author+manage parity via `render()` HTML (was 057 T033)
-- [ ] T023 [US4] Verify **watch exclusion** (was 057 T034) + guard test — `backend/tests/test_byo_watch_excluded.py`
+- [X] T022 [P] [US4] Web author+manage parity via `render()` HTML (was 057 T033) — **PROVEN LIVE 2026-07-14**: the full 5-phase author + generate + manage flow was driven end-to-end in the web client (Settings → "My agents"), delivering to a Windows host.
+- [X] T023 [US4] Verify **watch exclusion** (was 057 T034) + guard test — `backend/tests/test_byo_watch_excluded.py`: "My agents" is the single flag-gated authoring affordance in `menu_model`; `watch` is absent from `chrome_events._NATIVE_SDUI_DEVICE_TYPES` (the device list that gates chrome-menu delivery + surface render), keeping the surface off the wrist (FR-023). Host-marking has no server-side device gate (watch host exclusion is client-side — no host UI on the wrist); noted in the test.
 - [X] T024 [US4] FR-024 non-host messaging: delivery now targets **host-capable sockets only** (`_agent_host_sockets`; additive `RegisterUI.agent_host`/`host_session_id` + mark-by-demonstration) — a browser tab never receives a code bundle; the `no_host` branch tells the truth ("open your desktop client and re-run Generate") — `orchestrator.py`, `authoring.py`
-- [ ] T025 [US4] macOS host gating docs (was 057 T036): direct-download build hosts; MAS build author-only — `apple-clients` + `docs/`
+- [X] T025 [US4] macOS host gating docs (was 057 T036): direct-download build hosts; MAS build author-only — `apple-clients` + `docs/` (docs/byo-client-agents.md §"macOS host gating" + a pointer in apple-clients/README.md; docs-only, no Swift touched)
 
 ## Phase 6: Lifecycle (US5)
 
@@ -67,10 +67,10 @@ description: "Task list for feature 058 — BYO client-side agents runtime, host
 
 ## Phase 7: Polish
 
-- [ ] T032 [P] Update `CLAUDE.md` (Recent Changes + Active Technologies) for the completed 057+058 feature
-- [ ] T033 [P] `docs/`: production enablement note for `FF_BYO_AGENTS` + desktop-host packaging (Windows child process; macOS direct-download gating)
+- [X] T032 [P] Update `CLAUDE.md` (Recent Changes + Active Technologies) for the completed 057+058 feature — added a 057+058 Recent-Changes entry (top of the list) + two Active-Technologies lines (tech + schema); caveats honest (Android/Apple parity + host-side revise rollback not live-verified, Cresco Mode-2 deferred)
+- [X] T033 [P] `docs/`: production enablement note for `FF_BYO_AGENTS` + desktop-host packaging (Windows child process; macOS direct-download gating) — new docs/byo-client-agents.md (enable flow, security posture, Windows packaging, macOS host gating, flag-off guarantee, known limitations); linked from docs/production-deployment.md (companion-docs index + a short BYO section)
 - [ ] T034 Full backend `pytest` + `ruff` + diff coverage-gate; smoke with `FF_BYO_AGENTS` on and off (flag-off byte-identical)
-- [ ] T035 [P] Audit completeness: every user-agent action + denial emits an audited row
+- [X] T035 [P] Audit completeness: every user-agent action + denial emits an audited row — `orchestrator._audit_user_agent` (event_class `agent_lifecycle`, attributed to the owning human) wired at go_live, `deliver_agent_bundle`, `delete_user_agent`, refused `authorize_registration`, and the user-agent-scoped `GateRefusal` denial path; tool dispatch keeps its `agent_tool_call` pair. `backend/tests/test_byo_audit_completeness.py` (6 real guards, formerly xfail gaps).
 
 ## Phase 8: Cresco Mode-2 transport (DEFERRED)
 

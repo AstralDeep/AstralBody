@@ -191,6 +191,15 @@ unsigned CI builds and clean clones build without a signing identity.
   the watch dictates via SwiftUI `TextFieldLink` (the system dictation sheet,
   out-of-process) and only plays audio — it never touches the microphone or
   the Speech framework.
+- **BYO client-side agents (features 057/058) are AUTHOR-ONLY on these builds.**
+  The App Sandbox forbids spawning arbitrary child processes / executing the
+  packaged interpreter, so a Mac App Store build cannot *host* a user-authored
+  agent — it can only author and manage one (execution binds to a separate
+  Windows or direct-download-macOS desktop host). A non-sandboxed
+  **direct-download (Developer ID)** macOS build *may* host BYO agents with the
+  same child-process model as Windows. Host-gating rationale + the full BYO
+  security/enablement posture: [docs/byo-client-agents.md](../docs/byo-client-agents.md).
+  The watch is excluded from BYO authoring entirely.
 
 ## Signing & release runbook (053)
 

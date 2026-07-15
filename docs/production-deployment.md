@@ -9,7 +9,8 @@ adapts the output per device.
 
 Companion docs: [keycloak-realm-settings.md](keycloak-realm-settings.md)
 (identity provider), [keycloak_agent_delegation_setup.md](keycloak_agent_delegation_setup.md)
-(RFC 8693 agent delegation).
+(RFC 8693 agent delegation), [byo-client-agents.md](byo-client-agents.md)
+(features 057/058 — user-authored, desktop-hosted BYO agents; `FF_BYO_AGENTS`).
 
 ## Fail-closed posture (read this first)
 
@@ -70,6 +71,18 @@ deployment-wide default for user traffic:
   migrated into any store: each user configures fresh at next sign-in,
   and an admin sets the System LLM in-app if background features are
   wanted. Boot does not require any LLM configuration.
+
+## BYO client-side agents (features 057/058 — default OFF)
+
+User-authored agents that run on the **user's own desktop** as an isolated child
+process and tunnel inward over the client's authenticated UI socket. **Off by
+default** and safe to leave off. To enable, set `FF_BYO_AGENTS=true` in the host
+`.env` and **restart** — the flag is read once at import (boot-time switch, no
+admin UI). No schema migration, no new runtime dependency, no new port. User code
+is never executed on the orchestrator (pure-AST static validation); it runs only
+on the user's desktop and is untrusted at the boundary. Full enablement + security
+posture + desktop-host packaging (Windows child process; macOS
+direct-download-hosts vs App-Store author-only): **[byo-client-agents.md](byo-client-agents.md)**.
 
 ## TLS / reverse proxy
 
