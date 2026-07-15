@@ -11,6 +11,7 @@ could put it on the central host, so both are pinned here:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -26,6 +27,11 @@ from shared.database import Database  # noqa: E402
 from orchestrator import agent_authoring as aa  # noqa: E402
 from orchestrator.agent_lifecycle import AgentLifecycleManager, BYO_ORIGIN  # noqa: E402
 from orchestrator.orchestrator import LIVE_DRAFT_RELAUNCH_QUERY  # noqa: E402
+
+
+async def _t(fn, *a, **k):
+    """Run a synchronous (DB-touching) helper off the event loop (052)."""
+    return await asyncio.to_thread(fn, *a, **k)
 
 
 @pytest.fixture()
@@ -64,31 +70,31 @@ async def test_start_draft_agent_refuses_a_byo_draft(db, monkeypatch):
 
     monkeypatch.setattr(subprocess, "Popen", _no_popen)
     lm = AgentLifecycleManager(db, orchestrator=None)
-    draft_id = _live_draft(db, BYO_ORIGIN)
+    draft_id = await _t(_live_draft, db, BYO_ORIGIN)
     try:
         with pytest.raises(ValueError, match="BYO"):
             await lm.start_draft_agent(draft_id)
     finally:
-        db.delete_draft_agent(draft_id)
+        await _t(db.delete_draft_agent, draft_id)
 
 
 async def test_approve_agent_refuses_a_byo_draft(db):
     # approve_agent both exec's the tools in-process AND Popens them. A BYO draft
     # id belongs to the user, so this entry point is reachable — refuse it.
     lm = AgentLifecycleManager(db, orchestrator=None)
-    draft_id = _live_draft(db, BYO_ORIGIN)
+    draft_id = await _t(_live_draft, db, BYO_ORIGIN)
     try:
         with pytest.raises(ValueError, match="BYO"):
             await lm.approve_agent(draft_id)
     finally:
-        db.delete_draft_agent(draft_id)
+        await _t(db.delete_draft_agent, draft_id)
 
 
 async def test_refine_validates_a_byo_draft_out_of_process(db, monkeypatch, tmp_path):
     # The refine entry point validates too — and validation EXECUTES the tools.
     lm = AgentLifecycleManager(db, orchestrator=None)
-    draft_id = _live_draft(db, BYO_ORIGIN)
-    slug = db.get_draft_agent(draft_id)["agent_slug"]
+    draft_id = await _t(_live_draft, db, BYO_ORIGIN)
+    slug = (await _t(db.get_draft_agent, draft_id))["agent_slug"]
     agent_dir = os.path.join(lm._agents_dir, slug)
     os.makedirs(agent_dir, exist_ok=True)
     with open(os.path.join(agent_dir, "mcp_tools.py"), "w", encoding="utf-8") as fh:
@@ -110,7 +116,7 @@ async def test_refine_validates_a_byo_draft_out_of_process(db, monkeypatch, tmp_
         assert json.loads(state["validation_report"])["passed"]
     finally:
         shutil.rmtree(agent_dir, ignore_errors=True)
-        db.delete_draft_agent(draft_id)
+        await _t(db.delete_draft_agent, draft_id)
 
 
 async def test_authoring_path_never_starts_a_process(monkeypatch, db):
@@ -160,4 +166,4 @@ async def test_authoring_path_never_starts_a_process(monkeypatch, db):
         o.lifecycle_manager.approve_agent.assert_not_called()
     finally:
         for t in ("user_agent", "agent_ownership"):
-            db.execute(f"DELETE FROM {t} WHERE agent_id = ?", (res["agent_id"],))
+            await _t(db.execute, f"DELETE FROM {t} WHERE agent_id = ?", (res["agent_id"],))

@@ -3,6 +3,7 @@ frame wrap, honest-offline on disconnect. Exercises the whole server-side tunnel
 path with a fake UI socket (only the real Windows host needs a live client)."""
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -21,6 +22,11 @@ from shared.protocol import AgentCard, AgentSkill, RegisterAgent  # noqa: E402
 OWNER = "byo058own"
 FOREIGN = "byo058foreign"
 AID = "byo058-greeter"
+
+
+async def _t(fn, *a, **k):
+    """Run a synchronous (DB-touching) helper off the event loop (052)."""
+    return await asyncio.to_thread(fn, *a, **k)
 
 
 class FakeUI:
@@ -73,9 +79,9 @@ async def test_owner_tunnel_registers_and_goes_live(orch):
     await _tunnel(orch, ws, _reg_frame())
     assert AID in orch.agents and isinstance(orch.agents[AID], TunnelSocket)
     assert orch.agents[AID].owner_sub == OWNER
-    row = ua.get_user_agent(orch.history.db, AID)
+    row = await _t(ua.get_user_agent, orch.history.db, AID)
     assert row["status"] == "live"           # go_live ran
-    own = orch.history.db.get_agent_ownership(AID)
+    own = await _t(orch.history.db.get_agent_ownership, AID)
     assert own is not None and bool(own["is_public"]) is False   # private companion row
 
 
@@ -122,7 +128,7 @@ async def test_no_delegation_token_handed_to_tunnel_agent(orch):
     ws = FakeUI()
     orch.ui_sessions[ws] = {"sub": OWNER, "_raw_token": "tok"}
     await _tunnel(orch, ws, _reg_frame())
-    orch.tool_permissions.set_agent_scopes(OWNER, AID, {"tools:read": True})
+    await _t(orch.tool_permissions.set_agent_scopes, OWNER, AID, {"tools:read": True})
     auth = await orch._authorize_and_prepare(ws, AID, "greet", {"user_id": OWNER}, None, OWNER)
     from orchestrator.orchestrator import PreparedDispatch, GateRefusal
     if isinstance(auth, GateRefusal):
@@ -197,9 +203,9 @@ async def test_register_ui_marks_only_a_declared_host(monkeypatch):
     import uuid as _uuid
     monkeypatch.setenv("USE_MOCK_AUTH", "true")
     from orchestrator.async_tasks import BackgroundTask, VirtualWebSocket
-    o = Orchestrator()
-    o._llm_store.set_sync("test_user", provider="custom", base_url="http://t.invalid/v1",
-                          model="m", api_key="k")
+    o = await _t(Orchestrator)
+    await _t(o._llm_store.set_sync, "test_user", provider="custom",
+             base_url="http://t.invalid/v1", model="m", api_key="k")
 
     async def _register(**extra):
         ws = VirtualWebSocket(BackgroundTask(task_id=_uuid.uuid4().hex, chat_id="",
@@ -226,7 +232,7 @@ async def test_delete_user_agent_soft_deletes_and_stops_host(orch):
     ws.sent.clear()
     assert await orch.delete_user_agent(OWNER, AID) is True
     assert AID not in orch.agents                                    # routing removed
-    row = ua.get_user_agent(orch.history.db, AID)
+    row = await _t(ua.get_user_agent, orch.history.db, AID)
     assert row["status"] == "disabled" and row["deleted_at"] is not None   # soft-deleted, retained
     assert any(json.loads(f).get("type") == "agent_stop" for f in ws.sent)  # host told to stop
     # A different user cannot delete it.
@@ -238,8 +244,8 @@ async def test_list_owner_agents_excludes_foreign_and_deleted(orch):
     ws = FakeUI()
     orch.ui_sessions[ws] = {"sub": OWNER}
     await _tunnel(orch, ws, _reg_frame())
-    mine = ua.list_user_agents(orch.history.db, OWNER)
+    mine = await _t(ua.list_user_agents, orch.history.db, OWNER)
     assert [a["agent_id"] for a in mine] == [AID]
-    assert ua.list_user_agents(orch.history.db, "someone-else") == []
-    ua.soft_delete(orch.history.db, AID)
-    assert ua.list_user_agents(orch.history.db, OWNER) == []          # soft-deleted hidden
+    assert await _t(ua.list_user_agents, orch.history.db, "someone-else") == []
+    await _t(ua.soft_delete, orch.history.db, AID)
+    assert await _t(ua.list_user_agents, orch.history.db, OWNER) == []          # soft-deleted hidden

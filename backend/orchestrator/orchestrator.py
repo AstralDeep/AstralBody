@@ -6813,7 +6813,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
         # Inject per-user credentials (E2E encrypted — only agent can decrypt)
         if user_id and agent_id:
-            creds = self.credential_manager.get_agent_credentials_encrypted(user_id, agent_id)
+            creds = await asyncio.to_thread(
+                self.credential_manager.get_agent_credentials_encrypted, user_id, agent_id)
             if creds:
                 args["_credentials"] = creds
                 args["_credentials_encrypted"] = True

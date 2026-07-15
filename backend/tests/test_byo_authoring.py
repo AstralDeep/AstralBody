@@ -8,6 +8,7 @@ hid a defect where the delivered bundle was always ``{}``."""
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import os
 import shutil
@@ -23,6 +24,11 @@ from shared.database import Database  # noqa: E402
 from orchestrator import agent_authoring as aa  # noqa: E402
 from orchestrator import user_agents as ua  # noqa: E402
 from orchestrator.agent_lifecycle import AgentLifecycleManager, BYO_ORIGIN  # noqa: E402
+
+
+async def _t(fn, *a, **k):
+    """Run a synchronous (DB-touching) helper off the event loop (052)."""
+    return await asyncio.to_thread(fn, *a, **k)
 
 # A plausible LLM output: self-contained, astralprims-only, correct return shape.
 CANNED_TOOLS = '''"""Greeter tools."""
@@ -108,11 +114,11 @@ async def test_analyze_pass_generates_validates_delivers():
         assert res["status"] == "delivered" and res["delivered_to"] == 1
         o.lifecycle_manager.generate_code.assert_awaited_once()
         o.deliver_agent_bundle.assert_awaited_once()
-        row = ua.get_user_agent(o.history.db, res["agent_id"])
+        row = await _t(ua.get_user_agent, o.history.db, res["agent_id"])
         assert row["status"] == "validated" and row["constitution_version"]
     finally:
         for t in ("user_agent", "agent_ownership"):
-            o.history.db.execute(f"DELETE FROM {t} WHERE agent_id = ?", (res["agent_id"],))
+            await _t(o.history.db.execute, f"DELETE FROM {t} WHERE agent_id = ?", (res["agent_id"],))
 
 
 async def test_generation_failure_reported_no_delivery():
@@ -129,7 +135,7 @@ async def test_generation_failure_reported_no_delivery():
         o.deliver_agent_bundle.assert_not_awaited()
     finally:
         for t in ("user_agent", "agent_ownership"):
-            o.history.db.execute(f"DELETE FROM {t} WHERE agent_id = ?", (res["agent_id"],))
+            await _t(o.history.db.execute, f"DELETE FROM {t} WHERE agent_id = ?", (res["agent_id"],))
 
 
 def test_slug_is_owner_namespaced_and_non_reserved():
@@ -145,7 +151,7 @@ async def _gen_byo(lm, agent_id, name="Byo Greeter"):
         user_id="u-byo", agent_name=name,
         description="greets the owner by their name",
         tools_spec=[{"name": "greet", "description": "greet"}])
-    lm.db.update_draft_agent(draft["id"], origin=BYO_ORIGIN)
+    await _t(lm.db.update_draft_agent, draft["id"], origin=BYO_ORIGIN)
     return await lm.generate_code(draft["id"], target="byo", agent_id=agent_id)
 
 
@@ -192,20 +198,20 @@ async def test_generated_card_agent_id_matches_the_user_agent_row(real_lifecycle
     # The registry looks up user_agent[card.agent_id]; a slug-derived '<slug>-1'
     # finds no row and registration is refused fail-closed (and silently).
     agent_id = aa.slug_agent_id("Byo Carded", "owner-sub-9")
-    ua.create_user_agent(real_lifecycle.db, agent_id=agent_id, owner_user_id="owner-sub-9",
-                         display_name="Byo Carded")
+    await _t(ua.create_user_agent, real_lifecycle.db, agent_id=agent_id,
+             owner_user_id="owner-sub-9", display_name="Byo Carded")
     try:
         gen = await _gen_byo(real_lifecycle, agent_id, name="Byo Carded")
         files = aa._bundle_files(gen)
         frames = _run_bundle(_write_bundle(tmp_path, files), [])
         assert frames[0]["type"] == "register_agent"
         card = frames[0]["agent_card"]
-        row = ua.get_user_agent(real_lifecycle.db, agent_id)
+        row = await _t(ua.get_user_agent, real_lifecycle.db, agent_id)
         assert card["agent_id"] == row["agent_id"]
         assert [s["name"] for s in card["skills"]] == ["greet"]
         assert "api_key" not in frames[0]      # authority is the owner's session
     finally:
-        real_lifecycle.db.execute("DELETE FROM user_agent WHERE agent_id = ?", (agent_id,))
+        await _t(real_lifecycle.db.execute, "DELETE FROM user_agent WHERE agent_id = ?", (agent_id,))
 
 
 def test_backend_target_agent_id_is_unchanged(real_lifecycle):
@@ -308,7 +314,7 @@ async def test_generate_code_refuses_the_backend_target_for_a_byo_draft(real_lif
         user_id="u-byo", agent_name="Byo Rowkeyed",
         description="greets the owner by their name",
         tools_spec=[{"name": "greet", "description": "greet"}])
-    real_lifecycle.db.update_draft_agent(draft["id"], origin=BYO_ORIGIN)
+    await _t(real_lifecycle.db.update_draft_agent, draft["id"], origin=BYO_ORIGIN)
     with pytest.raises(ValueError, match="BYO"):
         await real_lifecycle.generate_code(draft["id"])       # default target=backend
 
@@ -336,7 +342,7 @@ async def test_authoring_refuses_to_deliver_an_empty_bundle():
         o.deliver_agent_bundle.assert_not_awaited()
     finally:
         for t in ("user_agent", "agent_ownership"):
-            o.history.db.execute(f"DELETE FROM {t} WHERE agent_id = ?", (res["agent_id"],))
+            await _t(o.history.db.execute, f"DELETE FROM {t} WHERE agent_id = ?", (res["agent_id"],))
 
 
 # ── G1/SC-002: BYO code is NEVER executed on the server, in ANY process ───────

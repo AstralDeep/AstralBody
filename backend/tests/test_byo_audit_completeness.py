@@ -18,6 +18,7 @@ dispatch keeps its ``agent_tool_call`` ``tool.<name>.start/.end`` pair):
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 from types import SimpleNamespace
@@ -35,6 +36,11 @@ from shared.protocol import MCPResponse  # noqa: E402
 
 OWNER = "byo058audit_owner"
 AID = "byo058audit-agent"
+
+
+async def _t(fn, *a, **k):
+    """Run a synchronous (DB-touching) helper off the event loop (052)."""
+    return await asyncio.to_thread(fn, *a, **k)
 
 
 class FakeUI:
@@ -171,7 +177,7 @@ async def test_go_live_should_audit(orch, captured):
                      skills=[AgentSkill(name="greet", description="g", id="greet",
                                         scope="tools:read", input_schema={})])
     await orch.register_agent(ws, RegisterAgent(agent_card=card))
-    row = ua.get_user_agent(orch.history.db, AID)
+    row = await _t(ua.get_user_agent, orch.history.db, AID)
     assert row["status"] == "live"           # go_live ran
     rows = _rows(captured)
     assert any(getattr(r, "agent_id", None) == AID for r in rows), \
