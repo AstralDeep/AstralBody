@@ -13,6 +13,7 @@ import contextvars
 import json
 import time
 import os
+import random
 import sys
 import logging
 import re
@@ -5797,8 +5798,10 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     # event above retain the full details for operators.
                     return None, None
 
-                # Exponential backoff: 1s, 2s, 4s, 8s
-                backoff = min(2 ** (attempt - 1), 8)
+                # Exponential backoff: 1s, 2s, 4s, 8s with ±20% jitter to
+                # avoid thundering-herd when concurrent LLM calls fail against
+                # the same upstream (mirrors stream_manager.compute_backoff).
+                backoff = min(2 ** (attempt - 1), 8) * random.uniform(0.8, 1.2)
                 if is_transient:
                     logger.info(f"Transient error detected, retrying in {backoff}s...")
                 await asyncio.sleep(backoff)
@@ -8075,7 +8078,11 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
             # Retryable error — try again if attempts remain
             if attempt < max_retries:
-                backoff = self.RETRY_BACKOFF[attempt - 1] if attempt - 1 < len(self.RETRY_BACKOFF) else 2.0
+                base = self.RETRY_BACKOFF[attempt - 1] if attempt - 1 < len(self.RETRY_BACKOFF) else 2.0
+                # ±20% jitter to avoid thundering-herd when concurrent tool
+                # calls fail against the same upstream (mirrors
+                # stream_manager.compute_backoff's jitter pattern).
+                backoff = base * random.uniform(0.8, 1.2)
                 logger.warning(
                     f"Tool '{tool_name}' failed (attempt {attempt}/{max_retries}): {error_msg}. "
                     f"Retrying in {backoff}s..."
