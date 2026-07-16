@@ -1,6 +1,37 @@
 <!--
   Sync Impact Report
   ==================
+  Version change: 2.7.0 → 2.8.0 (MINOR — Principle X materially adds a
+    local-before-push release-evidence boundary and standardizes protected
+    publication on native CI identity without repository-scoped GitHub Apps)
+
+  Amendment (2026-07-16, v2.8.0) — local evidence and native CI publication:
+    X. Production Readiness (EXPANDED) — release evidence is collected,
+        normalized, and parsed locally before push. Local output is diagnostic,
+        not release authority; protected CI independently validates canonical
+        evidence, identities, digests, and pinned policy before authorizing a
+        release. Protected verification and publication remain CI jobs, using
+        native short-lived GitHub Actions identity and job-scoped permissions.
+        AstralDeep release workflows must not require repository-scoped GitHub
+        Apps, installation tokens, or a custom token broker. Candidate jobs
+        remain read-only, while the separately protected publisher receives
+        release-write/OIDC authority only inside its approved publication job.
+        When the bounded exception policy is used, protected CI performs the
+        approved append-only debt/resolution transition with a narrowly gated
+        branch write; local and candidate jobs cannot authorize it.
+    Technology Stack — Continuous Integration now records local pre-push
+        evidence preparation and the native protected-publisher identity.
+    Development Workflow — release-affecting PRs must run the local evidence
+        preparation gate before push and preserve independent CI validation.
+    Templates requiring updates:
+      ✅ .specify/templates/plan-template.md — Constitution Check now prompts
+         for the local/CI evidence boundary and native protected publisher
+      ✅ .specify/templates/spec-template.md — generic and compatible
+      ✅ .specify/templates/tasks-template.md — polish examples now include
+         local evidence preparation and native CI publication validation
+    Follow-up TODOs: None
+
+  -- Prior amendment (2026-07-15, v2.7.0) --------------------------------
   Version change: 2.6.1 → 2.7.0 (MINOR — Principle X materially adds a
     bounded, auditable exception model for temporary client-platform
     unavailability while preserving non-waivable staging and trust gates)
@@ -670,6 +701,15 @@ and the happy path works."
   or candidate-supplied manifest MUST NOT substitute for that decision. The
   decision MUST have a bounded validity window, and any consuming publisher
   MUST reject it after expiry.
+- Release evidence collection, normalization, and human-readable parsing MUST
+  be completed locally before push for every feature that uses release
+  evidence. The local command MUST be deterministic, fail closed, preserve the
+  canonical machine evidence and its digests, and emit no authorization claim.
+  Local output is a developer/reviewer diagnostic only. Protected CI MUST
+  independently schema-validate and re-hash the submitted canonical evidence,
+  reconstruct trusted provider/workflow identities, and execute its pinned
+  policy before producing any merge or release decision; CI MUST NOT trust a
+  committed local verdict merely because its parser passed.
 - Candidate-controlled code or workflows MUST NOT possess signing credentials,
   OIDC publication authority, or public-release mutation permission. Release
   signing, tag/release creation, asset upload, verification, and public
@@ -685,6 +725,16 @@ and the happy path works."
   and workflow-artifact read scopes needed to retrieve and re-hash that exact
   input; under those constraints it is a protected bridge, not a candidate-
   controlled publisher.
+- Protected release verification and publication MUST use the repository's
+  native GitHub Actions controls: immutable workflow identity, protected refs
+  and environments, required reviewers where applicable, and the built-in
+  short-lived `GITHUB_TOKEN` with job-scoped least privilege. AstralDeep's
+  release path MUST NOT create or depend on a repository-scoped GitHub App,
+  GitHub App installation token, or custom token broker. Only the separately
+  protected publisher job MAY receive release-mutation or OIDC authority;
+  an environment-approved exception/debt job MAY receive only the narrowly
+  protected branch write needed for an append-only debt or resolution record.
+  Ordinary CI and candidate evidence jobs MUST remain read-only.
 
 **Rationale**: A change that is "almost done" is a future
 incident. Setting the merge bar at production-ready — not
@@ -888,8 +938,10 @@ an ungoverned back channel for unverified claims.
   migrations (`shared/database.py::_init_db`) executed
   automatically at application boot
 - **Continuous Integration**: GitHub Actions running the
-  Principle XI gate set; container images published to GitHub
-  Container Registry
+  Principle XI gate set; deterministic release evidence prepared locally
+  before push and independently validated by protected CI; container images
+  published to GitHub Container Registry; protected publication uses native
+  short-lived GitHub Actions identity rather than repository-scoped Apps
 - **Eval/Benchmark Harnesses**: eval-only dependency manifests
   (e.g., `requirements-eval.txt`) kept out of the product
   runtime and enforced by an automated isolation guard
@@ -936,6 +988,11 @@ an ungoverned back channel for unverified claims.
 - PRs MUST be production-ready before merge — reviewers MUST
   reject changes that contain stubs, debug-only code, missing
   observability for new features, or untested error paths.
+- PRs that affect release evidence or publication MUST run the deterministic
+  local evidence preparation/parser before push, retain its canonical inputs
+  and digests, and keep independent protected-CI validation authoritative.
+  Publication remains in protected CI with the built-in short-lived token;
+  repository-scoped GitHub Apps or custom token brokers MUST NOT be introduced.
 - Constitution compliance MUST be verified during code review.
 - Each PR MUST reference relevant spec/task IDs when
   applicable.
@@ -957,4 +1014,4 @@ guidance when conflicts arise.
   adherence to these principles. Violations MUST be resolved
   before merge.
 
-**Version**: 2.7.0 | **Ratified**: 2026-03-11 | **Last Amended**: 2026-07-15
+**Version**: 2.8.0 | **Ratified**: 2026-03-11 | **Last Amended**: 2026-07-16

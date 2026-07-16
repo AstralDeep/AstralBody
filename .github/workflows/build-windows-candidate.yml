@@ -29,8 +29,9 @@ on:
         type: string
 
 # This candidate producer cannot sign, tag, create a release, upload release
-# assets, or otherwise mutate public state. A protected publisher consumes a
-# separately protected final decision and these exact artifact identities.
+# assets, or otherwise mutate public state. The protected native CI publisher
+# consumes the independently validated decision and these exact artifact
+# identities with a job-scoped short-lived token; no custom GitHub App is used.
 permissions:
   contents: read
 

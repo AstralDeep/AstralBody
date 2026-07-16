@@ -67,8 +67,8 @@ def _pins(
     path: Path,
     *,
     status: str = "available",
-    agp: str = "10.0.0-alpha01",
-    gradle: str = "10.0.0-milestone-1",
+    agp: str = "10.0.0",
+    gradle: str = "10.0.1",
 ) -> Path:
     unavailable = status == "unreleased"
     agp_value = "UNRELEASED" if unavailable else agp
@@ -169,8 +169,8 @@ def test_unreleased_tools_fail_closed_without_creating_a_checkout(tmp_path: Path
 @pytest.mark.parametrize(
     ("agp", "gradle", "expected_code"),
     [
-        ("9.3.0", "10.0.0-milestone-1", "wrong_agp_major"),
-        ("10.0.0-alpha01", "9.6.1", "wrong_gradle_major"),
+        ("9.3.0", "10.0.1", "wrong_agp_major"),
+        ("10.0.0", "9.6.1", "wrong_gradle_major"),
     ],
 )
 def test_major_nine_pin_cannot_masquerade_as_the_canary(
@@ -184,7 +184,7 @@ def test_major_nine_pin_cannot_masquerade_as_the_canary(
 
 def test_shipping_toolchain_cannot_be_reused_as_the_separate_canary(tmp_path: Path) -> None:
     source = _android_fixture(
-        tmp_path, agp="10.0.0-alpha01", gradle="10.0.0-milestone-1"
+        tmp_path, agp="10.0.0", gradle="10.0.1"
     )
     properties = _pins(tmp_path / "pins.properties")
     with pytest.raises(driver.CanaryConfigError) as reused:
@@ -209,8 +209,8 @@ def test_isolated_run_asserts_resolved_versions_and_warnings_as_errors(
         if any(item.endswith("astralCanaryResolvedVersions") for item in command):
             return _completed(
                 command,
-                "ASTRAL_RESOLVED_AGP=10.0.0-alpha01\n"
-                "ASTRAL_RESOLVED_GRADLE=10.0.0-milestone-1\n",
+                "ASTRAL_RESOLVED_AGP=10.0.0\n"
+                "ASTRAL_RESOLVED_GRADLE=10.0.1\n",
             )
         return _completed(command, "BUILD SUCCESSFUL\n")
 
@@ -223,8 +223,8 @@ def test_isolated_run_asserts_resolved_versions_and_warnings_as_errors(
 
     assert report["status"] == "passed"
     assert report["resolved"] == {
-        "agp": "10.0.0-alpha01",
-        "gradle": "10.0.0-milestone-1",
+        "agp": "10.0.0",
+        "gradle": "10.0.1",
     }
     assert observed_checkout
     assert list(temp_parent.iterdir()) == []
@@ -281,8 +281,8 @@ def test_official_probe_rejects_stale_unreleased_declaration(tmp_path: Path) -> 
 
     def fake_fetch(url: str) -> bytes:
         if "maven-metadata" in url:
-            return b"<metadata><versioning><versions><version>10.0.0-alpha01</version></versions></versioning></metadata>"
-        return json.dumps([{"version": "10.0.0-milestone-1"}]).encode()
+            return b"<metadata><versioning><versions><version>10.0.0</version></versions></versioning></metadata>"
+        return json.dumps([{"version": "10.0.1"}]).encode()
 
     availability = driver.probe_official_availability(pins, fetcher=fake_fetch)
     assert availability == {
@@ -292,6 +292,45 @@ def test_official_probe_rejects_stale_unreleased_declaration(tmp_path: Path) -> 
     with pytest.raises(driver.CanaryConfigError) as stale:
         driver.validate_unreleased_declaration(pins, availability)
     assert stale.value.code == "unreleased_declaration_stale"
+
+
+@pytest.mark.parametrize(
+    ("agp_versions", "gradle_versions", "expected"),
+    [
+        (
+            ["10.0.0-alpha01", "10.0.0-rc01"],
+            ["10.0.0-milestone-1", "10.0.0-rc-1"],
+            {"agp_major_available": False, "gradle_major_available": False},
+        ),
+        (
+            ["10.0.0"],
+            ["10.0.0-milestone-1"],
+            {"agp_major_available": True, "gradle_major_available": False},
+        ),
+        (
+            ["10.0.0-alpha01"],
+            ["10.0.1"],
+            {"agp_major_available": False, "gradle_major_available": True},
+        ),
+    ],
+)
+def test_official_probe_requires_both_stable_public_releases(
+    tmp_path: Path,
+    agp_versions: list[str],
+    gradle_versions: list[str],
+    expected: dict[str, bool],
+) -> None:
+    pins = driver.load_pins(_pins(tmp_path / "pins.properties", status="unreleased"))
+
+    def fake_fetch(url: str) -> bytes:
+        if "maven-metadata" in url:
+            versions = "".join(f"<version>{version}</version>" for version in agp_versions)
+            return f"<metadata><versioning><versions>{versions}</versions></versioning></metadata>".encode()
+        return json.dumps([{"version": version} for version in gradle_versions]).encode()
+
+    availability = driver.probe_official_availability(pins, fetcher=fake_fetch)
+    assert availability == expected
+    driver.validate_unreleased_declaration(pins, availability)
 
 
 @pytest.mark.parametrize(
@@ -307,9 +346,11 @@ def test_official_probe_rejects_stale_unreleased_declaration(tmp_path: Path) -> 
         ("tasks", "help,help", "invalid_tasks"),
         ("availability", "pending", "invalid_availability"),
         ("agp_version", "latest", "invalid_version"),
+        ("agp_version", "10.0.0-alpha01", "invalid_version"),
+        ("gradle_version", "10.0.1-milestone-1", "invalid_version"),
         (
             "gradle_distribution_url",
-            "https://services.gradle.org/distributions/gradle-10.0.1-bin.zip",
+            "https://services.gradle.org/distributions/gradle-10.0.2-bin.zip",
             "distribution_version_mismatch",
         ),
         ("gradle_distribution_sha256", "A" * 64, "invalid_distribution_sha256"),
@@ -330,7 +371,7 @@ def test_unreleased_declaration_rejects_fabricated_exact_pin(tmp_path: Path) -> 
     properties = _replace_property(
         _pins(tmp_path / "pins.properties", status="unreleased"),
         "agp_version",
-        "10.0.0-alpha01",
+        "10.0.0",
     )
 
     with pytest.raises(driver.CanaryConfigError) as invalid:
@@ -550,8 +591,8 @@ def test_existing_wrapper_checksum_is_replaced_in_isolated_checkout(tmp_path: Pa
         )
         return _completed(
             command,
-            "ASTRAL_RESOLVED_AGP=10.0.0-alpha01\n"
-            "ASTRAL_RESOLVED_GRADLE=10.0.0-milestone-1\n",
+            "ASTRAL_RESOLVED_AGP=10.0.0\n"
+            "ASTRAL_RESOLVED_GRADLE=10.0.1\n",
         )
 
     assert driver.run_canary(
@@ -592,8 +633,8 @@ def test_default_command_runner_maps_gradle_exit_and_preserves_output(
     [
         ("BUILD SUCCESSFUL\n", "resolved_version_missing"),
         (
-            "ASTRAL_RESOLVED_AGP=10.0.1-alpha01\n"
-            "ASTRAL_RESOLVED_GRADLE=10.0.0-milestone-1\n",
+            "ASTRAL_RESOLVED_AGP=10.0.2\n"
+            "ASTRAL_RESOLVED_GRADLE=10.0.1\n",
             "resolved_version_mismatch",
         ),
     ],

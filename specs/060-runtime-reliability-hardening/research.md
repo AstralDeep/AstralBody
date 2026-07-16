@@ -342,14 +342,14 @@ because future updates can silently disappear again.
 **Decision**: Remove `android.builtInKotlin=false` and `android.newDsl=false`, migrate off the
 `kotlin-android` plugin/obsolete variant APIs and Project-object dependency notation, and use the
 covered Python driver `scripts/run_android_next_major_canary.py` in an isolated temporary checkout.
-As of 2026-07-16, AGP 10 is scheduled for late 2026 and neither AGP 10 nor Gradle 10 has a public
-artifact, so the tracked declaration says `unreleased` instead of inventing versions or a wrapper
-checksum. The default command fails closed; CI's explicitly selected diagnostic checks Google's AGP
-metadata and Gradle's official versions feed and fails if that declaration becomes stale. Once both
-artifacts publish, the declaration must pin their exact versions, official distribution URL, and
-SHA-256. Only then may the driver assert the resolved major versions and run configuration, lint,
-unit, and assemble with warnings as errors. Keep the shipping toolchain pin until that true
-compatibility lane passes; no runtime dependency is added.
+As of 2026-07-16, AGP 10 is scheduled for late 2026 and neither AGP 10 nor Gradle 10 has a stable
+public release, so the tracked declaration says `unreleased` instead of inventing versions or a
+wrapper checksum. Alpha, beta, release-candidate, milestone, nightly, and snapshot artifacts do not
+qualify. The default command fails closed; CI's explicitly selected diagnostic checks Google's AGP
+metadata and Gradle's official versions feed and fails only when both stable major releases exist.
+Spec 060 does not activate or adopt them. A separately authorized future change may replace the
+sentinels with exact stable versions, official distribution URL, and SHA-256, then run the true
+major-asserting canary before changing the shipping toolchain.
 
 **Rationale**: Current builds pass, but the remaining warning originates in the isolated Kover test
 plugin rather than shipping source. A truthful unavailable declaration preserves the strict future
@@ -358,7 +358,16 @@ gate without turning guessed coordinates into false release evidence.
 **Alternatives considered**: Upgrade the shipping toolchain immediately — rejected because a canary
 should expose incompatibilities without coupling remediation to an unproven production upgrade.
 
-## R16. Same-SHA artifact evidence and bounded exceptions
+## R16. Same-SHA artifact evidence and protected CI publication
+
+**Superseding owner decision (2026-07-16)**: Release-evidence collection, normalization, and parsing
+must run locally before push and emit diagnostic canonical evidence/digests only. Protected CI must
+independently validate those bytes and trusted run/job/artifact identities before authorization.
+The bounded exception/debt semantics below remain, but their protected approval, registration, and
+resolution are native environment-approved GitHub Actions jobs using the built-in short-lived
+`GITHUB_TOKEN`. Release publication remains there as well. Repository-scoped GitHub Apps,
+installation tokens, and a custom token broker are rejected; references below to App-issued identity
+or brokered tokens are historical design context, not implementation authority.
 
 **Decision**: Add a release-readiness matrix whose browser, build-once packaged Windows, connected Android,
 macOS, iOS, and watchOS jobs all emit schema-validated JSON bound to candidate SHA and artifact
@@ -463,11 +472,11 @@ source revision, synthetic provenance, sanitization assertions, and required rep
 and a test fails for secrets, missing coverage, or fingerprint drift.
 
 The deploy job emits a TLS endpoint, request namespace, candidate image digest, data fingerprint,
-capability digest, and service identities, then leaves the deployment alive. It uploads the trust-
-schema manifest under a unique artifact ID and sends it through the candidate-independent protected
-trusted builder. The protected verifier reconstructs/downloads that ID from the current run and accepts staging identity
-only after protected signer-digest/certificate, repository/candidate, subject-digest, and producer-
-runner verification, never from an evidence-controlled file or URL.
+capability digest, and service identities, then leaves the deployment alive. Local pre-push tooling
+collects and parses the canonical evidence and its digests without authorization. Protected CI
+reconstructs/downloads exact artifact IDs from the current run and accepts staging identity only
+after repository/candidate, subject-digest, and producer-runner verification, never from an
+evidence-controlled file, URL, or committed local verdict.
 Digest-pinned Playwright and the separate
 Windows, Android, and Apple runners require that job, consume its reachable endpoint, and repeat the
 same identity in every report. A final `if: always()` cleanup job waits for the complete matrix before
@@ -482,8 +491,9 @@ input/nesting fail closed; mutation tests exercise every supported keyword and b
 validation, beyond schema shape, rejects duplicate check IDs within a platform document and duplicate
 platform reports within an evidence set.
 
-**Rationale**: Constitution v2.7.0 permits ephemeral staging but requires the actual candidate, real
-dependencies, representative migrated data, affected clients, and candidate-bound evidence.
+**Rationale**: Constitution v2.8.0 permits ephemeral staging but requires the actual candidate, real
+dependencies, representative migrated data, affected clients, candidate-bound evidence, local
+pre-push preparation, and independent protected-CI authorization.
 
 **Alternatives considered**: Call ordinary local pytest plus an empty database “staging” — rejected
 by Principle X. Start Compose on the Linux job and give other hosted runners `localhost` — rejected

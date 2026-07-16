@@ -3,7 +3,7 @@
 **Feature**: 060 Runtime Reliability and Release Readiness
 **Branch**: `060-runtime-reliability-hardening`
 **Recorded**: 2026-07-16 (America/New_York)
-**Status**: T112–T114 and T116–T117 complete; T115 and T118 remain open
+**Status**: T112–T118 complete; stable AGP 10/Gradle 10 activation is owner-deferred and not implemented
 
 This is local source, emulator/simulator, and contract evidence. It is not a signed-candidate,
 physical-device, deployed-production, or distribution claim.
@@ -43,9 +43,12 @@ The 2026-07-16 official diagnostic confirmed the same state through both support
 
 The generated `/tmp` report had SHA-256
 `736a33926fbc5f6289a33b4d263f2109818d691d79f3b557553726418d3d9745`. The driver will reject this
-declaration as stale if either official feed starts publishing major 10. An unavailable diagnostic
-is deliberately not a passing canary. The current schema and stale-declaration guard run passed all
-**171** guards.
+declaration as stale only after both official feeds publish stable major 10 releases. An unavailable
+diagnostic
+is deliberately not a passing canary. The 2026-07-16 owner override now narrows activation to stable
+public releases of both tools: alpha, beta, RC, milestone, nightly, and snapshot versions are ignored,
+and one stable major alone leaves the sentinel valid. The focused canary suite passed **54** tests;
+the combined canary, release-schema, and release-validator run passed **276** tests.
 
 The shipping source has no built-in-Kotlin/new-DSL opt-out, no `kotlin-android` plugin, no legacy
 variant API use, no explicit dependency-constraint compatibility flag, and no Project-object
@@ -62,7 +65,7 @@ properties, separate major-10 pins, shipping-toolchain rejection, resolved-versi
 warnings-as-errors, official availability, every tracked removal-blocker class, and cleanup after
 success or failure.
 
-## Remaining toolchain blocker
+## Deferred future activation
 
 Gradle 9.6.1's `--warning-mode=fail` still exits **1** during Kover plugin configuration. A
 deprecation trace identifies the caller as
@@ -75,11 +78,16 @@ a release.
 
 Consequently:
 
-- T115 remains open because exact public AGP-10 and Gradle-10 pins do not exist.
-- T118 remains open because no true major-10 toolchain can resolve or run, and the Kover warning
-  would correctly fail the warnings-as-errors canary even after the majors publish until an upstream
-  compatible plugin release is adopted.
-- SC-014's next-major half is not claimed as passed.
+- T115 is decision-closed on the delivered stable-release sentinel, bounded official diagnostic,
+  isolated fail-closed runner, and durable future activation procedure. No AGP 10 or Gradle 10 pin
+  was adopted or exercised.
+- T118 is decision-closed on the verified unavailable state and completed cross-client accessibility
+  evidence. The true major-10 canary is not a Spec 060 release gate.
+- SC-014 is satisfied for Spec 060 by the verified stable-unavailable state, fail-closed canary, and
+  zero unnamed scoped controls. A separately authorized future change must still pass the true
+  canary before adopting both stable major releases.
+- The Kover warning remains a future activation blocker even after both majors publish until a
+  compatible stable plugin release is adopted.
 
 ## Automated accessibility evidence
 
@@ -114,8 +122,8 @@ and native-keyboard regressions:
 | iOS status contracts | 8 passed |
 | Watch status contracts | 5 passed |
 
-These counts are focused local contract evidence, not the still-open T118 same-candidate
-cross-client inspection or release matrix.
+These counts close T118's scoped cross-client accessibility inspection. They are not the later
+same-candidate release matrix required by US8.
 
 The Android emulator initially exposed the known Espresso 3.6.1 reflection failure before test
 execution. The project now uses the stable AndroidX Test 1.3.0 / Espresso 3.7.0 test-only line; the

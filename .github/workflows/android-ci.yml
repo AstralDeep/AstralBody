@@ -84,8 +84,8 @@ jobs:
           path: android-client/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: warn
 
-  next-major-canary:
-    name: Android next-major compatibility (isolated)
+  next-major-readiness:
+    name: Android stable next-major readiness (isolated)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -95,20 +95,20 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Run exact canary or verify official unavailability
+      - name: Verify stable-release readiness without activating prereleases
         working-directory: .
         run: >-
           python3 scripts/run_android_next_major_canary.py
           android-client/gradle/next-major-canary.properties
           --allow-unreleased
           --verify-official-availability
-          --output build/060/android-next-major.json
+          --output build/060/android-next-major-readiness.json
 
-      - name: Archive next-major diagnostic
+      - name: Archive stable-release readiness diagnostic
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: android-next-major
-          path: build/060/android-next-major.json
+          name: android-next-major-readiness
+          path: build/060/android-next-major-readiness.json
           if-no-files-found: error
 
   # Instrumented Compose UI tests on an emulator. Heavier and flakier than the

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -186,11 +187,14 @@ def test_web_ci_packages_cannot_enter_product_manifests_or_image() -> None:
     assert "tooling/web-ci" not in dockerfile
     assert re.search(r"(?mi)^\s*COPY\s+\.\s", dockerfile) is None
 
-    package_manifests = {
-        path.relative_to(REPO_ROOT).as_posix()
-        for path in REPO_ROOT.rglob("package.json")
-        if "node_modules" not in path.parts and "build" not in path.parts
-    }
+    tracked = subprocess.run(
+        ["git", "ls-files", "--", "*package.json"],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    package_manifests = {line for line in tracked.stdout.splitlines() if line}
     assert package_manifests == {"tooling/web-ci/package.json"}
 
     forbidden = tuple(EXPECTED_DEV_DEPENDENCIES)

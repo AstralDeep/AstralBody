@@ -15,10 +15,12 @@ authorization.
 
 T126 cannot close. The current workflow tree contains 56 third-party `uses:`
 occurrences and all 56 are now immutable commit-SHA references with adjacent
-version comments. The protected readiness, exception registrar, trusted
-builder, publisher controller, and publisher workflows required by T107,
-T119, and T120 do not exist yet, so their dependency closure and installed
-workflow identities cannot be audited.
+version comments. The local evidence wrapper, protected native-CI readiness
+workflow, and hardened build-once Windows publisher required by revised
+T107/T119/T120 do not exist yet, so their dependency closure and reviewed
+workflow identities cannot be audited. The 2026-07-16 owner decision retains
+bounded exception/debt behavior in native protected CI but removes the proposed
+repository-scoped GitHub Apps, installation tokens, and custom token broker.
 
 The previously ad-hoc Python CI/tooling installs and the legacy Windows release
 install are resolved in the candidate tree: every CI-only Python tool now comes
@@ -168,11 +170,12 @@ for the changed files.
 ## Required re-audit before T126 can close
 
 1. Implement T107/T119/T120, then audit and pin every third-party action added
-   to those candidate and protected workflow copies by full commit SHA with a
-   version comment.
+   to the local-evidence/readiness/native-publisher paths by full commit SHA
+   with a version comment.
 2. Add Gradle dependency locking and verification metadata, then record the
    resolved direct/transitive graph and artifact checksums.
-3. Re-run product-artifact isolation checks against the installed protected
-   workflow bytes and exact candidate artifacts.
+3. Re-run product-artifact isolation checks against the reviewed protected-CI
+   workflow bytes and exact candidate artifacts; prove no custom App/broker
+   credential path exists.
 4. Record the lead-developer approval disposition in the feature PR, then bind
-   this audit to the candidate SHA and protected trust-root identities.
+   this audit to the candidate SHA and native protected-CI identities.

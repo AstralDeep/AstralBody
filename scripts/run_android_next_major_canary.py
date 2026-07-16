@@ -4,10 +4,12 @@
 The declaration may truthfully say that the requested major is not published
 yet. That state is never a passing canary: the default command exits with
 ``EX_UNAVAILABLE``. CI may explicitly request an availability diagnostic, which
-re-queries the official AGP and Gradle metadata and succeeds only while neither
-major exists. Once exact artifacts are declared, the runner replaces only the
-isolated copy's AGP/wrapper pins, proves the versions resolved by Gradle itself,
-and runs configuration, lint, tests, and assembly with warnings as errors.
+re-queries the official AGP and Gradle metadata and succeeds until stable public
+releases exist for both majors. Prereleases never activate the canary. Once
+exact stable artifacts are declared by a separately authorized future change,
+the runner replaces only the isolated copy's AGP/wrapper pins, proves the
+versions resolved by Gradle itself, and runs configuration, lint, tests, and
+assembly with warnings as errors.
 """
 
 from __future__ import annotations
@@ -36,6 +38,10 @@ VERSION = re.compile(
     r"^(?P<major>0|[1-9][0-9]*)\."
     r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
     r"(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$"
+)
+STABLE_VERSION = re.compile(
+    r"^(?P<major>0|[1-9][0-9]*)\."
+    r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$"
 )
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 AGP_PIN = re.compile(r'(?m)^(agp\s*=\s*")([^"\r\n]+)("\s*)$')
@@ -119,7 +125,7 @@ class CanaryConfigError(CanaryError):
 
 
 class CanaryUnavailable(CanaryError):
-    """Raised when exact official next-major artifacts are not yet published."""
+    """Raised when both stable official next-major artifacts are not published."""
 
 
 class CanaryExecutionError(CanaryError):
@@ -200,10 +206,13 @@ def _parse_positive_int(values: Mapping[str, str], key: str) -> int:
     return parsed
 
 
-def _version_major(version: str, *, key: str) -> int:
-    match = VERSION.fullmatch(version)
+def _version_major(version: str, *, key: str, stable: bool = False) -> int:
+    match = (STABLE_VERSION if stable else VERSION).fullmatch(version)
     if match is None:
-        raise CanaryConfigError("invalid_version", f"{key} is not an exact version")
+        qualifier = "stable " if stable else ""
+        raise CanaryConfigError(
+            "invalid_version", f"{key} is not an exact {qualifier}version"
+        )
     return int(match.group("major"))
 
 
@@ -226,8 +235,8 @@ def load_pins(path: Path | str) -> CanaryPins:
 
     ``unreleased`` declarations must use the literal ``UNRELEASED`` instead of
     a guessed version/checksum. ``available`` declarations require exact
-    versions whose majors match their independent major pins and an official
-    Gradle distribution URL plus lowercase SHA-256.
+    stable versions whose majors match their independent major pins and an
+    official Gradle distribution URL plus lowercase SHA-256.
     """
 
     path = Path(path).resolve()
@@ -310,9 +319,9 @@ def load_pins(path: Path | str) -> CanaryPins:
 
     agp_version = values["agp_version"]
     gradle_version = values["gradle_version"]
-    if _version_major(agp_version, key="agp_version") != agp_major:
+    if _version_major(agp_version, key="agp_version", stable=True) != agp_major:
         raise CanaryConfigError("wrong_agp_major", "AGP version does not match major pin")
-    if _version_major(gradle_version, key="gradle_version") != gradle_major:
+    if _version_major(gradle_version, key="gradle_version", stable=True) != gradle_major:
         raise CanaryConfigError(
             "wrong_gradle_major", "Gradle version does not match major pin"
         )
@@ -421,8 +430,10 @@ def _fetch_official_metadata(url: str) -> bytes:
 
 
 def _has_major(versions: Sequence[str], major: int) -> bool:
+    """Return whether official metadata contains a stable release for ``major``."""
+
     for version in versions:
-        match = VERSION.fullmatch(version)
+        match = STABLE_VERSION.fullmatch(version)
         if match is not None and int(match.group("major")) == major:
             return True
     return False
@@ -431,7 +442,7 @@ def _has_major(versions: Sequence[str], major: int) -> bool:
 def probe_official_availability(
     pins: CanaryPins, *, fetcher: MetadataFetcher = _fetch_official_metadata
 ) -> dict[str, bool]:
-    """Query bounded official metadata and report whether each target major exists."""
+    """Report whether each target major has a stable official release."""
 
     try:
         agp_root = ET.fromstring(fetcher(pins.agp_metadata_url))
@@ -468,12 +479,13 @@ def validate_unreleased_declaration(
         raise CanaryConfigError(
             "availability_state_mismatch", "expected an unreleased declaration"
         )
-    if availability.get("agp_major_available") or availability.get(
+    if availability.get("agp_major_available") and availability.get(
         "gradle_major_available"
     ):
         raise CanaryConfigError(
             "unreleased_declaration_stale",
-            "an official target-major artifact now exists; exact pins are required",
+            "both stable official target-major releases now exist; a future "
+            "authorized change must review exact pins",
         )
 
 
@@ -610,7 +622,7 @@ def run_canary(
     if pins.availability != "available":
         raise CanaryUnavailable(
             "toolchain_unreleased",
-            "AGP 10 and Gradle 10 exact public artifacts are not declared",
+            "AGP 10 and Gradle 10 stable public artifacts are not declared",
         )
     assert pins.agp_version is not None and pins.gradle_version is not None
     if (

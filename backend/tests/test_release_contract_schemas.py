@@ -555,7 +555,7 @@ def _platform_evidence(platform: str) -> dict[str, Any]:
                 ]
             )
         elif platform == "android":
-            check_ids.append("android_next_toolchain_canary")
+            check_ids.append("android_next_toolchain_readiness")
         elif platform in {"macos", "ios"}:
             check_ids.append("apple_first_login_llm")
         if platform == "macos":

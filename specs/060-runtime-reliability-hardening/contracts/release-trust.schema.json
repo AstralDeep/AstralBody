@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://astraldeep.local/specs/060/release-trust.schema.json",
   "title": "AstralDeep Release Workflow Trust Manifests",
-  "description": "Shape contract for per-producer workflow provenance, stage-deploy, protected exception approval plus debt-ledger registration, and final protected release-decision manifests accepted only after candidate-independent verification.",
+  "description": "Shape contract for native protected-CI producer provenance, stage deployment, bounded exception approval plus debt registration, debt resolution, and the final release decision.",
   "oneOf": [
     { "$ref": "#/$defs/trusted_workflow_provenance" },
     { "$ref": "#/$defs/trusted_stage_deploy" },
@@ -10,7 +10,7 @@
     { "$ref": "#/$defs/trusted_debt_resolution" },
     { "$ref": "#/$defs/trusted_release_decision" }
   ],
-  "$comment": "Schema validity is not a trust root. Repository rules require a protected reusable trusted-builder/verifier workflow pinned independently of the candidate. That verifier reconstructs each manifest from bounded current-run IDs/API state, verifies GitHub artifact attestations with immutable protected-environment --signer-digest/--cert-identity values, checks repository/source SHA and subject bytes, executes pinned policy/coverage, and attests the final trusted_release_decision required check. The caller aggregate only consumes that decision. Manifest workflow_ref/trusted_builder fields are cross-checks, never roots. Candidate-controlled workflow/path/value, caller filename, embedded hash, evidence member, policy output, or self-asserted verification/decision never establishes trust.",
+  "$comment": "Schema validity is not a trust root. Evidence is parsed locally before push without authorization, then native protected CI reconstructs provider identities, verifies exact bytes, and executes pinned policy. Protected environment jobs own exception/debt transitions and publication with the built-in short-lived job token; no repository-scoped GitHub App, installation token, or custom token broker is used.",
   "$defs": {
     "uuid": {
       "type": "string",

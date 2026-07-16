@@ -54,10 +54,16 @@ and exact ledger snapshot. When candidate code can influence qualifying evidence
 or policy, identify the candidate-independent protected verifier, pinned policy
 identity, reconstructed trusted inputs, attested bounded-lifetime decision, and
 required gate bound to the installed protected workflow identity rather than a
-name-only check.]
+name-only check. Identify the deterministic local evidence collection,
+normalization, and parsing command that must run before push; keep its result
+diagnostic and explain how protected CI independently validates canonical
+evidence, identities, digests, and policy. If exceptions are permitted, keep
+their approval and append-only debt/resolution mutation in native protected CI;
+local and candidate jobs cannot authorize them.
 For a distributable release, identify the separately pinned protected publisher,
-its approval boundary, create-only/collision policy, and how candidate workflows
-remain unprivileged.]
+its approval boundary, native short-lived CI identity, create-only/collision
+policy, and how candidate workflows remain unprivileged. Repository-scoped
+GitHub Apps, installation tokens, and custom token brokers are not permitted.]
 
 ## Project Structure
 

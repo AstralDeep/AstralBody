@@ -8,6 +8,21 @@
 
 **Input**: User description: "Review current main, including merged feature 058, for current and future non-security problems; exercise the Android, Windows, and web clients end to end; make the Windows release ship with its deployment connection profile instead of showing the first-run Configure AstralDeep dialog; and create the next collision-safe remediation specification. Security behavior is explicitly out of scope."
 
+## Owner Decisions (2026-07-16)
+
+- Spec 060 does not adopt AGP 10 or Gradle 10. Activation remains blocked until stable public
+  releases of both tools exist and a separately authorized future compatibility change begins;
+  alpha, beta, release-candidate, milestone, nightly, and snapshot artifacts do not qualify.
+- Release-evidence collection, normalization, and parsing run locally before push and remain
+  diagnostic. Protected CI independently validates canonical evidence, identities, digests, and
+  policy before authorization.
+- Release verification and publication remain in GitHub Actions with protected environments,
+  immutable workflow identity, and the built-in short-lived job token. Spec 060 does not create or
+  require repository-scoped GitHub Apps, installation tokens, or a custom token broker.
+- The existing bounded platform-unavailability policy remains available only through protected,
+  environment-approved CI using the built-in job token. Local evidence cannot approve an exception,
+  and no repository-scoped GitHub App, installation token, or custom broker is introduced.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Work completes once under load (Priority: P1)
@@ -246,37 +261,40 @@ round trip where the client supports hosting.
 1. **Given** a pull request changes runtime, protocol, packaging, or client behavior, **When** its
    release gates run, **Then** the same immutable candidate is deployed with real configured
    authentication, representative migrated data, and real workers, and every affected shipping
-   client completes its smoke flow before merge unless—and only while—an independently verified
-   FR-051 platform-unavailability exception covers that exact client evidence.
+   client completes its smoke flow before merge.
 2. **Given** the Windows candidate artifact, **When** it runs from a clean profile, **Then** both the
    normal application and packaged personal-agent worker complete their smoke checks and terminate
    cleanly.
 3. **Given** an affected client platform is temporarily unavailable, **When** validation runs,
-   **Then** the release is explicitly blocked or carries a recorded, time-bounded exception rather
-   than silently treating another client as equivalent evidence.
+   **Then** the release remains blocked unless the existing candidate-bound, seven-day protected-CI
+   exception and debt-resolution policy is satisfied; another client is never equivalent evidence.
+4. **Given** release evidence has been collected, **When** a maintainer prepares a push, **Then** the
+   deterministic local parser validates and canonicalizes it without claiming authorization, and
+   protected CI later validates those canonical inputs independently before release.
 
 ---
 
-### User Story 9 - Keep the clients operable through upcoming platform changes (Priority: P3)
+### User Story 9 - Defer future toolchains without losing readiness (Priority: P3)
 
-A maintainer can upgrade the next declared client toolchain without first untangling known removal
-warnings, and users relying on assistive technology can identify every interactive control.
+A maintainer can prove that the next Android major toolchain is not yet eligible for adoption,
+retain a stable-release-only activation path for a future authorized change, and ensure users
+relying on assistive technology can identify every interactive control.
 
-**Why this priority**: Android currently builds, but its own build output identifies constructs that
-will stop working at the next major toolchain boundary, and two authoring switches lack accessible
-labels.
+**Why this priority**: The current Android toolchain is supported and shipping. Premature adoption
+of alpha or milestone major releases would create avoidable instability, while removal blockers and
+unnamed controls still need to be eliminated before any future activation.
 
-**Independent Test**: Once the next major toolchain has public, exactly resolvable artifacts, run a
-compatibility canary against those separately pinned releases and automated accessibility inspection
-on every changed surface; verify no removal blocker and no unnamed control. Before publication, CI
-MUST fail closed by default, verify official unavailability explicitly, and reject a stale
-`unreleased` declaration; that diagnostic is not a passing compatibility canary.
+**Independent Test**: Run the official-availability diagnostic and automated accessibility
+inspection on every changed surface. Verify that prereleases do not activate the canary, the
+declaration remains `unreleased` until both stable public majors exist, known source blockers are
+absent, and no scoped control is unnamed. The true next-major canary remains a future activation
+gate and is not a Spec 060 release requirement.
 
 **Acceptance Scenarios**:
 
-1. **Given** the next declared major client toolchain has public exact artifacts, **When** the
-   compatibility canary runs,
-   **Then** configuration and tests complete without a known-removal blocker.
+1. **Given** either next-major tool has no stable public release, **When** readiness is checked,
+   **Then** prerelease artifacts are ignored, the stable-release sentinel remains unavailable, and
+   the shipping toolchain is unchanged.
 2. **Given** an interactive authoring surface, **When** it is inspected through accessibility
    semantics, **Then** every control has a stable role, name, state, and focus behavior.
 3. **Given** a mobile text field has invoked the system keyboard, **When** the user completes entry
@@ -489,18 +507,14 @@ MUST fail closed by default, verify official unavailability explicitly, and reje
   the latest release, and the publisher MUST confirm the resulting `/releases/latest` metadata so
   the shipped v0.3.0 updater selects and verifies 0.4.0; a post-transition mismatch MUST remove only
   the just-created release/tag, emit a protected failure, and never report publication success.
-  Candidate-modifiable workflows MUST have no
-  release-mutation authority.
-  To preserve the verifier shipped in v0.3.0, `release-windows.yml` MAY receive OIDC only as an exact-
-  byte-pinned compatibility bridge after the protected publisher verifies its installed blob and
-  creates `v0.4.0`; that bridge MUST have only `contents: read`, `actions: read`, and `id-token: write`,
-  retrieve the EXE by exact originating run/attempt/artifact identity, sign only those re-hashed
-  protected-decision bytes under the existing tag-ref SAN, pass the actual v0.3.0 verifier, and have
-  no tag/release mutation. Tag/
-  release creation, asset mutation, approval verification, and public transition MUST run in a
-  separately pinned protected publisher whose exact workflow SHA is checked before a scoped token is
-  issued. Immediately before any mutation, that publisher MUST prove the attested decision is still
-  before its protected `valid_until` and every used exception approval is still unexpired.
+  Candidate-modifiable workflows MUST have no release-mutation authority. To preserve the verifier
+  shipped in v0.3.0, the protected CI publisher MAY invoke an exact-byte-pinned compatibility signer
+  with only `contents: read`, `actions: read`, and `id-token: write`; the signer MUST retrieve the EXE
+  by exact originating run/attempt/artifact identity, re-hash and sign only those bytes under the
+  existing tag-ref SAN, and have no tag/release mutation. Tag/release creation, asset mutation,
+  approval verification, and public transition MUST run in a separately pinned, environment-
+  approved GitHub Actions publisher using only the built-in short-lived job token. No repository-
+  scoped GitHub App, installation token, or custom token broker may be required.
 - **FR-049**: Changes affecting runtime, protocol, packaging, or cross-client behavior MUST deploy
   the same commit-derived candidate artifact in a qualifying persistent or isolated ephemeral
   staging environment with real configured authentication, representative data migrated through
@@ -509,63 +523,42 @@ MUST fail closed by default, verify official unavailability explicitly, and reje
   Android emulator or device, and affected Apple clients on an Apple runner, with cleanup only after
   the matrix finishes. Evidence MUST bind the candidate SHA, immutable artifact digests, fixture
   fingerprints, target runner identities, one shared staging identity, and re-hashed raw bytes. The
-  per-producer workflow and stage-deploy trust manifests MUST be downloaded by exact artifact ID
-  from the current workflow run and independently verified through GitHub artifact attestations
-  against the expected repository/candidate and a protected reusable trusted-builder signer digest
-  and certificate identity pinned outside the candidate by repository rules/protected-environment
-  configuration. Each platform report's job and runner MUST match its verified producer manifest; a
-  candidate-controlled workflow ref, caller path, filename, or embedded hash is not a trust root.
-  The repository-required final decision MUST be produced and attested by that protected verifier,
-  which reconstructs bounded current-run inputs from GitHub identities and API state and executes
-  policy/coverage code pinned at its protected signer digest rather than candidate-controlled code;
-  a caller aggregate or candidate-declared success MUST NOT qualify. Repository rules MUST require
-  the installed protected workflow identity, not merely a reproducible check name; a candidate job
-  using the same name MUST NOT satisfy the merge gate.
+  per-producer workflow and stage-deploy identities MUST be downloaded by exact artifact ID from the
+  current workflow run and independently verified through GitHub artifact attestations against the
+  expected repository and candidate. Each platform report's job and runner MUST match its verified
+  producer identity; a candidate-controlled filename, embedded hash, or local verdict is not a trust
+  root. Evidence collection, normalization, and parsing MUST complete locally before push and emit
+  canonical evidence plus digests without release authorization. The repository-required final
+  decision MUST be produced by protected CI, which independently schema-validates and re-hashes those
+  inputs, reconstructs bounded current-run identities from GitHub API state, and executes pinned
+  policy/coverage code. A committed local verdict or candidate-declared success MUST NOT qualify.
   Archived endpoints MUST contain no userinfo, query, or fragment.
   Runner-local, caller-selected URL, mutable-reference, source-only, or mock fallbacks do not qualify. One reusable
   readiness aggregate MUST run automatically for pull requests and main pushes using the immutable
-  event base, while explicit candidate reruns MAY use a verified manual ancestor.
-  The protected verifier/policy/schemas, bridge template, publisher/controller, broker, and rules
-  MUST be installed in a protected first landing while the automatic candidate caller remains
-  disabled. Only after the candidate rebases onto and verifies that trust-root landing MAY a second
-  checkpoint enable the PR/main caller and required check; no bootstrap run may depend on a trust
-  root that the same run is attempting to install. Every final decision MUST attest the exact current
-  protected debt-ledger commit/tree/canonical path-digest snapshot and reject stale or concurrently
-  moved heads even when no current exception is used.
+  event base, while explicit candidate reruns MAY use a verified manual ancestor. The publisher,
+  signer template, policy, schemas, protected environment, and tag/ref rules MUST be reviewed and
+  protected before release activation; candidate jobs remain read-only.
 - **FR-050**: The matrix MUST cover sign-in, one ordinary rendered chat turn, reconnect and resume,
   lifecycle status, and personal-agent authoring or hosting wherever that client supports it. macOS
   hosting applicability MUST come from a complete server-owned capability value in the exercised
   candidate—not a branch/spec path, live client count, or client-authored report. Unsupported makes
   only the macOS-hosting check not applicable; supported-but-refused or unacknowledged is a failure.
-- **FR-051**: Temporary shipping-client runner/platform unavailability independent of product
-  behavior MUST block release or require a recorded, owner-approved exception that names the missing
-  platform/check evidence, expires within seven calendar days, and blocks the next release if the
-  evidence is still absent. Approval MUST be verified against the same-repository GitHub API and an
-  independently attested protected `release-evidence-exception` environment deployment reviewed by
-  an allowlisted release owner other than the requester. The approval request MUST expose and bind
-  the exact immutable exception artifact ID and digest before review, and the protected verifier MUST
-  re-query and re-hash those same bytes; a self-declared approver or post-request mutation is invalid.
-  An unavailable client report MUST still bind the exact built client artifact, verified qualifying
-  staging identity, and a protected immutable observation of the attempted target job/runner or
-  platform failure, with the always-running control producer identified separately. Failed
-  behavior, backend/docs results, qualifying staging, provenance/trust, and evidence-policy integrity
-  are not exception-eligible. First-login credential validation
-  on both Apple platforms is non-waivable for an Apple release intended to resolve this App Store
-  rejection. The immutable pre-review request artifact MUST contain only requester-known scope and
-  candidate/release identity; reviewer identity, approval time, expiry, and approval state MUST come
-  only from the protected approval record. Before the protected final decision passes, a separately
-  pinned registrar MUST append a canonical debt entry create-only to an externally protected,
-  non-force-push `release-evidence-debt` ref and return an attested immutable commit/path/digest
-  receipt. Current exception debt MUST NOT be committed into the candidate tree or used to derive
-  the candidate SHA it names. Exception history MUST remain append-only, and a later release MUST prove every prior
-  missing platform/check as passing and append a protected `release_evidence_debt_resolution` plus
-  attested receipt before its aggregate may pass; another exception cannot resolve prior debt. A
-  resolution applies only to its named debt, so a later outage for the same check is a new debt.
+- **FR-051**: Every affected shipping client and feature-designated non-waivable check MUST produce
+  passing evidence for the exact candidate before release unless a temporary runner/platform outage
+  satisfies the existing candidate-bound, independently verified seven-day exception policy.
+  Exception approval, append-only debt registration, and later resolution MUST run in protected,
+  environment-approved GitHub Actions using the built-in short-lived job token; local evidence and
+  candidate-controlled jobs cannot approve themselves. Product failures, qualifying staging, trust
+  and policy integrity, and feature-designated non-waivable checks remain ineligible, and no client
+  may substitute for another. No repository-scoped GitHub App, installation token, or custom token
+  broker may be required.
 - **FR-052**: Client build configuration MUST include a compatibility canary for the next declared
   major toolchain and MUST remove known-removal blockers before adopting that toolchain. Exact pins
-  MUST identify public, independently resolvable artifacts; while either major is unpublished, the
-  declaration MUST remain explicitly unavailable, fail closed as a canary, and use only a separate
-  official-availability diagnostic that cannot satisfy the canary success criterion.
+  MUST identify stable public, independently resolvable artifacts; prerelease artifacts do not
+  qualify. While either stable major is unpublished, the declaration MUST remain explicitly
+  unavailable, fail closed as a canary, and use only a separate official-availability diagnostic.
+  Spec 060 closes on that verified unavailable state and leaves activation to a separately authorized
+  future change after both stable public releases exist.
 - **FR-053**: The feature MUST add no new product runtime dependency without the project approval
   required by the constitution; test-only tooling MUST remain isolated from released artifacts.
 - **FR-054**: On macOS and iOS first login, choosing Save for LLM API credentials MUST produce visible
@@ -650,20 +643,18 @@ MUST fail closed by default, verify official unavailability explicitly, and reje
 - **SC-012**: One release-candidate evidence set identifies the qualifying staging topology,
   representative migration, candidate SHA/artifact digests, and quantitative trials demonstrating
   sign-in, rendered chat, continuity, and applicable personal-agent behavior on every affected
-  shipping client against one reachable deployment before publication, except only exact client
-  evidence covered by a current FR-051 request, protected approval, and registered-ledger receipt;
-  missing platform evidence,
-  duplicate checks, illegal N/A outcomes, unresolved prior exception debt, unverified bytes, or
-  conflicting staging identity is never silently treated as passing.
+  shipping client against one reachable deployment before publication. Missing platform evidence,
+  duplicate checks, illegal N/A outcomes, unverified bytes, or conflicting staging identity is never
+  silently treated as passing.
 - **SC-013**: All affected tracked documentation links resolve, the personal-agent operating guide
   is present in a clean checkout, and the documented enablement flow proves the running effective
   value on its first execution.
-- **SC-014**: Once exact public artifacts exist for both declared next-major tools, the
-  next-major-toolchain compatibility canary completes with zero known-removal blockers, and
-  automated accessibility inspection reports zero unnamed interactive controls on changed
-  surfaces. Until then, the independently verified official-availability diagnostic MUST confirm
-  that the artifacts remain unpublished and the canary MUST fail closed; that diagnostic does not
-  satisfy this criterion or authorize distribution.
+- **SC-014**: The independently verified official-availability diagnostic confirms that either one
+  or both stable next-major tools remain unpublished, prereleases do not trigger activation, the
+  compatibility canary fails closed, and automated accessibility inspection reports zero unnamed
+  interactive controls on changed surfaces. After both stable public releases exist, a separately
+  authorized future change must pass the true canary before adopting them; that future activation is
+  not a Spec 060 distribution gate.
 - **SC-015**: All new or changed behavior meets the repository's ≥90% changed executable-line
   coverage gate in every changed maintained language and in aggregate, with missing applicable
   reports or an unexpected empty event-base comparison failing automatically on pull requests and
@@ -733,8 +724,9 @@ MUST fail closed by default, verify official unavailability explicitly, and reje
 
 - Any change to product-runtime authentication, authorization, secret storage, agent/data trust
   boundaries, permission policy, or other runtime security behavior. This exclusion does not cover
-  the candidate-independent release-provenance and CI evidence-trust controls required by
-  FR-048–FR-051.
+  the local evidence-preparation, protected-CI validation, and native CI publisher controls required
+  by FR-048–FR-051. Repository-scoped GitHub Apps and custom release token brokers are explicitly out
+  of scope.
 - Building the macOS personal-agent host itself, which remains owned by feature 059.
 - A visual redesign, new UI primitive family, or new agent-sharing/publishing capability.
 - Replacing the current scheduling, client, or deployment product with a different platform; this

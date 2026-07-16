@@ -145,6 +145,8 @@ Client gates:
 
 Tests are necessary, not sufficient. Exercise changed UI behavior against the live backend on every affected client/form factor. Verify authorization and security changes through the real dispatch path, including denial/failure cases. If an unrelated baseline failure exists, demonstrate and document the baseline rather than hiding it or weakening a gate.
 
+Release-evidence collection, normalization, and parsing run locally before push and remain diagnostic; protected CI independently validates canonical evidence, identities, digests, policy, and any bounded exception/debt transition before authorizing release. Release publication and protected exception/debt mutation stay in environment-approved GitHub Actions with the built-in short-lived job token and narrowly gated job permissions. Do not introduce repository-scoped GitHub Apps, installation tokens, or a custom token broker for release verification or publication.
+
 ## Knowledge vault and handoffs
 
 When available, the local knowledge vault is at `../../../Karpathy-my-g`. Use `index.md` to route, then read the relevant concept/entity pages, the tail of `log.md`, and any active `sessions/resume-*.md`. The vault is project memory, not current-state authority; verify its claims against the live repositories.

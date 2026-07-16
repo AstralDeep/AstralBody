@@ -95,7 +95,7 @@ non-sensitively in `system_config`.
 
 ## Constitution Check
 
-*GATE: evaluated against constitution v2.7.0 before research and re-checked after Phase 1 design.*
+*GATE: evaluated against constitution v2.8.0 and re-checked after the 2026-07-16 owner decisions.*
 
 | Principle | Verdict | Design evidence |
 |---|---|---|
@@ -108,8 +108,8 @@ non-sensitively in `system_config`.
 | VII. Security | PASS / unchanged | Existing Keycloak, authorization, delegation, policy, PHI, egress, audit, and credential-storage behavior is preserved. Profiles/evidence never contain secrets; tunnel authority remains the authenticated UI principal. |
 | VIII. User Experience | PASS | Existing primitives render status/forms; no new primitive type is needed. Immediate, accessible operation feedback and coherent restoration improve the existing SDUI flow. |
 | IX. Database Migrations | PASS (plan) | One additive guarded 060 revision, PostgreSQL advisory ownership, post-lock recheck, representative old-data tests, repeat safety, and rollback/recovery are specified in data-model.md. |
-| X. Production Readiness | PASS (plan) | Runtime-infrastructure proof reuses the CI-built candidate image and build-once unsigned client artifacts, then a configured staging host deploys the image into a TLS-reachable request namespace with real Keycloak, representative PostgreSQL data migrated normally, and real background/scheduler paths. Every platform job/runner and artifact matches its per-producer manifest verified by a candidate-independent protected trusted builder; cleanup follows the matrix. A temporary client-runner outage may use only a seven-day request approved through an independently verified protected release-owner environment and registered create-only in the protected debt ledger; failed behavior, backend/docs, staging, trust/policy integrity, and Apple first-login remain non-waivable, and every debt must pass next release and receive a protected resolution receipt. Detached Sigstore publication keeps the tested EXE byte-identical, verifies all three draft assets after re-download, then makes the release public without a rebuild. |
-| XI. Continuous Integration | PASS (plan) | `ci.yml` invokes one reusable readiness workflow automatically for every PR and main push (manual dispatch remains available). Per-language lint, all coverage producers, connected Android, Apple/Watch tests, build-once Windows smoke, digest-pinned Playwright, docs links, compatibility canary, staging proof, byte re-hashing, evidence policy, and the ≥90% changed-code decision converge on one named required aggregate; main image publication depends on it. |
+| X. Production Readiness | PASS (plan) | Runtime-infrastructure proof reuses the CI-built candidate image and build-once unsigned client artifacts, then a configured staging host deploys the image into a TLS-reachable request namespace with real Keycloak, representative PostgreSQL data migrated normally, and real background/scheduler paths. Evidence is collected, normalized, and parsed locally before push without authorization; protected CI independently validates canonical bytes, run/job/artifact identities, pinned policy, and any bounded platform-exception approval/debt transition. Detached Sigstore publication remains in a protected environment-approved CI job, keeps the tested EXE byte-identical, verifies all three draft assets after re-download, and uses only the built-in short-lived job token; no repository-scoped GitHub App or custom broker is introduced. |
+| XI. Continuous Integration | PASS (plan) | `ci.yml` invokes one reusable readiness workflow automatically for every PR and main push (manual dispatch remains available). Per-language lint, all coverage producers, connected Android, Apple/Watch tests, build-once Windows smoke, digest-pinned Playwright, docs links, stable-release Android readiness, staging proof, byte re-hashing, evidence policy, and the ≥90% changed-code decision converge on one named required aggregate after the local pre-push evidence command; main image publication depends on it. |
 | XII. Cross-Client Consistency | PASS (plan) | `conversation_commit_ready`, `conversation_snapshot`, `operation_status`, and `agent_lifecycle` enter the manifest and every client drift guard/handler together; shared state names and generation rejection are uniform. |
 | XIII. Documentation & Research Integrity | PASS | Product feature; research decisions cite verified repository evidence, and release evidence is SHA/artifact-bound rather than asserted from source-only tests. |
 
@@ -249,13 +249,10 @@ backend/tests/test_release_workflows_060.py  # workflow DAG/reuse/cleanup/no-reb
 .github/workflows/
 ├── ci.yml
 ├── build-windows-candidate.yml               # NEW reusable build-once unsigned artifact producer
-├── release-trusted-builder.yml               # NEW protected candidate-independent attester/verifier
-├── release-exception-registrar.yml            # NEW protected append-only debt/resolution registrar
-├── release-windows-publisher-controller.yml # NEW protected exact-SHA/token-broker entrypoint
-├── release-windows-publisher.yml            # NEW protected create-only publisher
+├── release-evidence-exception.yml             # NEW native protected-CI exception/debt transitions
 ├── android-ci.yml
 ├── apple-ci.yml
-├── release-windows.yml                       # hardened legacy-SAN bridge signer only
+├── release-windows.yml                       # protected build-once consumer/signer/publisher
 └── release-readiness.yml                    # NEW same-artifact candidate-staging evidence matrix
 ```
 
@@ -287,10 +284,10 @@ introduced.
    backend ten-second attempt deadline, single flight, retry/edit behavior, iOS/macOS UI tests.
 7. **P2 data/operability**: draft CAS/atomic publication, maintenance claims, registry snapshots,
    truthful examples, canonical lifecycle/progress, tracked guide/apply behavior/link checks.
-8. **P2/P3 release proof and future readiness**: comprehensive evidence-schema validator,
-   reachable candidate-staging topology, same-SHA/digest artifact matrix, exception policy,
-   connected client gates, Android built-in-Kotlin/next-major canary, accessibility semantics,
-   maintained-language lint, and cross-language changed-code coverage.
+8. **P2/P3 release proof and future readiness**: comprehensive local-before-push evidence parser,
+   independent CI validation, reachable candidate-staging topology, same-SHA/digest artifact matrix,
+   bounded protected-CI exception policy, connected client gates, Android built-in-Kotlin/stable-release readiness,
+   accessibility semantics, maintained-language lint, and cross-language changed-code coverage.
 9. **Verification**: focused suites after each phase, then full CI-parity suites, the isolated
    candidate deployment with representative migration/real Keycloak/workers, stress/fault matrices,
    digest-pinned Playwright plus Android/iOS/macOS/watchOS runs, trusted byte provenance, and one
@@ -310,65 +307,43 @@ workflow outputs and immutable artifacts. The job exits without tearing the name
 Backend/browser, packaged Windows, connected Android, and Apple jobs all require `stage-deploy`,
 consume that endpoint, attestation-verified deploy manifest, and archived artifact identities, and fail if any is
 unreachable, mismatched, mutable, or cannot be re-hashed; there is no localhost, mock-auth, empty-
-database, source-run, or caller-selected URL fallback. Repository rules require a reusable trusted-
-builder/verifier workflow pinned independently of the candidate; signer digest and certificate
-identity are immutable to candidate code. Every producer and stage deployment emits its own manifest
-through that builder. Before exception review, the protected approval request exposes the exact
-request artifact ID/digest. After review, a separately pinned registrar re-queries API/request bytes
-and appends a canonical debt entry create-only to the protected non-force-push
-`release-evidence-debt` ref; later passing evidence appends a resolution receipt instead of rewriting
-debt. A used approval manifest binds the payload, API state, ledger parent/new commits, entry bytes,
-and immutable path. Candidate commits never contain current debt.
-The protected verifier—not the candidate aggregate—reconstructs exact artifact/job IDs from the
-current run and GitHub API, verifies attestations and subject bytes, re-hashes exception/stage/raw
-artifacts, executes policy and coverage code from its pinned signer revision, and emits an attested
-`trusted_release_decision` binding each consumed manifest ID to its canonical artifact member and
-re-hashed bytes plus the exact current protected-ledger commit/tree/snapshot and a bounded
-`valid_until`. It rejects stale/concurrently moved ledger heads and appends/verifies resolution
-receipts for newly satisfied prior debts before finalizing. The repository ruleset requires the
-installed protected workflow identity, not merely its check name; the caller aggregate or a
-candidate job using the same name cannot substitute its verdict.
-A mandatory two-checkpoint bootstrap first lands the protected verifier/policy/all three schemas,
-bridge-signer template, exception registrar/debt ref, publisher/controller, and exact-workflow-SHA
-token broker on the protected default branch, configures environments/reviewer allowlists/tag/ref
-rules, and records immutable
-identities while the automatic PR/main caller and required check remain disabled. The candidate then
-rebases onto and verifies that installed root; only a second candidate checkpoint enables the
-automatic caller and repository-required check before qualifying evidence. Candidate copies, moved
-refs, dirty working-tree policy bytes, or a caller enabled by the trust-root installation run never
-establish the root; the verifier extracts and executes the exact pinned commit archive.
+database, source-run, or caller-selected URL fallback. Before push, a deterministic local command
+collects, normalizes, and parses the canonical platform reports and raw references, records their
+digests, and emits `protected_release_authorization: false`. Protected CI then reconstructs exact
+artifact/job IDs from the current run and GitHub API, verifies attestations and subject bytes,
+re-hashes stage/raw artifacts, and executes pinned policy and coverage independently. A committed
+local verdict, candidate filename, or same-name job cannot substitute for that decision.
+Repository rules protect the reviewed readiness workflow identity and required check. Protected
+environment-approved CI performs any bounded exception approval, append-only debt registration, or
+later resolution with its built-in job token; local and candidate jobs cannot authorize those
+transitions. The publisher environment, release-tag rules, signer bytes, and job-scoped permissions
+are configured before any official publication. No repository-scoped GitHub App, installation token,
+or custom broker is created.
 A final `stage-cleanup` job with `if: always()` depends on the entire matrix and removes only that
-request namespace. Missing staging-host/registry/TLS/trust inputs block unconditionally. A missing
-client runner blocks unless an always-running control-plane job separately records the attempted
-target runner/platform failure while retaining the exact built artifact and verified qualifying-stage
-identity, and the protected verifier validates the exact-byte-bound owner-approved exception; product
-failures and non-waivable gaps have no fallback.
+request namespace. Missing staging-host/registry/TLS/trust inputs block unconditionally. A required
+client-runner outage remains blocked unless the existing bounded, protected-CI exception policy is
+satisfied; no substitute client exists.
 
-`ci.yml` calls `release-readiness.yml` as a reusable workflow on every pull request and main push;
+`ci.yml` calls `release-readiness.yml` as a reusable workflow on every pull request and main push
+after maintainers have run the local evidence-preparation command;
 the latter also retains explicit manual dispatch. It passes the PR base SHA, `github.event.before`
 for main, or a manually supplied verified ancestor, records that base, and rejects an unexpected
 empty executable diff. One named protected decision check owns both release-evidence policy and the
 cross-language ≥90% result, and main image publication depends on that status.
 
-Windows publication is a protected owner-approved dispatch, not candidate/tag-checkout authority.
-An exact-workflow-SHA deployment rule grants a scoped GitHub App token only inside the installed
-publisher; candidate workflows retain read-only permissions. To preserve the actual v0.3.0 updater's
-pinned Sigstore SAN, the publisher first proves the candidate's `release-windows.yml` blob is
-byte-identical to the installed compatibility-bridge template, refuses any existing tag/release/
-asset, and creates exactly `v${release_version}` (`v0.4.0`) at the protected-decision SHA. That tag
-triggers the bridge with only `contents: read`, `actions: read`, and `id-token: write`; it retrieves
-the T068 EXE by exact originating run/attempt/artifact ID, re-hashes it, and signs those bytes under
-the legacy `release-windows.yml@refs/tags/v0.4.0` identity but cannot mutate releases. The publisher
-verifies the bundle with the shipped v0.3.0 policy, creates `SHA256SUMS`, uploads exactly the three
-create-only assets to a new draft, re-downloads numeric asset IDs, verifies hashes, draft state/count,
-protected approval/publisher/decision provenance, exact release name/tag equality, latest-on-publish
-disposition, and target SHA, validates `windows_draft_verification_provenance`, and only then makes
-the release public as latest. Official mode re-queries `/releases/latest` with the API shape consumed
-by v0.3.0 before declaring success. Before its first mutation and again before transition, the
-publisher requires current time before the decision's `valid_until` and every used approval expiry.
-Failure removes only
-the just-created tag/draft before publication. A moved-main/modified publisher receives no token;
-disposable test mode runs only in an isolated repository/draft and never creates an official tag.
+Windows publication remains a protected owner-approved GitHub Actions dispatch. Candidate and
+evidence jobs retain read-only permissions. The protected publisher job uses the built-in short-lived
+`GITHUB_TOKEN` with job-scoped write/OIDC only after its environment approval and reviewed workflow
+identity are established; no repository-scoped App or broker participates. It consumes the T068 EXE
+by exact originating run/attempt/artifact ID and never rebuilds. To preserve the actual v0.3.0
+updater's pinned Sigstore SAN, an exact-byte-pinned signer step receives only `contents: read`,
+`actions: read`, and `id-token: write`, re-hashes and signs those exact bytes, and has no release
+mutation authority. The publisher refuses any existing tag/release/asset, creates the exact SemVer
+tag at the validated SHA, verifies the bundle with the shipped v0.3.0 policy, creates `SHA256SUMS`,
+uploads exactly the three create-only assets to a draft, re-downloads numeric asset IDs, verifies
+hashes, name/tag/latest disposition and target SHA, and only then makes the release public as latest.
+Failure removes only the just-created tag/draft before publication. Disposable test mode runs only
+in an isolated repository/draft and never creates an official tag.
 
 ## Feature 059 Integration Rule
 

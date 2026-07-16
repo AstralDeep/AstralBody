@@ -376,26 +376,23 @@ defaults.
 Two fresh Windows/Python-3.11 release environments must resolve identical installed-package and lock
 digests. The client and file metadata must both report `0.4.0`; `v0.3.0` and its assets remain
 immutable. The order is build → clean-profile validation → frozen-worker round trip → no-dialog GUI
-smoke → protected decision → protected owner approval/token gate → exact tag → legacy-bridge
-detached sign → draft upload → re-download/verify → public transition.
+smoke → local evidence preparation → independent CI validation → protected environment approval →
+exact tag → legacy-compatible detached sign → draft upload → re-download/verify → public transition.
 The reusable Windows candidate job archives that one unsigned EXE with its run/artifact ID, SHA-256,
 source SHA, profile/lock digests, and coverage. The readiness matrix downloads and tests those bytes.
-Candidate workflows have read-only permissions and cannot publish. A separately installed publisher
-receives a scoped GitHub App token only after its full workflow SHA and protected owner approval are
-verified by the deployment broker. It consumes the exact attested protected decision, re-opens its
-approval/ledger inputs, and requires current time before both decision `valid_until` and every used
-approval expiry immediately before mutation and public transition. It refuses any
-existing tag/release/asset. To preserve the verifier shipped in v0.3.0, it proves the candidate's
-`release-windows.yml` blob equals the installed bridge template, then creates exactly
-`v${release_version}` (`v0.4.0`) at the protected-decision SHA. That tag alone triggers the bridge,
-which has only `contents: read`, `actions: read`, and `id-token: write`, retrieves T068's EXE by its
-exact originating run/attempt/artifact ID, re-hashes it, and emits a detached
-bundle with SAN exactly `https://github.com/AstralDeep/AstralDeep/.github/workflows/release-windows.yml@refs/tags/v0.4.0`.
-The bridge cannot mutate releases. The publisher verifies the bundle with the actual v0.3.0 policy,
+Candidate workflows have read-only permissions and cannot publish. A protected, environment-approved
+publisher job uses only the built-in short-lived `GITHUB_TOKEN` with job-scoped write/OIDC
+permissions; no repository-scoped GitHub App or custom broker is involved. It consumes the exact
+independently validated candidate/artifact decision and refuses any existing tag/release/asset. To
+preserve the verifier shipped in v0.3.0, its exact-byte-pinned signer has only `contents: read`,
+`actions: read`, and `id-token: write`, retrieves T068's EXE by exact originating
+run/attempt/artifact ID, re-hashes it, and emits a detached bundle with SAN exactly
+`https://github.com/AstralDeep/AstralDeep/.github/workflows/release-windows.yml@refs/tags/v0.4.0`.
+The signer cannot mutate releases. The publisher verifies the bundle with the actual v0.3.0 policy,
 creates `SHA256SUMS`, uploads exactly `AstralDeep.exe`, `SHA256SUMS`, and `cosign.bundle` create-only to
 a new draft, resolves/re-downloads all three distinct numeric asset IDs, and re-hashes/verifies the
-checksum, legacy identity/issuer, draft state/count, tag, target SHA, protected decision, publisher
-identity, and API-backed approval. It validates `windows_draft_verification_provenance` while the
+checksum, legacy identity/issuer, draft state/count, tag, target SHA, CI decision, publisher
+workflow identity, and environment approval. It validates `windows_draft_verification_provenance` while the
 release is still a draft, including `release_name == tag == v0.4.0` and
 `latest_disposition == make_latest_on_publish`; only then may it make the draft public as latest.
 Official mode must re-query the API-shaped `/releases/latest` response and run the shipped v0.3.0
@@ -420,24 +417,23 @@ cp android-client/core/build/reports/kover/report.xml build/060/coverage/android
 python3 scripts/run_android_next_major_canary.py android-client/gradle/next-major-canary.properties
 ```
 
-AGP 10 and Gradle 10 do not have public artifacts as of 2026-07-16, so the tracked declaration is
-explicitly `unreleased` and the command above MUST exit 69 rather than count a guessed or shipping
-toolchain as evidence. CI may verify that this declaration remains current with:
+AGP 10 and Gradle 10 do not both have stable public releases as of 2026-07-16, so the tracked
+declaration is explicitly `unreleased` and the command above MUST exit 69 rather than count a
+prerelease, guessed, or shipping toolchain as evidence. CI may verify that this declaration remains
+current with:
 
 ```bash
 python3 scripts/run_android_next_major_canary.py \
   android-client/gradle/next-major-canary.properties \
   --allow-unreleased --verify-official-availability \
-  --output build/060/android-next-major.json
+  --output build/060/android-next-major-readiness.json
 ```
 
-That diagnostic succeeds only while both official metadata feeds lack major 10; it is not a passing
-canary. When exact public artifacts exist, replace the declaration's version, official wrapper URL,
-and SHA-256 together. The script then copies Android source into a temporary directory, replaces both
-plugin and wrapper versions, runs configuration plus unit/lint/assemble with
-`--warning-mode=fail`, deletes the copy, and MUST assert that the resolved AGP and Gradle majors are
-10 so rerunning shipping 9.x cannot count as canary evidence. Install the candidate and exercise real
-process recreation:
+That readiness diagnostic succeeds until both official metadata feeds contain stable major-10
+releases. Alpha, beta, RC, milestone, nightly, and snapshot versions are ignored. Spec 060 does not
+replace the sentinels or upgrade the shipping toolchain; a separately authorized future change owns
+stable pins, the official wrapper URL/SHA-256, and the true isolated canary. Install the current
+candidate and exercise real process recreation:
 
 ```bash
 "$ANDROID_HOME/platform-tools/adb" install -r android-client/app/build/outputs/apk/debug/app-debug.apk
@@ -572,7 +568,7 @@ worker, localhost/non-HTTPS endpoint, unreachable cross-runner endpoint, or sour
 Missing staging host/registry/TLS secrets blocks the workflow. A local sequential Compose smoke is
 useful diagnostics but cannot emit qualifying release evidence.
 
-## 10. Documentation, profile, and same-SHA evidence aggregation
+## 10. Local pre-push evidence and protected CI validation
 
 Validate tracked documentation, including files explicitly unignored beneath `docs/`:
 
@@ -582,10 +578,31 @@ git ls-files docs/byo-client-agents.md
 python3 -m pytest backend/tests/test_release_contract_schemas.py backend/tests/test_release_evidence_validator.py -q
 ```
 
-The validator must schema-check all three tracked schemas, reject unsupported keywords/remote references,
-enforce UUID/date-time/URI formats plus `oneOf`/`contains`/conditionals, and reject missing or under-
-threshold quantitative measurements, illegal N/A outcomes, unresolved exception debt, and raw-
-evidence references whose trusted bundled/GitHub/OCI bytes cannot be resolved and re-hashed.
+The validator must schema-check the active tracked schemas, reject unsupported keywords/remote
+references, enforce UUID/date-time/URI formats plus `oneOf`/`contains`/conditionals, and reject
+missing/unavailable platform reports, under-threshold quantitative measurements, illegal N/A
+outcomes, and raw-evidence references whose trusted bundled/GitHub/OCI bytes cannot be resolved and
+re-hashed.
+
+T107 owns the future normative `make prepare-release-evidence` wrapper; it is not executable until
+that open task lands. Until then, use the tracked direct validator invocation above for local
+diagnostics. The eventual wrapper collects, normalizes, and parses canonical evidence and digests
+locally. A green local
+result remains diagnostic and must state `protected_release_authorization: false`. Protected CI then
+downloads the exact run/artifact identities, independently schema-validates and re-hashes the
+canonical evidence and executes pinned policy/coverage. An affected platform must pass unless the
+existing bounded exception policy is independently satisfied by protected CI; local output cannot
+approve an exception.
+
+Release publication and protected exception/debt transitions remain environment-approved GitHub
+Actions jobs using the built-in short-lived `GITHUB_TOKEN` with job-scoped permissions. Do not
+create a repository-scoped GitHub App, installation token, publisher App, or custom token broker.
+
+<details>
+<summary>Superseded App/broker bootstrap (historical only — do not execute)</summary>
+
+The remainder of this section records the rejected pre-2026-07-16 design so its security analysis is
+not lost. It is not an implementation or administrator runbook.
 
 Bootstrap is deliberately ordered. A first protected landing installs the verifier, pinned policy
 and all three schemas, bridge template, publisher/controller, exception registrar, token broker, and
@@ -723,6 +740,8 @@ base/candidate and downloaded artifacts:
 ```bash
 python3 scripts/check_changed_coverage.py --base-sha "$BASE_SHA" --candidate-sha "$SHA" --backend-python build/060/coverage/backend.xml --tooling-python build/060/coverage/tooling-python.xml --windows-python build/060/coverage/windows.xml --javascript build/060/coverage/node-v8/tooling-javascript.json --javascript build/060/coverage/web-istanbul.json --android-app build/060/coverage/android-app.xml --android-core build/060/coverage/android-core.xml --apple build/060/coverage/apple-ios-xccov.json --apple build/060/coverage/apple-macos-xccov.json --apple build/060/coverage/apple-watchos-xccov.json --fail-under 90 --output build/060/coverage/changed-code.json
 ```
+
+</details>
 
 ## 11. Rollback and recovery
 

@@ -158,9 +158,10 @@ Examples of foundational tasks (adjust based on your project):
 - [ ] TXXX Security hardening
 - [ ] TXXX Run every maintained-language lint gate, including TypeScript/JavaScript when changed
 - [ ] TXXX Validate runtime-infrastructure changes in a qualifying persistent or ephemeral staging deployment using the same candidate artifact, real dependencies and affected clients, representative migrated data, and candidate-bound evidence
-- [ ] TXXX Test bounded platform-unavailability requests, machine-verifiable protected release-owner approval, non-waivable staging/trust checks, create-only protected debt/resolution history outside the candidate tree, seven-day expiry, exact ledger snapshots, and next-release passing-evidence resolution receipts
+- [ ] TXXX Test bounded platform-unavailability requests, machine-verifiable native protected-CI release-owner approval, non-waivable staging/trust checks, create-only protected debt/resolution history outside the candidate tree, seven-day expiry, exact ledger snapshots, and next-release passing-evidence resolution receipts; prove local/candidate jobs cannot authorize or mutate them
 - [ ] TXXX Configure and test a candidate-independent protected verifier that reconstructs trusted inputs, runs pinned policy, attests a bounded-lifetime final decision, and owns a required gate bound to its installed protected workflow identity rather than a name-only check
-- [ ] TXXX Keep candidate workflows unprivileged and exercise signing/publication only through a separately pinned protected publisher with create-only collision checks and protected approval
+- [ ] TXXX Run deterministic release-evidence collection, normalization, and parsing locally before push; retain canonical inputs/digests and prove the local result cannot authorize merge or release
+- [ ] TXXX Keep candidate workflows unprivileged and exercise signing/publication only through a separately pinned protected CI publisher with create-only collision checks, protected approval, and a native short-lived job-scoped token—never a repository-scoped GitHub App or custom token broker
 - [ ] TXXX Run quickstart.md validation
 
 ---

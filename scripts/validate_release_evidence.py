@@ -137,7 +137,7 @@ REQUIRED_CHECKS = {
         "windows_upgrade_from_0_3_0",
         "dependency_lock_reproducibility",
     },
-    "android": COMMON_CLIENT_CHECKS | {"android_next_toolchain_canary"},
+    "android": COMMON_CLIENT_CHECKS | {"android_next_toolchain_readiness"},
     "macos": COMMON_CLIENT_CHECKS
     | {"apple_first_login_llm", "macos_personal_agent_host"},
     "ios": COMMON_CLIENT_CHECKS | {"apple_first_login_llm"},

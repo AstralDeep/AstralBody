@@ -962,6 +962,12 @@ reports only profile/release IDs, source, digest, versions, and disposition—no
 
 ## 10. Release Evidence
 
+> **Owner override (2026-07-16)**: Spec 060 prepares and parses canonical evidence locally before
+> push, then requires independent protected-CI validation. The bounded exception/debt data model
+> remains active, but approval, append-only registration, resolution, and publication use protected,
+> environment-approved GitHub Actions jobs with the built-in short-lived job token. References below
+> to repository-scoped GitHub Apps, installation tokens, or a custom token broker are superseded.
+
 Release evidence is tracked/artifact JSON validated by `contracts/release-evidence.schema.json`, not
 a database table and not an assertion inferred from source-only tests.
 
