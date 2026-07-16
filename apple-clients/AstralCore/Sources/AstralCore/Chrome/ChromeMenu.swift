@@ -48,9 +48,14 @@ public struct SignOutItem: Equatable, Sendable {
     public let label: String
     public let style: String
     public let action: String
-    public init(key: String = "signout", label: String = "Sign out",
-                style: String = "danger", action: String = "logout") {
-        self.key = key; self.label = label; self.style = style; self.action = action
+    public init(
+        key: String = "signout", label: String = "Sign out",
+        style: String = "danger", action: String = "logout"
+    ) {
+        self.key = key
+        self.label = label
+        self.style = style
+        self.action = action
     }
 }
 
@@ -75,23 +80,27 @@ public struct ChromeMenuModel: Equatable, Sendable {
             guard let key = el["key"]?.stringValue else { return nil }
             var action: SurfaceRef?
             if let a = el["action"], a.objectValue != nil {
-                action = SurfaceRef(surface: a["surface"]?.stringValue ?? "",
-                                    params: a["params"] ?? .object([:]))
+                action = SurfaceRef(
+                    surface: a["surface"]?.stringValue ?? "",
+                    params: a["params"] ?? .object([:]))
             }
-            return TopBarControl(key: key, kind: el["kind"]?.stringValue ?? "action",
-                                 label: el["label"]?.stringValue, icon: el["icon"]?.stringValue,
-                                 action: action)
+            return TopBarControl(
+                key: key, kind: el["kind"]?.stringValue ?? "action",
+                label: el["label"]?.stringValue, icon: el["icon"]?.stringValue,
+                action: action)
         }
         let menu: [ChromeMenuGroup] = (root["menu"]?.arrayValue ?? []).compactMap { g in
             guard let key = g["key"]?.stringValue else { return nil }
             let items: [ChromeMenuItem] = (g["items"]?.arrayValue ?? []).compactMap { i in
                 guard let ik = i["key"]?.stringValue, let surface = i["surface"]?.stringValue else { return nil }
-                return ChromeMenuItem(key: ik, label: i["label"]?.stringValue ?? "",
-                                      surface: surface, params: i["params"] ?? .object([:]),
-                                      adminOnly: i["admin_only"]?.boolValue ?? false)
+                return ChromeMenuItem(
+                    key: ik, label: i["label"]?.stringValue ?? "",
+                    surface: surface, params: i["params"] ?? .object([:]),
+                    adminOnly: i["admin_only"]?.boolValue ?? false)
             }
-            return ChromeMenuGroup(key: key, label: g["label"]?.stringValue ?? "",
-                                   adminOnly: g["admin_only"]?.boolValue ?? false, items: items)
+            return ChromeMenuGroup(
+                key: key, label: g["label"]?.stringValue ?? "",
+                adminOnly: g["admin_only"]?.boolValue ?? false, items: items)
         }
         let so = root["signout"]
         let signout = SignOutItem(
@@ -105,16 +114,16 @@ public struct ChromeMenuModel: Equatable, Sendable {
     }
 }
 
-public extension ChromeMenuItem {
+extension ChromeMenuItem {
     /// The `chrome_open` payload ({surface, params}).
-    var chromeOpenPayload: [String: JSONValue] {
+    public var chromeOpenPayload: [String: JSONValue] {
         ["surface": .string(surface), "params": params]
     }
 }
 
-public extension TopBarControl {
+extension TopBarControl {
     /// The `chrome_open` payload ({surface, params}) for an interactive control.
-    var chromeOpenPayload: [String: JSONValue] {
+    public var chromeOpenPayload: [String: JSONValue] {
         ["surface": .string(action?.surface ?? ""), "params": action?.params ?? .object([:])]
     }
 }

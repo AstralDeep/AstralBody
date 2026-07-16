@@ -17,9 +17,80 @@ import hashlib
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from astral_client import integrity
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "v0.4.0",
+        " 0.4.0",
+        "0.4.0 ",
+        "0.4.0\n",
+        "0.4.0\r",
+        "0.4.0\t",
+        "0.4.0\u2028",
+        "01.4.0",
+        "0.04.0",
+        "0.4.00",
+        "0.4.0-01",
+        "0.4.0-alpha.01",
+    ],
+)
+def test_strict_semver_rejects_prefix_whitespace_and_leading_zeroes(value):
+    with pytest.raises(ValueError):
+        integrity.parse_semver(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "0.4.0",
+        "0.4.0-alpha",
+        "0.4.0-alpha.1",
+        "0.4.0-0.3.7",
+        "0.4.0-x.7.z.92",
+        "0.4.0+build.5",
+        "0.4.0-alpha+build.5",
+    ],
+)
+def test_strict_semver_accepts_legal_prerelease_and_build(value):
+    assert str(integrity.parse_semver(value)) == value
+
+
+def test_semver_precedence_and_upgrade_from_0_3_0():
+    assert integrity.is_newer_version("0.4.0", "0.3.0") is True
+    assert integrity.is_newer_version("0.4.0-alpha.1", "0.4.0-alpha") is True
+    assert integrity.is_newer_version("0.4.0", "0.4.0-rc.1") is True
+    assert integrity.is_newer_version("0.3.0", "0.4.0") is False
+    assert integrity.is_newer_version("0.4.0+build.2", "0.4.0+build.1") is False
+
+
+def test_release_assets_require_immutable_distinct_asset_identities(monkeypatch):
+    payload = {
+        "id": 42,
+        "name": "0.4.0",
+        "tag_name": "v0.4.0",
+        "html_url": "https://github.invalid/releases/42",
+        "assets": [
+            {"id": 101, "name": "AstralDeep.exe", "browser_download_url": "u/exe"},
+            {"id": 102, "name": "SHA256SUMS", "browser_download_url": "u/sha"},
+            {"id": 103, "name": "cosign.bundle", "browser_download_url": "u/bundle"},
+        ],
+    }
+    monkeypatch.setattr(integrity, "_api_get", lambda _path: payload)
+    release = integrity.latest_release()
+    assert release is not None
+    assert release.version == "0.4.0"
+    assert release.release_id == 42
+    assert release.asset_ids == (101, 102, 103)
+
+    payload["assets"][2]["id"] = 102
+    assert integrity.latest_release() is None
 
 
 def _make_release(exe_url="u/exe", sha_url="u/sha", bundle_url="u/bundle"):
@@ -155,8 +226,10 @@ def test_latest_release_none_when_asset_missing(monkeypatch):
         integrity,
         "_api_get",
         lambda path: {
+            "id": 1,
+            "tag_name": "v1.2.3",
             "assets": [
-                {"name": "AstralDeep.exe", "browser_download_url": "u"}
+                {"id": 2, "name": "AstralDeep.exe", "browser_download_url": "u"}
             ],  # no sha/bundle
         },
     )
@@ -168,20 +241,23 @@ def test_latest_release_parses(monkeypatch):
         integrity,
         "_api_get",
         lambda path: {
-            "name": "v1.2.3",
+            "id": 11,
+            "name": "1.2.3",
             "tag_name": "v1.2.3",
             "html_url": "h",
             "assets": [
-                {"name": "AstralDeep.exe", "browser_download_url": "u/exe"},
-                {"name": "SHA256SUMS", "browser_download_url": "u/sha"},
-                {"name": "cosign.bundle", "browser_download_url": "u/bundle"},
+                {"id": 21, "name": "AstralDeep.exe", "browser_download_url": "u/exe"},
+                {"id": 22, "name": "SHA256SUMS", "browser_download_url": "u/sha"},
+                {"id": 23, "name": "cosign.bundle", "browser_download_url": "u/bundle"},
             ],
         },
     )
     rel = integrity.latest_release()
     assert rel is not None
-    assert rel.version == "v1.2.3"
+    assert rel.version == "1.2.3"
     assert rel.tag == "v1.2.3"
+    assert rel.release_id == 11
+    assert rel.asset_ids == (21, 22, 23)
     assert rel.exe_url == "u/exe" and rel.bundle_url == "u/bundle"
 
 
@@ -261,10 +337,10 @@ def test_verify_sigstore_builds_identity_from_tag(monkeypatch):
 # verify_running_exe — verify the on-disk running binary (no exe re-download)
 # --------------------------------------------------------------------------- #
 
-def _rel(version="v0.2.0"):
+def _rel(version="0.2.0"):
     return integrity.ReleaseAssets(
         version=version, exe_url="e", sha_url="s", bundle_url="b",
-        html_url="h", tag=version,
+        html_url="h", tag=f"v{version}",
     )
 
 
@@ -280,7 +356,7 @@ def test_verify_running_exe_happy(monkeypatch, tmp_path):
     res = integrity.verify_running_exe(str(exe), workdir=str(tmp_path), _release=_rel)
     assert res.ok, res.reason
     assert res.exe_path == str(exe)
-    assert res.version == "v0.2.0"
+    assert res.version == "0.2.0"
     # the tiny bundle is cleaned up; the running exe is NEVER deleted.
     assert not os.path.exists(os.path.join(str(tmp_path), "cosign.bundle"))
     assert os.path.exists(str(exe))
@@ -338,16 +414,16 @@ def test_check_at_launch_dev_not_frozen():
 def test_check_at_launch_verified_same_version():
     n = integrity.check_at_launch(
         "0.2.0", "C:/AstralDeep.exe", frozen=True, workdir="/tmp",
-        _release=lambda: _rel("v0.2.0"), _verify_running=_verok,
+        _release=lambda: _rel("0.2.0"), _verify_running=_verok,
     )
     assert n["status"] == "verified" and n["level"] == "success"
-    assert "v0.2.0" in n["message"]
+    assert "0.2.0" in n["message"]
 
 
 def test_check_at_launch_unverified_same_version():
     n = integrity.check_at_launch(
         "0.2.0", "C:/AstralDeep.exe", frozen=True, workdir="/tmp",
-        _release=lambda: _rel("v0.2.0"), _verify_running=_verbad("bad sig"),
+        _release=lambda: _rel("0.2.0"), _verify_running=_verbad("bad sig"),
     )
     assert n["status"] == "unverified" and n["level"] == "error"
     assert "bad sig" in n["message"]
@@ -363,15 +439,15 @@ def test_check_at_launch_offline():
 def test_check_at_launch_update_available():
     n = integrity.check_at_launch(
         "0.1.0", "C:/AstralDeep.exe", frozen=True, workdir="/tmp",
-        _release=lambda: _rel("v0.2.0"), _verify_latest=_verok,
+        _release=lambda: _rel("0.2.0"), _verify_latest=_verok,
     )
-    assert n["status"] == "update_available" and "v0.2.0" in n["message"]
+    assert n["status"] == "update_available" and "0.2.0" in n["message"]
 
 
 def test_check_at_launch_update_unverified_is_ignored():
     n = integrity.check_at_launch(
         "0.1.0", "C:/AstralDeep.exe", frozen=True, workdir="/tmp",
-        _release=lambda: _rel("v0.2.0"), _verify_latest=_verbad("nope"),
+        _release=lambda: _rel("0.2.0"), _verify_latest=_verbad("nope"),
     )
     assert n["status"] == "update_unverified" and n["level"] == "warning"
 

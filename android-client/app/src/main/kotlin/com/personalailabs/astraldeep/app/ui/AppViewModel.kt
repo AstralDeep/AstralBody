@@ -6,10 +6,17 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import com.personalailabs.astraldeep.app.auth.ConversationResumeStore
+import com.personalailabs.astraldeep.app.auth.ConversationResumeStore.AccountIdentity
+import com.personalailabs.astraldeep.app.auth.ConversationResumeStore.ClearReason
 import com.personalailabs.astraldeep.app.rest.AstralRest
 import com.personalailabs.astraldeep.app.rest.AuditEvent
 import com.personalailabs.astraldeep.app.transport.ConnectionState
+import com.personalailabs.astraldeep.app.transport.ConversationGenerationBinding
+import com.personalailabs.astraldeep.app.transport.ConversationRequestPurpose
+import com.personalailabs.astraldeep.app.transport.LocalSubmission
 import com.personalailabs.astraldeep.app.transport.OrchestratorClient
+import com.personalailabs.astraldeep.app.transport.QueuedSubmissionFailure
 import com.personalailabs.astraldeep.app.ui.theme.ThemePalette
 import com.personalailabs.astraldeep.app.ui.theme.themePaletteForSpec
 import com.personalailabs.astraldeep.core.chrome.ChromeMenuModel
@@ -27,19 +34,47 @@ import com.personalailabs.astraldeep.core.streaming.streamErrorOps
 import com.personalailabs.astraldeep.core.streaming.streamFrameToOps
 import com.personalailabs.astraldeep.core.streaming.subscribeAckOps
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
 
+/** Canonical transcript part disposition used by the native message renderer. */
+enum class ChatSegmentKind { TEXT, COMPONENTS, STRUCTURED, RECOVERY }
+
+/** One ordered, semantically retained transcript part. */
 @Immutable
-data class ChatTurn(val role: String, val text: String)
+data class ChatSegment(
+    val kind: ChatSegmentKind,
+    val text: String,
+    val components: List<Component> = emptyList(),
+    val structuredValue: JsonElement? = null,
+)
+
+/** Visible transcript turn with ordered semantic parts and retained attachments. */
+@Immutable
+data class ChatTurn(
+    val role: String,
+    val text: String,
+    val segments: List<ChatSegment> = emptyList(),
+    val attachments: List<JsonObject> = emptyList(),
+    val messageId: String? = null,
+    val createdAt: String? = null,
+) {
+    val hasVisibleContent: Boolean
+        get() = text.isNotBlank() || segments.any { it.components.isNotEmpty() } || attachments.isNotEmpty()
+}
 
 /**
  * The top-level navigable surfaces. Settings is no longer a screen — it is the
@@ -70,10 +105,25 @@ data class UiState(
     val connection: ConnectionState = ConnectionState.Disconnected,
     val screen: Screen = Screen.Chat,
     val activeChatId: String? = null,
+    /** Last complete server-owned transcript. Pending turns live separately. */
     val turns: List<ChatTurn> = emptyList(),
+    val pendingTurns: List<ChatTurn> = emptyList(),
     // canvas lifecycle: identity-keyed ops morph the live canvas as they arrive
     // (even mid-turn — 055 live-op rule); only in-turn FULL renders buffer.
     val canvas: List<Component> = emptyList(),
+    /** Disposable request-scoped preview. Null means show committed [canvas]. */
+    val transientCanvas: List<Component>? = null,
+    /** Spec 060 equality fence and per-chat committed revision. */
+    val connectionGeneration: String? = null,
+    val requestGeneration: String? = null,
+    val requestChatId: String? = null,
+    val requestPurpose: ConversationRequestPurpose? = null,
+    val expectedCommitRenderRevision: ULong? = null,
+    val lastCommittedRenderRevision: ULong = 0UL,
+    val lastTransientFrameSequence: ULong = 0UL,
+    val hydrationApplied: Boolean = false,
+    val acceptedSnapshotId: String? = null,
+    val acceptedSnapshot: Inbound.ConversationSnapshot? = null,
     /** Buffer built from a replacing turn's full renders; committed on `done`. */
     val pendingCanvas: List<Component> = emptyList(),
     /** Orchestrator is working this turn (drives the thin progress indicator). */
@@ -113,6 +163,12 @@ data class UiState(
     /** True once this session has connected — gates the "Reconnecting…" strip. */
     val everConnected: Boolean = false,
     val agents: List<Agent> = emptyList(),
+    /** Local-only `submitting` attempts, keyed by their request generation. */
+    val pendingSubmissions: Map<String, LocalSubmission> = emptyMap(),
+    /** Highest canonical projection retained for each durable operation. */
+    val operationStatuses: Map<String, Inbound.OperationStatus> = emptyMap(),
+    /** Highest `(lifecycleGeneration, stateRevision)` retained per agent. */
+    val agentLifecycles: Map<String, Inbound.AgentLifecycle> = emptyMap(),
     val history: List<ChatSummary> = emptyList(),
     val audit: List<AuditEvent> = emptyList(),
     // Per-surface "fetching its data" flags → skeletons on the list screens.
@@ -142,7 +198,10 @@ data class UiState(
 ) {
     /** What the canvas area actually renders (a history entry, or the live canvas). */
     val visibleCanvas: List<Component>
-        get() = viewingIndex?.let { canvasHistory.getOrNull(it)?.components } ?: canvas
+        get() = viewingIndex?.let { canvasHistory.getOrNull(it)?.components } ?: (transientCanvas ?: canvas)
+
+    /** Pending user/preview turns are overlays and never mutate committed transcript. */
+    val visibleTurns: List<ChatTurn> get() = turns + pendingTurns
 
     val isViewingHistory: Boolean get() = viewingIndex != null
 
@@ -179,22 +238,23 @@ private val TIMELINE_MUTATIONS =
  * Owns the connection + derived UI state. Folds each [Inbound] into [state] and
  * sends chat/events out. Identity-keyed canvas ops (`ui_upsert`, streaming)
  * apply to the LIVE canvas immediately — even mid-turn — so the originating
- * device renders partial output exactly like co-viewing devices (055 live-op
- * rule). Only in-turn FULL renders buffer into [UiState.pendingCanvas] (an
- * authoritative replace landing mid-accumulation is the 044 clobber hazard) and
- * win per identity on `chat_status done`, so the committed state always equals
- * what the user is looking at when the turn ends. Each superseded pre-turn
- * canvas is pushed onto [UiState.canvasHistory] for the read-only timeline.
+ * Spec 060 conversation frames keep server snapshots as the sole committed
+ * transcript/canvas publication. Scoped render/upsert/stream frames update only
+ * a disposable preview; stale generations never cross the equality fence. The
+ * legacy reducer remains available for a no-generation compatibility session.
  */
 class AppViewModel(
     private val client: OrchestratorClient,
     private val rest: AstralRest,
+    private val resumeStore: ConversationResumeStore? = null,
 ) : ViewModel() {
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     private var session: Job? = null
+    private var snapshotTimeout: Job? = null
     private var token: String? = null
+    private var account: AccountIdentity? = null
     private var attachSeq: Long = 0
     private val seqState = mutableMapOf<String, Int>()
 
@@ -204,48 +264,77 @@ class AppViewModel(
         device: DeviceCapabilities,
     ) {
         this.token = token
+        val nextAccount = ConversationResumeStore.accountFromAccessToken(token)
+        val previousAccount = account
+        if (previousAccount != null && nextAccount != null && previousAccount != nextAccount) {
+            resumeStore?.clear(previousAccount, ClearReason.ACCOUNT_SWITCH_OR_REMOVAL)
+        }
+        account = nextAccount
+        val locatedChat = nextAccount?.let { resumeStore?.load(it)?.chatId }
+        if (previousAccount != nextAccount) {
+            _state.value =
+                UiState(
+                    activeChatId = locatedChat,
+                    themePalette = _state.value.themePalette,
+                )
+        } else if (_state.value.activeChatId == null && locatedChat != null) {
+            _state.value = _state.value.copy(activeChatId = locatedChat)
+        }
         session?.cancel()
+        snapshotTimeout?.cancel()
         seqState.clear()
+        client.observeConversationGenerations(::installConversationGeneration)
         session =
             viewModelScope.launch {
                 launch {
-                    client.stream(token, device) { _state.value.activeChatId }.collect { msg ->
-                        val before = _state.value
-                        _state.value = reduce(before, msg)
-                        // Cross-device continuity (audit item 12): a background
-                        // result landing in the OPEN chat re-issues load_chat so
-                        // narrative + canvas refresh without a manual reopen.
-                        continuityReloadTarget(before, msg)?.let(::requestChatRefresh)
-                    }
+                    client
+                        .stream(
+                            token = token,
+                            device = device,
+                            sessionId = { _state.value.activeChatId },
+                            onGeneration = ::installConversationGeneration,
+                            onQueuedSubmission = ::installQueuedSubmission,
+                        ).collect { msg ->
+                            val before = _state.value
+                            val retryChat = snapshotRetryTarget(before, msg)
+                            val after = reduceWithPersistence(before, msg)
+                            _state.value = after
+                            when {
+                                retryChat != null -> {
+                                    snapshotTimeout?.cancel()
+                                    _state.update { current ->
+                                        current.copy(statusText = "Conversation restore failed; retrying…")
+                                    }
+                                    requestChatRefresh(retryChat)
+                                }
+                                msg is Inbound.ConversationCommitReady &&
+                                    after.requestGeneration == msg.requestGeneration &&
+                                    after.expectedCommitRenderRevision == msg.renderRevision -> {
+                                    scheduleSnapshotTimeout(
+                                        ConversationGenerationBinding(
+                                            connectionGeneration = msg.connectionGeneration,
+                                            chatId = msg.chatId,
+                                            requestGeneration = msg.requestGeneration,
+                                            purpose = ConversationRequestPurpose.COMMIT,
+                                        ),
+                                        msg.renderRevision,
+                                    )
+                                }
+                                msg is Inbound.ConversationSnapshot && after !== before &&
+                                    after.lastCommittedRenderRevision == msg.renderRevision -> {
+                                    snapshotTimeout?.cancel()
+                                }
+                            }
+                            // Cross-device continuity (audit item 12): a background
+                            // result landing in the OPEN chat re-issues load_chat so
+                            // narrative + canvas refresh without a manual reopen.
+                            continuityReloadTarget(before, msg)?.let(::requestChatRefresh)
+                        }
                 }
                 launch {
                     client.state.collect { c ->
-                        // A dropped socket ends any in-flight turn so the canvas
-                        // area never gets stuck showing skeletons forever.
-                        val cur = _state.value
-                        _state.value =
-                            when (c) {
-                                ConnectionState.Disconnected ->
-                                    cur.copy(
-                                        connection = c,
-                                        turnActive = false,
-                                        pendingReplace = false,
-                                        pendingCanvas = emptyList(),
-                                        preTurnCanvas = emptyList(),
-                                        turnOpsApplied = false,
-                                        agentsLoading = false,
-                                        historyLoading = false,
-                                        auditLoading = false,
-                                    )
-                                ConnectionState.Connected -> {
-                                    // (Re)registered with a chat open: re-issue
-                                    // load_chat to pull in anything delivered
-                                    // while this socket was down (continuity).
-                                    cur.activeChatId?.let(::requestChatRefresh)
-                                    cur.copy(connection = c, everConnected = true)
-                                }
-                                else -> cur.copy(connection = c)
-                            }
+                        _state.update { current -> reduceConnectionState(current, c) }
+                        if (c == ConnectionState.Disconnected) snapshotTimeout?.cancel()
                     }
                 }
                 launch {
@@ -257,6 +346,11 @@ class AppViewModel(
                                 banner = "Not sent while offline: $action (queue full)",
                                 bannerKind = "error",
                             )
+                    }
+                }
+                launch {
+                    client.queuedFailures.collect { failure ->
+                        _state.update { current -> reduceQueuedFailure(current, failure) }
                     }
                 }
             }
@@ -281,13 +375,14 @@ class AppViewModel(
             }
         _state.value =
             armTurn(s).copy(
-                turns = s.turns + ChatTurn("user", bubble),
+                pendingTurns = s.pendingTurns + ChatTurn("user", bubble),
                 pendingLabel = (text.ifBlank { ready.firstOrNull()?.filename ?: "" }).take(80),
                 staged = emptyList(),
-                statusText = null,
             )
         val attachments = ready.map { ChatAttachment(it.attachmentId!!, it.filename, it.category) }
-        client.sendChat(text, _state.value.activeChatId, attachments)
+        client.sendChat(text, _state.value.activeChatId, attachments) { submission ->
+            _state.update { current -> projectLocalSubmission(current, submission) }
+        }
     }
 
     fun sendEvent(
@@ -324,7 +419,43 @@ class AppViewModel(
         if (action == "chat_message") {
             _state.value = armTurn(_state.value)
         }
-        client.sendEvent(action, _state.value.activeChatId, payload)
+        client.sendEvent(action, _state.value.activeChatId, payload) { submission ->
+            _state.update { current -> projectLocalSubmission(current, submission) }
+        }
+    }
+
+    /** Install the local-only status before any authoritative operation frame is reduced. */
+    internal fun projectLocalSubmission(
+        s: UiState,
+        submission: LocalSubmission,
+    ): UiState =
+        s.copy(
+            pendingSubmissions = s.pendingSubmissions + (submission.requestGeneration to submission),
+            statusText = "Submitting…",
+        )
+
+    /** Restore an exact queued projection before the transport replays it. */
+    private fun installQueuedSubmission(submission: LocalSubmission) {
+        _state.update { current -> projectLocalSubmission(current, submission) }
+    }
+
+    /** Settle only the projection whose queued bytes were visibly discarded. */
+    internal fun reduceQueuedFailure(
+        s: UiState,
+        failure: QueuedSubmissionFailure,
+    ): UiState {
+        val retained =
+            s.pendingSubmissions.filterValues {
+                it.submissionId != failure.submission.submissionId
+            }
+        return s.copy(
+            pendingSubmissions = retained,
+            statusText =
+                if (retained.isEmpty() && s.statusText == "Submitting…") null
+                else s.statusText,
+            banner = "Not sent while offline: ${failure.submission.action} (${failure.reason})",
+            bannerKind = "error",
+        )
     }
 
     /**
@@ -352,12 +483,23 @@ class AppViewModel(
 
     /** Start a fresh conversation (clears the canvas, timeline, and transcript). */
     fun newChat() {
+        if (!clearResumeLocator(ClearReason.EXPLICIT_NEW_CHAT)) {
+            _state.value =
+                _state.value.copy(
+                    banner = "Could not start a new chat because the current selection was not saved.",
+                    bannerKind = "error",
+                )
+            return
+        }
+        snapshotTimeout?.cancel()
         seqState.clear()
         _state.value =
             _state.value.copy(
                 activeChatId = null,
                 turns = emptyList(),
+                pendingTurns = emptyList(),
                 canvas = emptyList(),
+                transientCanvas = null,
                 pendingCanvas = emptyList(),
                 preTurnCanvas = emptyList(),
                 turnOpsApplied = false,
@@ -372,6 +514,15 @@ class AppViewModel(
                 banner = null,
                 stepTrail = emptyList(),
                 asyncDetached = false,
+                requestGeneration = null,
+                requestChatId = null,
+                requestPurpose = null,
+                expectedCommitRenderRevision = null,
+                lastCommittedRenderRevision = 0UL,
+                lastTransientFrameSequence = 0UL,
+                hydrationApplied = false,
+                acceptedSnapshotId = null,
+                acceptedSnapshot = null,
             )
         sendEvent("new_chat")
     }
@@ -532,12 +683,40 @@ class AppViewModel(
     }
 
     fun openChat(chatId: String) {
-        requestChatRefresh(chatId)
-        _state.value = _state.value.copy(screen = Screen.Chat, viewingIndex = null)
+        if (!persistActiveChat(chatId)) {
+            _state.value =
+                _state.value.copy(
+                    banner = "Could not save the selected conversation.",
+                    bannerKind = "error",
+                )
+            return
+        }
+        val switching = _state.value.activeChatId != chatId
+        _state.value =
+            _state.value.copy(
+                activeChatId = chatId,
+                screen = Screen.Chat,
+                viewingIndex = null,
+                lastCommittedRenderRevision = if (switching) 0UL else _state.value.lastCommittedRenderRevision,
+                transientCanvas = null,
+                pendingTurns = emptyList(),
+            )
+        requestChatRefresh(chatId, locatorAlreadyPersisted = true)
     }
 
-    /** Re-issue load_chat — the chat_loaded + trailing ui_render(canvas) rehydrate everything. */
-    private fun requestChatRefresh(chatId: String) {
+    /** Re-issue load_chat under a fresh hydration UUID4 after persisting its locator. */
+    private fun requestChatRefresh(
+        chatId: String,
+        locatorAlreadyPersisted: Boolean = false,
+    ) {
+        if (!locatorAlreadyPersisted && !persistActiveChat(chatId)) {
+            _state.value =
+                _state.value.copy(
+                    banner = "Could not save the selected conversation.",
+                    bannerKind = "error",
+                )
+            return
+        }
         sendEvent("load_chat", buildJsonObject { put("chat_id", chatId) })
     }
 
@@ -607,124 +786,86 @@ class AppViewModel(
 
     // --- reducer ------------------------------------------------------------
 
+    /**
+     * Fold transport state without letting a dead socket leave either a turn
+     * skeleton or a client-only submission projection running indefinitely.
+     */
+    internal fun reduceConnectionState(
+        s: UiState,
+        connection: ConnectionState,
+    ): UiState =
+        when (connection) {
+            ConnectionState.Disconnected ->
+                s.copy(
+                    connection = connection,
+                    turnActive = false,
+                    pendingReplace = false,
+                    pendingCanvas = emptyList(),
+                    preTurnCanvas = emptyList(),
+                    turnOpsApplied = false,
+                    transientCanvas = null,
+                    pendingTurns = emptyList(),
+                    connectionGeneration = null,
+                    requestGeneration = null,
+                    requestChatId = null,
+                    requestPurpose = null,
+                    expectedCommitRenderRevision = null,
+                    hydrationApplied = false,
+                    acceptedSnapshotId = null,
+                    acceptedSnapshot = null,
+                    lastTransientFrameSequence = 0UL,
+                    agentsLoading = false,
+                    historyLoading = false,
+                    auditLoading = false,
+                    pendingSubmissions = emptyMap(),
+                    statusText = null,
+                )
+            ConnectionState.Connected -> s.copy(connection = connection, everConnected = true)
+            else -> s.copy(connection = connection)
+        }
+
     /** Fold one inbound frame into state. `internal` so the JVM unit test can drive it. */
     internal fun reduce(
         s: UiState,
         msg: Inbound,
     ): UiState =
         when (msg) {
-            is Inbound.UiRender ->
-                if (msg.target == "chat") {
-                    val text = flattenText(msg.components)
-                    // Suppress the "concise lead" that pairs with a narrative doc
-                    // card — the full narrative is routed to the chat from the card
-                    // itself (see UiUpsert), so this render would just duplicate it.
-                    if (text.isBlank() || text.contains(DOC_ON_CANVAS_MARKER, ignoreCase = true)) {
-                        s
-                    } else {
-                        s.copy(turns = s.turns + ChatTurn("assistant", text))
-                    }
-                } else {
-                    // Reasoning collapsibles → chat snippets. Narrative "Document"
-                    // cards (id "doc_…") are a chat message, never canvas content —
-                    // drop them here (on rehydration the transcript carries the text).
-                    val (reasoning, rest0) = msg.components.partition(::isReasoning)
-                    val canvasComps = rest0.filterNot { isDocCard(it.id) || isSkeleton(it) }
-                    val reasoningTurns =
-                        reasoning.mapNotNull { r ->
-                            flattenText(r.children).ifBlank { flattenText(listOf(r)) }
-                                .takeIf { it.isNotBlank() }
-                                ?.let { ChatTurn("reasoning", it) }
-                        }
-                    val s2 = if (reasoningTurns.isEmpty()) s else s.copy(turns = s.turns + reasoningTurns)
-                    when {
-                        // In-turn FULL renders stay buffered until commit — an
-                        // authoritative render replacing the canvas mid-accumulation
-                        // is the actual "clobber" hazard (FR-013). Identity-keyed
-                        // ops go LIVE instead (see UiUpsert); the buffer-merge keeps
-                        // later renders additive by identity. An empty in-turn
-                        // frame has nothing to add, so it's a no-op.
-                        s2.pendingReplace ->
-                            if (canvasComps.isEmpty()) {
-                                s2
-                            } else {
-                                s2.copy(pendingCanvas = Canvas.apply(s2.pendingCanvas, renderToOps(canvasComps)))
-                            }
-                        // Out-of-turn canvas render (load_chat rehydration, combine/
-                        // condense reconcile, timeline view/back-to-live, update_device
-                        // re-adapt, or an explicit clear): the server sends the COMPLETE
-                        // authoritative canvas (guaranteed by the backend full-render
-                        // contract), so this is a wholesale REPLACE — components absent
-                        // from the frame are removed, and an empty frame clears the
-                        // canvas (the server pushes [] to clear). Compose re-keys the
-                        // render by component id, so surviving components keep their
-                        // state. A union/merge here would leak combined-away cards and
-                        // mash timeline snapshots onto the live canvas — matching the
-                        // web reference (setHTML replace) and the Windows twin.
-                        else -> s2.copy(canvas = canvasComps, pendingCanvas = emptyList())
-                    }
-                }
-            is Inbound.UiUpsert ->
-                // Drop only ops explicitly addressed to a DIFFERENT chat. On the
-                // first turn `activeChatId` may not be set yet when the round's
-                // upserts arrive — accept those rather than losing the canvas.
-                if (msg.chatId != null && s.activeChatId != null && msg.chatId != s.activeChatId) {
-                    s
-                } else {
-                    // A narrative "Document" card (id "doc_…") is the assistant's
-                    // written answer — route it to the chat, keep it OFF the canvas.
-                    val docTurns =
-                        msg.ops.mapNotNull { op ->
-                            if (op.op != "remove" && isDocCard(op.componentId)) {
-                                op.component?.let { flattenText(listOf(it)) }
-                                    ?.takeIf { it.isNotBlank() }
-                                    ?.let { ChatTurn("assistant", it) }
-                            } else {
-                                null
-                            }
-                        }
-                    val canvasOps = msg.ops.filterNot { isDocCard(it.componentId) || isSkeleton(it.component) }
-                    val s2 = if (docTurns.isEmpty()) s else s.copy(turns = s.turns + docTurns)
-                    // Identity-keyed ops apply LIVE even mid-turn (055: no
-                    // origin/co-viewer divergence) — see applyCanvasOps.
-                    applyCanvasOps(s2, canvasOps)
-                }
-            is Inbound.ChatCreated -> s.copy(activeChatId = msg.chatId ?: s.activeChatId)
+            is Inbound.UiRender -> reduceUiRender(s, msg)
+            is Inbound.UiUpsert -> reduceUiUpsert(s, msg)
+            is Inbound.ChatCreated -> bindAcknowledgedChat(s, msg.chatId)
             is Inbound.UserMessageAcked ->
                 // The origin's optimistic arm normally ran already (sendChat / the
                 // chat_message ui_event); arming here too covers an acked turn that
                 // skipped it, without resetting an armed turn's pre-turn snapshot
                 // or already-applied live ops.
-                (if (s.pendingReplace) s else armTurn(s)).copy(activeChatId = msg.chatId ?: s.activeChatId)
+                if (msg.chatId != null && s.requestChatId != null && msg.chatId != s.requestChatId) {
+                    s
+                } else {
+                    bindAcknowledgedChat(if (s.pendingReplace) s else armTurn(s), msg.chatId)
+                }
             is Inbound.ChatLoaded ->
-                s.copy(
-                    activeChatId = msg.chat.id ?: s.activeChatId,
-                    turns = msg.chat.messages.map { ChatTurn(it.role, it.content) },
-                    // A different conversation: reset the live canvas + timeline;
-                    // the trailing ui_render(canvas) rehydrates `canvas`.
-                    canvas = emptyList(),
-                    pendingCanvas = emptyList(),
-                    preTurnCanvas = emptyList(),
-                    turnOpsApplied = false,
-                    canvasHistory = emptyList(),
-                    viewingIndex = null,
-                    turnActive = false,
-                    pendingReplace = false,
-                    canvasLabel = "",
-                    pendingLabel = "",
-                    statusText = null,
-                    stepTrail = emptyList(),
-                    asyncDetached = false,
-                )
+                if (s.connectionGeneration == null) reduceLegacyChatLoaded(s, msg) else s
+            is Inbound.ConversationSnapshot -> reduceConversationSnapshot(s, msg)
+            is Inbound.ConversationCommitReady -> reduceConversationCommitReady(s, msg)
             is Inbound.ChatStatus -> reduceStatus(s, msg)
             is Inbound.AgentList -> s.copy(agents = msg.agents, agentsLoading = false)
             is Inbound.HistoryList -> s.copy(history = msg.chats, historyLoading = false)
-            is Inbound.UiStreamData ->
-                applyCanvasOps(s, streamFrameToOps(msg, s.activeChatId, seqState))
+            is Inbound.UiStreamData -> reduceUiStreamData(s, msg)
             is Inbound.StreamSubscribed ->
-                applyCanvasOps(s, subscribeAckOps(msg, canvasIds(s)))
+                if (hasGenerationScopedConversation(s)) {
+                    s
+                } else {
+                    applyCanvasOps(s, subscribeAckOps(msg, canvasIds(s)))
+                }
             is Inbound.StreamErrorMsg ->
-                applyCanvasOps(s, streamErrorOps(msg))
+                if (hasGenerationScopedConversation(s)) {
+                    s.copy(
+                        banner = msg.error.message ?: msg.error.code ?: "Stream error",
+                        bannerKind = "error",
+                    )
+                } else {
+                    applyCanvasOps(s, streamErrorOps(msg))
+                }
             is Inbound.ChromeMenu -> s.copy(chromeMenu = msg.model)
             is Inbound.ChromeSurface ->
                 when {
@@ -778,32 +919,16 @@ class AppViewModel(
             is Inbound.UserPreferences -> s.copy(themePalette = themePaletteForSpec(s.themePalette, msg.theme))
             // Read-only workspace timeline toggled: lock/unlock mutations (T041).
             is Inbound.WorkspaceTimelineMode -> s.copy(timelineReadOnly = msg.active)
-            // A server error reply is never silent (FR-002): banner it and resolve
-            // any in-flight turn so nothing stays stuck "thinking" (SC-006).
-            is Inbound.ErrorFrame ->
-                s.copy(
-                    banner =
-                        if (msg.code != null && msg.code != "internal") {
-                            "${msg.message} (${msg.code})"
-                        } else {
-                            msg.message
-                        },
-                    bannerKind = "error",
-                    turnActive = false,
-                    pendingReplace = false,
-                    pendingCanvas = emptyList(),
-                    preTurnCanvas = emptyList(),
-                    turnOpsApplied = false,
-                    agentsLoading = false,
-                    historyLoading = false,
-                    auditLoading = false,
-                    statusText = null,
-                    asyncDetached = false,
-                )
+            // A server error reply is never silent (FR-002). Only the strict
+            // refusal variant can settle the exact local submission it names.
+            is Inbound.AdmissionRefusal -> reduceAdmissionRefusal(s, msg)
+            is Inbound.ErrorFrame -> reduceErrorFrame(s, msg)
             is Inbound.ChatStep ->
                 s.copy(stepTrail = trailUpsert(s.stepTrail, stepLine(msg)))
             is Inbound.ToolProgress ->
                 s.copy(stepTrail = trailUpsert(s.stepTrail, "• ${msg.label}"))
+            is Inbound.OperationStatus -> reduceOperationStatus(s, msg)
+            is Inbound.AgentLifecycle -> reduceAgentLifecycle(s, msg)
             // The turn detached into a background task: keep the turn alive but let
             // the UI relax — results will arrive when the task completes. A task in
             // ANOTHER chat (started on another device, audit item 12) must not touch
@@ -817,7 +942,13 @@ class AppViewModel(
                 }
             is Inbound.TaskCompleted ->
                 if (forOpenChat(msg.chatId, s)) {
-                    commitTurn(s).copy(banner = "Background task finished", bannerKind = "info")
+                    val settled =
+                        if (s.connectionGeneration == null) {
+                            commitTurn(s)
+                        } else {
+                            s.copy(statusText = null, asyncDetached = false)
+                        }
+                    settled.copy(banner = "Background task finished", bannerKind = "info")
                 } else {
                     // The banner layer has no tap action — point at History instead.
                     s.copy(banner = "Background task finished in another chat — open it from History", bannerKind = "info")
@@ -846,16 +977,24 @@ class AppViewModel(
             is Inbound.ComponentSaveError ->
                 s.copy(banner = msg.error ?: "Couldn't save component", bannerKind = "error")
             is Inbound.ComponentDeleted ->
-                msg.componentId?.takeIf { it.isNotBlank() }
-                    ?.let { applyCanvasOps(s, listOf(CanvasOp("remove", it))) } ?: s
+                if (hasGenerationScopedConversation(s)) {
+                    s
+                } else {
+                    msg.componentId?.takeIf { it.isNotBlank() }
+                        ?.let { applyCanvasOps(s, listOf(CanvasOp("remove", it))) } ?: s
+                }
             is Inbound.CombineStatus -> s.copy(statusText = msg.message ?: msg.status)
             is Inbound.CombineError ->
                 s.copy(statusText = null, banner = msg.error ?: "Couldn't combine components", bannerKind = "error")
             is Inbound.ComponentsReplaced -> {
-                val ops =
-                    msg.removedIds.map { CanvasOp("remove", it) } +
-                        msg.newComponents.mapNotNull { c -> c.id?.let { CanvasOp("upsert", it, c) } }
-                applyCanvasOps(s.copy(statusText = null), ops)
+                if (hasGenerationScopedConversation(s)) {
+                    s.copy(statusText = null)
+                } else {
+                    val ops =
+                        msg.removedIds.map { CanvasOp("remove", it) } +
+                            msg.newComponents.mapNotNull { c -> c.id?.let { CanvasOp("upsert", it, c) } }
+                    applyCanvasOps(s.copy(statusText = null), ops)
+                }
             }
             is Inbound.SavedComponentsList -> {
                 // Accepted ack; no native saved-components surface exists to
@@ -876,6 +1015,670 @@ class AppViewModel(
             }
             else -> s
         }
+
+    /** Install a connection/request equality fence without changing committed surfaces. */
+    internal fun bindConversationGeneration(
+        s: UiState,
+        binding: ConversationGenerationBinding,
+    ): UiState {
+        val switchingChats =
+            binding.chatId != null && s.activeChatId != null && binding.chatId != s.activeChatId
+        return s.copy(
+            activeChatId = binding.chatId ?: s.activeChatId,
+            connectionGeneration = binding.connectionGeneration,
+            requestGeneration = binding.requestGeneration,
+            requestChatId = binding.chatId,
+            requestPurpose = binding.purpose,
+            expectedCommitRenderRevision = null,
+            lastCommittedRenderRevision = if (switchingChats) 0UL else s.lastCommittedRenderRevision,
+            lastTransientFrameSequence = 0UL,
+            transientCanvas = null,
+            pendingTurns = if (binding.purpose == ConversationRequestPurpose.HYDRATION) emptyList() else s.pendingTurns,
+            hydrationApplied = false,
+            acceptedSnapshotId = null,
+            acceptedSnapshot = null,
+        )
+    }
+
+    /** Install a fence and arm the bounded hydration wait before bytes are sent. */
+    private fun installConversationGeneration(binding: ConversationGenerationBinding) {
+        _state.update { current -> bindConversationGeneration(current, binding) }
+        snapshotTimeout?.cancel()
+        if (binding.purpose == ConversationRequestPurpose.HYDRATION) {
+            scheduleSnapshotTimeout(binding)
+        }
+    }
+
+    /**
+     * Preserve the last committed surfaces when one complete snapshot does not
+     * arrive in time, then retry this exact chat under a newly generated fence.
+     */
+    private fun scheduleSnapshotTimeout(
+        binding: ConversationGenerationBinding,
+        expectedCommitRevision: ULong? = null,
+    ) {
+        val chatId = binding.chatId ?: return
+        val requestGeneration = binding.requestGeneration ?: return
+        snapshotTimeout?.cancel()
+        snapshotTimeout =
+            viewModelScope.launch {
+                delay(SNAPSHOT_TIMEOUT_MS)
+                val current = _state.value
+                val stillWaiting =
+                    current.activeChatId == chatId &&
+                        current.connectionGeneration == binding.connectionGeneration &&
+                        current.requestGeneration == requestGeneration &&
+                        current.requestPurpose == binding.purpose &&
+                        current.expectedCommitRenderRevision == expectedCommitRevision &&
+                        !(binding.purpose == ConversationRequestPurpose.HYDRATION && current.hydrationApplied)
+                if (!stillWaiting) return@launch
+                _state.value =
+                    current.copy(
+                        statusText = "Conversation restore timed out; retrying…",
+                        transientCanvas = null,
+                        pendingTurns = emptyList(),
+                        lastTransientFrameSequence = 0UL,
+                    )
+                requestChatRefresh(chatId)
+            }
+    }
+
+    /** Exact-scope retry classification; foreign/stale errors are inert. */
+    internal fun snapshotRetryTarget(
+        s: UiState,
+        msg: Inbound,
+    ): String? {
+        val error = msg as? Inbound.ErrorFrame ?: return null
+        if (error.code != SNAPSHOT_RETRYABLE_CODE || !error.retryable) return null
+        val chatId = error.chatId ?: return null
+        return chatId.takeIf {
+            s.requestPurpose != null &&
+                s.requestGeneration != null &&
+                chatId == s.activeChatId &&
+                error.connectionGeneration == s.connectionGeneration &&
+                error.requestGeneration == s.requestGeneration
+        }
+    }
+
+    /**
+     * Persist newly acknowledged chat identity before exposing it and clear a
+     * locator only for an owner-scoped, generation-matching definitive miss.
+     */
+    private fun reduceWithPersistence(
+        s: UiState,
+        msg: Inbound,
+    ): UiState {
+        if (msg is Inbound.ErrorFrame && isDefinitiveCurrentChatMiss(s, msg)) {
+            if (!clearResumeLocator(ClearReason.CONFIRMED_DELETION)) {
+                return s.copy(
+                    banner = "Conversation was removed, but local recovery state could not be cleared.",
+                    bannerKind = "error",
+                )
+            }
+            return clearConversationState(s).copy(
+                banner = "Conversation not found.",
+                bannerKind = "error",
+            )
+        }
+
+        // Reduction is pure: validate every scope/revision first, then commit the
+        // locator synchronously before the candidate state becomes observable.
+        val candidate = reduce(s, msg)
+        val acknowledgedChat =
+            when (msg) {
+                is Inbound.ChatCreated ->
+                    msg.chatId?.takeIf { candidate.activeChatId == it && candidate !== s }
+                is Inbound.UserMessageAcked ->
+                    msg.chatId?.takeIf { candidate.activeChatId == it && candidate !== s }
+                is Inbound.ConversationSnapshot ->
+                    msg.chatId.takeIf {
+                        candidate !== s &&
+                            candidate.activeChatId == msg.chatId &&
+                            candidate.lastCommittedRenderRevision == msg.renderRevision
+                    }
+                else -> null
+            }
+        if (acknowledgedChat != null && !persistActiveChat(acknowledgedChat)) {
+            return s.copy(
+                banner = "Could not save the active conversation; the update was not applied.",
+                bannerKind = "error",
+            )
+        }
+        return candidate
+    }
+
+    private fun persistActiveChat(chatId: String): Boolean {
+        val owner = account ?: return resumeStore == null
+        val store = resumeStore ?: return true
+        return store.save(owner, chatId)
+    }
+
+    private fun clearResumeLocator(reason: ClearReason): Boolean {
+        val owner = account ?: return resumeStore == null
+        val store = resumeStore ?: return true
+        return store.clear(owner, reason)
+    }
+
+    /** Synchronous explicit-sign-out hook used before credentials are removed. */
+    fun clearConversationForSignOut(): Boolean = clearResumeLocator(ClearReason.DEFINITIVE_SIGN_OUT)
+
+    private fun isDefinitiveCurrentChatMiss(
+        s: UiState,
+        error: Inbound.ErrorFrame,
+    ): Boolean =
+        error.code in DEFINITIVE_CHAT_MISS_CODES &&
+            error.chatId == s.activeChatId &&
+            error.connectionGeneration == s.connectionGeneration &&
+            error.requestGeneration == s.requestGeneration &&
+            !error.retryable
+
+    private fun clearConversationState(s: UiState): UiState =
+        s.copy(
+            activeChatId = null,
+            turns = emptyList(),
+            pendingTurns = emptyList(),
+            canvas = emptyList(),
+            transientCanvas = null,
+            pendingCanvas = emptyList(),
+            preTurnCanvas = emptyList(),
+            turnOpsApplied = false,
+            canvasHistory = emptyList(),
+            viewingIndex = null,
+            turnActive = false,
+            pendingReplace = false,
+            canvasLabel = "",
+            pendingLabel = "",
+            statusText = null,
+            stepTrail = emptyList(),
+            asyncDetached = false,
+            requestGeneration = null,
+            requestChatId = null,
+            requestPurpose = null,
+            expectedCommitRenderRevision = null,
+            lastCommittedRenderRevision = 0UL,
+            lastTransientFrameSequence = 0UL,
+            hydrationApplied = false,
+            acceptedSnapshotId = null,
+            acceptedSnapshot = null,
+        )
+
+    private fun bindAcknowledgedChat(
+        s: UiState,
+        chatId: String?,
+    ): UiState {
+        if (chatId == null) return s
+        if (s.requestChatId != null && s.requestChatId != chatId) return s
+        return s.copy(activeChatId = chatId, requestChatId = chatId)
+    }
+
+    /** Open a supplied commit fence only for a future revision on this socket/chat. */
+    private fun reduceConversationCommitReady(
+        s: UiState,
+        ready: Inbound.ConversationCommitReady,
+    ): UiState {
+        if (
+            ready.schemaVersion != 1 ||
+            ready.chatId != s.activeChatId ||
+            ready.connectionGeneration != s.connectionGeneration ||
+            ready.renderRevision <= s.lastCommittedRenderRevision
+        ) {
+            Log.i(TAG, "conversation_commit_ready ignored: stale or foreign scope")
+            return s
+        }
+        return s.copy(
+            requestGeneration = ready.requestGeneration,
+            requestChatId = ready.chatId,
+            requestPurpose = ConversationRequestPurpose.COMMIT,
+            expectedCommitRenderRevision = ready.renderRevision,
+            lastTransientFrameSequence = 0UL,
+            transientCanvas = null,
+            hydrationApplied = false,
+            acceptedSnapshotId = null,
+            acceptedSnapshot = null,
+        )
+    }
+
+    /** Purpose-aware, all-or-nothing committed snapshot reducer. */
+    private fun reduceConversationSnapshot(
+        s: UiState,
+        snapshot: Inbound.ConversationSnapshot,
+    ): UiState {
+        val expectedPurpose =
+            when (s.requestPurpose) {
+                ConversationRequestPurpose.HYDRATION -> "hydration"
+                ConversationRequestPurpose.COMMIT -> "commit"
+                null -> null
+            }
+        if (
+            snapshot.schemaVersion != 1 ||
+            snapshot.chatId != s.activeChatId ||
+            (s.requestChatId != null && snapshot.chatId != s.requestChatId) ||
+            snapshot.connectionGeneration != s.connectionGeneration ||
+            snapshot.requestGeneration != s.requestGeneration ||
+            snapshot.snapshotPurpose != expectedPurpose
+        ) {
+            Log.i(TAG, "conversation snapshot ignored: wrong scope or purpose")
+            return s
+        }
+        if (
+            s.requestPurpose == ConversationRequestPurpose.COMMIT &&
+            s.expectedCommitRenderRevision == null
+        ) {
+            Log.w(TAG, "conversation snapshot ignored: missing commit-ready prelude")
+            return s
+        }
+        if (
+            s.expectedCommitRenderRevision != null &&
+            snapshot.renderRevision != s.expectedCommitRenderRevision
+        ) {
+            Log.w(TAG, "conversation snapshot ignored: commit-ready revision mismatch")
+            return s
+        }
+        if (snapshot.renderRevision < s.lastCommittedRenderRevision) {
+            Log.i(TAG, "stale_frame_ignored")
+            return s
+        }
+        if (snapshot.renderRevision == s.lastCommittedRenderRevision) {
+            if (
+                s.requestPurpose == ConversationRequestPurpose.HYDRATION &&
+                !s.hydrationApplied
+            ) {
+                return applyConversationSnapshot(s, snapshot)
+            }
+            if (s.hydrationApplied && s.acceptedSnapshotId == snapshot.snapshotId) {
+                if (s.acceptedSnapshot == snapshot) return s
+                Log.w(TAG, "revision_conflict: snapshot identity content changed")
+                return s
+            }
+            if (s.hydrationApplied) Log.w(TAG, "revision_conflict") else Log.i(TAG, "unexpected_equal_commit")
+            return s
+        }
+        return applyConversationSnapshot(s, snapshot)
+    }
+
+    private fun applyConversationSnapshot(
+        s: UiState,
+        snapshot: Inbound.ConversationSnapshot,
+    ): UiState {
+        val transcript = decodeTranscript(snapshot.transcript)
+        if (transcript == null) {
+            Log.w(TAG, "conversation snapshot rejected: semantic transcript decode failed")
+            return s
+        }
+        val hydration = s.requestPurpose == ConversationRequestPurpose.HYDRATION
+        return s.copy(
+            activeChatId = snapshot.chatId,
+            turns = transcript,
+            pendingTurns = emptyList(),
+            canvas = snapshot.canvas.components,
+            transientCanvas = null,
+            pendingCanvas = emptyList(),
+            preTurnCanvas = emptyList(),
+            turnOpsApplied = false,
+            canvasHistory = emptyList(),
+            viewingIndex = null,
+            turnActive = false,
+            pendingReplace = false,
+            canvasLabel = "",
+            pendingLabel = "",
+            statusText = null,
+            stepTrail = emptyList(),
+            asyncDetached = false,
+            lastCommittedRenderRevision = snapshot.renderRevision,
+            lastTransientFrameSequence = 0UL,
+            hydrationApplied = hydration,
+            acceptedSnapshotId = if (hydration) snapshot.snapshotId else null,
+            acceptedSnapshot = if (hydration) snapshot else null,
+            requestGeneration = if (hydration) s.requestGeneration else null,
+            requestChatId = if (hydration) snapshot.chatId else null,
+            requestPurpose = if (hydration) s.requestPurpose else null,
+            expectedCommitRenderRevision = null,
+        )
+    }
+
+    private fun decodeTranscript(messages: List<JsonObject>): List<ChatTurn>? =
+        messages.map { message -> decodeTranscriptMessage(message) ?: return null }
+
+    private fun decodeTranscriptMessage(message: JsonObject): ChatTurn? {
+        val messageId = message.string("message_id") ?: return null
+        val role = message.string("role") ?: return null
+        val createdAt = message.string("created_at") ?: return null
+        val rawParts = message["parts"] as? JsonArray ?: return null
+        val rawAttachments = message["attachments"] as? JsonArray ?: return null
+        if (rawParts.isEmpty() || rawAttachments.any { it !is JsonObject }) return null
+        val segments = rawParts.map { decodeTranscriptPart(it as? JsonObject ?: return null) }
+        return ChatTurn(
+            role = role,
+            text = segments.joinToString("\n") { it.text }.trim(),
+            segments = segments,
+            attachments = rawAttachments.map { it.jsonObject },
+            messageId = messageId,
+            createdAt = createdAt,
+        )
+    }
+
+    private fun decodeTranscriptPart(part: JsonObject): ChatSegment {
+        val recovery =
+            ChatSegment(
+                kind = ChatSegmentKind.RECOVERY,
+                text = RECOVERY_MESSAGE,
+            )
+        return when (part.string("type")) {
+            "text" -> {
+                val text = part.string("text")
+                if (text.isNullOrBlank()) recovery else ChatSegment(ChatSegmentKind.TEXT, text)
+            }
+            "structured" -> {
+                val plain = part.string("plain_text")
+                if (plain.isNullOrBlank() || !part.containsKey("value")) {
+                    recovery
+                } else {
+                    ChatSegment(
+                        kind = ChatSegmentKind.STRUCTURED,
+                        text = plain,
+                        structuredValue = part["value"],
+                    )
+                }
+            }
+            "components" -> {
+                val values = part["components"] as? JsonArray
+                if (values == null || values.isEmpty() || values.any { it !is JsonObject }) {
+                    recovery
+                } else {
+                    val components = Component.listFromJson(values)
+                    val text =
+                        flattenSemanticComponentText(components).ifBlank {
+                            components.joinToString(", ") { "[${it.type.ifBlank { "component" }}]" }
+                        }
+                    ChatSegment(ChatSegmentKind.COMPONENTS, text, components)
+                }
+            }
+            "recovery" -> {
+                val message = part.string("message")
+                ChatSegment(ChatSegmentKind.RECOVERY, message?.takeIf { it.isNotBlank() } ?: RECOVERY_MESSAGE)
+            }
+            else -> recovery
+        }
+    }
+
+    private fun JsonObject.string(key: String): String? = (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
+
+    private fun flattenSemanticComponentText(components: List<Component>): String =
+        components.joinToString("\n") { component ->
+            val own =
+                SEMANTIC_TEXT_KEYS.mapNotNull { key ->
+                    (component.attributes[key] as? JsonPrimitive)?.contentOrNull
+                }.joinToString(" ")
+            listOf(own, flattenSemanticComponentText(component.children))
+                .filter { it.isNotBlank() }
+                .joinToString("\n")
+        }.trim()
+
+    private fun reduceErrorFrame(
+        s: UiState,
+        error: Inbound.ErrorFrame,
+    ): UiState {
+        val banner =
+            if (error.code != null && error.code != "internal") {
+                "${error.message} (${error.code})"
+            } else {
+                error.message
+            }
+        return s.copy(
+            banner = banner,
+            bannerKind = "error",
+            turnActive = false,
+            pendingReplace = false,
+            pendingCanvas = emptyList(),
+            preTurnCanvas = emptyList(),
+            turnOpsApplied = false,
+            transientCanvas = null,
+            pendingTurns = emptyList(),
+            lastTransientFrameSequence = 0UL,
+            agentsLoading = false,
+            historyLoading = false,
+            auditLoading = false,
+            statusText = null,
+            asyncDetached = false,
+        )
+    }
+
+    private fun reduceAdmissionRefusal(
+        s: UiState,
+        refusal: Inbound.AdmissionRefusal,
+    ): UiState {
+        val pending =
+            s.pendingSubmissions.entries.firstOrNull { (_, submission) ->
+                submission.submissionId == refusal.submissionId
+            } ?: return s
+        val chatSubmission = pending.value.action == "chat_message"
+        return s.copy(
+            banner = "${refusal.message} (${refusal.code})",
+            bannerKind = "error",
+            pendingSubmissions = s.pendingSubmissions - pending.key,
+            statusText = refusal.message,
+            turnActive = if (chatSubmission) false else s.turnActive,
+            pendingReplace = if (chatSubmission) false else s.pendingReplace,
+            pendingCanvas = if (chatSubmission) emptyList() else s.pendingCanvas,
+            preTurnCanvas = if (chatSubmission) emptyList() else s.preTurnCanvas,
+            turnOpsApplied = if (chatSubmission) false else s.turnOpsApplied,
+            transientCanvas = if (chatSubmission) null else s.transientCanvas,
+            pendingTurns = if (chatSubmission) emptyList() else s.pendingTurns,
+            lastTransientFrameSequence = if (chatSubmission) 0UL else s.lastTransientFrameSequence,
+            asyncDetached = if (chatSubmission) false else s.asyncDetached,
+        )
+    }
+
+    private fun reduceOperationStatus(
+        s: UiState,
+        status: Inbound.OperationStatus,
+    ): UiState {
+        if (status.connectionGeneration != s.connectionGeneration) {
+            return s
+        }
+        val pendingOperation = s.pendingSubmissions[status.requestGeneration]
+        val inScope =
+            if (status.chatId != null) {
+                status.chatId == s.activeChatId &&
+                    (
+                        status.requestGeneration == s.requestGeneration ||
+                            pendingOperation?.action == status.action
+                    )
+            } else {
+                pendingOperation != null && pendingOperation.action == status.action
+            }
+        if (!inScope) return s
+        val current = s.operationStatuses[status.operationId]
+        if (current != null && (current.terminal || status.sequence <= current.sequence)) {
+            return s
+        }
+        val visible = status.error?.message ?: status.label
+        val retained = s.operationStatuses + (status.operationId to status)
+        val pending =
+            if (status.terminal) {
+                s.pendingSubmissions - status.requestGeneration
+            } else {
+                s.pendingSubmissions
+            }
+        return if (status.terminal) {
+            s.copy(
+                operationStatuses = retained,
+                pendingSubmissions = pending,
+                statusText = visible,
+                transientCanvas = null,
+                pendingTurns = emptyList(),
+                lastTransientFrameSequence = 0UL,
+            )
+        } else {
+            s.copy(operationStatuses = retained, pendingSubmissions = pending, statusText = visible)
+        }
+    }
+
+    private fun reduceAgentLifecycle(
+        s: UiState,
+        lifecycle: Inbound.AgentLifecycle,
+    ): UiState {
+        val current = s.agentLifecycles[lifecycle.agentId]
+        if (
+            current != null &&
+                (
+                    lifecycle.lifecycleGeneration < current.lifecycleGeneration ||
+                        (
+                            lifecycle.lifecycleGeneration == current.lifecycleGeneration &&
+                                lifecycle.stateRevision <= current.stateRevision
+                        )
+                )
+        ) {
+            return s
+        }
+        return s.copy(
+            agentLifecycles = s.agentLifecycles + (lifecycle.agentId to lifecycle),
+            banner = "${lifecycle.agentId}: ${lifecycle.label}",
+            bannerKind = if (lifecycle.state == "failed") "error" else "info",
+        )
+    }
+
+    private fun transientScopeMatches(
+        s: UiState,
+        scope: com.personalailabs.astraldeep.core.protocol.TransientFrameScope,
+    ): Boolean =
+        scope.chatId == s.activeChatId &&
+            scope.connectionGeneration == s.connectionGeneration &&
+            scope.requestGeneration == s.requestGeneration &&
+            scope.baseRenderRevision == s.lastCommittedRenderRevision &&
+            scope.frameSequence > s.lastTransientFrameSequence
+
+    private fun hasGenerationScopedConversation(s: UiState): Boolean = s.connectionGeneration != null && s.activeChatId != null
+
+    private fun reduceUiRender(
+        s: UiState,
+        msg: Inbound.UiRender,
+    ): UiState {
+        val scope = msg.scope
+        if (scope != null) {
+            if (!transientScopeMatches(s, scope)) return s
+            if (msg.target == "chat") {
+                val text = flattenText(msg.components)
+                return s.copy(
+                    pendingTurns =
+                        if (text.isBlank()) s.pendingTurns else s.pendingTurns + ChatTurn("assistant", text),
+                    lastTransientFrameSequence = scope.frameSequence,
+                )
+            }
+            return s.copy(
+                transientCanvas = msg.components.filterNot(::isSkeleton),
+                lastTransientFrameSequence = scope.frameSequence,
+                turnOpsApplied = s.turnOpsApplied || s.pendingReplace,
+            )
+        }
+        // An active 060 conversation never lets an unscoped compatibility frame
+        // mutate committed surfaces. A no-chat welcome remains a valid global UI.
+        if (s.connectionGeneration != null && s.activeChatId != null) return s
+        return reduceLegacyUiRender(s, msg)
+    }
+
+    private fun reduceLegacyUiRender(
+        s: UiState,
+        msg: Inbound.UiRender,
+    ): UiState =
+        if (msg.target == "chat") {
+            val text = flattenText(msg.components)
+            if (text.isBlank() || text.contains(DOC_ON_CANVAS_MARKER, ignoreCase = true)) {
+                s
+            } else {
+                s.copy(turns = s.turns + ChatTurn("assistant", text))
+            }
+        } else {
+            val (reasoning, rest0) = msg.components.partition(::isReasoning)
+            val canvasComps = rest0.filterNot { isDocCard(it.id) || isSkeleton(it) }
+            val reasoningTurns =
+                reasoning.mapNotNull { component ->
+                    flattenText(component.children).ifBlank { flattenText(listOf(component)) }
+                        .takeIf { it.isNotBlank() }
+                        ?.let { ChatTurn("reasoning", it) }
+                }
+            val next = if (reasoningTurns.isEmpty()) s else s.copy(turns = s.turns + reasoningTurns)
+            if (next.pendingReplace) {
+                if (canvasComps.isEmpty()) {
+                    next
+                } else {
+                    next.copy(pendingCanvas = Canvas.apply(next.pendingCanvas, renderToOps(canvasComps)))
+                }
+            } else {
+                next.copy(canvas = canvasComps, pendingCanvas = emptyList())
+            }
+        }
+
+    private fun reduceUiUpsert(
+        s: UiState,
+        msg: Inbound.UiUpsert,
+    ): UiState {
+        val scope = msg.scope
+        if (scope != null) {
+            if (!transientScopeMatches(s, scope)) return s
+            val preview = Canvas.apply(s.transientCanvas ?: s.canvas, msg.ops)
+            return s.copy(
+                transientCanvas = preview,
+                lastTransientFrameSequence = scope.frameSequence,
+                turnOpsApplied = s.turnOpsApplied || s.pendingReplace,
+            )
+        }
+        if (s.connectionGeneration != null && s.activeChatId != null) return s
+        if (msg.chatId != null && s.activeChatId != null && msg.chatId != s.activeChatId) return s
+        val docTurns =
+            msg.ops.mapNotNull { op ->
+                if (op.op != "remove" && isDocCard(op.componentId)) {
+                    op.component?.let { flattenText(listOf(it)) }
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let { ChatTurn("assistant", it) }
+                } else {
+                    null
+                }
+            }
+        val canvasOps = msg.ops.filterNot { isDocCard(it.componentId) || isSkeleton(it.component) }
+        val next = if (docTurns.isEmpty()) s else s.copy(turns = s.turns + docTurns)
+        return applyCanvasOps(next, canvasOps)
+    }
+
+    private fun reduceUiStreamData(
+        s: UiState,
+        msg: Inbound.UiStreamData,
+    ): UiState {
+        val scope = msg.scope
+        val ops = streamFrameToOps(msg, s.activeChatId, seqState)
+        if (scope != null) {
+            if (!transientScopeMatches(s, scope)) return s
+            return s.copy(
+                transientCanvas = Canvas.apply(s.transientCanvas ?: s.canvas, ops),
+                lastTransientFrameSequence = scope.frameSequence,
+                turnOpsApplied = s.turnOpsApplied || (s.pendingReplace && ops.isNotEmpty()),
+            )
+        }
+        if (s.connectionGeneration != null && s.activeChatId != null) return s
+        return applyCanvasOps(s, ops)
+    }
+
+    private fun reduceLegacyChatLoaded(
+        s: UiState,
+        msg: Inbound.ChatLoaded,
+    ): UiState =
+        s.copy(
+            activeChatId = msg.chat.id ?: s.activeChatId,
+            turns = msg.chat.messages.map { ChatTurn(it.role, it.content) },
+            canvas = emptyList(),
+            pendingCanvas = emptyList(),
+            preTurnCanvas = emptyList(),
+            turnOpsApplied = false,
+            canvasHistory = emptyList(),
+            viewingIndex = null,
+            turnActive = false,
+            pendingReplace = false,
+            canvasLabel = "",
+            pendingLabel = "",
+            statusText = null,
+            stepTrail = emptyList(),
+            asyncDetached = false,
+        )
 
     /**
      * A task frame targets the open chat. Foreign only when BOTH ids are known
@@ -977,7 +1780,14 @@ class AppViewModel(
     ): UiState {
         val label = msg.message?.takeIf { it.isNotBlank() } ?: msg.status
         return when (msg.status) {
-            "done" -> commitTurn(s)
+            "done" ->
+                if (s.connectionGeneration == null) {
+                    commitTurn(s)
+                } else {
+                    // The following conversation_snapshot is the sole committed
+                    // publication. Status completion cannot advance either surface.
+                    s.copy(turnActive = false, statusText = null, stepTrail = emptyList())
+                }
             "thinking", "executing", "fixing", "processing_async" ->
                 s.copy(turnActive = true, statusText = label)
             else -> s.copy(statusText = label) // "info" et al.: status only
@@ -1094,6 +1904,13 @@ class AppViewModel(
     companion object {
         private const val TAG = "AppViewModel"
 
+        private const val SNAPSHOT_TIMEOUT_MS = 5_000L
+        private const val SNAPSHOT_RETRYABLE_CODE = "snapshot_retryable"
+        private const val RECOVERY_MESSAGE = "A saved response could not be displayed."
+        private val DEFINITIVE_CHAT_MISS_CODES = setOf("chat_not_found", "chat_deleted")
+        private val SEMANTIC_TEXT_KEYS =
+            listOf("content", "text", "message", "label", "title", "value", "caption")
+
         /** The step trail is a live glance, not a log — keep only the tail. */
         private const val MAX_TRAIL = 20
 
@@ -1108,8 +1925,9 @@ class AppViewModel(
         fun factory(
             client: OrchestratorClient,
             rest: AstralRest,
+            resumeStore: ConversationResumeStore? = null,
         ) = viewModelFactory {
-            initializer { AppViewModel(client, rest) }
+            initializer { AppViewModel(client, rest, resumeStore) }
         }
     }
 }

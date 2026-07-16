@@ -16,7 +16,12 @@ from typing import Optional, Tuple
 
 from openai import OpenAI
 
-PROBE_TIMEOUT_SECONDS: float = 15.0
+# Feature 060 (FR-055/FR-056): the provider probe must leave enough of the
+# server-owned ten-second credential-save attempt for persistence, gate
+# unlock, and durable terminalization.  The SDK timeout alone is not a hard
+# async bound (DNS/TLS and a stuck worker thread can outlive it), so the call
+# below also has an event-loop-owned deadline.
+PROBE_TIMEOUT_SECONDS: float = 8.0
 
 
 def classify_probe_error(exc: BaseException) -> str:
@@ -24,10 +29,21 @@ def classify_probe_error(exc: BaseException) -> str:
     (taxonomy from specs/006-user-llm-config/contracts/rest-llm-test.md).
     """
     s = str(exc).lower()
-    if "401" in s or "auth" in s or "api key" in s or "unauthor" in s:
+    if (
+        "401" in s
+        or "403" in s
+        or "auth" in s
+        or "api key" in s
+        or "unauthor" in s
+        or "forbidden" in s
+    ):
         return "auth_failed"
     if "404" in s or ("model" in s and ("not" in s or "exist" in s)):
         return "model_not_found"
+    if "400" in s or "bad request" in s or "invalid_request" in s:
+        return "contract_violation"
+    if any(k in s for k in ("429", "500", "502", "503", "504", "rate limit", "unavailable")):
+        return "provider_unavailable"
     if any(k in s for k in ("connection", "timeout", "network", "dns", "resolve")):
         return "transport_error"
     if "choices" in s or "schema" in s or "json" in s:
@@ -66,7 +82,9 @@ async def probe_chat_completion(
                 "OpenAI-compatible chat-completions endpoint")
 
     try:
-        await asyncio.to_thread(_run)
+        await asyncio.wait_for(asyncio.to_thread(_run), timeout=timeout)
         return True, None, None
+    except TimeoutError:
+        return False, "transport_error", "Provider probe timed out"
     except Exception as exc:
         return False, classify_probe_error(exc), str(exc)[:1024]

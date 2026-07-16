@@ -46,14 +46,20 @@ public enum MarkdownBlocks {
         }
         func flushBullets() {
             if !bullets.isEmpty {
-                blocks.append(.bullets(items: bullets, ordered: bulletsOrdered,
-                                       start: bulletsStart))
+                blocks.append(
+                    .bullets(
+                        items: bullets, ordered: bulletsOrdered,
+                        start: bulletsStart))
             }
             bullets = []
             bulletsStart = 1
         }
         func flushTable() {
-            defer { tableRows = []; tableRawLines = []; tableHasHeader = false }
+            defer {
+                tableRows = []
+                tableRawLines = []
+                tableHasHeader = false
+            }
             guard !tableRows.isEmpty else { return }
             // Commit only unambiguous tables (a separator row, or several
             // rows). A single stray pipe-wrapped line stays verbatim prose.
@@ -63,7 +69,11 @@ public enum MarkdownBlocks {
                 blocks.append(.paragraph(tableRawLines.joined(separator: "\n")))
             }
         }
-        func flushAll() { flushParagraph(); flushBullets(); flushTable() }
+        func flushAll() {
+            flushParagraph()
+            flushBullets()
+            flushTable()
+        }
 
         for rawLine in source.components(separatedBy: "\n") {
             var line = rawLine.trimmingCharacters(in: .whitespaces)
@@ -99,15 +109,19 @@ public enum MarkdownBlocks {
             }
 
             if line.isEmpty {
-                flushParagraph(); flushBullets(); flushTable()
+                flushParagraph()
+                flushBullets()
+                flushTable()
                 continue
             }
 
             // Pipe-table row: must be pipe-WRAPPED ("|…|"), not merely
             // pipe-prefixed — "|x - 3| < 5 holds" is prose.
             if line.hasPrefix("|"), line.hasSuffix("|"), line.count >= 2,
-               line.dropFirst().contains("|") {
-                flushParagraph(); flushBullets()
+                line.dropFirst().contains("|")
+            {
+                flushParagraph()
+                flushBullets()
                 let cells = tableCells(line)
                 if isTableSeparator(cells) {
                     if tableRows.count == 1 { tableHasHeader = true }
@@ -198,15 +212,18 @@ public enum MarkdownBlocks {
 
     private static func bulletLine(_ line: String) -> (text: String, ordered: Bool, number: Int?)? {
         if let first = line.first, "-*+".contains(first),
-           line.dropFirst().first == " " {
+            line.dropFirst().first == " "
+        {
             return (line.dropFirst(2).trimmingCharacters(in: .whitespaces), false, nil)
         }
         let digits = line.prefix(while: \.isNumber)
         if !digits.isEmpty, digits.count <= 3 {
             let rest = line.dropFirst(digits.count)
             if rest.first == "." || rest.first == ")", rest.dropFirst().first == " " {
-                return (rest.dropFirst(2).trimmingCharacters(in: .whitespaces),
-                        true, Int(digits))
+                return (
+                    rest.dropFirst(2).trimmingCharacters(in: .whitespaces),
+                    true, Int(digits)
+                )
             }
         }
         return nil
@@ -225,8 +242,9 @@ public enum MarkdownBlocks {
     }
 
     private static func isTableSeparator(_ cells: [String]) -> Bool {
-        !cells.isEmpty && cells.allSatisfy { cell in
-            !cell.isEmpty && cell.allSatisfy { $0 == "-" || $0 == ":" } && cell.contains("-")
-        }
+        !cells.isEmpty
+            && cells.allSatisfy { cell in
+                !cell.isEmpty && cell.allSatisfy { $0 == "-" || $0 == ":" } && cell.contains("-")
+            }
     }
 }

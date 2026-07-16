@@ -29,6 +29,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from typing import Any
+
+from orchestrator.work_admission import OperationState, StaleExecutionFenceError
 
 logger = logging.getLogger("Orchestrator.LLMGate")
 
@@ -156,25 +160,99 @@ async def _send_welcome(orch, websocket, user_id: str) -> None:
         logger.debug("llm_gate: welcome render failed (non-fatal)", exc_info=True)
 
 
-async def unlock_after_save(orch, user_id: str) -> bool:
+async def unlock_after_save(
+    orch,
+    user_id: str,
+    *,
+    coordinator: Any | None = None,
+    fence: Any | None = None,
+    completed_owner: Any | None = None,
+    completed_operation_id: Any | None = None,
+    deadline_at_monotonic: float | None = None,
+) -> bool:
     """Close the gate on ALL of the user's sockets after a successful save.
 
     Returns ``True`` iff at least one socket was gated (the caller uses
     this to skip its own modal re-render — the unlock already replaced it).
+
+    Feature 060 credential operations pass their complete execution fence and
+    attempt deadline.  Each logical gate transition is authorized immediately
+    before it mutates the marker, so a cancelled/stale provider worker cannot
+    unlock a user after the durable terminal state won the race.
     """
+    completed_authority = (
+        completed_owner is not None or completed_operation_id is not None
+    )
+    if (completed_owner is None) != (completed_operation_id is None):
+        raise ValueError(
+            "completed_owner and completed_operation_id are required together"
+        )
+    if fence is not None and completed_authority:
+        raise ValueError("unlock authority must be live-fence or completed")
+    if coordinator is None and (fence is not None or completed_authority):
+        raise ValueError("coordinator is required for operation unlock")
+    if coordinator is not None and fence is None and not completed_authority:
+        raise ValueError("operation unlock authority is required")
+
+    async def _assert_unlock_authority() -> None:
+        if (
+            deadline_at_monotonic is not None
+            and time.monotonic() >= deadline_at_monotonic
+        ):
+            raise TimeoutError("credential save deadline elapsed before unlock")
+        if coordinator is not None:
+            if fence is not None:
+                await asyncio.to_thread(
+                    coordinator.assert_current_execution, fence
+                )
+            else:
+                operation = await asyncio.to_thread(
+                    coordinator.query_operation,
+                    owner=completed_owner,
+                    operation_id=completed_operation_id,
+                )
+                if operation.state is not OperationState.COMPLETED:
+                    raise StaleExecutionFenceError(
+                        "credential save did not complete"
+                    )
+        if (
+            deadline_at_monotonic is not None
+            and time.monotonic() >= deadline_at_monotonic
+        ):
+            raise TimeoutError("credential save deadline elapsed before unlock")
+
+    await _assert_unlock_authority()
     gated = _gated_map(orch)
     any_unlocked = False
     for ws in _user_sockets(orch, user_id):
+        await _assert_unlock_authority()
         was_gated = gated.pop(id(ws), False)
         if not was_gated:
             continue
+        try:
+            # Closing the race between the logical marker mutation and the
+            # first client frame: deadline loss restores the marker, so no
+            # post-deadline close/navigation can be projected.
+            await _assert_unlock_authority()
+        except Exception:
+            gated[id(ws)] = True
+            raise
         any_unlocked = True
         try:
             await _push_gate_close(orch, ws)
+            await _assert_unlock_authority()
             await _send_welcome(orch, ws, user_id)
+            await _assert_unlock_authority()
         except Exception:
-            logger.debug("llm_gate: unlock push failed for one socket",
-                         exc_info=True)
+            # Fence/deadline failures are operation-authority outcomes, not a
+            # best-effort delivery miss. Propagate them so the outer Save
+            # terminal cannot become a late success.
+            if coordinator is not None:
+                raise
+            logger.debug(
+                "llm_gate: unlock push failed for one socket",
+                exc_info=True,
+            )
     return any_unlocked
 
 

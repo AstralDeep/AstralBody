@@ -4,6 +4,9 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
+import okhttp3.Request
+import okhttp3.WebSocket
+import okio.ByteString
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -35,4 +38,42 @@ class QueueOverflowTest {
             assertTrue(drops.isEmpty())
             job.cancel()
         }
+
+    @Test
+    fun open_socket_rejection_retains_exact_frame_for_reconnect_replay() {
+        val client = OrchestratorClient("ws://localhost:9/ws")
+        client.installOpenSocketForTest(RejectingWebSocket())
+
+        val local = client.sendEvent("raced_send", null)
+
+        assertEquals(listOf("raced_send"), client.pendingActions())
+        val sent = mutableListOf<String>()
+        val replayed = mutableListOf<LocalSubmission>()
+        client.replayPendingForTest(
+            connectionGeneration = "22222222-2222-4222-8222-222222222222",
+            onGeneration = {},
+            onQueuedSubmission = replayed::add,
+            send = { frame -> sent.add(frame) },
+        )
+        assertEquals(listOf(local), replayed)
+        assertEquals(client.pendingActions(), emptyList())
+        assertTrue(sent.single().contains(local.submissionId))
+    }
+
+    private class RejectingWebSocket : WebSocket {
+        override fun request(): Request = Request.Builder().url("ws://localhost:9/ws").build()
+
+        override fun queueSize(): Long = 0L
+
+        override fun send(text: String): Boolean = false
+
+        override fun send(bytes: ByteString): Boolean = false
+
+        override fun close(
+            code: Int,
+            reason: String?,
+        ): Boolean = true
+
+        override fun cancel() = Unit
+    }
 }

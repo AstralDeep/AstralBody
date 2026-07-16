@@ -1,6 +1,80 @@
 <!--
   Sync Impact Report
   ==================
+  Version change: 2.6.1 → 2.7.0 (MINOR — Principle X materially adds a
+    bounded, auditable exception model for temporary client-platform
+    unavailability while preserving non-waivable staging and trust gates)
+
+  Amendment (2026-07-15, v2.7.0) — bounded platform-unavailability evidence:
+    X. Production Readiness (EXPANDED) — every affected live client remains
+        required, but a temporarily unavailable runner/platform may use one
+        owner-approved, candidate-bound exception lasting at most seven days;
+        approval must be independently machine-verifiable through a protected
+        release-owner control, never a self-asserted field.
+        When candidate-controlled code or workflows can influence release
+        evidence, a candidate-independent protected verifier pinned outside
+        the candidate must reconstruct the inputs, execute pinned policy, and
+        attest the required final decision; the repository gate binds that
+        installed workflow identity and consumers enforce decision expiry.
+        Candidate-controlled workflows also cannot hold or exercise signing
+        or public-release mutation authority; a separately pinned protected
+        publisher must consume the protected decision.
+        Exceptions cannot hide a product failure or waive qualifying staging,
+        real dependencies/data/workers, candidate/artifact identity, evidence
+        integrity, or a feature-designated non-waivable check. The append-only
+        protected ledger stays outside the candidate tree; its debt requires a
+        later pass plus a durable resolution receipt.
+        Candidate-influenced release evidence requires a pinned protected final
+        verifier/required decision, and signing/public mutation requires a
+        separately pinned protected publisher. An already-shipped signer SAN
+        may use only an exact-byte-pinned, mutation-free compatibility bridge
+        with the minimum read scopes needed to retrieve its exact protected-
+        decision artifact plus OIDC signing authority.
+    Development Workflow — live parity verification now points to Principle
+        X's bounded exception rules rather than contradicting them.
+    Templates requiring updates:
+      ✅ .specify/templates/plan-template.md — Constitution Check now prompts
+         for exception boundaries/debt, protected final verification, and
+         protected publication in addition to staging and lint
+      ✅ .specify/templates/spec-template.md — generic and compatible
+      ✅ .specify/templates/tasks-template.md — setup/polish examples now
+         include exception-policy/debt, protected-verifier, and publisher
+         validation
+    Follow-up TODOs: None
+
+  -- Prior amendment (2026-07-15, v2.6.1) --------------------------------
+  Version change: 2.6.0 → 2.6.1 (PATCH — Principle X clarifies what
+    qualifies as a staging environment, and Principles IV/XI plus the
+    development workflow make maintained-language lint enforcement
+    mechanically consistent)
+
+  Amendment (2026-07-15, v2.6.1) — candidate staging and lint enforcement:
+    IV. Code Quality (CLARIFIED) — maintained JavaScript/TypeScript requires
+        a tracked standard lint configuration and an automated CI gate; a
+        test-only linter remains governed by the existing Principle V/XI
+        isolation carve-out and does not become a product dependency.
+    X. Production Readiness (CLARIFIED) — staging may be a persistent shared
+        environment or an ephemeral isolated candidate deployment. It
+        qualifies only when it runs the same candidate artifact/SHA with real
+        configured authentication, database, workers, and affected clients
+        against representative migrated data, and emits evidence bound to the
+        candidate. Mock-only or source-only local checks do not qualify.
+    XI. Continuous Integration (CORRECTED) — the independently reported lint
+        gate covers Python and every maintained client language changed by the
+        candidate, explicitly including JavaScript/TypeScript, instead of
+        naming only Python despite Principle IV's broader requirement.
+    Development Workflow — the PR lint gate is described as maintained-
+        language lint so reviewers cannot treat the Python check as complete
+        evidence when client JavaScript/TypeScript changes.
+    Templates requiring updates:
+      ✅ .specify/templates/plan-template.md — Constitution Check now prompts
+         for qualifying staging topology/evidence and maintained-language lint
+      ✅ .specify/templates/spec-template.md — generic and compatible
+      ✅ .specify/templates/tasks-template.md — setup/polish examples now
+         include per-language lint and candidate-bound staging evidence
+    Follow-up TODOs: None
+
+  -- Prior amendment (2026-07-08, v2.6.0) --------------------------------
   Version change: 2.5.0 → 2.6.0 (MINOR — Principle XII materially expanded:
     device-client consistency now covers the visual design language — one
     shared palette/theme across every client — and layout parity on
@@ -361,6 +435,10 @@ All code MUST adhere to established style standards.
 - Any client-side TypeScript/JavaScript emitted or maintained
   (including the orchestrator render layer's output assets) MUST
   pass standard lint rules. Linting MUST be enforced in CI.
+- When maintained TypeScript/JavaScript exists, the repository MUST
+  carry its standard lint configuration in version control and the
+  CI lint gate MUST exercise it. A linter declared only for CI remains
+  isolated from product runtime dependencies under Principles V and XI.
 - No linting exceptions without inline justification comments.
 
 ### V. Dependency Management
@@ -544,13 +622,69 @@ and the happy path works."
   authentication, deployment topology, container images,
   background workers) MUST be validated end-to-end in a
   staging environment before merge.
+- A qualifying staging environment MAY be either a persistent shared
+  environment or an ephemeral isolated candidate deployment. In both
+  forms it MUST run the same candidate artifact or commit-derived image,
+  use real configured authentication, database, background workers, and
+  affected client flows, include representative data migrated through
+  the product's normal migration mechanism, and produce evidence bound
+  to the candidate SHA or immutable artifact digest. Mock-only fixtures,
+  source-only test processes, and an empty database do not qualify as
+  staging evidence.
 - UI changes MUST be exercised against EVERY affected client
   target (e.g., a real browser for the web, the desktop client
   launched, the native mobile client on an emulator or device)
   running against the live backend before being declared
   complete; type-checks and unit tests do not verify feature
   correctness, and verifying one client does not stand in for
-  the others (Principle XII).
+  the others (Principle XII). If a client runner or platform is
+  temporarily unavailable for reasons independent of candidate
+  behavior, a release MAY proceed only under an owner-approved,
+  candidate- and release-bound evidence exception that names the
+  missing platform/checks, explains the unavailability, expires
+  within seven calendar days, and is recorded in an append-only
+  protected ledger outside any candidate tree whose SHA it names. Approval MUST be independently machine-verifiable through
+  a protected release-owner environment, ruleset, or signed approval
+  attestation bound to that exception and candidate; a self-declared
+  approver field is insufficient. The unavailable report MUST still bind the
+  exact candidate artifact, qualifying staging identity, and a protected,
+  independently re-hashed observation of the attempted target runner/platform;
+  the approval MUST bind the exact exception bytes so its scope cannot be
+  changed after review. The exception MUST NOT convert a product failure into
+  unavailability or waive qualifying staging, real configured
+  authentication/database/workers, representative migrated data,
+  candidate/artifact identity and byte verification, evidence-
+  policy integrity, or any check the owning feature designates
+  non-waivable. Every exception MUST block the next release until
+  that release supplies passing evidence for each recorded debt and
+  durably appends a resolution receipt without rewriting history;
+  a replacement exception does not resolve it.
+- When candidate-controlled code or workflows can influence qualifying
+  release evidence, policy, aggregation, or coverage, the final release
+  decision MUST be produced by a candidate-independent protected verifier
+  pinned outside the candidate. It MUST reconstruct bounded current-run
+  inputs from trusted provider/API identities, execute protected pinned policy
+  code, attest the exact decision and inputs, and own the repository-required
+  gate through its installed protected workflow identity, not a name-only
+  status. A caller job, candidate script, same-name check, self-declared result,
+  or candidate-supplied manifest MUST NOT substitute for that decision. The
+  decision MUST have a bounded validity window, and any consuming publisher
+  MUST reject it after expiry.
+- Candidate-controlled code or workflows MUST NOT possess signing credentials,
+  OIDC publication authority, or public-release mutation permission. Release
+  signing, tag/release creation, asset upload, verification, and public
+  transition MUST execute in a separately pinned protected publisher that
+  consumes the attested protected decision, reconstructs immutable inputs,
+  refuses collisions/replacement, and is governed by protected release-owner
+  approval. An unprivileged candidate workflow MAY only request publication.
+  A compatibility signer required by an already-shipped pinned verifier MAY
+  receive OIDC without mutation authority only when its exact workflow bytes
+  equal an independently installed protected template, its ref can be created
+  only by that protected publisher, and it signs only the exact protected-
+  decision artifact. It MAY receive only the minimum non-mutating repository
+  and workflow-artifact read scopes needed to retrieve and re-hash that exact
+  input; under those constraints it is a protected bridge, not a candidate-
+  controlled publisher.
 
 **Rationale**: A change that is "almost done" is a future
 incident. Setting the merge bar at production-ready — not
@@ -565,8 +699,11 @@ are the enforceable definition of "passes CI" wherever this
 constitution requires it.
 
 - The pipeline MUST run, as independently-reported checks:
-  1. **Lint** — Python lint from the repository-root
-     configuration (Principle IV).
+  1. **Lint** — Python lint from the repository-root configuration
+     plus standard lint for every maintained client language changed by
+     the candidate, explicitly including TypeScript/JavaScript when
+     present (Principle IV). Language-specific invocations MAY share one
+     check only when their outputs and failures remain clearly partitioned.
   2. **Tests** — the complete backend test suite (default suite
      plus all module suites) against a real database service,
      excluding only tests that require a live deployed
@@ -773,7 +910,7 @@ an ungoverned back channel for unverified claims.
 ## Development Workflow
 
 - All changes MUST go through pull requests.
-- PRs MUST pass the Principle XI CI gate set (lint, tests,
+- PRs MUST pass the Principle XI CI gate set (maintained-language lint, tests,
   changed-code coverage, image build, boot smoke, secret scan)
   before merge.
 - PRs introducing new dependencies MUST include lead developer
@@ -792,8 +929,10 @@ an ungoverned back channel for unverified claims.
   user-facing capability MUST update the single server-owned
   definition rather than any per-client copy, MUST keep the
   UI-protocol manifest and every client's drift-guard suites
-  green, and MUST verify parity on every affected client target
-  before merge (Principle XII).
+  green, and MUST verify live parity on every affected client
+  target before merge or carry the narrowly bounded platform-
+  unavailability evidence exception permitted by Principle X
+  (Principle XII).
 - PRs MUST be production-ready before merge — reviewers MUST
   reject changes that contain stubs, debug-only code, missing
   observability for new features, or untested error paths.
@@ -818,4 +957,4 @@ guidance when conflicts arise.
   adherence to these principles. Violations MUST be resolved
   before merge.
 
-**Version**: 2.6.0 | **Ratified**: 2026-03-11 | **Last Amended**: 2026-07-08
+**Version**: 2.7.0 | **Ratified**: 2026-03-11 | **Last Amended**: 2026-07-15

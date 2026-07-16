@@ -94,9 +94,29 @@ private fun InputPrimitive(
         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
         keyboardActions =
             KeyboardActions(
-                onDone = { if (action != null) emit.event(action, buildJsonObject { put("value", value) }) },
+                onDone = {
+                    dispatchInputDone(action, value, emit) {
+                        defaultKeyboardAction(ImeAction.Done)
+                    }
+                },
             ),
     )
+}
+
+/** Emit the server-owned action, then preserve Compose's native IME dismissal. */
+internal fun dispatchInputDone(
+    action: String?,
+    value: String,
+    emit: Emit,
+    defaultKeyboardAction: () -> Unit,
+) {
+    try {
+        if (action != null) {
+            emit.event(action, buildJsonObject { put("value", value) })
+        }
+    } finally {
+        defaultKeyboardAction()
+    }
 }
 
 // --- param_picker field rules (pure — JVM unit-tested) ----------------------

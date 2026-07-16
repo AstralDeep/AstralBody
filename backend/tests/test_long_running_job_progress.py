@@ -30,6 +30,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from orchestrator.orchestrator import Orchestrator  # noqa: E402
+from orchestrator.history import ConversationCommitRepository  # noqa: E402
 from orchestrator.workspace import WorkspaceManager  # noqa: E402
 from shared.protocol import ToolProgress  # noqa: E402
 
@@ -98,6 +99,7 @@ def _make_fake(history, user_id, llm_content=NARRATION):
 
     async def _safe_send(ws, payload):
         sent.append((ws, json.loads(payload) if isinstance(payload, str) else payload))
+        return True
 
     async def _call_llm(websocket, messages, tools_desc=None, temperature=None,
                         feature="tool_dispatch"):
@@ -109,10 +111,13 @@ def _make_fake(history, user_id, llm_content=NARRATION):
     fake = types.SimpleNamespace(
         workspace=WorkspaceManager(history),
         history=history,
+        conversation_commits=ConversationCommitRepository(history.db),
         rote=ROTE(),
         ui_clients=[],
         ui_sessions=ui_sessions,
         _ws_active_chat={},
+        _conversation_scopes={},
+        _workspace_locks={},
         pending_ui_sockets={},
         _job_context={},
         _pending_cap_entries={},
@@ -126,7 +131,11 @@ def _make_fake(history, user_id, llm_content=NARRATION):
     for name in ("_handle_tool_progress", "_finalize_long_running_job",
                  "_build_job_result_component", "_narrate_job_result",
                  "_sockets_on_chat", "send_ui_upsert", "send_ui_render",
-                 "_release_hop_cap_slot"):
+                 "_release_hop_cap_slot", "_begin_detached_conversation_publication",
+                 "_append_conversation_message", "_publish_conversation_snapshot",
+                 "_deliver_committed_conversation_snapshot",
+                 "_conversation_snapshot_candidate", "_adapt_conversation_snapshot",
+                 "_bind_conversation_scope"):
         setattr(fake, name, types.MethodType(getattr(Orchestrator, name), fake))
     fake._sent = sent
     return fake
@@ -134,7 +143,8 @@ def _make_fake(history, user_id, llm_content=NARRATION):
 
 def _seed_job(fake, user_id, chat_id, cap):
     fake._job_context[cap] = {"user_id": user_id, "agent_id": "ml-services-1",
-                              "chat_id": chat_id, "tool_name": "classify_start_training_job"}
+                              "chat_id": chat_id, "tool_name": "classify_start_training_job",
+                              "publication_request_generation": str(uuid.uuid4())}
     fake._pending_cap_entries[cap] = (user_id, "ml-services-1")
 
 
@@ -143,6 +153,14 @@ def _register_socket(fake, user_id, chat_id):
     fake.ui_clients.append(ws)
     fake.ui_sessions[ws] = {"sub": user_id}
     fake._ws_active_chat[id(ws)] = chat_id
+    fake._conversation_scopes[id(ws)] = {
+        "chat_id": chat_id,
+        "connection_generation": str(uuid.uuid4()),
+        "request_generation": str(uuid.uuid4()),
+        "purpose": "hydration",
+        "base_render_revision": 0,
+        "frame_sequence": 0,
+    }
     return ws
 
 
@@ -171,6 +189,13 @@ def test_terminal_result_persists_fans_out_and_narrates(chat_env):
     assert "0.718" in blob and "random_forest.accuracy" in blob
     # Table delivered live as a ui_upsert.
     assert any(m.get("type") == "ui_upsert" for _, m in fake._sent)
+    assert [m.get("type") for _, m in fake._sent].count(
+        "conversation_commit_ready"
+    ) == 1
+    snapshots = [m for _, m in fake._sent if m.get("type") == "conversation_snapshot"]
+    assert len(snapshots) == 1
+    assert snapshots[0]["snapshot_purpose"] == "commit"
+    assert snapshots[0]["render_revision"] == 1
     # Model-written comparison narrated into the chat rail (live)...
     assert any(m.get("type") == "ui_render" and m.get("target") == "chat"
                and NARRATION in json.dumps(m) for _, m in fake._sent)

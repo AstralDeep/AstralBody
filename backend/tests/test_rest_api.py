@@ -77,6 +77,7 @@ def _create_test_app():
     """Create a minimal FastAPI app for testing with a mock orchestrator."""
     from unittest.mock import AsyncMock, MagicMock
     from orchestrator.history import HistoryManager
+    from orchestrator.workspace import WorkspaceManager
     import tempfile
 
     app = FastAPI(title="Test App")
@@ -97,17 +98,20 @@ def _create_test_app():
     mock_orch.history = history
     mock_orch.agent_cards = {}
     mock_orch.agent_capabilities = {}
+    from shared.protocol import CandidateCapabilityMap
+    mock_orch.personal_agent_capabilities = CandidateCapabilityMap()
+    mock_orch.get_personal_agent_capabilities = MagicMock(
+        side_effect=lambda: mock_orch.personal_agent_capabilities.to_dict()[
+            "capabilities"
+        ]
+    )
     mock_orch.ui_clients = []
     mock_orch.ui_sessions = {}
-    # Feature 028: the REST component verbs write through the workspace and
-    # await fan-out helpers. An empty upsert result drops the handlers onto
-    # the legacy history path these tests pin; the real workspace-backed REST
-    # behavior is covered by tests/test_rest_legacy_workspace.py.
-    mock_orch.workspace = MagicMock()
-    mock_orch.workspace.upsert.return_value = []
-    mock_orch.workspace.aupsert = AsyncMock(return_value=[])
-    mock_orch.workspace.aget_by_component_id = AsyncMock(return_value=None)
-    mock_orch.workspace.asnapshot = AsyncMock(return_value=None)
+    # Component endpoints exercise the real semantic workspace. The narrow
+    # mock omits the detached publication runner; api.py's unit-test seam runs
+    # the mutation directly, while production Orchestrator instances always
+    # use the revisioned atomic boundary.
+    mock_orch.workspace = WorkspaceManager(history)
     mock_orch.send_ui_upsert = AsyncMock()
     mock_orch._reconcile_legacy_replacement = AsyncMock()
     # Draft listings hide draft agents via a to_thread call — a bare
@@ -324,6 +328,15 @@ class TestAgentEndpoints:
         data = resp.json()
         assert "agents" in data
         assert "total_tools" in data
+        assert data["capabilities"] == {
+            "personal_agent_host": {
+                "macos": {
+                    "supported": False,
+                    "runtime_contract_versions": [],
+                    "source_feature": None,
+                }
+            }
+        }
 
 
 class TestSendMessageCreatesChat:

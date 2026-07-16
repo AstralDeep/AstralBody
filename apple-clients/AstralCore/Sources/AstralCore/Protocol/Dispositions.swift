@@ -12,7 +12,7 @@ import Foundation
 
 public enum FrameDisposition: Equatable, Sendable {
     case handled
-    case ignored(String)   // reason — documentation, not dead weight
+    case ignored(String)  // reason — documentation, not dead weight
 }
 
 public enum ComponentDisposition: Equatable, Sendable {
@@ -40,9 +40,12 @@ public struct ClientDispositions: Sendable {
     /// `handled` for a frame the code lets fall through `default:` is a lie
     /// the parity matrix would inherit.
     private static let commonHandled: [String] = [
-        "auth_required", "chat_created", "chat_loaded", "chat_status",
-        "chat_step", "error", "stream_error", "ui_render", "ui_stream_data",
-        "ui_upsert", "user_message_acked",
+        "agent_lifecycle",
+        "auth_required", "chat_created", "chat_deleted", "chat_loaded", "chat_status",
+        "chat_step", "conversation_commit_ready", "conversation_snapshot", "error",
+        "operation_status", "stream_error", "ui_append", "ui_render",
+        "ui_stream_data", "ui_update", "ui_upsert",
+        "user_message_acked",
     ]
 
     /// Deliberately ignored on every Apple client (044 channel decisions —
@@ -51,15 +54,19 @@ public struct ClientDispositions: Sendable {
         "agent_permissions": "acks for web workspace verbs; natives re-discover",
         "agent_permissions_updated": "acks for web workspace verbs; natives re-discover",
         "agent_registered": "agent lifecycle acks have no native surface (matches Android)",
+        "agent_host_inventory_reconciled": "host-only inventory result; author-only clients ignore",
+        "agent_host_registered": "structured host acknowledgement; Apple targets are author-only until feature 059",
+        "agent_host_registration_refused": "host-only registration refusal; author-only clients ignore",
         // Feature 058 BYO host frames — only a HOSTING desktop acts on these; the
         // Apple clients are author-only (macOS hosting is deferred to feature 059),
         // so they ignore them, exactly as the Android ProtocolManifest does.
-        "agent_bundle_deliver": "BYO code delivery — only a hosting desktop receives it; author-only clients ignore (matches Android)",
+        "agent_bundle_deliver":
+            "BYO code delivery — only a hosting desktop receives it; author-only clients ignore (matches Android)",
         "agent_offline": "BYO host-liveness signal — no native host surface; author-only (matches Android)",
         "agent_stop": "BYO host frame — Apple clients never host a user agent (matches Android)",
-        "agent_tunnel": "BYO agent frames — relayed only by a hosting desktop; author-only clients ignore (matches Android)",
+        "agent_tunnel":
+            "BYO agent frames — relayed only by a hosting desktop; author-only clients ignore (matches Android)",
         "audit_append": "admin audit surface is web-only (044); natives fetch audit via REST",
-        "chat_deleted": "cross-tab concern; natives are single-window (044)",
         "chrome_render": "raw-HTML chrome region is web-only; natives use chrome_surface",
         "heartbeat": "keepalive; the transport layer answers (matches Windows/Android)",
         "llm_config_ack": "natives use the LLM chrome-surface round trip (044)",
@@ -68,12 +75,12 @@ public struct ClientDispositions: Sendable {
         "stream_list": "no native stream-browser surface (matches Windows/Android)",
         "stream_unsubscribed": "terminal state arrives via ui_stream_data done flag",
         "system_config": "dashboard data; natives use agent_list (044)",
-        "ui_append": "legacy channel; server no longer targets natives (044)",
-        "ui_update": "legacy channel; server no longer targets natives (044)",
     ]
 
-    private static func frames(extraHandled: [String],
-                               extraIgnored: [String: String]) -> [String: FrameDisposition] {
+    private static func frames(
+        extraHandled: [String],
+        extraIgnored: [String: String]
+    ) -> [String: FrameDisposition] {
         var table: [String: FrameDisposition] = [:]
         for name in commonHandled { table[name] = .handled }
         for (name, reason) in commonIgnored { table[name] = .ignored(reason) }
@@ -97,7 +104,7 @@ public struct ClientDispositions: Sendable {
                 "tool_progress", "user_preferences", "workspace_timeline_mode",
             ],
             extraIgnored: [
-                "agent_creation_progress": "agentic-creation drafting UX is web-only for now (matches Android)",
+                "agent_creation_progress": "agentic-creation drafting UX is web-only for now (matches Android)"
             ]),
         components: fullComponentSet(fallbacks: [
             "audio": "web-only media, server degrade ladder (044 channel decision)",
@@ -108,7 +115,7 @@ public struct ClientDispositions: Sendable {
 
     public static let macos = ClientDispositions(
         client: "macos",
-        frames: ios.frames,   // identical frame surface to iOS by design
+        frames: ios.frames,  // identical frame surface to iOS by design
         components: fullComponentSet(fallbacks: [
             "audio": "web-only media, server degrade ladder (044 channel decision)",
             "generative": "web-only media (044 channel decision)",
@@ -192,15 +199,19 @@ public struct ClientDispositions: Sendable {
     ]
 
     public static let allPushTypes: [String] = [
-        "agent_bundle_deliver", "agent_creation_progress", "agent_list",
-        "agent_offline", "agent_permissions", "agent_permissions_updated",
-        "agent_registered", "agent_stop", "agent_tunnel", "audit_append",
+        "agent_bundle_deliver", "agent_creation_progress", "agent_host_inventory_reconciled",
+        "agent_host_registered", "agent_host_registration_refused", "agent_lifecycle",
+        "agent_list", "agent_offline", "agent_permissions",
+        "agent_permissions_updated", "agent_registered", "agent_stop",
+        "agent_tunnel", "audit_append",
         "auth_required", "chat_created", "chat_deleted", "chat_loaded",
         "chat_status", "chat_step", "chrome_menu", "chrome_render",
         "chrome_surface", "combine_error", "combine_status",
         "component_deleted", "component_save_error", "component_saved",
-        "components_combined", "components_condensed", "error", "heartbeat",
-        "history_list", "llm_config_ack", "llm_usage_report", "notification",
+        "components_combined", "components_condensed", "conversation_commit_ready",
+        "conversation_snapshot",
+        "error", "heartbeat", "history_list", "llm_config_ack",
+        "llm_usage_report", "notification", "operation_status",
         "rote_config", "saved_components_list", "stream_data", "stream_error",
         "stream_list", "stream_subscribed", "stream_unsubscribed",
         "system_config", "task_completed", "task_started", "tool_progress",

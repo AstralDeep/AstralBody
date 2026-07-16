@@ -1,0 +1,45 @@
+{
+  "legal/windows-runner-unavailable-a.json": {
+    "schema_valid": true,
+    "policy_eligible": true
+  },
+  "legal/windows-runner-unavailable-b.json": {
+    "schema_valid": true,
+    "policy_eligible": true
+  },
+  "illegal/failed-product.json": {
+    "schema_valid": true,
+    "policy_eligible": false,
+    "reason": "failed_product_behavior"
+  },
+  "illegal/backend.json": {
+    "schema_valid": false,
+    "policy_eligible": false,
+    "reason": "backend_nonwaivable"
+  },
+  "illegal/docs.json": {
+    "schema_valid": false,
+    "policy_eligible": false,
+    "reason": "documentation_nonwaivable"
+  },
+  "illegal/staging.json": {
+    "schema_valid": false,
+    "policy_eligible": false,
+    "reason": "candidate_staging_nonwaivable"
+  },
+  "illegal/trust.json": {
+    "schema_valid": false,
+    "policy_eligible": false,
+    "reason": "trust_nonwaivable"
+  },
+  "illegal/policy.json": {
+    "schema_valid": false,
+    "policy_eligible": false,
+    "reason": "policy_integrity_nonwaivable"
+  },
+  "illegal/apple-first-login.json": {
+    "schema_valid": false,
+    "policy_eligible": false,
+    "reason": "apple_first_login_nonwaivable"
+  }
+}

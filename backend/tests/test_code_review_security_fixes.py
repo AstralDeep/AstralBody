@@ -5,6 +5,7 @@ reintroduce the vulnerability. Grouped by the module the fix lives in.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import sqlite3
 import sys
@@ -200,7 +201,7 @@ async def test_parallel_wrapper_records_taint_and_fires_posthook(monkeypatch):
     from shared.feature_flags import flags
     from shared.protocol import MCPResponse
 
-    orch = Orchestrator()
+    orch = await asyncio.to_thread(Orchestrator)
     orch._execute_with_retry = AsyncMock(return_value=MCPResponse(
         result={"x": 1}, ui_components=[{"type": "text", "content": "hi"}]))
     tracker = MagicMock()

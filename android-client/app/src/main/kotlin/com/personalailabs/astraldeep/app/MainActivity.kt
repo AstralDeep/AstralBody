@@ -43,6 +43,8 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.personalailabs.astraldeep.app.auth.ConversationResumeStore
+import com.personalailabs.astraldeep.app.auth.ConversationResumeStore.ClearReason
 import com.personalailabs.astraldeep.app.auth.KeycloakLogout
 import com.personalailabs.astraldeep.app.auth.OidcAuth
 import com.personalailabs.astraldeep.app.auth.TokenStore
@@ -97,6 +99,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private val store by lazy { TokenStore(this) }
+    private val conversationResumeStore by lazy { ConversationResumeStore(this) }
     private val authToken = MutableStateFlow<String?>(null)
     private val signInError = MutableStateFlow<String?>(null)
 
@@ -143,7 +146,8 @@ class MainActivity : ComponentActivity() {
             signInError.value = route.error
         }
         setContent {
-            val vm: AppViewModel = viewModel(factory = AppViewModel.factory(client, rest))
+            val vm: AppViewModel =
+                viewModel(factory = AppViewModel.factory(client, rest, conversationResumeStore))
             // Collect once at the top so the theme can restyle live (US5): the palette
             // drives AstralTheme, and recomposition repaints the whole tree.
             val uiState by vm.state.collectAsStateWithLifecycle()
@@ -219,6 +223,13 @@ class MainActivity : ComponentActivity() {
         val st = runCatching { store.load() }.getOrNull()
         val access = authToken.value ?: st?.accessToken
         val refresh = st?.refreshToken
+        access
+            ?.let(ConversationResumeStore::accountFromAccessToken)
+            ?.let { account ->
+                if (!conversationResumeStore.clear(account, ClearReason.DEFINITIVE_SIGN_OUT)) {
+                    Log.w("MainActivity", "conversation locator clear failed during sign-out")
+                }
+            }
         store.clear()
         signInError.value = null
         authToken.value = null

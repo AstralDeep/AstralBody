@@ -14,7 +14,8 @@ public struct DeviceLoginStart: Sendable, Equatable {
 
     public init?(json: JSONValue) {
         guard let handle = json["handle"]?.stringValue,
-              let code = json["user_code"]?.stringValue else { return nil }
+            let code = json["user_code"]?.stringValue
+        else { return nil }
         self.handle = handle
         self.userCode = code
         self.verificationURI = json["verification_uri"]?.stringValue ?? ""
@@ -52,9 +53,9 @@ public enum DeviceLoginPoll: Sendable, Equatable {
 }
 
 public enum DeviceLoginError: Error, Equatable {
-    case unavailable(String)   // 503 — flag off / IdP down / grant not enabled
-    case invalidHandle         // 400 — expired or replayed handle
-    case rejected(String)      // 401 invalid_grant — the IdP refused the credential
+    case unavailable(String)  // 503 — flag off / IdP down / grant not enabled
+    case invalidHandle  // 400 — expired or replayed handle
+    case rejected(String)  // 401 invalid_grant — the IdP refused the credential
     case rateLimited
     case transport(String)
 }
@@ -68,8 +69,10 @@ public struct DeviceLoginClient: Sendable {
     public let clientId: String
     private let transport: Transport
 
-    public init(serverBase: URL, clientId: String = AstralConfig.watchClientId,
-                transport: Transport? = nil) {
+    public init(
+        serverBase: URL, clientId: String = AstralConfig.watchClientId,
+        transport: Transport? = nil
+    ) {
         self.serverBase = serverBase
         self.clientId = clientId
         self.transport = transport ?? Self.urlSessionTransport
@@ -99,7 +102,8 @@ public struct DeviceLoginClient: Sendable {
     }
 
     static func brokerError(status: Int, body: JSONValue) -> DeviceLoginError {
-        let detail = body["detail"]?["detail"]?.stringValue
+        let detail =
+            body["detail"]?["detail"]?.stringValue
             ?? body["detail"]?.stringValue ?? "device login failed"
         switch status {
         case 429: return .rateLimited
@@ -110,8 +114,9 @@ public struct DeviceLoginClient: Sendable {
     }
 
     public func start() async throws -> DeviceLoginStart {
-        let (status, body) = try await post("api/auth/device/start",
-                                            .object(["client": .string(clientId)]))
+        let (status, body) = try await post(
+            "api/auth/device/start",
+            .object(["client": .string(clientId)]))
         guard status == 200, let out = DeviceLoginStart(json: body) else {
             throw Self.brokerError(status: status, body: body)
         }
@@ -119,8 +124,9 @@ public struct DeviceLoginClient: Sendable {
     }
 
     public func poll(handle: String) async throws -> DeviceLoginPoll {
-        let (status, body) = try await post("api/auth/device/poll",
-                                            .object(["handle": .string(handle)]))
+        let (status, body) = try await post(
+            "api/auth/device/poll",
+            .object(["handle": .string(handle)]))
         guard status == 200, let out = DeviceLoginPoll(json: body) else {
             throw Self.brokerError(status: status, body: body)
         }
@@ -128,10 +134,12 @@ public struct DeviceLoginClient: Sendable {
     }
 
     public func refresh(refreshToken: String) async throws -> TokenSet {
-        let (status, body) = try await post("api/auth/device/refresh", .object([
-            "client": .string(clientId),
-            "refresh_token": .string(refreshToken),
-        ]))
+        let (status, body) = try await post(
+            "api/auth/device/refresh",
+            .object([
+                "client": .string(clientId),
+                "refresh_token": .string(refreshToken),
+            ]))
         guard status == 200, let tokens = TokenSet(json: body) else {
             throw Self.brokerError(status: status, body: body)
         }
@@ -141,14 +149,16 @@ public struct DeviceLoginClient: Sendable {
     /// Poll until terminal, honoring the server's pacing (pending keeps the
     /// current interval; slow_down replaces it — never poll faster, SC-009).
     /// `onTick` fires before each wait so the UI can show progress.
-    public func waitForApproval(start: DeviceLoginStart,
-                                onTick: (@Sendable (TimeInterval) -> Void)? = nil,
-                                sleeper: (@Sendable (TimeInterval) async -> Void)? = nil
+    public func waitForApproval(
+        start: DeviceLoginStart,
+        onTick: (@Sendable (TimeInterval) -> Void)? = nil,
+        sleeper: (@Sendable (TimeInterval) async -> Void)? = nil
     ) async throws -> DeviceLoginPoll {
         var interval = start.interval
-        let sleep = sleeper ?? { seconds in
-            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-        }
+        let sleep =
+            sleeper ?? { seconds in
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            }
         while true {
             try Task.checkCancellation()
             onTick?(interval)

@@ -40,11 +40,15 @@ public struct BoundedQueue<Element>: Sendable where Element: Sendable {
     /// occurred (surface it to the user — never drop silently).
     @discardableResult
     public mutating func append(_ element: Element) -> Bool {
-        var dropped = false
+        appendReturningDropped(element) != nil
+    }
+
+    /// Append and return the exact oldest element removed at capacity.
+    public mutating func appendReturningDropped(_ element: Element) -> Element? {
+        var dropped: Element?
         if elements.count >= limit {
-            elements.removeFirst()
+            dropped = elements.removeFirst()
             droppedCount += 1
-            dropped = true
         }
         elements.append(element)
         return dropped
@@ -64,6 +68,13 @@ public enum WSEvent: Sendable {
     case disconnected(reason: String)
     case frame(InboundFrame)
     case sendDropped(total: Int)
+    case queuedOperationDropped(QueuedOperationReplay, reason: String)
+    case sendRejected(action: String)
+}
+
+private struct QueuedOutboundFrame: Sendable {
+    let text: String
+    let replay: QueuedOperationReplay
 }
 
 /// URLSession-backed client. The app layer supplies the register_ui frame on
@@ -72,10 +83,15 @@ public actor WSClient {
     public let url: URL
     private var task: URLSessionWebSocketTask?
     private var backoff = BackoffPolicy()
-    private var queue = BoundedQueue<String>(limit: 64)
+    private var queue = BoundedQueue<QueuedOutboundFrame>(limit: 64)
     private var running = false
+    /// `URLSessionWebSocketTask.state == .running` only means `resume()` was
+    /// called. It does not prove registration or the first server receive, so
+    /// user work must remain in our replayable queue until this fence is true.
+    private var established = false
     private var continuation: AsyncStream<WSEvent>.Continuation?
     private var onConnect: (@Sendable () async -> String?)?
+    private var onReplay: (@Sendable (QueuedOperationReplay) async -> Bool)?
 
     public init(url: URL) {
         self.url = url
@@ -90,15 +106,20 @@ public actor WSClient {
 
     /// `onConnect` returns the register_ui frame to send first on every
     /// (re)connect (silent resume: `resumed: true` after the first).
-    public func start(onConnect: @escaping @Sendable () async -> String?) {
+    public func start(
+        onConnect: @escaping @Sendable () async -> String?,
+        onReplay: @escaping @Sendable (QueuedOperationReplay) async -> Bool = { _ in true }
+    ) {
         guard !running else { return }
         running = true
         self.onConnect = onConnect
+        self.onReplay = onReplay
         Task { await self.runLoop() }
     }
 
     public func stop() {
         running = false
+        established = false
         task?.cancel(with: .normalClosure, reason: nil)
         task = nil
         continuation?.finish()
@@ -106,12 +127,15 @@ public actor WSClient {
 
     /// Send or queue (bounded) while disconnected.
     public func send(_ text: String) {
-        if let task, task.state == .running {
-            task.send(.string(text)) { _ in }
+        guard let replay = QueuedOperationReplay(frameText: text) else {
+            continuation?.yield(.sendRejected(action: Self.actionHint(text)))
+            return
+        }
+        let queued = QueuedOutboundFrame(text: text, replay: replay)
+        if established, let task, task.state == .running {
+            transmit(queued, using: task)
         } else {
-            if queue.append(text) {
-                continuation?.yield(.sendDropped(total: queue.droppedCount))
-            }
+            retain(queued)
         }
     }
 
@@ -129,6 +153,7 @@ public actor WSClient {
             // we wait out the backoff. Offline launches sit here.
             let task = URLSession.shared.webSocketTask(with: url)
             self.task = task
+            established = false
             task.resume()
 
             guard let register = await onConnect?(), running else {
@@ -144,7 +169,6 @@ public actor WSClient {
             // `.connected` (and the backoff reset, per the shared contract:
             // reset ONLY on success) waits for the first successful receive —
             // resume() alone proves nothing when the network is down.
-            var established = false
             receive: while running {
                 do {
                     let message = try await task.receive()
@@ -152,8 +176,15 @@ public actor WSClient {
                         established = true
                         backoff.reset()
                         continuation?.yield(.connected)
-                        for frame in queue.drainAll() {
-                            task.send(.string(frame)) { _ in }
+                        for queued in queue.drainAll() {
+                            guard await onReplay?(queued.replay) == true else {
+                                continuation?.yield(
+                                    .queuedOperationDropped(
+                                        queued.replay,
+                                        reason: "replay fence rejected"))
+                                continue
+                            }
+                            transmit(queued, using: task)
                         }
                     }
                     switch message {
@@ -163,17 +194,20 @@ public actor WSClient {
                         }
                     case .data(let data):
                         if let text = String(data: data, encoding: .utf8),
-                           let frame = InboundFrame.parse(text) {
+                            let frame = InboundFrame.parse(text)
+                        {
                             continuation?.yield(.frame(frame))
                         }
                     @unknown default:
                         break
                     }
                 } catch {
+                    established = false
                     continuation?.yield(.disconnected(reason: error.localizedDescription))
                     break receive
                 }
             }
+            established = false
             self.task = nil
             guard running else { break }
             let delay = backoffNext()
@@ -183,5 +217,30 @@ public actor WSClient {
 
     private func backoffNext() -> TimeInterval {
         backoff.next()
+    }
+
+    private func transmit(
+        _ queued: QueuedOutboundFrame,
+        using task: URLSessionWebSocketTask
+    ) {
+        task.send(.string(queued.text)) { [weak self] error in
+            guard error != nil else { return }
+            // Reuse the exact identities. If delivery became ambiguous, the
+            // server's durable submission idempotency fence prevents a second
+            // mutation while retaining work that URLSession did not accept.
+            Task { await self?.retain(queued) }
+        }
+    }
+
+    private func retain(_ queued: QueuedOutboundFrame) {
+        if let dropped = queue.appendReturningDropped(queued) {
+            continuation?.yield(
+                .queuedOperationDropped(dropped.replay, reason: "offline queue full"))
+            continuation?.yield(.sendDropped(total: queue.droppedCount))
+        }
+    }
+
+    private static func actionHint(_ text: String) -> String {
+        InboundFrame.parse(text)?.payload["action"]?.stringValue ?? "message"
     }
 }

@@ -80,6 +80,11 @@ def _last_done_index(ws):
 def env(monkeypatch):
     """A real Orchestrator + a native-profile VirtualWebSocket on a fresh chat."""
     monkeypatch.setenv("FF_UI_DESIGNER", "true")
+    # This suite owns designer delivery, not compatibility TaskManager
+    # admission.  Isolate it from persistent queue state in a shared live
+    # development database while the async-manager test below still exercises
+    # that manager's public submit/watcher path.
+    monkeypatch.setitem(flags._flags, "task_state_machine", False)
     for mod in ("agentic_creation", "scheduling_chat", "memory_chat",
                 "desktop_codegen"):
         monkeypatch.setattr(f"orchestrator.{mod}.should_inject",
@@ -202,19 +207,37 @@ async def test_async_mode_render_sequences_before_task_completed(env, monkeypatc
     _install_llm(orch)
     _install_designer(monkeypatch)
     watcher_frames = []
+    managed_socket = {}
+    started = asyncio.Event()
+    release = asyncio.Event()
 
     class _Watcher:
         # 055: watcher notification arrives via send_text (encoding fix —
         # send_json would double-encode over a real FastAPI socket).
         async def send_text(self, data):
-            watcher_frames.append((json.loads(data), len(_canvas_renders(ws))))
-
-    ws.task.watchers.append(_Watcher())
+            watcher_frames.append(
+                (json.loads(data), len(_canvas_renders(managed_socket["ws"])))
+            )
 
     async def _coro(vws):
+        managed_socket["ws"] = vws
+        orch.ui_sessions[vws] = {
+            "sub": user_id,
+            "preferred_username": user_id,
+        }
+        orch.ui_clients.append(vws)
+        orch.rote.register_device(vws, {"device_type": "android"})
+        orch._ws_active_chat[id(vws)] = chat_id
+        started.set()
+        await release.wait()
         await orch.handle_chat_message(vws, "make a dashboard", chat_id, user_id=user_id)
 
-    await orch.async_task_manager._run_task(ws.task, ws, _coro)
+    task = await orch.async_task_manager.submit(chat_id, user_id, _coro)
+    await asyncio.wait_for(started.wait(), timeout=5)
+    task.watchers.append(_Watcher())
+    release.set()
+    assert task.asyncio_task is not None
+    await asyncio.wait_for(asyncio.shield(task.asyncio_task), timeout=10)
 
     assert watcher_frames and watcher_frames[0][0]["type"] == "task_completed"
     assert watcher_frames[0][1] == 1, \

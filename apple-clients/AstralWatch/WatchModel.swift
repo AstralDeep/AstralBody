@@ -1,11 +1,12 @@
+import AstralCore
 // Feature 051 — the watch app's brain: device-login lifecycle (start → QR →
 // poll → tokens, auto-rotate before expiry), broker-based refresh, WS session
 // with the `watch` device profile, transcript state, and speech coordination.
 import Foundation
 import SwiftUI
-import AstralCore
+
 #if os(watchOS)
-import WatchKit
+    import WatchKit
 #endif
 
 @MainActor
@@ -43,11 +44,46 @@ final class WatchModel {
     /// apply in place (replace/remove by component_id) instead of stacking
     /// duplicate transcript entries (FR-013 as it reaches the watch).
     var canvas: [AstralComponent] = []
+    var transientEntries: [Entry] = []
+    var transientCanvas: [AstralComponent]?
     var statusText: String?
     var errorBanner: String?
     var connected = false
     var accountName = ""
     var pendingDictation = ""
+    var operationStatuses: [String: OperationStatus] = [:]
+    var agentLifecycles: [String: AgentLifecycle] = [:]
+    var localOperationSubmissions: [String: LocalOperationSubmission] = [:]
+
+    var visibleEntries: [Entry] { entries + transientEntries }
+    var visibleCanvas: [AstralComponent] { transientCanvas ?? canvas }
+    var pendingSurfaceRequestGenerations: Set<String> {
+        Set(
+            localOperationSubmissions.values.compactMap { submission in
+                submission.chatId == nil ? submission.requestGeneration : nil
+            })
+    }
+    var pendingChatRequestGenerations: Set<String> {
+        Set(
+            localOperationSubmissions.values.compactMap { submission in
+                submission.chatId == activeChatId ? submission.requestGeneration : nil
+            })
+    }
+    var rootStatusText: String? {
+        if let statusText, !statusText.isEmpty { return statusText }
+        if let operation = operationStatuses.values.max(by: {
+            ($0.updatedAt, $0.sequence) < ($1.updatedAt, $1.sequence)
+        }) {
+            return operation.error.objectValue?["message"]?.stringValue ?? operation.label
+        }
+        if let lifecycle = agentLifecycles.values.max(by: {
+            ($0.lifecycleGeneration, $0.stateRevision)
+                < ($1.lifecycleGeneration, $1.stateRevision)
+        }) {
+            return "\(lifecycle.agentId): \(lifecycle.label)"
+        }
+        return nil
+    }
 
     let speaker = Speaker()
 
@@ -62,12 +98,12 @@ final class WatchModel {
     /// routes by `session_id` FIRST — a made-up id would send every message
     /// to a phantom chat, so this is adopted from chat_created/chat_loaded
     /// and nil until the server assigns one.
-    @ObservationIgnored private var activeChatId: String?
+    @ObservationIgnored var activeChatId: String?
     private let store: TokenStorage = {
         #if canImport(Security)
-        KeychainTokenStore(service: "com.personalailabs.astraldeep.watch")
+            KeychainTokenStore(service: "com.personalailabs.astraldeep.watch")
         #else
-        InMemoryTokenStore()
+            InMemoryTokenStore()
         #endif
     }()
 
@@ -84,6 +120,15 @@ final class WatchModel {
     @ObservationIgnored private var refreshTask: Task<RefreshResult, Never>?
     @ObservationIgnored private var refreshTaskGeneration = -1
     @ObservationIgnored private var sessionGeneration = 0
+    @ObservationIgnored private var conversationResumeStore: ConversationResumeStore
+    @ObservationIgnored private var conversationAccount: ConversationAccount?
+    @ObservationIgnored private var continuity = ConversationContinuityReducer()
+    @ObservationIgnored private var pendingCommitRequestGeneration: String?
+    @ObservationIgnored private var seqState: [String: Int] = [:]
+    @ObservationIgnored private var statusLifecycle = StatusLifecycleReducer()
+
+    /// Test seam: observes the exact frame before it reaches the socket.
+    @ObservationIgnored var outboundTap: ((String) -> Void)?
 
     var deviceLogin: DeviceLoginClient {
         DeviceLoginClient(serverBase: serverBase)
@@ -96,6 +141,88 @@ final class WatchModel {
     }
 
     // MARK: lifecycle
+
+    convenience init() {
+        self.init(conversationResumeStore: ConversationResumeStore())
+    }
+
+    init(conversationResumeStore: ConversationResumeStore) {
+        self.conversationResumeStore = conversationResumeStore
+    }
+
+    func bindConversationAccount(_ account: ConversationAccount) {
+        if conversationAccount != account {
+            continuity.clear()
+            resetConversationState()
+        }
+        conversationAccount = account
+        activeChatId = conversationResumeStore.load(for: account)?.chatId
+    }
+
+    func registrationFrame(token: String, resumed: Bool) -> String {
+        let connection = UUID().uuidString.lowercased()
+        guard beginConversationConnection(connection) else { return "{}" }
+        var resume: ConversationResumeRegistration?
+        if let account = conversationAccount,
+            let chatId = conversationResumeStore.load(for: account)?.chatId
+        {
+            guard conversationResumeStore.save(chatId: chatId, for: account) else {
+                return "{}"
+            }
+            activeChatId = chatId
+            let request = UUID().uuidString.lowercased()
+            if openConversationRequest(
+                chatId: chatId,
+                requestGeneration: request,
+                purpose: .hydration)
+            {
+                resume = ConversationResumeRegistration(
+                    activeChatId: chatId,
+                    requestGeneration: request)
+            }
+        }
+        let (width, height) = viewport
+        return Outbound.registerUI(
+            token: token,
+            sessionId: activeChatId,
+            device: .watch(viewportWidth: width, viewportHeight: height),
+            resumed: resumed,
+            connectionGeneration: connection,
+            resume: resume)
+    }
+
+    @discardableResult
+    func beginConversationConnection(_ generation: String) -> Bool {
+        clearPendingOperationSubmissions()
+        transientEntries = []
+        transientCanvas = nil
+        return continuity.beginConnection(generation)
+    }
+
+    @discardableResult
+    func openConversationRequest(
+        chatId: String,
+        requestGeneration: String,
+        purpose: ConversationGenerationPurpose
+    ) -> Bool {
+        let resetRevision =
+            continuity.activeChatId != nil
+            && continuity.activeChatId != chatId
+        guard continuity.selectChat(chatId, resetRevision: resetRevision),
+            continuity.openRequest(
+                chatId: chatId,
+                requestGeneration: requestGeneration,
+                purpose: purpose)
+        else { return false }
+        activeChatId = chatId
+        transientEntries = []
+        transientCanvas = nil
+        return true
+    }
+
+    var lastCommittedRenderRevision: UInt64 {
+        continuity.lastCommittedRenderRevision
+    }
 
     func bootstrap() async {
         // Feature 053 — listen for an endpoint override from the iPhone companion.
@@ -127,7 +254,7 @@ final class WatchModel {
             // definitive IdP rejection returns the watch to the QR screen.
             enterSignedIn()
             if case .rejected = await refreshOutcome() {
-                await signOut(revokeRemote: false)   // ends at the QR screen
+                await signOut(revokeRemote: false)  // ends at the QR screen
             }
             return
         }
@@ -166,7 +293,7 @@ final class WatchModel {
                     defer { group.cancelAll() }
                     while let next = try await group.next() {
                         if let terminal = next { return terminal }
-                        return .expired   // rotation fired first
+                        return .expired  // rotation fired first
                     }
                     return .expired
                 }
@@ -178,12 +305,13 @@ final class WatchModel {
                     enterSignedIn()
                     return
                 case .denied(let reason):
-                    phase = .loginFailed(reason == "denied_no_access"
-                        ? "This account doesn't have access."
-                        : "Sign-in was declined.")
+                    phase = .loginFailed(
+                        reason == "denied_no_access"
+                            ? "This account doesn't have access."
+                            : "Sign-in was declined.")
                     return
                 case .expired:
-                    continue          // auto-rotate: fetch a fresh QR
+                    continue  // auto-rotate: fetch a fresh QR
                 case .pending, .slowDown:
                     continue
                 }
@@ -243,6 +371,13 @@ final class WatchModel {
 
     private func enterSignedIn() {
         accountName = tokens?.displayName ?? ""
+        if let account = tokens?.conversationAccount {
+            bindConversationAccount(account)
+        } else {
+            conversationAccount = nil
+            continuity.clear()
+            resetConversationState()
+        }
         phase = .signedIn
         connectWS()
         // Recents load via WatchHomeView's `.task` the moment home appears
@@ -253,32 +388,65 @@ final class WatchModel {
     /// used when the IdP has ALREADY refused the credential (nothing to
     /// revoke, and the call would only delay returning to the QR screen).
     func signOut(revokeRemote: Bool = true) async {
-        if revokeRemote, let refresh = tokens?.refreshToken {
-            _ = try? await rest.logout(clientId: AstralConfig.watchClientId, refreshToken: refresh)
+        // Snapshot remote-revocation inputs, then wipe the local session before
+        // the first await. A suspended or killed watch app must never relaunch
+        // into the account that was just signed out.
+        let access = tokens?.accessToken
+        let refresh = tokens?.refreshToken
+        let logoutClient = RestClient(serverBase: serverBase) { access }
+        let socket = ws
+        if let account = conversationAccount {
+            _ = conversationResumeStore.clear(.signOut, for: account)
         }
         sessionGeneration += 1
+        refreshTask?.cancel()
         refreshTask = nil
         wsTask?.cancel()
-        await ws?.stop()
+        wsTask = nil
         ws = nil
         store.wipe()
         tokens = nil
-        entries = []
-        canvas = []
+        conversationAccount = nil
+        continuity.clear()
+        resetConversationState()
+        clearPendingOperationSubmissions()
+        statusLifecycle.clear()
+        operationStatuses = [:]
+        agentLifecycles = [:]
         recents = []
-        activeChatId = nil
         speaker.stop()
         beginDeviceLogin()
+
+        // The local account is already gone; these network operations cannot
+        // make the prior Keychain session durable again.
+        await socket?.stop()
+        if revokeRemote, let refresh {
+            _ = try? await logoutClient.logout(
+                clientId: AstralConfig.watchClientId, refreshToken: refresh)
+        }
+    }
+
+    func clearConversationForAccountRemoval() {
+        if let account = conversationAccount {
+            _ = conversationResumeStore.clear(.accountRemoval, for: account)
+        }
+        conversationAccount = nil
+        continuity.clear()
+        resetConversationState()
+        clearPendingOperationSubmissions()
+        statusLifecycle.clear()
+        operationStatuses = [:]
+        agentLifecycles = [:]
     }
 
     // MARK: WS
 
     private var viewport: (Int, Int) {
         #if os(watchOS)
-        let bounds = WKInterfaceDevice.current().screenBounds
-        return (Int(bounds.width), Int(bounds.height))
+            let bounds = WKInterfaceDevice.current().screenBounds
+            return (Int(bounds.width), Int(bounds.height))
         #else
-        return (198, 242)
+            return (198, 242)
         #endif
     }
 
@@ -286,43 +454,69 @@ final class WatchModel {
         wsTask?.cancel()
         let client = WSClient(url: rest.webSocketURL)
         ws = client
-        var resumed = false
+        let resumeState = WatchRegistrationResumeState()
         wsTask = Task {
             let events = await client.events()
-            await client.start(onConnect: { [weak self] in
-                guard let self else { return nil }
-                guard let token = await self.freshAccessToken() else { return nil }
-                let (w, h) = await self.viewport
-                let register = Outbound.registerUI(
-                    token: token, sessionId: await self.activeChatId,
-                    device: .watch(viewportWidth: w, viewportHeight: h),
-                    resumed: resumed)
-                resumed = true
-                return register
-            })
+            await client.start(
+                onConnect: { [weak self] in
+                    guard let self else { return nil }
+                    guard let token = await self.freshAccessToken() else { return nil }
+                    let resumed = await resumeState.consume()
+                    return await self.registrationFrame(token: token, resumed: resumed)
+                },
+                onReplay: { [weak self] replay in
+                    guard let self else { return false }
+                    return await self.replayQueuedOperation(replay)
+                })
             for await event in events {
                 await self.handle(event)
             }
         }
     }
 
-    private func handle(_ event: WSEvent) async {
+    func handle(_ event: WSEvent) async {
         switch event {
         case .connected:
             connected = true
         case .disconnected:
             connected = false
+            clearPendingOperationSubmissions()
+            transientEntries = []
+            transientCanvas = nil
         case .sendDropped:
             errorBanner = "Connection is behind; some input was dropped."
+        case .queuedOperationDropped(let replay, let reason):
+            localOperationSubmissions.removeValue(forKey: replay.identity.submissionId)
+            if localOperationSubmissions.isEmpty && statusText == "Submitting…" {
+                statusText = nil
+            }
+            errorBanner = "Not sent: \(replay.action) (\(reason))"
+        case .sendRejected(let action):
+            clearPendingOperationSubmissions()
+            errorBanner = "Not sent: \(action) (invalid queued identity)"
         case .frame(let frame):
             handleFrame(frame)
         }
     }
 
-    private func handleFrame(_ frame: InboundFrame) {
+    func handleFrame(_ frame: InboundFrame) {
         // Dispositions: ClientDispositions.watch — unlisted/ignored frames
         // fall through the default silently (FR-003).
+        if continuity.connectionGeneration != nil,
+            ["ui_render", "ui_update", "ui_upsert", "ui_append", "ui_stream_data"]
+                .contains(frame.name)
+        {
+            reduceTransient(frame)
+            return
+        }
         switch frame.name {
+        case "conversation_snapshot":
+            reduceConversationSnapshot(frame)
+        case "conversation_commit_ready":
+            if let ready = ConversationCommitReady(frame: frame), continuity.accept(ready) {
+                transientEntries = []
+                transientCanvas = nil
+            }
         case "ui_render":
             let comps = frame.renderComponents
             guard !comps.isEmpty else { return }
@@ -351,20 +545,38 @@ final class WatchModel {
             }
         case "chat_status", "chat_step":
             statusText = frame.statusText
+        case "operation_status":
+            reduceOperationStatus(frame)
+        case "agent_lifecycle":
+            reduceAgentLifecycle(frame)
         case "user_message_acked":
-            activeChatId = frame.payload["payload"]?["chat_id"]?.stringValue
-                ?? frame.payload["chat_id"]?.stringValue ?? activeChatId
+            if let chatId = nestedChatId(frame) { adoptChat(chatId) }
             statusText = "Thinking…"
         case "chat_created":
             // Adopt the server-issued chat id; the transcript the user is
             // looking at (their just-sent bubble) must NOT be wiped.
-            activeChatId = frame.payload["payload"]?["chat_id"]?.stringValue
-                ?? frame.payload["chat_id"]?.stringValue ?? activeChatId
+            if let chatId = nestedChatId(frame) { adoptChat(chatId) }
         case "chat_loaded":
-            reduceChatLoaded(frame)
-        case "error", "stream_error":
+            if continuity.connectionGeneration == nil {
+                reduceChatLoaded(frame)
+            }
+        case "chat_deleted":
+            if let chatId = nestedChatId(frame) { clearConfirmedDeletion(chatId) }
+        case "error":
+            if reduceAdmissionRefusal(frame) { return }
+            fallthrough
+        case "stream_error":
             errorBanner = frame.errorMessage
             statusText = nil
+            transientEntries = []
+            transientCanvas = nil
+            let code = frame.payload["code"]?.stringValue
+            if code == "chat_not_found" || code == "conversation_not_found" {
+                if let chatId = nestedChatId(frame) ?? activeChatId {
+                    clearConfirmedDeletion(chatId)
+                    errorBanner = frame.errorMessage
+                }
+            }
         case "notification":
             // 055 background-task continuity (audit item 7): a completion that
             // happened elsewhere reaches the wrist as a brief status line and
@@ -378,12 +590,182 @@ final class WatchModel {
             Task { [weak self] in
                 try? await Task.sleep(nanoseconds: 8_000_000_000)
                 guard let self, self.statusText == message else { return }
-                self.statusText = nil   // brief: clear unless something replaced it
+                self.statusText = nil  // brief: clear unless something replaced it
             }
         case "auth_required":
             Task { await self.handleAuthRequired() }
         default:
             break
+        }
+    }
+
+    private func reduceOperationStatus(_ frame: InboundFrame) {
+        guard let status = OperationStatus(frame: frame),
+            statusLifecycle.accept(
+                operation: status,
+                connectionGeneration: continuity.connectionGeneration,
+                conversationRequestGeneration: continuity.requestGeneration,
+                activeChatId: activeChatId,
+                pendingChatRequestGenerations: pendingChatRequestGenerations,
+                pendingSurfaceRequestGenerations: pendingSurfaceRequestGenerations)
+        else { return }
+        operationStatuses = statusLifecycle.operations
+        statusText = status.error.objectValue?["message"]?.stringValue ?? status.label
+        if status.terminal {
+            clearLocalOperationSubmission(requestGeneration: status.requestGeneration)
+        }
+        if status.terminal && ["failed", "cancelled", "retryable"].contains(status.state) {
+            transientEntries = []
+            transientCanvas = nil
+        }
+    }
+
+    private func reduceAgentLifecycle(_ frame: InboundFrame) {
+        guard let lifecycle = AgentLifecycle(frame: frame),
+            statusLifecycle.accept(lifecycle: lifecycle)
+        else { return }
+        agentLifecycles = statusLifecycle.agents
+        let message = "\(lifecycle.agentId): \(lifecycle.label)"
+        statusText = message
+        if lifecycle.state == "failed" {
+            errorBanner = message
+        }
+    }
+
+    @discardableResult
+    private func reduceAdmissionRefusal(_ frame: InboundFrame) -> Bool {
+        guard let refusal = AdmissionRefusal(frame: frame),
+            localOperationSubmissions.removeValue(forKey: refusal.submissionId) != nil
+        else { return false }
+        statusText = refusal.message
+        errorBanner = refusal.message
+        return true
+    }
+
+    private func reduceConversationSnapshot(_ frame: InboundFrame) {
+        guard let snapshot = ConversationSnapshot(frame: frame),
+            continuity.apply(snapshot) == .applied
+        else { return }
+        if let account = conversationAccount {
+            _ = conversationResumeStore.save(chatId: snapshot.chatId, for: account)
+        }
+
+        var restored: [Entry] = []
+        for message in snapshot.messages {
+            if message.role == "user" {
+                restored.append(
+                    .user(
+                        id: message.messageId,
+                        text: message.visibleText,
+                        attachments: message.attachmentNames))
+                continue
+            }
+            let narrative = message.visibleText
+            if !narrative.isEmpty {
+                restored.append(.status(id: message.messageId, text: narrative))
+            }
+            if !message.components.isEmpty {
+                restored.append(
+                    .turn(
+                        id: "\(message.messageId)-components",
+                        components: message.components))
+            }
+        }
+
+        activeChatId = snapshot.chatId
+        entries = restored
+        canvas = snapshot.canvasComponents
+        transientEntries = []
+        transientCanvas = nil
+        statusText = nil
+        pendingCommitRequestGeneration = nil
+    }
+
+    private func reduceTransient(_ frame: InboundFrame) {
+        guard continuity.acceptTransient(frame) else { return }
+        switch frame.name {
+        case "ui_render", "ui_update":
+            let components = frame.renderComponents
+            if frame.renderTarget == "chat" {
+                let pendingUsers = transientEntries.filter {
+                    if case .user = $0 { return true }
+                    return false
+                }
+                let response: [Entry] =
+                    components.isEmpty
+                    ? []
+                    : [
+                        .turn(
+                            id: "preview-\(frame.payload["frame_sequence"]?.numberValue ?? 0)",
+                            components: components)
+                    ]
+                transientEntries = pendingUsers + response
+            } else {
+                transientCanvas = components
+            }
+            speaker.speak(frame.speech)
+        case "ui_append":
+            let components = frame.renderComponents
+            if frame.renderTarget == "chat" {
+                if !components.isEmpty {
+                    transientEntries.append(
+                        .turn(
+                            id: "preview-\(frame.payload["frame_sequence"]?.numberValue ?? 0)",
+                            components: components))
+                }
+            } else {
+                transientCanvas = (transientCanvas ?? canvas) + components
+            }
+            speaker.speak(frame.speech)
+        case "ui_upsert":
+            transientCanvas = Canvas.apply(transientCanvas ?? canvas, frame.upsertOps)
+            speaker.speak(frame.speech)
+        case "ui_stream_data":
+            transientCanvas = Canvas.apply(
+                transientCanvas ?? canvas,
+                streamFrameToOps(frame, activeChat: activeChatId, seqState: &seqState))
+        default:
+            break
+        }
+    }
+
+    private func nestedChatId(_ frame: InboundFrame) -> String? {
+        frame.payload["payload"]?["chat_id"]?.stringValue
+            ?? frame.payload["chat_id"]?.stringValue
+    }
+
+    private func adoptChat(_ chatId: String) {
+        if let account = conversationAccount {
+            _ = conversationResumeStore.save(chatId: chatId, for: account)
+        }
+        activeChatId = chatId
+        guard let request = pendingCommitRequestGeneration else { return }
+        if openConversationRequest(
+            chatId: chatId,
+            requestGeneration: request,
+            purpose: .commit)
+        {
+            pendingCommitRequestGeneration = nil
+        }
+    }
+
+    private func clearConfirmedDeletion(_ chatId: String) {
+        if let account = conversationAccount {
+            _ = conversationResumeStore.clear(
+                .confirmedDeletion,
+                for: account,
+                chatId: chatId)
+        }
+        guard activeChatId == chatId else { return }
+        clearContinuityChatKeepingConnection()
+        resetConversationState()
+    }
+
+    private func clearContinuityChatKeepingConnection() {
+        let connection = continuity.connectionGeneration
+        continuity.clear()
+        if let connection {
+            _ = continuity.beginConnection(connection)
         }
     }
 
@@ -405,11 +787,11 @@ final class WatchModel {
         }
         switch result {
         case .ok(let set) where set.accessToken != refused:
-            break             // the reconnect loop re-registers with the fresh token
+            break  // the reconnect loop re-registers with the fresh token
         case .ok, .rejected:
-            await signOut()   // same/refused token — the session is dead server-side
+            await signOut()  // same/refused token — the session is dead server-side
         case .transient:
-            break             // offline blip; keep the session and retry
+            break  // offline blip; keep the session and retry
         }
     }
 
@@ -420,11 +802,15 @@ final class WatchModel {
     private func reduceChatLoaded(_ frame: InboundFrame) {
         let chat = frame.payload["chat"]
         activeChatId = chat?["id"]?.stringValue ?? activeChatId
-        canvas = []   // the server re-hydrates the workspace via ui_render next
+        if let account = conversationAccount, let activeChatId {
+            _ = conversationResumeStore.save(chatId: activeChatId, for: account)
+        }
+        canvas = []  // the server re-hydrates the workspace via ui_render next
         let messages = chat?["messages"]?.arrayValue ?? chat?["history"]?.arrayValue ?? []
         var loaded: [Entry] = []
         for (index, message) in messages.enumerated() {
-            let role = message["role"]?.stringValue
+            let role =
+                message["role"]?.stringValue
                 ?? (message["is_user"]?.boolValue == true ? "user" : "assistant")
             let text = message["content"]?.stringValue ?? message["text"]?.stringValue ?? ""
             if role == "user" {
@@ -447,19 +833,130 @@ final class WatchModel {
         recents = Array((try? await rest.chats())?.prefix(10) ?? [])
     }
 
-    func newConversation() {
+    private func resetConversationState() {
         entries = []
         canvas = []
-        activeChatId = nil   // the server assigns the id via chat_created
+        transientEntries = []
+        transientCanvas = nil
+        activeChatId = nil
+        statusText = nil
         errorBanner = nil
-        Task { await ws?.send(Outbound.newChat(sessionId: nil)) }
+        pendingCommitRequestGeneration = nil
+        seqState.removeAll()
+    }
+
+    private func beginLocalOperationSubmission(
+        identity: ClientOperationIdentity,
+        action: String,
+        surface: String,
+        chatId: String?
+    ) {
+        guard let connectionGeneration = continuity.connectionGeneration,
+            let submission = LocalOperationSubmission(
+                identity: identity,
+                action: action,
+                surface: surface,
+                chatId: chatId,
+                connectionGeneration: connectionGeneration)
+        else { return }
+        localOperationSubmissions[submission.submissionId] = submission
+        statusText = submission.label
+    }
+
+    /// Restore the exact client identity and current connection fence before
+    /// shared transport replays retained bytes.
+    @discardableResult
+    func replayQueuedOperation(_ replay: QueuedOperationReplay) -> Bool {
+        guard let connectionGeneration = continuity.connectionGeneration else { return false }
+        if let purpose = replay.conversationPurpose {
+            if let chatId = replay.chatId {
+                guard
+                    openConversationRequest(
+                        chatId: chatId,
+                        requestGeneration: replay.identity.requestGeneration,
+                        purpose: purpose)
+                else { return false }
+            } else if purpose == .commit {
+                pendingCommitRequestGeneration = replay.identity.requestGeneration
+            } else {
+                return false
+            }
+        }
+        guard
+            let submission = LocalOperationSubmission(
+                identity: replay.identity,
+                action: replay.action,
+                surface: replay.surface,
+                chatId: replay.chatId,
+                connectionGeneration: connectionGeneration)
+        else { return false }
+        localOperationSubmissions[submission.submissionId] = submission
+        statusText = submission.label
+        return true
+    }
+
+    private func clearLocalOperationSubmission(requestGeneration: String) {
+        localOperationSubmissions = localOperationSubmissions.filter {
+            $0.value.requestGeneration != requestGeneration
+        }
+    }
+
+    private func clearPendingOperationSubmissions() {
+        let wasSubmitting = statusText == "Submitting…"
+        localOperationSubmissions.removeAll()
+        if wasSubmitting { statusText = nil }
+    }
+
+    private func rawSend(_ frame: String) {
+        outboundTap?(frame)
+        Task { await ws?.send(frame) }
+    }
+
+    func newConversation() {
+        if let account = conversationAccount {
+            _ = conversationResumeStore.clear(.newChat, for: account)
+        }
+        clearContinuityChatKeepingConnection()
+        resetConversationState()
+        let identity = ClientOperationIdentity.fresh()
+        beginLocalOperationSubmission(
+            identity: identity,
+            action: "new_chat",
+            surface: "operation",
+            chatId: nil)
+        rawSend(
+            Outbound.newChat(
+                sessionId: nil,
+                submissionId: identity.submissionId,
+                requestGeneration: identity.requestGeneration))
     }
 
     func openChat(_ chat: ChatSummary) {
-        entries = []
-        canvas = []
+        if let account = conversationAccount {
+            guard conversationResumeStore.save(chatId: chat.id, for: account) else { return }
+        }
         activeChatId = chat.id
-        Task { await ws?.send(Outbound.loadChat(sessionId: chat.id, chatId: chat.id)) }
+        let identity = ClientOperationIdentity.fresh()
+        let request = identity.requestGeneration
+        if continuity.connectionGeneration != nil {
+            guard
+                openConversationRequest(
+                    chatId: chat.id,
+                    requestGeneration: request,
+                    purpose: .hydration)
+            else { return }
+        }
+        beginLocalOperationSubmission(
+            identity: identity,
+            action: "load_chat",
+            surface: "chat",
+            chatId: chat.id)
+        rawSend(
+            Outbound.loadChat(
+                sessionId: chat.id,
+                chatId: chat.id,
+                submissionId: identity.submissionId,
+                requestGeneration: request))
     }
 
     /// Dictated text goes through the STANDARD chat path (FR-029) after the
@@ -467,9 +964,50 @@ final class WatchModel {
     func sendPending() {
         let text = pendingDictation.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
+        let identity = ClientOperationIdentity.fresh()
+        let request = identity.requestGeneration
+        if continuity.connectionGeneration != nil {
+            if let chatId = activeChatId {
+                guard
+                    openConversationRequest(
+                        chatId: chatId,
+                        requestGeneration: request,
+                        purpose: .commit)
+                else { return }
+            } else {
+                pendingCommitRequestGeneration = request
+            }
+        }
         pendingDictation = ""
-        entries.append(.user(id: "user-\(entries.count)", text: text, attachments: []))
-        statusText = "Sending…"
-        Task { await ws?.send(Outbound.chatMessage(text, sessionId: activeChatId)) }
+        let entry = Entry.user(
+            id: "pending-user-\(UUID().uuidString.lowercased())",
+            text: text,
+            attachments: [])
+        if continuity.connectionGeneration == nil {
+            entries.append(entry)
+        } else {
+            transientEntries.append(entry)
+        }
+        beginLocalOperationSubmission(
+            identity: identity,
+            action: "chat_message",
+            surface: "chat",
+            chatId: activeChatId)
+        rawSend(
+            Outbound.chatMessage(
+                text,
+                sessionId: activeChatId,
+                submissionId: identity.submissionId,
+                requestGeneration: request))
+    }
+}
+
+private actor WatchRegistrationResumeState {
+    private var next = false
+
+    func consume() -> Bool {
+        let value = next
+        next = true
+        return value
     }
 }

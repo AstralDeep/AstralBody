@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
+import uuid
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -172,16 +173,85 @@ def _run_bundle(bundle_dir, requests):
     return [json.loads(ln) for ln in proc.stdout.splitlines() if ln.strip()]
 
 
-async def test_real_generate_code_returns_the_three_file_bundle(real_lifecycle):
+async def test_real_generate_code_returns_finalized_v2_bundle(real_lifecycle):
     # The delivered bundle was ALWAYS EMPTY: generate_code returned a draft_agents
     # row, which has no files/agent_code column, so _bundle_files fell through to {}.
     gen = await _gen_byo(real_lifecycle, "ua-byo-greeter-uown")
     assert gen["status"] == "generated", gen.get("error_message")
     files = aa._bundle_files(gen)
-    assert set(files) == set(aa.BUNDLE_FILENAMES)
+    # The v2 artifact digest covers the three executable files; manifest.json is
+    # the metadata envelope retained by the legacy flat-file delivery seam.
+    assert set(files) == {
+        "agent_main.py",
+        "astralprims_ui.py",
+        "mcp_tools.py",
+        "manifest.json",
+    }
     assert all(files.values())                      # no empty file
     assert "TOOL_REGISTRY" in files["mcp_tools.py"]
-    assert json.loads(files["manifest.json"])["agent_id"] == "ua-byo-greeter-uown"
+    manifest = json.loads(files["manifest.json"])
+    assert manifest["agent_id"] == "ua-byo-greeter-uown"
+    assert manifest["revision_id"] == gen["revision_id"]
+    assert manifest["bundle_sha256"] == gen["bundle_sha256"]
+    assert manifest["runtime_contract_version"] == 2
+    assert gen["artifact_relative_path"] == (
+        f"revisions/ua-byo-greeter-uown/{gen['revision_id']}"
+    )
+    loaded = real_lifecycle.artifact_store.load(
+        gen["artifact_relative_path"],
+        expected_digest=gen["bundle_sha256"],
+        expected_manifest_digest=gen["manifest_sha256"],
+    )
+    assert loaded.files["mcp_tools.py"] == files["mcp_tools.py"]
+
+
+async def test_v2_authoring_delivery_forwards_immutable_artifact_path(monkeypatch):
+    revision_id = str(uuid.uuid4())
+    artifact_path = f"revisions/ua-path-owner/{revision_id}"
+    executable = {
+        "agent_main.py": "pass\n",
+        "astralprims_ui.py": "pass\n",
+        "mcp_tools.py": "TOOL_REGISTRY = {}\n",
+    }
+    manifest = {
+        "manifest_version": 2,
+        "runtime_contract_version": 2,
+        "revision_id": revision_id,
+        "agent_id": "ua-path-owner",
+        "required_runtime_lock_sha256": "a" * 64,
+        "bundle_sha256": "b" * 64,
+        "digest_algorithm": "sha256",
+        "files": [],
+    }
+    orch = MagicMock()
+    orch.lifecycle_manager.generate_code = AsyncMock(
+        return_value={
+            "status": "generated",
+            "files": {**executable, "manifest.json": json.dumps(manifest)},
+            "runtime_manifest": manifest,
+            "bundle_sha256": "b" * 64,
+            "revision_id": revision_id,
+            "runtime_contract_version": 2,
+            "required_runtime_lock_sha256": "a" * 64,
+            "artifact_relative_path": artifact_path,
+        }
+    )
+    orch.deliver_agent_bundle = AsyncMock(return_value=1)
+    monkeypatch.setattr(ua, "mark_validated", lambda *args, **kwargs: None)
+
+    result = await aa._generate_and_deliver(
+        orch,
+        user_id="owner",
+        agent_id="ua-path-owner",
+        draft_id=str(uuid.uuid4()),
+        tool_names=[],
+        declared_scopes=[],
+    )
+
+    assert result["status"] == "delivered"
+    assert orch.deliver_agent_bundle.await_args.kwargs[
+        "artifact_relative_path"
+    ] == artifact_path
 
 
 async def test_bundle_is_self_contained(real_lifecycle):

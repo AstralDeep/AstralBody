@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "synthetic": true,
+  "ledger_ref": "refs/heads/release-evidence-debt",
+  "ordered_history": [
+    {
+      "name": "empty",
+      "transition": "history/00-empty/transition.json"
+    },
+    {
+      "name": "temporary_windows_outage_a_registered",
+      "request": "requests/legal/windows-runner-unavailable-a.json",
+      "receipt": "receipts/approval-registration-a.json",
+      "transition": "history/01-debt-a/transition.json",
+      "expected": "eligible_only_with_unavailable_report_and_independent_observation"
+    },
+    {
+      "name": "later_pass_resolves_debt_a",
+      "receipt": "receipts/debt-resolution-a.json",
+      "transition": "history/02-resolution-a/transition.json",
+      "expected": "debt_a_resolved_once"
+    },
+    {
+      "name": "distinct_later_windows_outage_b",
+      "request": "requests/legal/windows-runner-unavailable-b.json",
+      "receipt": "receipts/approval-registration-b.json",
+      "transition": "history/03-debt-b/transition.json",
+      "expected": "debt_b_unresolved",
+      "must_not_be_satisfied_by_resolution_id": "33333333-3333-4333-8333-333333333333"
+    }
+  ],
+  "illegal_request_expectations": "requests/expected-validation.json"
+}

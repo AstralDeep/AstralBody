@@ -71,6 +71,8 @@ import com.personalailabs.astraldeep.app.ui.theme.AstralColors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 
 /** How the chat + canvas are arranged for the current window width. */
 enum class LayoutMode { Stacked, Split }
@@ -117,7 +119,7 @@ private fun StackedShell(
             modifier = Modifier.fillMaxWidth().weight(1f),
         )
         if (state.turnActive) StepTrail(state.stepTrail)
-        MessagesPanel(turns = state.turns, statusText = state.statusText)
+        MessagesPanel(turns = state.visibleTurns, statusText = state.statusText, renderer = renderer)
         InputBar(
             staged = state.staged,
             readOnly = state.mutationsLocked,
@@ -142,7 +144,7 @@ private fun SplitShell(
     Row(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.width(360.dp).fillMaxHeight()) {
             PanelHeader("Conversation")
-            ChatList(state.turns, Modifier.fillMaxWidth().weight(1f))
+            ChatList(state.visibleTurns, Modifier.fillMaxWidth().weight(1f), renderer)
             if (state.turnActive) StepTrail(state.stepTrail)
             InputBar(
                 staged = state.staged,
@@ -429,8 +431,9 @@ private fun EmptyCanvasHint(modifier: Modifier = Modifier) {
 private fun MessagesPanel(
     turns: List<ChatTurn>,
     statusText: String?,
+    renderer: Renderer,
 ) {
-    val visible = turns.filter { it.text.isNotBlank() }
+    val visible = turns.filter { it.hasVisibleContent }
     if (visible.isEmpty()) return
     // Appears expanded when the chat first has content; the user can collapse it
     // "down to just a bar" to give the canvas the full screen.
@@ -444,6 +447,7 @@ private fun MessagesPanel(
                     .fillMaxWidth()
                     .heightIn(max = 320.dp)
                     .background(MaterialTheme.colorScheme.background),
+                renderer,
             )
         }
         Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 3.dp) {
@@ -514,19 +518,23 @@ private fun PanelHeader(title: String) {
 private fun ChatList(
     turns: List<ChatTurn>,
     modifier: Modifier,
+    renderer: Renderer,
 ) {
-    val visible = turns.filter { it.text.isNotBlank() }
+    val visible = turns.filter { it.hasVisibleContent }
     LazyColumn(
         modifier = modifier.padding(horizontal = 12.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
         reverseLayout = true,
     ) {
-        items(visible.reversed()) { turn -> ChatBubble(turn) }
+        items(visible.reversed()) { turn -> ChatBubble(turn, renderer) }
     }
 }
 
 @Composable
-private fun ChatBubble(turn: ChatTurn) {
+private fun ChatBubble(
+    turn: ChatTurn,
+    renderer: Renderer,
+) {
     if (turn.role == "reasoning") {
         ReasoningSnippet(turn.text)
         return
@@ -555,11 +563,32 @@ private fun ChatBubble(turn: ChatTurn) {
                 },
             modifier = if (isUser) Modifier.widthIn(max = 300.dp) else Modifier.fillMaxWidth(0.96f),
         ) {
-            Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                if (isUser) {
-                    Text(turn.text, fontSize = 14.sp)
+            Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                if (turn.segments.isEmpty()) {
+                    if (isUser) Text(turn.text, fontSize = 14.sp) else MarkdownText(turn.text)
                 } else {
-                    MarkdownText(turn.text)
+                    turn.segments.forEach { segment ->
+                        if (segment.kind == ChatSegmentKind.COMPONENTS) {
+                            segment.components.forEach { component -> renderer.render(component) }
+                        } else if (isUser) {
+                            Text(segment.text, fontSize = 14.sp)
+                        } else {
+                            MarkdownText(segment.text)
+                        }
+                    }
+                }
+                turn.attachments.forEach { attachment ->
+                    val label =
+                        listOf("filename", "name", "label")
+                            .firstNotNullOfOrNull { key ->
+                                (attachment[key] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+                            } ?: "Attachment"
+                    Text(
+                        text = "📎 $label",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
                 }
             }
         }

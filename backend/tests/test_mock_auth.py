@@ -11,10 +11,11 @@ frontend/src/contexts/MockAuthContext.tsx — it must decode to test_user.
 If this test fails after you change the frontend token, update both in
 lockstep.
 """
-import os
-import sys
+import asyncio
 import base64
 import json
+import os
+import sys
 import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -66,7 +67,7 @@ def test_frontend_jwt_decodes_to_test_user():
 @pytest.mark.asyncio
 async def test_orchestrator_validates_frontend_jwt(mock_auth_env):
     from orchestrator.orchestrator import Orchestrator
-    orch = Orchestrator()
+    orch = await asyncio.to_thread(Orchestrator)
     payload = await orch.validate_token(FRONTEND_MOCK_JWT)
     _assert_test_user(payload)
 
@@ -74,7 +75,7 @@ async def test_orchestrator_validates_frontend_jwt(mock_auth_env):
 @pytest.mark.asyncio
 async def test_orchestrator_validates_dev_token(mock_auth_env):
     from orchestrator.orchestrator import Orchestrator
-    orch = Orchestrator()
+    orch = await asyncio.to_thread(Orchestrator)
     payload = await orch.validate_token("dev-token")
     _assert_test_user(payload)
     assert payload.get("email") == "test_user@local"
@@ -84,7 +85,7 @@ async def test_orchestrator_validates_dev_token(mock_auth_env):
 async def test_orchestrator_garbage_token_falls_back_to_test_user(mock_auth_env):
     """Mock auth is permissive by design — garbage tokens map to test_user."""
     from orchestrator.orchestrator import Orchestrator
-    orch = Orchestrator()
+    orch = await asyncio.to_thread(Orchestrator)
     payload = await orch.validate_token("not-a-jwt-at-all")
     _assert_test_user(payload)
 
@@ -93,7 +94,7 @@ async def test_orchestrator_garbage_token_falls_back_to_test_user(mock_auth_env)
 async def test_orchestrator_rejects_token_when_mock_disabled(no_mock_auth_env):
     """With mock off and no Keycloak config, validate_token returns None."""
     from orchestrator.orchestrator import Orchestrator
-    orch = Orchestrator()
+    orch = await asyncio.to_thread(Orchestrator)
     payload = await orch.validate_token(FRONTEND_MOCK_JWT)
     assert payload is None, "mock disabled + no Keycloak config must not accept tokens"
 

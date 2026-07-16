@@ -1,3 +1,4 @@
+import AstralCore
 // 055 — cross-device background-task continuity, iOS/macOS reduce side:
 // `task_completed`/`notification` frames that name the OPEN chat re-issue
 // load_chat (the server persisted the output; reloading re-hydrates narrative
@@ -7,7 +8,7 @@
 // load_chat — register_ui resumes the session but replays no turn frames.
 // Outbound frames are observed via the model's `outboundTap` seam.
 import XCTest
-import AstralCore
+
 @testable import AstralDeep
 
 @MainActor
@@ -96,7 +97,8 @@ final class AppModelBackgroundContinuityTests: XCTestCase {
         model.activeChatId = "c1"
         let log = record(model)
         // Scheduler shape: chat_id/title/body/level at the top level.
-        reduce(model, #"{"type":"notification","level":"info","chat_id":"c1","title":"Job done","body":"Digest ready"}"#)
+        reduce(
+            model, #"{"type":"notification","level":"info","chat_id":"c1","title":"Job done","body":"Digest ready"}"#)
         XCTAssertEqual(model.errorBanner, "Job done: Digest ready")
         XCTAssertFalse(model.bannerIsError)
         XCTAssertEqual(loadChats(log), ["c1"])

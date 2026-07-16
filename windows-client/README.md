@@ -27,35 +27,69 @@ Orchestrator (:8001)  ──WebSocket /ws──►  OrchestratorClient (asyncio 
 - `astral_client/app.py` — main window (chat rail + canvas) and message wiring.
 - `astral_client/theme.py` — dark palette mirroring the web app.
 
+## Deployment profile and precedence
+
+The official 0.4.0 executable contains one reviewed, non-secret production
+profile at `deployment/release-profile.json`. It resolves that whole profile
+before importing Qt, starting authentication, opening a transport, or hosting
+an agent. A clean install therefore opens without the **Configure AstralDeep**
+dialog.
+
+Profile sources are selected as complete documents in this order; fields are
+never mixed between sources:
+
+1. managed profile path in `ASTRAL_MANAGED_DEPLOYMENT_PROFILE`;
+2. `--deployment-profile <json-path>`;
+3. the permitted native QSettings value `deployment/profile_json`;
+4. the bundled production profile;
+5. local defaults only in an explicitly generic, non-frozen developer setup.
+
+An invalid higher-precedence selection fails closed with exit code 78. It does
+not fall back to the bundle or to localhost. Per-field deployment variables
+such as `ASTRAL_WS_URL` and `KEYCLOAK_AUTHORITY` are intentionally not read
+after profile resolution. Credentials are not profile fields.
+
+Validate an installed executable non-interactively without exposing authority,
+endpoint, or credentials:
+
+```powershell
+.\dist\AstralDeep.exe --validate-deployment --report deployment-validation.json
+```
+
 ## Run (dev)
 
-Requires **Python 3.10+** (CI and release builds use 3.11) and a running
-orchestrator. For local dev set the orchestrator to mock auth
+Requires **Python 3.11+** and a running orchestrator. For local dev set the
+orchestrator to mock auth
 (`USE_MOCK_AUTH=true`, `ASTRAL_ENV=development`) so the `dev-token` is accepted.
 
 ```bash
 python -m venv .venv
 .venv/Scripts/python -m pip install -r requirements.txt
-.venv/Scripts/python main.py                 # ws://127.0.0.1:8001/ws; see first-run note below
-# or:
-.venv/Scripts/python main.py --url ws://HOST:8001/ws --token <JWT>
+.venv/Scripts/python main.py --token <JWT>    # uses the bundled production profile
+# Explicit local development uses a complete schema-conforming local profile:
+.venv/Scripts/python main.py --deployment-profile C:\path\to\local-profile.json --token dev-token
 ```
 
-On a bare run with no authority/token configured (no env, no saved settings),
-a **first-run configuration dialog** appears (C-6): enter the server URL +
-Keycloak authority, or **Skip** to fall back to `dev-token` against a
-mock-auth orchestrator (Skip persists nothing, so the dialog returns on the
-next bare run).
-
-Env overrides: `ASTRAL_WS_URL`, `ASTRAL_TOKEN`.
+The local profile must satisfy the feature-060
+[`windows-deployment-profile` schema](../specs/060-runtime-reliability-hardening/contracts/windows-deployment-profile.schema.json):
+`distribution` is `generic_developer`, `local_only` is `true`, and its authority
+and WebSocket endpoint are loopback URLs. `ASTRAL_TOKEN` remains an optional
+credential input; it is not deployment configuration.
 
 ## Build the .exe
 
-```bash
-.venv/Scripts/python -m pip install pyinstaller
-.venv/Scripts/pyinstaller --noconfirm AstralDeep.spec
+```powershell
+.venv\Scripts\python -m pip install --require-hashes -r requirements-release.lock.txt
+.venv\Scripts\pyinstaller --noconfirm --clean AstralDeep.spec
 # → dist/AstralDeep.exe  (single-file, no console)
+.\dist\AstralDeep.exe --validate-deployment
 ```
+
+The reusable `build-windows-candidate.yml` workflow performs the authoritative
+unsigned build-once candidate run from two clean locked Python 3.11
+environments. It runs the actual frozen worker and GUI smokes, records coverage,
+and archives the exact EXE with source/run/artifact identities. It does not
+sign, tag, publish, or create a release.
 
 ## Tests
 
@@ -70,8 +104,9 @@ QT_QPA_PLATFORM=offscreen .venv/Scripts/python tests/e2e_live.py --prompt "roll 
 - **Dev**: `dev-token` against a mock-auth orchestrator (`--token dev-token`, or
   the fallback when no authority is configured and the first-run dialog is
   skipped).
-- **Real Keycloak (OIDC)**: set `--authority <realm-url>` (or `KEYCLOAK_AUTHORITY`)
-  and the app runs **Authorization-Code + PKCE with a loopback redirect** (RFC
+- **Real Keycloak (OIDC)**: select a complete profile whose `authority`,
+  `client_id`, and `auth_mode` are approved together. The app runs
+  **Authorization-Code + PKCE with a loopback redirect** (RFC
   8252) — it opens the system browser, you log in, and the token is used for
   `register_ui`; it silently refreshes on expiry. An explicit `--token` always
   wins.
@@ -81,42 +116,32 @@ By default the desktop uses its own **dedicated public Keycloak client**,
 Native Apps): the browser does PKCE, then the app exchanges the auth code and
 refreshes tokens **directly against Keycloak** — it holds no secret and does not
 depend on the orchestrator's BFF, and the web/desktop auth surfaces stay
-isolated. The orchestrator accepts the desktop client's `azp` via its
-`KEYCLOAK_ALLOWED_AZP` allow-list. Override the client id with `--client-id` /
-`ASTRAL_CLIENT_ID`.
+  isolated. The orchestrator accepts the desktop client's `azp` via its
+  `KEYCLOAK_ALLOWED_AZP` allow-list.
 
 **One-time Keycloak setup** (create the public client + add it to the
 allow-list): see [`docs/keycloak-windows-client-setup.md`](../docs/keycloak-windows-client-setup.md).
 
-```bash
-.venv/Scripts/python main.py --authority https://iam.example.com/realms/Astral
-# (uses client astral-desktop, direct token exchange)
-```
-
-**Legacy BFF reuse** (no dedicated client): pass `--bff` (or `ASTRAL_AUTH_BFF=1`)
-to reuse the web's confidential `astral-frontend` client by proxying the token
-exchange through the orchestrator's `POST /auth/token`. This requires the
-`http://127.0.0.1/*` loopback redirect on the `astral-frontend` client and is
-kept only for environments that have not provisioned `astral-desktop` yet.
-
-```bash
-.venv/Scripts/python main.py --authority https://iam.example.com/realms/Astral \
-    --client-id astral-frontend --bff
-```
+Legacy BFF reuse remains available only when an approved whole profile selects
+`auth_mode: keycloak_bff`; it is not enabled by mixing command-line fields into
+the production profile.
 
 ## Windows tools agent (client-hosted)
 
-The app hosts a small **A2A agent in-process** (`win_agent/`) that exposes
+Generic/developer profiles may host the legacy **A2A agent in-process**
+(`win_agent/`) that exposes
 Windows-specific tools to the orchestrator, so the assistant can act on this PC:
 `get_system_info`, `read_clipboard`, `write_clipboard`, `notify` (native toast),
 `open_path` (file/folder/URL), `list_directory`, plus the **coding tools**
 (`read_file`, `write_file`, `edit_file`, `run_command`, `run_shell`). Results
 render natively.
 
-On connect, the client registers the agent at `http://host.docker.internal:8771`
-(the orchestrator runs in Docker and reaches the host that way). Override with
-`ASTRAL_AGENT_HOST` / `WIN_AGENT_PORT`; disable with `ASTRAL_WIN_AGENT=0`. The
-agent can also run standalone: `python -m win_agent.agent --port 8771`.
+The reviewed production profile disables this inbound legacy listener and uses
+the authenticated UI-socket tunnel for user-authored agents. In a legacy
+generic/developer launch, the client registers the listener at
+`http://host.docker.internal:8771`; its local topology can be adjusted with
+`ASTRAL_AGENT_HOST` / `WIN_AGENT_PORT`. The agent can also run standalone:
+`python -m win_agent.agent --port 8771`.
 
 The agent registers with the orchestrator's `AGENT_API_KEY` when set (required
 outside dev; dev mode is keyless).

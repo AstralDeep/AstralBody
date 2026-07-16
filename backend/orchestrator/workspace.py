@@ -45,6 +45,7 @@ Deterministic component actions bypass all of this: they target an explicit
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import logging
@@ -52,6 +53,11 @@ import re
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
+
+from orchestrator.conversation_publication import (
+    ConversationPublicationStage,
+    current_conversation_publication,
+)
 
 logger = logging.getLogger("orchestrator.workspace")
 
@@ -194,6 +200,39 @@ class WorkspaceManager:
         self.history = history
         self.db = history.db
 
+    def _publication_stage(
+        self,
+        chat_id: str,
+        user_id: str,
+        *,
+        mutable: bool = False,
+    ) -> Optional[ConversationPublicationStage]:
+        """Return the exact task-local stage matching this workspace access."""
+        stage = current_conversation_publication()
+        if stage is None or not stage.matches(self.history, chat_id, user_id):
+            return None
+        if stage.sealed:
+            if mutable:
+                stage.ensure_mutable()
+            return None
+        if mutable:
+            stage.ensure_mutable()
+        return stage
+
+    def _assert_legacy_write_allowed(self, chat_id: str, user_id: str) -> None:
+        """Fail closed once a chat is governed by revisioned publication."""
+
+        row = self.db.fetch_one(
+            "SELECT render_revision FROM chats WHERE id = ? AND user_id = ?",
+            (chat_id, user_id),
+        )
+        if row is None:
+            raise RuntimeError("workspace conversation does not exist")
+        if int(row.get("render_revision") or 0) > 0:
+            raise RuntimeError(
+                "revisioned workspace writes require a publication stage"
+            )
+
     # ── identity ─────────────────────────────────────────────────────────
     def resolve_identity(self, comp: Dict[str, Any]) -> str:
         """Compute (and stamp) the stable component_id for one component."""
@@ -229,12 +268,52 @@ class WorkspaceManager:
 
     # ── live workspace reads ─────────────────────────────────────────────
     def live_rows(self, chat_id: str, user_id: str) -> List[Dict[str, Any]]:
-        """Ordered workspace rows (legacy NULL-position rows sort by created_at)."""
-        rows = self.db.fetch_all(
-            "SELECT * FROM saved_components WHERE chat_id = ? AND user_id = ? "
-            "ORDER BY COALESCE(position, 2147483647) ASC, created_at ASC",
-            (chat_id, user_id),
-        )
+        """Return the one complete canvas selected by publication context.
+
+        A matching active stage reads only its commit-versioned complete copy.
+        Every other task sees either the legacy revision-zero rows or exactly
+        the commit/revision currently named by the chat authority row.
+        """
+        stage = self._publication_stage(chat_id, user_id)
+        if stage is not None:
+            rows = self.db.fetch_all(
+                "SELECT component.* FROM saved_components AS component "
+                "JOIN conversation_commit AS publication "
+                "ON publication.commit_id = component.conversation_commit_id "
+                "WHERE component.chat_id = ? AND component.user_id = ? "
+                "AND component.conversation_commit_id = ? "
+                "AND component.committed_render_revision = ? "
+                "AND publication.chat_id = ? AND publication.owner_user_id = ? "
+                "AND publication.base_render_revision = ? "
+                "AND publication.state = 'staged' "
+                "ORDER BY COALESCE(component.position, 2147483647) ASC, "
+                "component.created_at ASC",
+                (
+                    chat_id,
+                    user_id,
+                    stage.commit_id,
+                    stage.next_render_revision,
+                    chat_id,
+                    user_id,
+                    stage.base_render_revision,
+                ),
+            )
+        else:
+            rows = self.db.fetch_all(
+                "SELECT component.* FROM saved_components AS component "
+                "JOIN chats AS chat ON chat.id = component.chat_id "
+                "AND chat.user_id = component.user_id "
+                "WHERE component.chat_id = ? AND component.user_id = ? AND ("
+                "(chat.render_revision = 0 "
+                "AND component.conversation_commit_id IS NULL "
+                "AND component.committed_render_revision IS NULL) OR "
+                "(chat.render_revision > 0 "
+                "AND component.conversation_commit_id = chat.conversation_commit_id "
+                "AND component.committed_render_revision = chat.render_revision)) "
+                "ORDER BY COALESCE(component.position, 2147483647) ASC, "
+                "component.created_at ASC",
+                (chat_id, user_id),
+            )
         out = []
         for row in rows:
             try:
@@ -289,6 +368,9 @@ class WorkspaceManager:
         """
         if not chat_id or not components:
             return []
+        stage = self._publication_stage(chat_id, user_id, mutable=True)
+        if stage is None:
+            self._assert_legacy_write_allowed(chat_id, user_id)
         live = self.live_rows(chat_id, user_id)
         by_cid = {r["component_id"]: r for r in live if r.get("component_id")}
         by_source: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
@@ -434,22 +516,78 @@ class WorkspaceManager:
             existing = by_cid.get(cid)
             created = existing is None
             if existing:
-                self.db.execute(
-                    "UPDATE saved_components SET component_data = ?, component_type = ?, "
-                    "title = ?, updated_at = ? WHERE chat_id = ? AND component_id = ? AND user_id = ?",
-                    (json.dumps(comp), comp.get("type", existing["component_type"]),
-                     comp.get("title", existing["title"]), _now_ms(), chat_id, cid, user_id),
-                )
+                if stage is not None:
+                    cursor = self.db.execute(
+                        "UPDATE saved_components SET component_data = ?, component_type = ?, "
+                        "title = ?, updated_at = ? WHERE id = ? AND chat_id = ? "
+                        "AND component_id = ? AND user_id = ? "
+                        "AND conversation_commit_id = ? "
+                        "AND committed_render_revision = ?",
+                        (
+                            json.dumps(comp),
+                            comp.get("type", existing["component_type"]),
+                            comp.get("title", existing["title"]),
+                            _now_ms(),
+                            existing["id"],
+                            chat_id,
+                            cid,
+                            user_id,
+                            stage.commit_id,
+                            stage.next_render_revision,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise RuntimeError("staged workspace update lost publication scope")
+                else:
+                    cursor = self.db.execute(
+                        "UPDATE saved_components SET component_data = ?, component_type = ?, "
+                        "title = ?, updated_at = ? WHERE id = ? AND chat_id = ? "
+                        "AND component_id = ? AND user_id = ?",
+                        (
+                            json.dumps(comp),
+                            comp.get("type", existing["component_type"]),
+                            comp.get("title", existing["title"]),
+                            _now_ms(),
+                            existing["id"],
+                            chat_id,
+                            cid,
+                            user_id,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise RuntimeError("workspace update lost authoritative row")
             else:
                 row_id = str(uuid.uuid4())
                 title = comp.get("title") or str(comp.get("type", "Component")).replace("_", " ").title()
-                self.db.execute(
-                    "INSERT INTO saved_components (id, chat_id, user_id, component_data, "
-                    "component_type, title, created_at, component_id, position, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (row_id, chat_id, user_id, json.dumps(comp), comp.get("type", "unknown"),
-                     title, _now_ms(), cid, next_pos, _now_ms()),
-                )
+                if stage is not None:
+                    self.db.execute(
+                        "INSERT INTO saved_components (id, chat_id, user_id, component_data, "
+                        "component_type, title, created_at, component_id, position, updated_at, "
+                        "conversation_commit_id, committed_render_revision) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            row_id,
+                            chat_id,
+                            user_id,
+                            json.dumps(comp),
+                            comp.get("type", "unknown"),
+                            title,
+                            _now_ms(),
+                            cid,
+                            next_pos,
+                            _now_ms(),
+                            stage.commit_id,
+                            stage.next_render_revision,
+                        ),
+                    )
+                else:
+                    self.db.execute(
+                        "INSERT INTO saved_components (id, chat_id, user_id, component_data, "
+                        "component_type, title, created_at, component_id, position, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (row_id, chat_id, user_id, json.dumps(comp), comp.get("type", "unknown"),
+                         title, _now_ms(), cid, next_pos, _now_ms()),
+                    )
                 by_cid[cid] = {"id": row_id, "component_id": cid,
                                "component_data": comp,
                                "component_type": comp.get("type", "unknown"),
@@ -460,15 +598,29 @@ class WorkspaceManager:
                 next_pos += 1
             ops.append({"op": "upsert", "component_id": cid, "component": comp, "created": created})
         if ops:
-            self.db.execute(
-                "UPDATE chats SET has_saved_components = TRUE WHERE id = ? AND user_id = ?",
-                (chat_id, user_id),
-            )
+            if stage is not None:
+                stage.mark_dirty()
+            else:
+                self.db.execute(
+                    "UPDATE chats SET has_saved_components = TRUE WHERE id = ? AND user_id = ?",
+                    (chat_id, user_id),
+                )
         return ops
 
     # ── canvas arrangements (feature 029, adaptive UI designer) ──────────
     def live_layouts(self, chat_id: str, user_id: str) -> List[Dict[str, Any]]:
         """Ordered designed arrangements for a chat (overlay over components)."""
+        stage = self._publication_stage(chat_id, user_id)
+        if stage is not None:
+            return copy.deepcopy(
+                sorted(
+                    stage.layouts,
+                    key=lambda item: (
+                        int(item.get("position") or 0),
+                        str(item.get("layout_key") or ""),
+                    ),
+                )
+            )
         rows = self.db.fetch_all(
             "SELECT layout_key, position, layout FROM workspace_layout "
             "WHERE chat_id = ? AND user_id = ? ORDER BY position ASC, id ASC",
@@ -486,15 +638,13 @@ class WorkspaceManager:
 
     def next_canvas_position(self, chat_id: str, user_id: str) -> int:
         """Next position in the SHARED ordering space of components + layouts."""
-        comp_max = self.db.fetch_one(
-            "SELECT MAX(position) AS p FROM saved_components WHERE chat_id = ? AND user_id = ?",
-            (chat_id, user_id),
-        )
-        lay_max = self.db.fetch_one(
-            "SELECT MAX(position) AS p FROM workspace_layout WHERE chat_id = ? AND user_id = ?",
-            (chat_id, user_id),
-        )
-        return 1 + max((comp_max or {}).get("p") or 0, (lay_max or {}).get("p") or 0)
+        component_positions = [
+            int(row.get("position") or 0) for row in self.live_rows(chat_id, user_id)
+        ]
+        layout_positions = [
+            int(row.get("position") or 0) for row in self.live_layouts(chat_id, user_id)
+        ]
+        return 1 + max(component_positions + layout_positions, default=0)
 
     def upsert_layout(self, chat_id: str, user_id: str, layout_key: str,
                       layout: List[Dict[str, Any]]) -> bool:
@@ -507,7 +657,34 @@ class WorkspaceManager:
         """
         if not chat_id or not layout_key or not isinstance(layout, list):
             return False
+        stage = self._publication_stage(chat_id, user_id, mutable=True)
+        if stage is None:
+            self._assert_legacy_write_allowed(chat_id, user_id)
         claimed = set(iter_layout_refs(layout))
+        if stage is not None:
+            if claimed:
+                for other in stage.layouts:
+                    if other.get("layout_key") == layout_key:
+                        continue
+                    overlap = set(iter_layout_refs(other.get("layout"))) & claimed
+                    if overlap:
+                        other["layout"] = prune_layout_refs(
+                            other.get("layout"), overlap
+                        )
+            for existing in stage.layouts:
+                if existing.get("layout_key") == layout_key:
+                    existing["layout"] = copy.deepcopy(layout)
+                    stage.mark_dirty()
+                    return True
+            stage.layouts.append(
+                {
+                    "layout_key": layout_key,
+                    "position": self.next_canvas_position(chat_id, user_id),
+                    "layout": copy.deepcopy(layout),
+                }
+            )
+            stage.mark_dirty()
+            return True
         if claimed:
             for other in self.live_layouts(chat_id, user_id):
                 if other["layout_key"] == layout_key:
@@ -541,9 +718,42 @@ class WorkspaceManager:
         return True
 
     def remove(self, chat_id: str, user_id: str, component_id: str) -> bool:
+        stage = self._publication_stage(chat_id, user_id, mutable=True)
+        if stage is None:
+            self._assert_legacy_write_allowed(chat_id, user_id)
+        if stage is not None:
+            cur = self.db.execute(
+                "DELETE FROM saved_components WHERE chat_id = ? "
+                "AND component_id = ? AND user_id = ? "
+                "AND conversation_commit_id = ? "
+                "AND committed_render_revision = ?",
+                (
+                    chat_id,
+                    component_id,
+                    user_id,
+                    stage.commit_id,
+                    stage.next_render_revision,
+                ),
+            )
+            removed = bool(getattr(cur, "rowcount", 0))
+            if removed:
+                stage.mark_dirty()
+                for layout in stage.layouts:
+                    if component_id in set(iter_layout_refs(layout.get("layout"))):
+                        layout["layout"] = prune_layout_refs(
+                            layout.get("layout"), {component_id}
+                        )
+            # ``has_saved_components`` and component-version cleanup describe
+            # authoritative state and therefore wait for atomic publication.
+            return removed
+
+        authoritative = self.get_by_component_id(chat_id, user_id, component_id)
+        if authoritative is None:
+            return False
         cur = self.db.execute(
-            "DELETE FROM saved_components WHERE chat_id = ? AND component_id = ? AND user_id = ?",
-            (chat_id, component_id, user_id),
+            "DELETE FROM saved_components WHERE id = ? AND chat_id = ? "
+            "AND component_id = ? AND user_id = ?",
+            (authoritative["id"], chat_id, component_id, user_id),
         )
         removed = bool(getattr(cur, "rowcount", 0))
         if removed:
@@ -569,11 +779,7 @@ class WorkspaceManager:
             except Exception:
                 logger.debug("version-history cascade failed on remove", exc_info=True)
         if removed:
-            count = self.db.fetch_one(
-                "SELECT COUNT(*) as count FROM saved_components WHERE chat_id = ? AND user_id = ?",
-                (chat_id, user_id),
-            )
-            if count and count["count"] == 0:
+            if not self.live_rows(chat_id, user_id):
                 self.db.execute(
                     "UPDATE chats SET has_saved_components = FALSE WHERE id = ? AND user_id = ?",
                     (chat_id, user_id),
@@ -585,6 +791,14 @@ class WorkspaceManager:
                  turn_message_id: Optional[int] = None) -> Optional[int]:
         """Record the full current workspace state. Returns the snapshot id."""
         if not chat_id:
+            return None
+        stage = self._publication_stage(chat_id, user_id)
+        if stage is not None:
+            # A timeline entry is an authoritative publication. Staged rows
+            # are already durable under conversation_commit and must not leak
+            # into that older visibility channel. Remember the requested
+            # derivative snapshot and materialize it only after publication.
+            stage.snapshot_cause = str(cause or "conversation_commit")[:128]
             return None
         components = self.live_components(chat_id, user_id)
         # Feature 029: arrangements snapshot alongside components so the

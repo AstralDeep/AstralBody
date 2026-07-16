@@ -37,6 +37,9 @@ SWEEP_ALLOWLIST = {
     "ui_event", "register_ui", "register_agent", "mcp_request", "mcp_response",
     "llm_config_set", "llm_config_clear",
     "tool_stream_data", "tool_stream_end", "tool_stream_cancel",
+    # Bidirectional transport controls are handled before UI dispatch and do
+    # not enter the semantic server-push vocabulary.
+    "ping", "pong", "close", "cancel", "cancel_task",
     # 056: agent-channel control frames for mediated hops (loopback / agent
     # WS only — never sent to a UI client; ui_protocol.json intentionally
     # unchanged, Constitution XII)
@@ -69,6 +72,103 @@ def test_manifest_is_well_formed():
     assert len(m["component_types"]) == len(set(m["component_types"]))
     assert m["component_types"] == sorted(m["component_types"])
     assert "error" in _push_names(m) and "notification" in _push_names(m)
+
+
+def test_admission_refusal_contract_is_exact_and_correlatable():
+    contract = _manifest()["frame_contracts"]["admission_refusal"]
+    assert contract == {
+        "type": "error",
+        "exact_fields": [
+            "type",
+            "submission_id",
+            "accepted",
+            "code",
+            "message",
+            "retryable",
+            "retry_after_ms",
+        ],
+        "submission_id": "canonical_lowercase_uuid4",
+        "accepted": False,
+        "additional_fields": False,
+        "codes": [
+            "capacity_exceeded",
+            "registration_required",
+            "registration_timeout",
+            "idempotency_conflict",
+            "connection_closing",
+            "service_draining",
+            "invalid_input",
+            "registration_queue_full",
+            "operation_failed",
+        ],
+    }
+
+
+def test_runtime_reliability_frames_and_structured_host_registration_are_manifested():
+    """Feature 060 additions must land as one reviewable cross-client contract.
+
+    ``register_ui.agent_host`` is deliberately represented as an additive field:
+    it is a client-to-server registration payload, not a server push type.
+    """
+    manifest = _manifest()
+    required_pushes = {
+        "conversation_commit_ready",
+        "conversation_snapshot",
+        "operation_status",
+        "agent_lifecycle",
+        "agent_host_inventory_reconciled",
+        "agent_host_registered",
+        "agent_host_registration_refused",
+    }
+    assert required_pushes <= _push_names(manifest), (
+        "feature-060 server frames are missing from shared/ui_protocol.json: "
+        f"{sorted(required_pushes - _push_names(manifest))}"
+    )
+
+    registrations = [
+        entry
+        for entry in manifest["additive_fields"]
+        if entry.get("field") == "agent_host"
+        and entry.get("carried_on") == ["register_ui"]
+    ]
+    assert len(registrations) == 1, (
+        "shared/ui_protocol.json must declare structured register_ui.agent_host exactly once"
+    )
+    shape = registrations[0].get("shape")
+    assert isinstance(shape, dict)
+    assert set(shape) == {
+        "host_id",
+        "supported_runtime_contract_versions",
+        "runtime_lock_sha256",
+        "platform",
+        "client_version",
+    }
+
+    fields = {
+        entry["field"]: entry for entry in manifest["additive_fields"]
+    }
+    transient_frames = {
+        "ui_render",
+        "ui_update",
+        "ui_upsert",
+        "ui_append",
+        "ui_stream_data",
+    }
+    for field_name in ("base_render_revision", "frame_sequence"):
+        assert set(fields[field_name]["carried_on"]) == transient_frames
+    for field_name in ("chat_id", "connection_generation", "request_generation"):
+        assert transient_frames <= set(fields[field_name]["carried_on"])
+
+    capability = fields["capabilities.personal_agent_host.macos"]
+    assert set(capability["carried_on"]) == {
+        "system_config",
+        "GET /api/dashboard",
+    }
+    assert set(capability["shape"]) == {
+        "supported",
+        "runtime_contract_versions",
+        "source_feature",
+    }
 
 
 def test_component_vocabulary_matches_renderer():

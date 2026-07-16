@@ -126,6 +126,9 @@ def env(monkeypatch):
     each viewing its own fresh chat."""
     monkeypatch.setenv("FF_UI_DESIGNER", "true")
     monkeypatch.setitem(flags._flags, "designer_all_devices", True)
+    # Canvas-origin parity is independent of compatibility TaskManager
+    # admission; do not let unrelated shared-database queue state gate a turn.
+    monkeypatch.setitem(flags._flags, "task_state_machine", False)
     for mod in ("agentic_creation", "scheduling_chat", "memory_chat",
                 "desktop_codegen"):
         monkeypatch.setattr(f"orchestrator.{mod}.should_inject",

@@ -18,4 +18,5 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "astral-android"
+enableFeaturePreview("TYPESAFE_PROJECT_ACCESSORS")
 include(":core", ":app")

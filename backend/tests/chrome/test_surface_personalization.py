@@ -6,11 +6,17 @@ fake (clean analyzer; the pure-Python prefilter still applies) so PHI
 rejections are exercised via obvious identifiers (SSN pattern).
 """
 import asyncio
+import html as html_module
+import json
+import re
+import uuid
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
 
 from personalization import phi_gate as pg
+from shared.feature_flags import flags
 from webrender.chrome.surfaces import personalization as surf
 
 
@@ -178,6 +184,92 @@ class FakeDB:
         return _Cursor(1)
 
 
+class FakeScheduleActionStore:
+    """Action-aware store fake; direct SQL remains observable on ``db``."""
+
+    def __init__(self, db):
+        self.db = db
+        self.run_now_calls = []
+        self.atomic_status_calls = []
+        self.legacy_status_calls = []
+        self._occurrences = {}
+
+    def list_jobs(self, user_id):
+        return [dict(job) for job in self.db.jobs if job["user_id"] == user_id]
+
+    def list_runs(self, user_id, job_id):
+        return [
+            dict(run)
+            for run in self.db.runs
+            if run.get("user_id") == user_id and run.get("job_id") == job_id
+        ]
+
+    def get_job(self, user_id, job_id):
+        for job in self.db.jobs:
+            if job["user_id"] == user_id and job["id"] == job_id:
+                return dict(job)
+        return None
+
+    def materialize_run_now(
+        self, *, user_id, job_id, submission_id, eligibility
+    ):
+        self.run_now_calls.append(
+            {
+                "user_id": user_id,
+                "job_id": job_id,
+                "submission_id": submission_id,
+                "eligibility": eligibility,
+            }
+        )
+        key = (user_id, submission_id)
+        prior = self._occurrences.get(key)
+        if prior is not None:
+            return SimpleNamespace(**{**prior.__dict__, "created": False})
+        result = SimpleNamespace(
+            occurrence_id=uuid.uuid4(),
+            job_id=uuid.UUID(job_id) if _is_uuid(job_id) else job_id,
+            owner_user_id=user_id,
+            scheduled_for=datetime(2026, 7, 16, 15, 30, tzinfo=UTC),
+            state="pending",
+            created=True,
+        )
+        self._occurrences[key] = result
+        return result
+
+    def set_status_and_cancel_unstarted(
+        self, *, user_id, job_id, status, terminal_code
+    ):
+        self.atomic_status_calls.append(
+            {
+                "user_id": user_id,
+                "job_id": job_id,
+                "status": status,
+                "terminal_code": terminal_code,
+            }
+        )
+        for job in self.db.jobs:
+            if job["user_id"] == user_id and job["id"] == job_id:
+                job["status"] = status
+                return True
+        return False
+
+    def set_status(self, user_id, job_id, status):
+        self.legacy_status_calls.append((user_id, job_id, status))
+        for job in self.db.jobs:
+            if job["user_id"] == user_id and job["id"] == job_id:
+                job["status"] = status
+                return True
+        return False
+
+
+def _is_uuid(value):
+    try:
+        uuid.UUID(str(value))
+    except (TypeError, ValueError, AttributeError):
+        return False
+    return True
+
+
 def _job(job_id, status, name="Daily digest"):
     return {
         "id": job_id, "user_id": "u1", "agent_id": "helper", "name": name,
@@ -191,10 +283,15 @@ def _job(job_id, status, name="Daily digest"):
 
 def make_orch(jobs=None, runs=None):
     repo = FakeRepo()
+    runner = SimpleNamespace(
+        assess_job=lambda _job: SimpleNamespace(eligible=True, code=None)
+    )
     return SimpleNamespace(
         personalization_service=SimpleNamespace(repo=repo),
         tool_permissions=FakeToolPermissions(),
         history=SimpleNamespace(db=FakeDB(jobs=jobs, runs=runs)),
+        work_admission=object(),
+        _scheduler_loop=SimpleNamespace(runner=runner),
         ui_sessions={},
     )
 
@@ -205,6 +302,31 @@ def render(orch, params=None, roles=("user",)):
 
 def call(handler, orch, payload):
     return asyncio.run(handler(orch, object(), "u1", ["user"], payload))
+
+
+def _html_action_payloads(markup, action):
+    encoded = re.findall(
+        rf'data-ui-action="{re.escape(action)}"[^>]*data-ui-payload=\'([^\']*)\'',
+        markup,
+    )
+    return [json.loads(html_module.unescape(value)) for value in encoded]
+
+
+def _sdui_action_payloads(value, action):
+    found = []
+
+    def visit(node):
+        if isinstance(node, dict):
+            if node.get("action") == action:
+                found.append(node.get("payload") or {})
+            for child in node.values():
+                visit(child)
+        elif isinstance(node, list):
+            for child in node:
+                visit(child)
+
+    visit(value)
+    return found
 
 
 # ---------------------------------------------------------------------------
@@ -279,7 +401,8 @@ def test_skills_tab_renders_toggle_and_unavailable_reason():
     assert "haven&#x27;t been granted" in html
 
 
-def test_schedule_tab_lists_jobs_with_actions_history_and_chat_hint():
+def test_schedule_tab_lists_jobs_with_actions_history_and_chat_hint(monkeypatch):
+    monkeypatch.setitem(flags._flags, "scheduler_execution", True)
     jobs = [_job("j1", "active"), _job("j2", "paused", name="Weekly report"),
             _job("j3", "disabled", name="Ghost job")]
     runs = [{"id": "r1", "job_id": "j1", "user_id": "u1",
@@ -294,6 +417,57 @@ def test_schedule_tab_lists_jobs_with_actions_history_and_chat_hint():
     assert 'data-ui-action="chrome_job_delete"' in html
     assert "created in chat" in html  # creation hint (jobs created in chat)
     assert "all good" in html and "success" in html  # inline run history
+
+
+def test_schedule_run_now_html_payload_has_one_stable_client_uuid(monkeypatch):
+    monkeypatch.setitem(flags._flags, "scheduler_execution", True)
+    job_id = str(uuid.uuid4())
+    markup = render(
+        make_orch(jobs=[_job(job_id, "active")]),
+        {"tab": "schedule"},
+    )
+
+    payloads = _html_action_payloads(markup, "chrome_job_run_now")
+
+    assert len(payloads) == 1
+    assert payloads[0]["job_id"] == job_id
+    submission_id = uuid.UUID(payloads[0]["submission_id"])
+    assert submission_id.version == 4
+
+
+def test_schedule_run_now_sdui_payload_has_one_stable_client_uuid(monkeypatch):
+    monkeypatch.setitem(flags._flags, "scheduler_execution", True)
+    job_id = str(uuid.uuid4())
+    components = asyncio.run(
+        surf.components(
+            make_orch(jobs=[_job(job_id, "active")]),
+            "u1",
+            ["user"],
+            {"tab": "schedule"},
+        )
+    )
+
+    payloads = _sdui_action_payloads(components, "chrome_job_run_now")
+
+    assert len(payloads) == 1
+    assert payloads[0]["job_id"] == job_id
+    submission_id = uuid.UUID(payloads[0]["submission_id"])
+    assert submission_id.version == 4
+
+
+def test_schedule_flag_off_omits_run_now_in_html_and_sdui(monkeypatch):
+    monkeypatch.setitem(flags._flags, "scheduler_execution", False)
+    job = _job(str(uuid.uuid4()), "active")
+    orch = make_orch(jobs=[job])
+
+    markup = render(orch, {"tab": "schedule"})
+    components = asyncio.run(
+        surf.components(orch, "u1", ["user"], {"tab": "schedule"})
+    )
+
+    assert _html_action_payloads(markup, "chrome_job_run_now") == []
+    assert _sdui_action_payloads(components, "chrome_job_run_now") == []
+    assert "unavailable" in markup.lower()
 
 
 def test_dreaming_tab_renders_toggle_trigger_and_sweeps():
@@ -437,8 +611,12 @@ def test_skill_toggle_disable_succeeds_and_records_override():
 # Handlers — schedule
 # ---------------------------------------------------------------------------
 
-def test_job_pause_resume_delete_set_status_via_store():
+def test_job_pause_delete_cancel_unstarted_and_resume_stays_definition_only(
+    monkeypatch,
+):
     orch = make_orch(jobs=[_job("j1", "active")])
+    store = FakeScheduleActionStore(orch.history.db)
+    monkeypatch.setattr(surf, "_job_store", lambda _orch: store)
     _, params, notice = call(surf._handle_job_pause, orch, {"job_id": "j1"})
     assert params["tab"] == "schedule" and "Job paused." in notice
     assert orch.history.db.jobs[0]["status"] == "paused"
@@ -451,16 +629,86 @@ def test_job_pause_resume_delete_set_status_via_store():
     _, _, notice = call(surf._handle_job_pause, orch, {"job_id": "nope"})
     assert "not found" in notice
 
+    assert store.atomic_status_calls == [
+        {
+            "user_id": "u1",
+            "job_id": "j1",
+            "status": "paused",
+            "terminal_code": "cancelled_job_paused",
+        },
+        {
+            "user_id": "u1",
+            "job_id": "j1",
+            "status": "disabled",
+            "terminal_code": "cancelled_job_deleted",
+        },
+        {
+            "user_id": "u1",
+            "job_id": "nope",
+            "status": "paused",
+            "terminal_code": "cancelled_job_paused",
+        },
+    ]
+    assert store.legacy_status_calls == [("u1", "j1", "active")]
 
-def test_job_run_now_queues_active_job_and_rejects_paused():
-    orch = make_orch(jobs=[_job("j1", "active"), _job("j2", "paused")])
-    _, _, notice = call(surf._handle_job_run_now, orch, {"job_id": "j1"})
+
+def test_job_run_now_replays_canonical_occurrence_without_direct_sql(monkeypatch):
+    monkeypatch.setitem(flags._flags, "scheduler_execution", True)
+    job_id = str(uuid.uuid4())
+    orch = make_orch(jobs=[_job(job_id, "active")])
+    store = FakeScheduleActionStore(orch.history.db)
+    monkeypatch.setattr(surf, "_job_store", lambda _orch: store)
+    submission_id = uuid.uuid4()
+    payload = {"job_id": job_id, "submission_id": str(submission_id)}
+
+    _, _, notice = call(surf._handle_job_run_now, orch, payload)
     assert "queued" in notice.lower()
-    assert any("next_run_at" in sql for sql, _ in orch.history.db.executed)
-    _, _, notice = call(surf._handle_job_run_now, orch, {"job_id": "j2"})
-    assert "not active" in notice
-    _, _, notice = call(surf._handle_job_run_now, orch, {"job_id": "zz"})
-    assert "not found" in notice
+    _, _, replay_notice = call(surf._handle_job_run_now, orch, payload)
+
+    assert "queued" in replay_notice.lower() or "already" in replay_notice.lower()
+    assert [call_["submission_id"] for call_ in store.run_now_calls] == [
+        submission_id,
+        submission_id,
+    ]
+    assert orch.history.db.executed == []
+
+
+def test_job_run_now_flag_off_refuses_without_store_or_sql(monkeypatch):
+    monkeypatch.setitem(flags._flags, "scheduler_execution", False)
+    job_id = str(uuid.uuid4())
+    orch = make_orch(jobs=[_job(job_id, "active")])
+    store = FakeScheduleActionStore(orch.history.db)
+    monkeypatch.setattr(surf, "_job_store", lambda _orch: store)
+
+    _, _, notice = call(
+        surf._handle_job_run_now,
+        orch,
+        {"job_id": job_id, "submission_id": str(uuid.uuid4())},
+    )
+
+    assert "unavailable" in notice.lower() or "disabled" in notice.lower()
+    assert store.run_now_calls == []
+    assert orch.history.db.executed == []
+
+
+def test_job_run_now_requires_client_submission_uuid(monkeypatch):
+    monkeypatch.setitem(flags._flags, "scheduler_execution", True)
+    job_id = str(uuid.uuid4())
+    orch = make_orch(jobs=[_job(job_id, "active")])
+    store = FakeScheduleActionStore(orch.history.db)
+    monkeypatch.setattr(surf, "_job_store", lambda _orch: store)
+
+    _, _, missing = call(surf._handle_job_run_now, orch, {"job_id": job_id})
+    _, _, invalid = call(
+        surf._handle_job_run_now,
+        orch,
+        {"job_id": job_id, "submission_id": "not-a-uuid"},
+    )
+
+    assert "submission" in missing.lower()
+    assert "submission" in invalid.lower()
+    assert store.run_now_calls == []
+    assert orch.history.db.executed == []
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,118 @@
+name: ${STAGING_PROJECT_NAME:?set a request-scoped staging project name}
+
+services:
+  postgres:
+    image: ${STAGING_POSTGRES_IMAGE:?set a digest-qualified PostgreSQL image}
+    environment:
+      POSTGRES_USER: ${STAGING_DB_USER:?set the staging database user}
+      POSTGRES_PASSWORD: ${STAGING_DB_PASSWORD:?set the staging database password}
+      POSTGRES_DB: ${STAGING_DB_NAME:?set the staging database name}
+    volumes:
+      - product-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: "no"
+
+  keycloak-postgres:
+    image: ${STAGING_POSTGRES_IMAGE:?set a digest-qualified PostgreSQL image}
+    environment:
+      POSTGRES_USER: ${STAGING_KEYCLOAK_DB_USER:?set the Keycloak database user}
+      POSTGRES_PASSWORD: ${STAGING_KEYCLOAK_DB_PASSWORD:?set the Keycloak database password}
+      POSTGRES_DB: ${STAGING_KEYCLOAK_DB_NAME:?set the Keycloak database name}
+    volumes:
+      - keycloak-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: "no"
+
+  keycloak:
+    image: ${STAGING_KEYCLOAK_IMAGE:?set a digest-qualified Keycloak image}
+    command:
+      - start
+      - --http-enabled=true
+      - --hostname-strict=false
+      - --import-realm
+      - --health-enabled=true
+    environment:
+      KC_DB: postgres
+      KC_DB_URL_HOST: keycloak-postgres
+      KC_DB_URL_DATABASE: ${STAGING_KEYCLOAK_DB_NAME:?set the Keycloak database name}
+      KC_DB_USERNAME: ${STAGING_KEYCLOAK_DB_USER:?set the Keycloak database user}
+      KC_DB_PASSWORD: ${STAGING_KEYCLOAK_DB_PASSWORD:?set the Keycloak database password}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${STAGING_KEYCLOAK_ADMIN_USER:?set the Keycloak bootstrap user}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${STAGING_KEYCLOAK_ADMIN_PASSWORD:?set the Keycloak bootstrap password}
+      KC_PROXY_HEADERS: xforwarded
+    volumes:
+      - ./backend/tests/fixtures/runtime_reliability_060/staging/keycloak-realm.json:/opt/keycloak/data/import/astral-060-realm.json:ro
+    depends_on:
+      keycloak-postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # The protected staging configuration supplies the exact pre-060 image.
+  # The driver runs this one-shot service first, restores representative 057
+  # rows second, and starts the candidate only after that restore succeeds.
+  schema-baseline:
+    image: ${STAGING_SCHEMA_BASELINE_IMAGE:?set the digest-qualified 057 baseline image}
+    profiles: [bootstrap]
+    working_dir: /app/backend
+    command:
+      - python
+      - -c
+      - from shared.database import Database; Database()
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: ${STAGING_DB_USER:?set the staging database user}
+      DB_PASSWORD: ${STAGING_DB_PASSWORD:?set the staging database password}
+      DB_NAME: ${STAGING_DB_NAME:?set the staging database name}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  astraldeep:
+    image: ${ASTRAL_CANDIDATE_IMAGE:?set the digest-qualified candidate image}
+    env_file:
+      - ${STAGING_RUNTIME_ENV_FILE:?set the protected runtime environment file}
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: ${STAGING_DB_USER:?set the staging database user}
+      DB_PASSWORD: ${STAGING_DB_PASSWORD:?set the staging database password}
+      DB_NAME: ${STAGING_DB_NAME:?set the staging database name}
+      KEYCLOAK_INTERNAL_URL: http://keycloak:8080
+      FF_BG_CONTINUITY: "true"
+      FF_SCHEDULER_EXECUTION: "true"
+    ports:
+      - 127.0.0.1:${STAGING_BIND_PORT:?set the request-scoped host port}:8001
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - import urllib.request; r=urllib.request.urlopen('http://localhost:8001/readyz', timeout=5); raise SystemExit(0 if r.status == 200 else 1)
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 60s
+    restart: "no"
+
+volumes:
+  product-postgres:
+  keycloak-postgres:

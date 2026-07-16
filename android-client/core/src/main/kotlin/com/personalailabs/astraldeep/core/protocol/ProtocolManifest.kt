@@ -26,6 +26,11 @@ object ProtocolManifest {
             "system_config" to IGNORED,
             "agent_list" to HANDLED,
             "agent_registered" to IGNORED,
+            // Android authors/manages agents but never advertises a desktop
+            // runtime host, so server-issued host control frames are explicit drops.
+            "agent_host_inventory_reconciled" to IGNORED,
+            "agent_host_registered" to IGNORED,
+            "agent_host_registration_refused" to IGNORED,
             // auth
             "auth_required" to HANDLED,
             // canvas / SDUI
@@ -53,6 +58,12 @@ object ProtocolManifest {
             "task_completed" to HANDLED,
             "tool_progress" to HANDLED,
             "workspace_timeline_mode" to HANDLED,
+            // Feature 060 canonical committed/status frames. Strict transport
+            // decoding lands here; feature reducers consume the typed variants.
+            "conversation_snapshot" to HANDLED,
+            "conversation_commit_ready" to HANDLED,
+            "operation_status" to HANDLED,
+            "agent_lifecycle" to HANDLED,
             // heartbeat: transport keepalive
             "heartbeat" to IGNORED,
             // streaming

@@ -8,9 +8,76 @@ Defines:
 - Tool Streaming: ToolStreamData, ToolStreamEnd, ToolStreamCancel
   (see specs/001-tool-stream-ui/contracts/protocol-messages.md §B)
 """
-from dataclasses import dataclass, asdict, field
-from typing import Optional, Dict, Any, List
 import json
+import re
+import uuid
+from dataclasses import asdict, dataclass, field, fields, replace
+from datetime import datetime
+from enum import Enum
+from typing import Any, ClassVar, Dict, List, Mapping, Optional
+
+
+_MAX_UINT64 = (1 << 64) - 1
+_SNAKE_CASE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
+_LOWER_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_STRICT_SEMVER = re.compile(
+    r"^(0|[1-9][0-9]*)\."
+    r"(0|[1-9][0-9]*)\."
+    r"(0|[1-9][0-9]*)"
+    r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
+
+
+class ProtocolValidationError(ValueError):
+    """A feature-060 wire value failed its public protocol contract."""
+
+
+def _require_uuid4(value: object, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise ProtocolValidationError(f"{field_name} must be a UUID4 string")
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError) as exc:
+        raise ProtocolValidationError(
+            f"{field_name} must be a UUID4 string"
+        ) from exc
+    if parsed.version != 4 or str(parsed) != value:
+        raise ProtocolValidationError(f"{field_name} must be a canonical UUID4 string")
+    return value
+
+
+def _require_uint64(value: object, field_name: str) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 0
+        or value > _MAX_UINT64
+    ):
+        raise ProtocolValidationError(
+            f"{field_name} must be an unsigned 64-bit integer"
+        )
+    return value
+
+
+def _require_rfc3339_utc(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise ProtocolValidationError(f"{field_name} must be an RFC3339 UTC string")
+    try:
+        parsed = datetime.fromisoformat(f"{value[:-1]}+00:00")
+    except ValueError as exc:
+        raise ProtocolValidationError(
+            f"{field_name} must be an RFC3339 UTC string"
+        ) from exc
+    if parsed.utcoffset() is None or parsed.utcoffset().total_seconds() != 0:
+        raise ProtocolValidationError(f"{field_name} must be an RFC3339 UTC string")
+    return value
+
+
+def _require_snake_case(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or _SNAKE_CASE.fullmatch(value) is None:
+        raise ProtocolValidationError(f"{field_name} must be a snake-case value")
+    return value
 
 # --- Base Message ---
 @dataclass
@@ -66,6 +133,16 @@ class Message:
             return AgentHopRequest(**data)
         elif msg_type == 'agent_hop_response':
             return AgentHopResponse(**data)
+        elif msg_type == 'conversation_snapshot':
+            return ConversationSnapshot.from_dict(data)
+        elif msg_type == 'conversation_commit_ready':
+            return ConversationCommitReady.from_dict(data)
+        elif msg_type == 'operation_status':
+            return OperationStatus.from_dict(data)
+        elif msg_type == 'agent_lifecycle':
+            return AgentLifecycle.from_dict(data)
+        elif msg_type == 'agent_host_registered':
+            return AgentHostRegistered.from_dict(data)
         return Message(**data)
 
 # --- MCP Protocol Wrappers ---
@@ -146,6 +223,82 @@ class UIEvent(Message):
     action: str = ""
     payload: Dict[str, Any] = field(default_factory=dict)
     session_id: Optional[str] = None
+    # Feature 060: client-created operation identity is carried at the frame
+    # boundary as well as in payload for thin-client compatibility.  These
+    # fields are optional only for direct/internal legacy seams; the finite
+    # connection ingress requires both before admission.
+    submission_id: Optional[str] = None
+    request_generation: Optional[str] = None
+    connection_generation: Optional[str] = None
+    snapshot_purpose: Optional[str] = None
+    surface: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        """Validate the open action payload and every supplied scope identity."""
+
+        if self.type != "ui_event":
+            raise ProtocolValidationError("type must be ui_event")
+        _require_snake_case(self.action, "action")
+        if not isinstance(self.payload, dict):
+            raise ProtocolValidationError("payload must be an object")
+
+        identity_fields = (
+            "submission_id",
+            "request_generation",
+            "connection_generation",
+        )
+        for field_name in identity_fields:
+            frame_value = getattr(self, field_name)
+            payload_value = self.payload.get(field_name)
+            if frame_value is not None:
+                _require_uuid4(frame_value, field_name)
+            if payload_value is not None:
+                _require_uuid4(payload_value, f"payload.{field_name}")
+            if (
+                frame_value is not None
+                and payload_value is not None
+                and frame_value != payload_value
+            ):
+                raise ProtocolValidationError(
+                    f"{field_name} must match payload.{field_name}"
+                )
+
+        payload_surface = self.payload.get("surface")
+        if self.surface is not None:
+            _require_snake_case(self.surface, "surface")
+        if payload_surface is not None:
+            _require_snake_case(payload_surface, "payload.surface")
+        if (
+            self.surface is not None
+            and payload_surface is not None
+            and self.surface != payload_surface
+        ):
+            raise ProtocolValidationError("surface must match payload.surface")
+
+        payload_purpose = self.payload.get("snapshot_purpose")
+        for value, field_name in (
+            (self.snapshot_purpose, "snapshot_purpose"),
+            (payload_purpose, "payload.snapshot_purpose"),
+        ):
+            if value is not None and value not in {"hydration", "commit"}:
+                raise ProtocolValidationError(
+                    f"{field_name} must be hydration or commit"
+                )
+        if (
+            self.snapshot_purpose is not None
+            and payload_purpose is not None
+            and self.snapshot_purpose != payload_purpose
+        ):
+            raise ProtocolValidationError(
+                "snapshot_purpose must match payload.snapshot_purpose"
+            )
+
+    def to_json(self) -> str:
+        self.validate()
+        return super().to_json()
 
 
 # --- Feature 004 UI event action names ---------------------------------
@@ -289,6 +442,543 @@ class ChromeSurface(Message):
     admin_only: bool = False
     components: List[Dict[str, Any]] = field(default_factory=list)
     mode: str = "replace"          # reserved; only "replace" today
+
+
+# --- Feature 060: canonical reliability protocol ----------------------
+@dataclass
+class ConversationCommitReady(Message):
+    """Prelude that opens a commit fence for a server-originated update.
+
+    Client-originated turns already open their request generation before the
+    request is sent. Detached work (for example, a long-running tool result)
+    has no such live client request, so the server advertises one fresh UUID4
+    immediately before the corresponding complete commit snapshot.
+    """
+
+    type: str = "conversation_commit_ready"
+    schema_version: int = 1
+    chat_id: str = ""
+    connection_generation: str = ""
+    request_generation: str = ""
+    render_revision: int = 0
+
+    def validate(self) -> None:
+        if self.type != "conversation_commit_ready":
+            raise ProtocolValidationError("type must be conversation_commit_ready")
+        if self.schema_version != 1 or isinstance(self.schema_version, bool):
+            raise ProtocolValidationError("schema_version must be exactly 1")
+        _require_uuid4(self.chat_id, "chat_id")
+        _require_uuid4(self.connection_generation, "connection_generation")
+        _require_uuid4(self.request_generation, "request_generation")
+        _require_uint64(self.render_revision, "render_revision")
+        if self.render_revision == 0:
+            raise ProtocolValidationError("render_revision must be positive")
+
+    def to_json(self) -> str:
+        self.validate()
+        return json.dumps(asdict(self), separators=(",", ":"), allow_nan=False)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "ConversationCommitReady":
+        expected = {item.name for item in fields(cls)}
+        if set(data) != expected:
+            raise ProtocolValidationError(
+                "conversation_commit_ready must contain exactly its canonical fields"
+            )
+        frame = cls(**dict(data))
+        frame.validate()
+        return frame
+
+
+@dataclass
+class ConversationSnapshot(Message):
+    """One complete authoritative committed conversation projection.
+
+    Transcript and canvas travel in the same frame so clients can validate
+    them off-thread and replace both in one reducer action.
+    """
+
+    type: str = "conversation_snapshot"
+    schema_version: int = 1
+    snapshot_id: str = ""
+    chat_id: str = ""
+    connection_generation: str = ""
+    request_generation: str = ""
+    snapshot_purpose: str = ""
+    render_revision: int = 0
+    committed_at: str = ""
+    transcript: List[Dict[str, Any]] = field(default_factory=list)
+    canvas: Dict[str, Any] = field(default_factory=dict)
+
+    def validate(self) -> None:
+        """Validate the complete snapshot without mutating client state."""
+
+        if self.type != "conversation_snapshot":
+            raise ProtocolValidationError("type must be conversation_snapshot")
+        if self.schema_version != 1 or isinstance(self.schema_version, bool):
+            raise ProtocolValidationError("schema_version must be exactly 1")
+        _require_uuid4(self.snapshot_id, "snapshot_id")
+        _require_uuid4(self.chat_id, "chat_id")
+        _require_uuid4(self.connection_generation, "connection_generation")
+        _require_uuid4(self.request_generation, "request_generation")
+        if self.snapshot_purpose not in {"hydration", "commit"}:
+            raise ProtocolValidationError(
+                "snapshot_purpose must be hydration or commit"
+            )
+        _require_uint64(self.render_revision, "render_revision")
+        _require_rfc3339_utc(self.committed_at, "committed_at")
+        self._validate_transcript()
+        if not isinstance(self.canvas, dict) or set(self.canvas) != {
+            "target",
+            "components",
+        }:
+            raise ProtocolValidationError(
+                "canvas must contain exactly target and components"
+            )
+        if self.canvas.get("target") != "canvas" or not isinstance(
+            self.canvas.get("components"), list
+        ):
+            raise ProtocolValidationError(
+                "canvas must target canvas and contain a components array"
+            )
+        try:
+            json.dumps(asdict(self), allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ProtocolValidationError("snapshot must be valid JSON") from exc
+
+    def _validate_transcript(self) -> None:
+        if not isinstance(self.transcript, list):
+            raise ProtocolValidationError("transcript must be an array")
+        for index, message in enumerate(self.transcript):
+            prefix = f"transcript[{index}]"
+            if not isinstance(message, dict) or set(message) != {
+                "message_id",
+                "role",
+                "created_at",
+                "parts",
+                "attachments",
+            }:
+                raise ProtocolValidationError(
+                    f"{prefix} must contain every canonical message field"
+                )
+            if not isinstance(message["message_id"], str) or not message[
+                "message_id"
+            ]:
+                raise ProtocolValidationError(f"{prefix}.message_id is required")
+            if message["role"] not in {"user", "assistant", "system", "tool"}:
+                raise ProtocolValidationError(f"{prefix}.role is invalid")
+            _require_rfc3339_utc(message["created_at"], f"{prefix}.created_at")
+            if not isinstance(message["attachments"], list):
+                raise ProtocolValidationError(f"{prefix}.attachments must be an array")
+            parts = message["parts"]
+            if not isinstance(parts, list) or not parts:
+                raise ProtocolValidationError(f"{prefix}.parts must be non-empty")
+            for part_index, part in enumerate(parts):
+                self._validate_part(part, f"{prefix}.parts[{part_index}]")
+
+    @staticmethod
+    def _validate_part(part: object, prefix: str) -> None:
+        if not isinstance(part, dict):
+            raise ProtocolValidationError(f"{prefix} must be an object")
+        part_type = part.get("type")
+        if part_type == "text":
+            valid = set(part) == {"type", "text"} and isinstance(
+                part.get("text"), str
+            )
+        elif part_type == "components":
+            valid = set(part) == {"type", "components"} and isinstance(
+                part.get("components"), list
+            )
+        elif part_type == "structured":
+            valid = set(part) == {"type", "value", "plain_text"} and isinstance(
+                part.get("plain_text"), str
+            )
+        elif part_type == "recovery":
+            valid = set(part) == {"type", "code", "message"} and all(
+                isinstance(part.get(key), str) and bool(part.get(key))
+                for key in ("code", "message")
+            )
+        else:
+            valid = False
+        if not valid:
+            raise ProtocolValidationError(f"{prefix} has an invalid canonical shape")
+
+    def to_json(self) -> str:
+        self.validate()
+        return json.dumps(asdict(self), separators=(",", ":"), allow_nan=False)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "ConversationSnapshot":
+        expected = {item.name for item in fields(cls)}
+        if set(data) != expected:
+            raise ProtocolValidationError(
+                "conversation_snapshot must contain exactly its canonical fields"
+            )
+        frame = cls(**dict(data))
+        frame.validate()
+        return frame
+
+
+@dataclass
+class OperationStatus(Message):
+    """Server-owned durable operation progress and terminal projection."""
+
+    type: str = "operation_status"
+    operation_id: str = ""
+    action: str = ""
+    surface: str = ""
+    chat_id: Optional[str] = None
+    connection_generation: str = ""
+    request_generation: str = ""
+    sequence: int = 0
+    state: str = ""
+    phase: str = ""
+    label: str = ""
+    terminal: bool = False
+    retryable: bool = False
+    error: Optional[Dict[str, Any]] = None
+    retry_after_ms: Optional[int] = None
+    updated_at: str = ""
+
+    _STATE_FLAGS: ClassVar[Dict[str, tuple[bool, bool]]] = {
+        "accepted": (False, False),
+        "validating": (False, False),
+        "persisting": (False, False),
+        "running": (False, False),
+        "completed": (True, False),
+        "failed": (True, False),
+        "cancelled": (True, False),
+        "retryable": (True, True),
+    }
+    _ERROR_CODES: ClassVar[set[str]] = {
+        "invalid_input",
+        "validation_failed",
+        "provider_unavailable",
+        "network_unavailable",
+        "deadline_exceeded",
+        "capacity_exceeded",
+        "queue_wait_expired",
+        "registration_timeout",
+        "disconnected",
+        "cancelled_by_user",
+        "operation_failed",
+        "conflict",
+        "incompatible_runtime",
+        "agent_offline",
+        "stale_generation",
+    }
+
+    def validate(self) -> None:
+        if self.type != "operation_status":
+            raise ProtocolValidationError("type must be operation_status")
+        _require_uuid4(self.operation_id, "operation_id")
+        _require_snake_case(self.action, "action")
+        _require_snake_case(self.surface, "surface")
+        if self.chat_id is not None:
+            _require_uuid4(self.chat_id, "chat_id")
+        _require_uuid4(self.connection_generation, "connection_generation")
+        _require_uuid4(self.request_generation, "request_generation")
+        _require_uint64(self.sequence, "sequence")
+        _require_snake_case(self.phase, "phase")
+        if not isinstance(self.label, str) or not self.label.strip():
+            raise ProtocolValidationError("label must be non-empty")
+        flags = self._STATE_FLAGS.get(self.state)
+        if flags is None or (self.terminal, self.retryable) != flags:
+            raise ProtocolValidationError("state, terminal, and retryable disagree")
+        error_required = self.state in {"failed", "cancelled", "retryable"}
+        if error_required:
+            if not isinstance(self.error, dict) or set(self.error) != {
+                "code",
+                "message",
+            }:
+                raise ProtocolValidationError("terminal error is required")
+            if self.error.get("code") not in self._ERROR_CODES:
+                raise ProtocolValidationError("error.code is not canonical")
+            if not isinstance(self.error.get("message"), str) or not self.error[
+                "message"
+            ].strip():
+                raise ProtocolValidationError("error.message must be non-empty")
+        elif self.error is not None:
+            raise ProtocolValidationError("error must be null for this state")
+        if self.retry_after_ms is not None:
+            _require_uint64(self.retry_after_ms, "retry_after_ms")
+            if self.state != "retryable":
+                raise ProtocolValidationError(
+                    "retry_after_ms is valid only for retryable state"
+                )
+        _require_rfc3339_utc(self.updated_at, "updated_at")
+
+    def to_json(self) -> str:
+        self.validate()
+        return json.dumps(asdict(self), separators=(",", ":"), allow_nan=False)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "OperationStatus":
+        expected = {item.name for item in fields(cls)}
+        if set(data) != expected:
+            raise ProtocolValidationError(
+                "operation_status must contain exactly its canonical fields"
+            )
+        frame = cls(**dict(data))
+        frame.validate()
+        return frame
+
+
+AGENT_LIFECYCLE_REASON_CODES = frozenset(
+    {
+        "invalid_host_registration",
+        "runtime_contract_unsupported",
+        "runtime_lock_mismatch",
+        "bundle_digest_mismatch",
+        "bundle_install_failed",
+        "child_start_failed",
+        "child_registration_timeout",
+        "child_exited",
+        "child_hung",
+        "host_lost",
+        "agent_offline",
+        "agent_deleted",
+        "stale_runtime_generation",
+        "revision_promotion_failed",
+        "inventory_required",
+        "process_cleanup_timeout",
+    }
+)
+
+
+@dataclass
+class AgentLifecycle(Message):
+    """Canonical user-facing projection of one authoritative agent runtime."""
+
+    type: str = "agent_lifecycle"
+    agent_id: str = ""
+    revision_id: Optional[str] = None
+    runtime_instance_id: Optional[str] = None
+    lifecycle_generation: int = 0
+    state_revision: int = 0
+    state: str = ""
+    reason_code: Optional[str] = None
+    label: str = ""
+    updated_at: str = ""
+
+    _REASON_CODES: ClassVar[frozenset[str]] = AGENT_LIFECYCLE_REASON_CODES
+
+    def validate(self) -> None:
+        if self.type != "agent_lifecycle":
+            raise ProtocolValidationError("type must be agent_lifecycle")
+        if not isinstance(self.agent_id, str) or not self.agent_id.strip():
+            raise ProtocolValidationError("agent_id must be non-empty")
+        if self.revision_id is not None:
+            _require_uuid4(self.revision_id, "revision_id")
+        if self.runtime_instance_id is not None:
+            _require_uuid4(self.runtime_instance_id, "runtime_instance_id")
+        _require_uint64(self.lifecycle_generation, "lifecycle_generation")
+        _require_uint64(self.state_revision, "state_revision")
+        if self.state not in {"starting", "online", "updating", "failed", "offline"}:
+            raise ProtocolValidationError("state is not a canonical lifecycle state")
+        if self.state in {"starting", "online", "updating"} and (
+            self.revision_id is None or self.runtime_instance_id is None
+        ):
+            raise ProtocolValidationError(
+                "active lifecycle states require revision and runtime instance"
+            )
+        if self.reason_code is not None:
+            _require_snake_case(self.reason_code, "reason_code")
+            if self.reason_code not in self._REASON_CODES:
+                raise ProtocolValidationError("reason_code is not canonical")
+        if not isinstance(self.label, str) or not self.label.strip():
+            raise ProtocolValidationError("label must be non-empty")
+        _require_rfc3339_utc(self.updated_at, "updated_at")
+
+    def to_json(self) -> str:
+        self.validate()
+        return json.dumps(asdict(self), separators=(",", ":"), allow_nan=False)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "AgentLifecycle":
+        expected = {item.name for item in fields(cls)}
+        if set(data) != expected:
+            raise ProtocolValidationError(
+                "agent_lifecycle must contain exactly its canonical fields"
+            )
+        frame = cls(**dict(data))
+        frame.validate()
+        return frame
+
+
+class FrameDisposition(str, Enum):
+    """Deterministic client-reducer decision for a scoped server frame."""
+
+    APPLY = "apply"
+    REPLAY = "replay"
+    REVISION_CONFLICT = "revision_conflict"
+    UNEXPECTED_EQUAL_COMMIT = "unexpected_equal_commit"
+    STALE = "stale"
+    WRONG_SCOPE = "wrong_scope"
+    WRONG_PURPOSE = "wrong_purpose"
+    APPLY_OVERLAY = "apply_overlay"
+    OUT_OF_ORDER = "out_of_order"
+    WRONG_BASE_REVISION = "wrong_base_revision"
+
+
+@dataclass(frozen=True)
+class TransientFrameScope:
+    """Generation and sequence fence carried by disposable preview frames."""
+
+    chat_id: str
+    connection_generation: str
+    request_generation: str
+    base_render_revision: int
+    frame_sequence: int
+
+    def validate(self) -> None:
+        _require_uuid4(self.chat_id, "chat_id")
+        _require_uuid4(self.connection_generation, "connection_generation")
+        _require_uuid4(self.request_generation, "request_generation")
+        _require_uint64(self.base_render_revision, "base_render_revision")
+        _require_uint64(self.frame_sequence, "frame_sequence")
+
+
+@dataclass
+class ConversationFrameFence:
+    """Purpose-aware reducer fence for committed and transient chat frames."""
+
+    chat_id: str
+    connection_generation: str
+    request_generation: str
+    request_purpose: str
+    last_committed_render_revision: int
+    _hydration_applied: bool = field(default=False, init=False, repr=False)
+    _accepted_snapshot_id: Optional[str] = field(default=None, init=False, repr=False)
+    _accepted_snapshot_json: Optional[str] = field(default=None, init=False, repr=False)
+    _last_frame_sequence: int = field(default=0, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        _require_uuid4(self.chat_id, "chat_id")
+        _require_uuid4(self.connection_generation, "connection_generation")
+        _require_uuid4(self.request_generation, "request_generation")
+        if self.request_purpose not in {"hydration", "commit"}:
+            raise ProtocolValidationError("request_purpose must be hydration or commit")
+        _require_uint64(
+            self.last_committed_render_revision,
+            "last_committed_render_revision",
+        )
+
+    def accept_snapshot(self, frame: ConversationSnapshot) -> FrameDisposition:
+        """Return the canonical reducer disposition and advance only on apply."""
+
+        frame.validate()
+        if (
+            frame.chat_id != self.chat_id
+            or frame.connection_generation != self.connection_generation
+            or frame.request_generation != self.request_generation
+        ):
+            return FrameDisposition.WRONG_SCOPE
+        if frame.snapshot_purpose != self.request_purpose:
+            return FrameDisposition.WRONG_PURPOSE
+        if frame.render_revision < self.last_committed_render_revision:
+            return FrameDisposition.STALE
+
+        canonical = json.dumps(
+            asdict(frame), sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+        if frame.render_revision == self.last_committed_render_revision:
+            if self.request_purpose != "hydration":
+                return FrameDisposition.UNEXPECTED_EQUAL_COMMIT
+            if not self._hydration_applied:
+                self._remember_snapshot(frame, canonical)
+                self._hydration_applied = True
+                return FrameDisposition.APPLY
+            if (
+                frame.snapshot_id == self._accepted_snapshot_id
+                and canonical == self._accepted_snapshot_json
+            ):
+                return FrameDisposition.REPLAY
+            return FrameDisposition.REVISION_CONFLICT
+
+        self.last_committed_render_revision = frame.render_revision
+        self._remember_snapshot(frame, canonical)
+        if self.request_purpose == "hydration":
+            self._hydration_applied = True
+        return FrameDisposition.APPLY
+
+    def accept_transient(self, frame: TransientFrameScope) -> FrameDisposition:
+        """Accept only current-base, strictly increasing preview overlays."""
+
+        frame.validate()
+        if (
+            frame.chat_id != self.chat_id
+            or frame.connection_generation != self.connection_generation
+            or frame.request_generation != self.request_generation
+        ):
+            return FrameDisposition.WRONG_SCOPE
+        if frame.base_render_revision != self.last_committed_render_revision:
+            return FrameDisposition.WRONG_BASE_REVISION
+        if frame.frame_sequence <= self._last_frame_sequence:
+            return FrameDisposition.OUT_OF_ORDER
+        self._last_frame_sequence = frame.frame_sequence
+        return FrameDisposition.APPLY_OVERLAY
+
+    def _remember_snapshot(
+        self, frame: ConversationSnapshot, canonical: str
+    ) -> None:
+        self._accepted_snapshot_id = frame.snapshot_id
+        self._accepted_snapshot_json = canonical
+
+
+@dataclass(frozen=True)
+class RuntimeFence:
+    """Complete durable host/runtime generation fence for personal agents."""
+
+    agent_id: str
+    host_id: str
+    host_session_id: str
+    delivery_id: str
+    revision_id: str
+    runtime_instance_id: str
+    process_id: Optional[str]
+    lifecycle_generation: int
+
+    def validate(self, *, allow_prelaunch: bool) -> None:
+        if not isinstance(self.agent_id, str) or not self.agent_id.strip():
+            raise ProtocolValidationError("agent_id must be non-empty")
+        for name in (
+            "host_id",
+            "host_session_id",
+            "delivery_id",
+            "revision_id",
+            "runtime_instance_id",
+        ):
+            _require_uuid4(getattr(self, name), name)
+        if self.process_id is None:
+            if not allow_prelaunch:
+                raise ProtocolValidationError("process_id is required after launch")
+        else:
+            _require_uuid4(self.process_id, "process_id")
+        _require_uint64(self.lifecycle_generation, "lifecycle_generation")
+
+    def bind_process(self, process_id: str) -> "RuntimeFence":
+        """Return the one legal post-launch fence; an existing bind is final."""
+
+        if self.process_id is not None:
+            raise ProtocolValidationError("process_id is already bound")
+        _require_uuid4(process_id, "process_id")
+        return replace(self, process_id=process_id)
+
+    def to_dict(self) -> Dict[str, Any]:
+        self.validate(allow_prelaunch=self.process_id is None)
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "RuntimeFence":
+        expected = {item.name for item in fields(cls)}
+        if set(data) != expected:
+            raise ProtocolValidationError(
+                "runtime fence must contain exactly its canonical fields"
+            )
+        fence = cls(**dict(data))
+        fence.validate(allow_prelaunch=fence.process_id is None)
+        return fence
 
 # --- Agent2Agent Protocol ---
 @dataclass
@@ -455,6 +1145,237 @@ class AuditAppend(Message):
     event: Dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class AgentHostRegistration:
+    """Structured runtime-contract advertisement from a desktop agent host."""
+
+    host_id: str
+    supported_runtime_contract_versions: tuple[int, ...]
+    runtime_lock_sha256: str
+    platform: str
+    client_version: str
+
+    def validate(self) -> None:
+        _require_uuid4(self.host_id, "host_id")
+        versions = self.supported_runtime_contract_versions
+        if (
+            not isinstance(versions, tuple)
+            or not versions
+            or any(
+                isinstance(version, bool)
+                or not isinstance(version, int)
+                or version <= 0
+                for version in versions
+            )
+            or len(set(versions)) != len(versions)
+            or tuple(sorted(versions)) != versions
+        ):
+            raise ProtocolValidationError(
+                "supported_runtime_contract_versions must be sorted, unique, "
+                "positive integers"
+            )
+        if _LOWER_SHA256.fullmatch(self.runtime_lock_sha256) is None:
+            raise ProtocolValidationError(
+                "runtime_lock_sha256 must be 64 lowercase hexadecimal characters"
+            )
+        if self.platform not in {"windows", "macos"}:
+            raise ProtocolValidationError("platform must be windows or macos")
+        if _STRICT_SEMVER.fullmatch(self.client_version) is None:
+            raise ProtocolValidationError("client_version must be strict SemVer")
+
+    def to_dict(self) -> Dict[str, Any]:
+        self.validate()
+        data = asdict(self)
+        data["supported_runtime_contract_versions"] = list(
+            self.supported_runtime_contract_versions
+        )
+        return data
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "AgentHostRegistration":
+        expected = {item.name for item in fields(cls)}
+        if set(data) != expected:
+            raise ProtocolValidationError(
+                "agent_host must contain exactly its structured v2 fields"
+            )
+        values = dict(data)
+        versions = values.get("supported_runtime_contract_versions")
+        if not isinstance(versions, (list, tuple)):
+            raise ProtocolValidationError(
+                "supported_runtime_contract_versions must be an array"
+            )
+        values["supported_runtime_contract_versions"] = tuple(versions)
+        registration = cls(**values)
+        registration.validate()
+        return registration
+
+
+@dataclass
+class AgentHostRegistered(Message):
+    """Server-issued acknowledgement that makes a host session eligible."""
+
+    type: str = "agent_host_registered"
+    host_id: str = ""
+    host_session_id: str = ""
+    inventory_required: bool = True
+    accepted_at: str = ""
+
+    def validate(self) -> None:
+        if self.type != "agent_host_registered":
+            raise ProtocolValidationError("type must be agent_host_registered")
+        _require_uuid4(self.host_id, "host_id")
+        _require_uuid4(self.host_session_id, "host_session_id")
+        if not isinstance(self.inventory_required, bool):
+            raise ProtocolValidationError("inventory_required must be boolean")
+        _require_rfc3339_utc(self.accepted_at, "accepted_at")
+
+    def to_json(self) -> str:
+        self.validate()
+        return json.dumps(asdict(self), separators=(",", ":"), allow_nan=False)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "AgentHostRegistered":
+        expected = {item.name for item in fields(cls)}
+        if set(data) != expected:
+            raise ProtocolValidationError(
+                "agent_host_registered must contain exactly its canonical fields"
+            )
+        acknowledgement = cls(**dict(data))
+        acknowledgement.validate()
+        return acknowledgement
+
+
+@dataclass(frozen=True)
+class PersonalAgentHostCapability:
+    """Immutable candidate-owned host applicability for one platform."""
+
+    supported: bool = False
+    runtime_contract_versions: tuple[int, ...] = ()
+    source_feature: Optional[str] = None
+
+    def validate(self) -> None:
+        if not isinstance(self.supported, bool):
+            raise ProtocolValidationError("supported must be boolean")
+        versions = self.runtime_contract_versions
+        if (
+            not isinstance(versions, tuple)
+            or any(
+                isinstance(version, bool)
+                or not isinstance(version, int)
+                or version <= 0
+                for version in versions
+            )
+            or tuple(sorted(set(versions))) != versions
+        ):
+            raise ProtocolValidationError(
+                "runtime_contract_versions must be sorted unique positive integers"
+            )
+        if self.supported:
+            if 2 not in versions or self.source_feature != "059":
+                raise ProtocolValidationError(
+                    "supported macOS hosting requires runtime v2 from feature 059"
+                )
+        elif versions or self.source_feature is not None:
+            raise ProtocolValidationError(
+                "unsupported macOS hosting requires empty versions and null source"
+            )
+
+    def to_dict(self) -> Dict[str, Any]:
+        self.validate()
+        return {
+            "supported": self.supported,
+            "runtime_contract_versions": list(self.runtime_contract_versions),
+            "source_feature": self.source_feature,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "PersonalAgentHostCapability":
+        if set(data) != {
+            "supported",
+            "runtime_contract_versions",
+            "source_feature",
+        }:
+            raise ProtocolValidationError("personal-agent host capability is malformed")
+        versions = data.get("runtime_contract_versions")
+        if not isinstance(versions, (list, tuple)):
+            raise ProtocolValidationError("runtime_contract_versions must be an array")
+        capability = cls(
+            supported=data.get("supported"),
+            runtime_contract_versions=tuple(versions),
+            source_feature=data.get("source_feature"),
+        )
+        capability.validate()
+        return capability
+
+
+@dataclass(frozen=True)
+class PersonalAgentHostCapabilities:
+    """Immutable personal-agent host capability partition."""
+
+    macos: PersonalAgentHostCapability = field(
+        default_factory=PersonalAgentHostCapability
+    )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.macos, PersonalAgentHostCapability):
+            raise ProtocolValidationError("macos host capability is malformed")
+        self.macos.validate()
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"macos": self.macos.to_dict()}
+
+
+@dataclass(frozen=True)
+class CandidateCapabilities:
+    """Immutable top-level candidate capability partition."""
+
+    personal_agent_host: PersonalAgentHostCapabilities = field(
+        default_factory=PersonalAgentHostCapabilities
+    )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.personal_agent_host, PersonalAgentHostCapabilities):
+            raise ProtocolValidationError("personal-agent host capabilities are malformed")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"personal_agent_host": self.personal_agent_host.to_dict()}
+
+
+@dataclass(frozen=True)
+class CandidateCapabilityMap:
+    """Candidate-owned applicability map shared by dashboard and UI config."""
+
+    capabilities: CandidateCapabilities = field(default_factory=CandidateCapabilities)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.capabilities, CandidateCapabilities):
+            raise ProtocolValidationError("candidate capabilities are malformed")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"capabilities": self.capabilities.to_dict()}
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "CandidateCapabilityMap":
+        if set(data) != {"capabilities"} or not isinstance(
+            data.get("capabilities"), Mapping
+        ):
+            raise ProtocolValidationError("candidate capability map is malformed")
+        capabilities = data["capabilities"]
+        if set(capabilities) != {"personal_agent_host"} or not isinstance(
+            capabilities.get("personal_agent_host"), Mapping
+        ):
+            raise ProtocolValidationError("candidate capabilities are malformed")
+        host = capabilities["personal_agent_host"]
+        if set(host) != {"macos"} or not isinstance(host.get("macos"), Mapping):
+            raise ProtocolValidationError("personal-agent host capabilities are malformed")
+        macos = PersonalAgentHostCapability.from_dict(host["macos"])
+        return cls(
+            capabilities=CandidateCapabilities(
+                personal_agent_host=PersonalAgentHostCapabilities(macos=macos)
+            )
+        )
+
+
 @dataclass
 class RegisterUI(Message):
     type: str = "register_ui"
@@ -472,17 +1393,71 @@ class RegisterUI(Message):
     # False (default) for fresh interactive logins and for older clients
     # that pre-date this feature. Drives the audit action_type selection.
     resumed: bool = False
+    # Feature 060: one fresh UUID4 per fenced connection plus an optional
+    # account-scoped resume payload. Legacy registrations may omit both, but a
+    # resume locator is never accepted without its connection fence.
+    connection_generation: Optional[str] = None
+    resume: Optional[Dict[str, Any]] = None
     # Feature 058 (BYO agents): this socket belongs to a DESKTOP HOST able to
     # write a delivered agent bundle to disk and supervise it as a child
     # process. Additive + default False, so a browser tab (which must never be
     # handed a code bundle) is a non-host by omission, exactly like every
     # pre-058 client. `host_session_id` identifies the host instance across
     # reconnects; it is echoed on the agent_tunnel frames the host relays.
-    agent_host: bool = False
+    agent_host: AgentHostRegistration | bool | None = False
     host_session_id: Optional[str] = None
 
     def to_json(self) -> str:
-        return json.dumps(asdict(self))
+        self.validate()
+        data = asdict(self)
+        if self.resume is not None:
+            data["resume"] = dict(self.resume)
+        if isinstance(self.agent_host, AgentHostRegistration):
+            data["agent_host"] = self.agent_host.to_dict()
+            data.pop("host_session_id", None)
+        return json.dumps(data)
+
+    def validate(self) -> None:
+        if self.type != "register_ui":
+            raise ProtocolValidationError("type must be register_ui")
+        if self.connection_generation is not None:
+            _require_uuid4(self.connection_generation, "connection_generation")
+        elif self.resume is not None:
+            raise ProtocolValidationError(
+                "connection_generation is required when resume is present"
+            )
+        if self.resume is not None:
+            if not isinstance(self.resume, Mapping):
+                raise ProtocolValidationError("resume must be a mapping")
+            expected_resume_fields = {
+                "schema_version",
+                "active_chat_id",
+                "request_generation",
+            }
+            if set(self.resume) != expected_resume_fields:
+                raise ProtocolValidationError(
+                    "resume must contain exactly schema_version, active_chat_id, "
+                    "and request_generation"
+                )
+            schema_version = self.resume["schema_version"]
+            if (
+                isinstance(schema_version, bool)
+                or not isinstance(schema_version, int)
+                or schema_version != 1
+            ):
+                raise ProtocolValidationError("resume.schema_version must be exactly 1")
+            _require_uuid4(self.resume["active_chat_id"], "resume.active_chat_id")
+            _require_uuid4(
+                self.resume["request_generation"], "resume.request_generation"
+            )
+        if isinstance(self.agent_host, AgentHostRegistration):
+            self.agent_host.validate()
+            if self.host_session_id is not None:
+                raise ProtocolValidationError(
+                    "structured agent hosts cannot propose host_session_id"
+                )
+        elif self.agent_host not in (False, True, None):
+            raise ProtocolValidationError("agent_host must be structured or boolean")
 
     @staticmethod
     def from_json(json_str: str) -> 'RegisterUI':
@@ -491,7 +1466,11 @@ class RegisterUI(Message):
         # vice versa) don't crash on additive fields.
         valid_fields = {f.name for f in RegisterUI.__dataclass_fields__.values()}
         data = {k: v for k, v in data.items() if k in valid_fields}
-        return RegisterUI(**data)
+        if isinstance(data.get("agent_host"), dict):
+            data["agent_host"] = AgentHostRegistration.from_dict(data["agent_host"])
+        registration = RegisterUI(**data)
+        registration.validate()
+        return registration
 
 
 # --- Feature 006: User-Configurable LLM Subscription -------------------

@@ -3,6 +3,7 @@
 // guard asserts frame TYPE names only, so this field rides with no
 // ui_protocol.json change and no disposition churn.
 import XCTest
+
 @testable import AstralCore
 
 final class ChromeSurfaceModeTests: XCTestCase {
@@ -12,7 +13,9 @@ final class ChromeSurfaceModeTests: XCTestCase {
     }
 
     func testMandatoryModeParsesWhenPresent() {
-        let f = frame(#"{"type":"chrome_surface","surface_key":"llm","title":"Set up your AI provider","components":[],"mode":"mandatory"}"#)
+        let f = frame(
+            #"{"type":"chrome_surface","surface_key":"llm","title":"Set up your AI provider","components":[],"mode":"mandatory"}"#
+        )
         XCTAssertEqual(f.surfaceMode, "mandatory")
     }
 

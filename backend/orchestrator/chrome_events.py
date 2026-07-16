@@ -15,8 +15,11 @@ regardless of what the menu rendered (FR-014).
 import json
 import logging
 import re
+from datetime import UTC, datetime
+from typing import Any, Optional
 
 from shared.perf import perf_span
+from shared.protocol import OperationStatus
 
 logger = logging.getLogger("Orchestrator.Chrome")
 
@@ -24,6 +27,57 @@ logger = logging.getLogger("Orchestrator.Chrome")
 # their module-level HANDLERS dicts; agentic_creation contributes the
 # draft/revision decision actions through the same mechanism.
 _HANDLERS = None
+
+
+def canonical_operation_status(
+    *,
+    operation_id: str,
+    action: str,
+    surface: str,
+    chat_id: Optional[str],
+    connection_generation: str,
+    request_generation: str,
+    sequence: int,
+    state: str,
+    phase: str,
+    label: str,
+    terminal: bool,
+    retryable: bool,
+    error: Optional[dict[str, Any]],
+    retry_after_ms: Optional[int],
+    updated_at: Optional[datetime] = None,
+) -> OperationStatus:
+    """Build and validate one canonical operation-status projection."""
+
+    timestamp = updated_at or datetime.now(UTC)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=UTC)
+    frame = OperationStatus(
+        operation_id=operation_id,
+        action=action,
+        surface=surface,
+        chat_id=chat_id,
+        connection_generation=connection_generation,
+        request_generation=request_generation,
+        sequence=sequence,
+        state=state,
+        phase=phase,
+        label=label,
+        terminal=terminal,
+        retryable=retryable,
+        error=error,
+        retry_after_ms=retry_after_ms,
+        updated_at=timestamp.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+    )
+    frame.validate()
+    return frame
+
+
+async def emit_operation_status(orch: Any, websocket: Any, **projection: Any) -> bool:
+    """Send one validated status frame over the orchestrator's safe-send seam."""
+
+    frame = canonical_operation_status(**projection)
+    return bool(await orch._safe_send(websocket, frame.to_json()))
 
 
 def _handlers():

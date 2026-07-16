@@ -36,6 +36,9 @@ CLASSIFICATION: dict[str, str] = {
     # process was accepted — a refusal is total silence (no NAK frame exists),
     # so the host times out on its absence. Not ignorable any more.
     "agent_registered": HANDLED,
+    "agent_host_inventory_reconciled": HANDLED,
+    "agent_host_registered": HANDLED,  # binds the server-issued host session
+    "agent_host_registration_refused": HANDLED,
     # BYO client-side agents (058): this desktop IS the host. The four frames
     # below are HANDLED, never ignored — an ignored agent frame would silently
     # drop the user's own agent's traffic and look like a hang.
@@ -66,6 +69,12 @@ CLASSIFICATION: dict[str, str] = {
     "task_completed": HANDLED,
     "tool_progress": HANDLED,
     "workspace_timeline_mode": HANDLED,
+    # 060 canonical committed/status frames; reducers land in the matching
+    # continuity and operation tasks, while transport validation is immediate.
+    "conversation_commit_ready": HANDLED,
+    "conversation_snapshot": HANDLED,
+    "operation_status": HANDLED,
+    "agent_lifecycle": HANDLED,
     "heartbeat": IGNORED,             # transport keepalive
     # streaming
     "stream_subscribed": HANDLED,

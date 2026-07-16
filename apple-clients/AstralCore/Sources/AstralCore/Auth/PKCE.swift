@@ -1,8 +1,8 @@
+import CryptoKit
 // Feature 051 — OIDC Authorization Code + PKCE (S256), hand-rolled on Apple
 // frameworks exactly as the Windows client hand-rolls it on the Python
 // stdlib (research D5: zero third-party Swift dependencies).
 import Foundation
-import CryptoKit
 
 public enum PKCE {
     /// RFC 7636 §4.1 — 32 random octets, base64url without padding.
@@ -34,8 +34,10 @@ public struct OIDCConfig: Sendable {
     public let redirectURI: String
     public let scope: String
 
-    public init(authority: URL, clientId: String, redirectURI: String,
-                scope: String = "openid profile email offline_access") {
+    public init(
+        authority: URL, clientId: String, redirectURI: String,
+        scope: String = "openid profile email offline_access"
+    ) {
         self.authority = authority
         self.clientId = clientId
         self.redirectURI = redirectURI
@@ -86,7 +88,8 @@ public struct OIDCConfig: Sendable {
 func formEncode(_ fields: [String: String]) -> String {
     var allowed = CharacterSet.alphanumerics
     allowed.insert(charactersIn: "-._~")
-    return fields
+    return
+        fields
         .sorted { $0.key < $1.key }
         .map { key, value in
             let k = key.addingPercentEncoding(withAllowedCharacters: allowed) ?? key
@@ -102,8 +105,10 @@ public struct TokenSet: Sendable, Equatable {
     public let refreshToken: String?
     public let expiresAt: Date
 
-    public init(accessToken: String, refreshToken: String?, expiresIn: TimeInterval,
-                now: Date = Date()) {
+    public init(
+        accessToken: String, refreshToken: String?, expiresIn: TimeInterval,
+        now: Date = Date()
+    ) {
         self.accessToken = accessToken
         self.refreshToken = refreshToken
         self.expiresAt = now.addingTimeInterval(expiresIn)

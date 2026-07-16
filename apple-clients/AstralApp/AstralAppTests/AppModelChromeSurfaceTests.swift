@@ -1,3 +1,4 @@
+import AstralCore
 // Feature 054 — first-run gate reduce tests (T021/T025): a `chrome_surface`
 // with `mode:"mandatory"` is ACCEPTED even though unsolicited and pins
 // navigation; the server's blank close instruction lifts the pin; unsolicited
@@ -7,15 +8,17 @@
 // parse itself (present/absent/malformed) is pinned by the CI-run
 // AstralCore suite (`ChromeSurfaceModeTests`).
 import XCTest
-import AstralCore
+
 @testable import AstralDeep
 
 @MainActor
 final class AppModelChromeSurfaceTests: XCTestCase {
 
-    private let mandatoryLLM = #"{"type":"chrome_surface","surface_key":"llm","title":"Set up your AI provider","components":[{"type":"text","content":"Pick a provider"}],"mode":"mandatory"}"#
+    private let mandatoryLLM =
+        #"{"type":"chrome_surface","surface_key":"llm","title":"Set up your AI provider","components":[{"type":"text","content":"Pick a provider"}],"mode":"mandatory"}"#
     private let blankClose = #"{"type":"chrome_surface","surface_key":"","components":[],"mode":"replace"}"#
-    private let unsolicitedTheme = #"{"type":"chrome_surface","surface_key":"theme","title":"Appearance","components":[{"type":"text","content":"Pick a theme"}]}"#
+    private let unsolicitedTheme =
+        #"{"type":"chrome_surface","surface_key":"theme","title":"Appearance","components":[{"type":"text","content":"Pick a theme"}]}"#
 
     private func signedInModel() -> AppModel {
         let model = AppModel()
@@ -37,7 +40,7 @@ final class AppModelChromeSurfaceTests: XCTestCase {
         XCTAssertEqual(model.pendingSurface?.title, "Set up your AI provider")
         XCTAssertEqual(model.pendingSurface?.components.count, 1)
         XCTAssertTrue(model.mandatorySurface)
-        XCTAssertNil(model.errorBanner)   // accepted, not demoted to a banner
+        XCTAssertNil(model.errorBanner)  // accepted, not demoted to a banner
     }
 
     // MARK: blank close lifts the pin
@@ -77,10 +80,10 @@ final class AppModelChromeSurfaceTests: XCTestCase {
 
         model.newChat()
         XCTAssertEqual(model.screen, .surface)
-        XCTAssertEqual(model.turns.count, 1)   // resetChatState never ran
+        XCTAssertEqual(model.turns.count, 1)  // resetChatState never ran
 
         model.openSurface("theme")
-        XCTAssertEqual(model.pendingSurfaceKey, "llm")   // pin not replaced
+        XCTAssertEqual(model.pendingSurfaceKey, "llm")  // pin not replaced
 
         reduce(model, blankClose)
         model.goTo(.history)

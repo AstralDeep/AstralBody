@@ -29,11 +29,13 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: windows-client/requirements-release.lock.txt
 
       # Guard: the pushed tag must equal v<astral_client.__version__>. Without
       # this, a tag pushed against a stale version constant builds and signs
@@ -59,11 +61,8 @@ jobs:
           print(f"tag {tag} matches __version__")
           EOF
 
-      - name: Install build + runtime deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r windows-client/requirements.txt
-          pip install "pyinstaller==6.21.0" "sigstore>=3.0,<4"
+      - name: Install hash-locked build and runtime dependencies
+        run: python -m pip install --require-hashes -r windows-client/requirements-release.lock.txt
 
       - name: Build the exe (PyInstaller)
         working-directory: windows-client
@@ -102,7 +101,7 @@ jobs:
             --cert-oidc-issuer https://token.actions.githubusercontent.com
 
       - name: Create / update the GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: |
             windows-client/dist/AstralDeep.exe

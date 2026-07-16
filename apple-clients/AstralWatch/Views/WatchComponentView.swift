@@ -1,10 +1,10 @@
+import AstralCore
 // Feature 051 US5 — compact watch renderers for the profile's native set,
 // readable-text fallback for everything else, and the "continue on another
 // device" affordance for over-budget interactivity (FR-032/FR-033).
 // The SERVER already degraded this payload via the watch ROTE profile; this
 // view is the last line of defense — it must never render blank.
 import SwiftUI
-import AstralCore
 
 struct WatchComponentView: View {
     let component: AstralComponent
@@ -118,10 +118,12 @@ struct WatchComponentView: View {
                 Text(component.label ?? component.title ?? component.fallbackText)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                Label("Continue on your phone or desktop",
-                      systemImage: "iphone.and.arrow.forward")
-                    .font(.caption2)
-                    .foregroundStyle(.tint)
+                Label(
+                    "Continue on your phone or desktop",
+                    systemImage: "iphone.and.arrow.forward"
+                )
+                .font(.caption2)
+                .foregroundStyle(.tint)
             }
         default:
             // Deterministic fallback chain terminates in readable text —

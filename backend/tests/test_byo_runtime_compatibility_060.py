@@ -1,0 +1,89 @@
+"""Neutral backend side of the feature-060 BYO runtime compatibility contract."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+import uuid
+
+import pytest
+
+from orchestrator.agent_generator import (
+    BYO_RUNTIME_CONTRACT_VERSION,
+    BYO_RUNTIME_LOCK_ARTIFACT,
+    BYO_RUNTIME_LOCK_SHA256,
+    AgentCodeGenerator,
+)
+from orchestrator.user_agents import RuntimeCompatibilityPolicy
+
+
+_ROOT = Path(__file__).resolve().parents[2]
+_FIXTURE = json.loads(
+    (
+        Path(__file__).parent
+        / "fixtures"
+        / "runtime_reliability_060"
+        / "runtime-lock-contract.json"
+    ).read_text(encoding="utf-8")
+)
+
+
+def test_final_release_lock_is_the_only_backend_runtime_identity() -> None:
+    assert _FIXTURE["runtime_contract_version"] == BYO_RUNTIME_CONTRACT_VERSION
+    assert _FIXTURE["lock_artifact"] == BYO_RUNTIME_LOCK_ARTIFACT
+    assert _FIXTURE["lock_digest"] == BYO_RUNTIME_LOCK_SHA256
+    artifact = _ROOT / BYO_RUNTIME_LOCK_ARTIFACT
+    assert hashlib.sha256(artifact.read_bytes()).hexdigest() == (
+        BYO_RUNTIME_LOCK_SHA256
+    )
+    policy = RuntimeCompatibilityPolicy(
+        runtime_contract_version=BYO_RUNTIME_CONTRACT_VERSION,
+        runtime_lock_sha256=BYO_RUNTIME_LOCK_SHA256,
+    )
+    assert policy.runtime_contract_version == 2
+    assert policy.runtime_lock_sha256 == BYO_RUNTIME_LOCK_SHA256
+
+
+def test_neutral_complete_bundle_digest_vector_matches_generator() -> None:
+    vector = _FIXTURE["bundle_digest_vector"]
+    files = vector["files"]
+    assert _FIXTURE["bundle_digest_contract"] == "canonical-json-utf8-v1"
+    canonical = json.dumps(
+        files,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    assert hashlib.sha256(canonical).hexdigest() == vector["bundle_sha256"]
+    assert AgentCodeGenerator._bundle_digest(files) == vector["bundle_sha256"]
+
+
+def test_finalized_delivery_metadata_cannot_drift_from_selected_release_lock() -> None:
+    generator = AgentCodeGenerator(llm_client=object(), llm_model="unused")
+    vector = _FIXTURE["bundle_digest_vector"]
+    finalized = generator.finalize_byo_bundle(
+        files=vector["files"],
+        agent_id="ua-runtime-compatibility",
+        revision_id=str(uuid.uuid4()),
+        agent_name="Compatibility Agent",
+        description="exercises the selected packaged runtime lock",
+        constitution_version="0.1.0",
+        required_runtime_lock_sha256=BYO_RUNTIME_LOCK_SHA256,
+    )
+    assert finalized.bundle_sha256 == vector["bundle_sha256"]
+    assert finalized.manifest["runtime_contract_version"] == 2
+    assert finalized.manifest["required_runtime_lock_sha256"] == (
+        BYO_RUNTIME_LOCK_SHA256
+    )
+    with pytest.raises(ValueError, match="runtime lock"):
+        generator.finalize_byo_bundle(
+            files=vector["files"],
+            agent_id="ua-runtime-compatibility",
+            revision_id=str(uuid.uuid4()),
+            agent_name="Compatibility Agent",
+            description="rejects malformed runtime metadata",
+            constitution_version="0.1.0",
+            required_runtime_lock_sha256="not-a-digest",
+        )

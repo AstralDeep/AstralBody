@@ -5,6 +5,7 @@
 // `ui_upsert` apply. Unconditional client-side: an id-less legacy welcome
 // (server flag off) matches nothing and the purge is a byte-equivalent no-op.
 import XCTest
+
 @testable import AstralCore
 
 final class WelcomePurgeTests: XCTestCase {
@@ -19,7 +20,7 @@ final class WelcomePurgeTests: XCTestCase {
     func testDropsWelcomeByComponentIdAndByIdFallback() {
         let canvas = [
             component(#"{"type":"hero","id":"wel_hero","component_id":"wel_hero","heading":"Welcome"}"#),
-            component(#"{"type":"text","id":"wel_hint","content":"Pick an agent"}"#),   // id-only read
+            component(#"{"type":"text","id":"wel_hint","content":"Pick an agent"}"#),  // id-only read
             component(#"{"type":"card","component_id":"wc_kept","title":"Budget"}"#),
         ]
         XCTAssertEqual(canvas.dropWelcome().map(\.componentId), ["wc_kept"])
@@ -27,7 +28,7 @@ final class WelcomePurgeTests: XCTestCase {
 
     func testKeepsIdLessAndNearMissIdentities() {
         let canvas = [
-            component(#"{"type":"text","content":"anonymous"}"#),   // id-less (flag off)
+            component(#"{"type":"text","content":"anonymous"}"#),  // id-less (flag off)
             component(#"{"type":"card","component_id":"weld_report","title":"Welding"}"#),
             component(#"{"type":"card","component_id":"welcome","title":"No underscore"}"#),
         ]
@@ -43,8 +44,11 @@ final class WelcomePurgeTests: XCTestCase {
             component(#"{"type":"hero","id":"wel_hero","component_id":"wel_hero","heading":"Welcome"}"#),
             component(#"{"type":"card","id":"wel_examples","component_id":"wel_examples","title":"Try asking"}"#),
         ]
-        let ops = [UpsertOp(op: "upsert", componentId: "wc_result",
-                            component: component(#"{"type":"card","component_id":"wc_result","title":"Result"}"#))]
+        let ops = [
+            UpsertOp(
+                op: "upsert", componentId: "wc_result",
+                component: component(#"{"type":"card","component_id":"wc_result","title":"Result"}"#))
+        ]
         XCTAssertEqual(Canvas.apply(welcome.dropWelcome(), ops).map(\.componentId), ["wc_result"])
     }
 
@@ -53,8 +57,11 @@ final class WelcomePurgeTests: XCTestCase {
             component(#"{"type":"card","id":"wel_enable","component_id":"wel_enable","title":"Enable agents"}"#),
             component(#"{"type":"table","component_id":"wc_prior","title":"Prior"}"#),
         ]
-        let ops = [UpsertOp(op: "upsert", componentId: "wc_new",
-                            component: component(#"{"type":"card","component_id":"wc_new","title":"New"}"#))]
+        let ops = [
+            UpsertOp(
+                op: "upsert", componentId: "wc_new",
+                component: component(#"{"type":"card","component_id":"wc_new","title":"New"}"#))
+        ]
         XCTAssertEqual(Canvas.apply(mixed.dropWelcome(), ops).map(\.componentId), ["wc_prior", "wc_new"])
     }
 }

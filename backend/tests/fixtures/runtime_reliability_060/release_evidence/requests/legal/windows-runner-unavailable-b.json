@@ -1,0 +1,16 @@
+{
+  "document_type": "evidence_exception_request",
+  "schema_version": 1,
+  "exception_id": "44444444-4444-4444-8444-444444444444",
+  "candidate_sha": "cccccccccccccccccccccccccccccccccccccccc",
+  "release_id": "060-rc-c",
+  "platform": "windows",
+  "missing_checks": [
+    "windows_deployment_validation"
+  ],
+  "reason": "A distinct later hosted Windows runner outage was independently observed before any product behavior ran.",
+  "requester_login": "fixture-author",
+  "requested_at": "2026-07-29T18:00:00Z",
+  "maximum_valid_days": 7,
+  "blocks_next_release": true
+}

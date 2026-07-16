@@ -32,12 +32,14 @@ keeps ``SCHEMA_REVISION`` untouched.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import hashlib
 import json
 import logging
 import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
+import uuid
 
 from shared.feature_flags import flags
 
@@ -89,6 +91,221 @@ _PLAIN_PHASES = ("specify", "plan", "tasks")
 NEEDS_CLARIFICATION = "NEEDS CLARIFICATION"
 
 _DEFAULT_SCOPE = "tools:read"
+
+_DRAFT_MUTABLE_FIELDS = frozenset(
+    {
+        "agent_name",
+        "description",
+        "clarify_answers",
+        "plan_json",
+        "analyze_result",
+        "constitution_version",
+        "phase",
+        "tools_spec",
+        "origin",
+        "revises_agent_id",
+        "status",
+    }
+)
+
+
+@dataclass(frozen=True)
+class DraftCASResult:
+    """Result of one owner-scoped draft compare-and-set transition."""
+
+    outcome: str
+    current_revision: int
+    draft: Dict[str, Any]
+    refresh_action: str = "refresh"
+
+    @property
+    def applied(self) -> bool:
+        """Whether this request or its exact replay already applied."""
+
+        return self.outcome in {"applied", "replayed"}
+
+
+def _current_execution_fence():
+    """Return the admitted connection operation fence when one is active."""
+
+    try:
+        from orchestrator.orchestrator import _CONNECTION_OPERATION_CONTEXT
+
+        context = _CONNECTION_OPERATION_CONTEXT.get() or {}
+        return context.get("execution_fence")
+    except Exception:
+        return None
+
+
+def cas_draft_update(
+    db,
+    *,
+    draft_id: str,
+    owner_user_id: str,
+    expected_revision: int,
+    updates: Dict[str, Any],
+    transition_kind: str,
+    transition_id: Optional[str] = None,
+    operation_fence=None,
+) -> DraftCASResult:
+    """Apply one owner-scoped draft mutation only at ``expected_revision``.
+
+    When invoked from an admitted UI operation, the transition identity and
+    exact operation execution generation are recorded in ``draft_transition``.
+    Direct/internal callers still receive strict revision CAS semantics, but do
+    not fabricate an operation fence merely to populate the audit table.
+    """
+
+    if type(expected_revision) is not int or expected_revision < 0:
+        raise ValueError("expected_revision must be non-negative")
+    if not isinstance(updates, dict) or not updates:
+        raise ValueError("updates must be a non-empty mapping")
+    unknown = set(updates) - _DRAFT_MUTABLE_FIELDS
+    if unknown:
+        raise ValueError(f"unsupported draft fields: {sorted(unknown)}")
+    if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", transition_kind or ""):
+        raise ValueError("transition_kind must be bounded snake_case")
+    parsed_transition = None
+    if transition_id is not None:
+        try:
+            parsed_transition = str(uuid.UUID(str(transition_id)))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValueError("transition_id must be a UUID") from exc
+    operation_fence = operation_fence or _current_execution_fence()
+
+    connection = db._get_connection()
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            "SELECT * FROM draft_agents WHERE id = %s AND user_id = %s FOR UPDATE",
+            (draft_id, owner_user_id),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise LookupError("draft is unavailable")
+        current = dict(row)
+        draft_uuid = str(current.get("draft_uuid") or "")
+        if not draft_uuid:
+            raise RuntimeError("draft UUID alias is missing")
+
+        if parsed_transition is not None and operation_fence is not None:
+            cursor.execute(
+                "SELECT * FROM draft_transition WHERE transition_id = %s",
+                (parsed_transition,),
+            )
+            replay = cursor.fetchone()
+            if replay is not None:
+                same_identity = (
+                    str(replay["draft_uuid"]) == draft_uuid
+                    and str(replay["owner_user_id"]) == owner_user_id
+                    and replay["transition_kind"] == transition_kind
+                    and int(replay["expected_revision"]) == expected_revision
+                )
+                if not same_identity:
+                    connection.rollback()
+                    return DraftCASResult(
+                        "conflict", int(current["state_revision"]), current
+                    )
+                connection.commit()
+                return DraftCASResult(
+                    "replayed", int(replay["result_revision"]), current
+                )
+            cursor.execute(
+                """
+                SELECT state, execution_generation, execution_lease_token
+                FROM operation_record WHERE operation_id = %s FOR SHARE
+                """,
+                (str(operation_fence.operation_id),),
+            )
+            operation = cursor.fetchone()
+            if not (
+                operation is not None
+                and operation["state"] == "running"
+                and int(operation["execution_generation"])
+                == operation_fence.execution_generation
+                and str(operation["execution_lease_token"])
+                == str(operation_fence.execution_lease_token)
+            ):
+                raise RuntimeError("draft operation execution fence is stale")
+
+        current_revision = int(current.get("state_revision") or 0)
+        if current_revision != expected_revision:
+            if parsed_transition is not None and operation_fence is not None:
+                cursor.execute(
+                    """
+                    INSERT INTO draft_transition (
+                        transition_id, draft_uuid, owner_user_id, operation_id,
+                        operation_execution_generation, transition_kind,
+                        expected_revision, result_revision, outcome, safe_code
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
+                              'conflict', 'stale_revision')
+                    """,
+                    (
+                        parsed_transition,
+                        draft_uuid,
+                        owner_user_id,
+                        str(operation_fence.operation_id),
+                        operation_fence.execution_generation,
+                        transition_kind,
+                        expected_revision,
+                        current_revision,
+                    ),
+                )
+                connection.commit()
+            else:
+                connection.rollback()
+            return DraftCASResult("conflict", current_revision, current)
+
+        assignments = [f"{field} = %s" for field in updates]
+        assignments.extend(
+            [
+                "state_revision = state_revision + 1",
+                "updated_at = (extract(epoch from clock_timestamp()) * 1000)::bigint",
+            ]
+        )
+        cursor.execute(
+            f"""
+            UPDATE draft_agents SET {', '.join(assignments)}
+            WHERE id = %s AND user_id = %s AND state_revision = %s
+            RETURNING *
+            """,
+            (*updates.values(), draft_id, owner_user_id, expected_revision),
+        )
+        updated = cursor.fetchone()
+        if updated is None:  # pragma: no cover - row lock makes this defensive
+            raise RuntimeError("draft compare-and-set lost serialization")
+        result = dict(updated)
+        result_revision = int(result["state_revision"])
+        if parsed_transition is not None and operation_fence is not None:
+            cursor.execute(
+                """
+                INSERT INTO draft_transition (
+                    transition_id, draft_uuid, owner_user_id, operation_id,
+                    operation_execution_generation, transition_kind,
+                    expected_revision, result_revision, outcome
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'applied')
+                """,
+                (
+                    parsed_transition,
+                    draft_uuid,
+                    owner_user_id,
+                    str(operation_fence.operation_id),
+                    operation_fence.execution_generation,
+                    transition_kind,
+                    expected_revision,
+                    result_revision,
+                ),
+            )
+        connection.commit()
+        return DraftCASResult("applied", result_revision, result)
+    except BaseException:
+        connection.rollback()
+        raise
+    finally:
+        try:
+            cursor.close()
+        finally:
+            connection.close()
 
 
 def _now_ms() -> int:
@@ -253,9 +470,10 @@ def session_spec(row: Dict[str, Any]) -> Dict[str, Any]:
 
 def session_agent_id(row: Dict[str, Any]) -> str:
     """The identity this session will register as. A REVISION keeps the revised
-    agent's id (so the host replaces the same agent); a new session derives an
-    owner-namespaced id from its name."""
+    agent's id (so the host replaces the same agent); a new 060 session uses its
+    immutable UUID target, independent of display and storage names."""
     return (row.get("revises_agent_id")
+            or row.get("target_agent_id")
             or slug_agent_id(row.get("agent_name") or "", row.get("user_id") or ""))
 
 
@@ -358,8 +576,20 @@ async def draft_phase(orch, websocket, user_id: str, draft_id: str) -> Tuple[boo
     row = await asyncio.to_thread(get_session, orch, user_id, draft_id)
     if row is None:
         return False, "That authoring session is not available."
-    db_update = orch.history.db.update_draft_agent
     phase = phase_of(row)
+    expected_revision = int(row.get("state_revision") or 0)
+
+    async def persist(updates: Dict[str, Any]) -> bool:
+        transition = await asyncio.to_thread(
+            cas_draft_update,
+            orch.history.db,
+            draft_id=draft_id,
+            owner_user_id=user_id,
+            expected_revision=expected_revision,
+            updates=updates,
+            transition_kind="save",
+        )
+        return transition.applied
     name = row.get("agent_name") or ""
     description = row.get("description") or ""
     ctx = f"Agent name: {name}\nWhat the owner asked for:\n{description}"
@@ -379,7 +609,8 @@ async def draft_phase(orch, websocket, user_id: str, draft_id: str) -> Tuple[boo
         text = str((out or {}).get("specification") or "").strip()
         if not text:
             return False, "Couldn't draft a specification — write one yourself and continue."
-        await asyncio.to_thread(db_update, draft_id, description=text[:4000])
+        if not await persist({"description": text[:4000]}):
+            return False, "This draft changed elsewhere — refresh before drafting again."
         return True, "Drafted a specification — edit it however you like."
 
     if phase == "clarify":
@@ -400,7 +631,8 @@ async def draft_phase(orch, websocket, user_id: str, draft_id: str) -> Tuple[boo
         existing = {i["question"]: i["answer"] for i in clarify_items(row)}
         items = [{"question": q, "answer": existing.get(q, "")}
                  for q in questions[:_MAX_QUESTIONS]]
-        await asyncio.to_thread(db_update, draft_id, clarify_answers=json.dumps(items))
+        if not await persist({"clarify_answers": json.dumps(items)}):
+            return False, "This draft changed elsewhere — refresh before drafting again."
         if not items:
             return True, "No open questions — answer nothing and continue."
         return True, f"{len(items)} question(s) to answer before this can move on."
@@ -421,7 +653,8 @@ async def draft_phase(orch, websocket, user_id: str, draft_id: str) -> Tuple[boo
         drafted = build_plan(format_tool_lines(tools), "", "",
                              notes=str((out or {}).get("notes") or ""),
                              tasks=list(plan.get("tasks") or []))
-        await asyncio.to_thread(db_update, draft_id, plan_json=json.dumps(drafted))
+        if not await persist({"plan_json": json.dumps(drafted)}):
+            return False, "This draft changed elsewhere — refresh before drafting again."
         return True, f"Drafted {len(tools)} tool(s) — adjust the names, scopes, and egress."
 
     if phase == "tasks":
@@ -436,7 +669,8 @@ async def draft_phase(orch, websocket, user_id: str, draft_id: str) -> Tuple[boo
         if not tasks:
             return False, "Couldn't draft tasks — write them yourself and continue."
         plan["tasks"] = tasks[:_MAX_TASKS]
-        await asyncio.to_thread(db_update, draft_id, plan_json=json.dumps(plan))
+        if not await persist({"plan_json": json.dumps(plan)}):
+            return False, "This draft changed elsewhere — refresh before drafting again."
         return True, f"Drafted {len(plan['tasks'])} task(s) — edit them however you like."
 
     return False, "Nothing to draft at this step."
@@ -457,14 +691,65 @@ async def start_session(orch, *, user_id: str, agent_name: str, description: str
     from orchestrator.agent_lifecycle import BYO_ORIGIN
     draft = await orch.lifecycle_manager.create_draft(
         user_id=user_id, agent_name=agent_name, description=description,
-        tools_spec=None)
+        tools_spec=None, revises_agent_id=revises_agent_id)
     draft_id = draft["id"]
-    await asyncio.to_thread(
-        orch.history.db.update_draft_agent, draft_id,
-        origin=BYO_ORIGIN, phase="specify", revises_agent_id=revises_agent_id)
+    initialized = await asyncio.to_thread(
+        cas_draft_update,
+        orch.history.db,
+        draft_id=draft_id,
+        owner_user_id=user_id,
+        expected_revision=int(draft.get("state_revision") or 0),
+        updates={
+            "origin": BYO_ORIGIN,
+            "phase": "specify",
+            "revises_agent_id": revises_agent_id,
+        },
+        transition_kind="save",
+    )
+    if not initialized.applied:  # pragma: no cover - newly created row is private
+        raise RuntimeError("new authoring session lost initialization CAS")
     logger.info("byo authoring: opened session %s for %s (revises=%s)",
                 draft_id, user_id, revises_agent_id)
     return await asyncio.to_thread(get_session, orch, user_id, draft_id) or dict(draft)
+
+
+def _mutation_identity(
+    fields: Dict[str, Any], row: Dict[str, Any]
+) -> tuple[int, Optional[str]]:
+    """Parse a client CAS identity, falling back only for legacy callers."""
+
+    raw_revision = fields.get("expected_revision")
+    if raw_revision in (None, ""):
+        expected_revision = int(row.get("state_revision") or 0)
+    else:
+        if isinstance(raw_revision, bool):
+            raise ValueError("expected revision is invalid")
+        try:
+            expected_revision = int(str(raw_revision))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("expected revision is invalid") from exc
+        if expected_revision < 0 or str(expected_revision) != str(raw_revision).strip():
+            raise ValueError("expected revision is invalid")
+    transition_id = fields.get("transition_id")
+    if transition_id in (None, ""):
+        return expected_revision, None
+    try:
+        parsed = uuid.UUID(str(transition_id))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ValueError("transition identity is invalid") from exc
+    if parsed.version != 4:
+        raise ValueError("transition identity is invalid")
+    return expected_revision, str(parsed)
+
+
+def _cas_message(result: DraftCASResult, success: str) -> Tuple[bool, str]:
+    if result.applied:
+        return True, success
+    return (
+        False,
+        f"This draft changed elsewhere (revision {result.current_revision}). "
+        "Refresh before saving again.",
+    )
 
 
 def save_artifact(orch, user_id: str, draft_id: str, fields: Dict[str, str]) -> Tuple[bool, str]:
@@ -477,14 +762,26 @@ def save_artifact(orch, user_id: str, draft_id: str, fields: Dict[str, str]) -> 
         return False, "That authoring session is not available."
     phase = phase_of(row)
     db = orch.history.db
+    try:
+        expected_revision, transition_id = _mutation_identity(fields, row)
+    except ValueError as exc:
+        return False, str(exc)
 
     if phase == "specify":
         name = (fields.get("agent_name") or "").strip() or row.get("agent_name")
         text = (fields.get("specification") or "").strip()
         if len(text) < 10:
             return False, "The specification needs at least 10 characters."
-        db.update_draft_agent(draft_id, agent_name=name[:100], description=text[:4000])
-        return True, "Specification saved."
+        result = cas_draft_update(
+            db,
+            draft_id=draft_id,
+            owner_user_id=user_id,
+            expected_revision=expected_revision,
+            updates={"agent_name": name[:100], "description": text[:4000]},
+            transition_kind="save",
+            transition_id=transition_id,
+        )
+        return _cas_message(result, "Specification saved.")
 
     if phase == "clarify":
         # Only ANSWERS are client-supplied; the questions are server-owned. A
@@ -495,8 +792,16 @@ def save_artifact(orch, user_id: str, draft_id: str, fields: Dict[str, str]) -> 
             return False, ("Run Clarify first — the assistant has to look for open questions "
                            "before they can be answered.")
         items = _answers_from_fields(row, fields)
-        db.update_draft_agent(draft_id, clarify_answers=json.dumps(items))
-        return True, "Answers saved."
+        result = cas_draft_update(
+            db,
+            draft_id=draft_id,
+            owner_user_id=user_id,
+            expected_revision=expected_revision,
+            updates={"clarify_answers": json.dumps(items)},
+            transition_kind="save",
+            transition_id=transition_id,
+        )
+        return _cas_message(result, "Answers saved.")
 
     if phase == "plan":
         plan = build_plan(
@@ -504,14 +809,30 @@ def save_artifact(orch, user_id: str, draft_id: str, fields: Dict[str, str]) -> 
             notes=fields.get("notes", ""), tasks=list(plan_artifact(row).get("tasks") or []))
         if not plan["tools"]:
             return False, "List at least one tool (one per line: name | scope | what it does)."
-        db.update_draft_agent(draft_id, plan_json=json.dumps(plan))
-        return True, "Plan saved."
+        result = cas_draft_update(
+            db,
+            draft_id=draft_id,
+            owner_user_id=user_id,
+            expected_revision=expected_revision,
+            updates={"plan_json": json.dumps(plan)},
+            transition_kind="save",
+            transition_id=transition_id,
+        )
+        return _cas_message(result, "Plan saved.")
 
     if phase == "tasks":
         plan = plan_artifact(row)
         plan["tasks"] = [t.strip() for t in (fields.get("tasks") or "").splitlines() if t.strip()]
-        db.update_draft_agent(draft_id, plan_json=json.dumps(plan))
-        return True, "Tasks saved."
+        result = cas_draft_update(
+            db,
+            draft_id=draft_id,
+            owner_user_id=user_id,
+            expected_revision=expected_revision,
+            updates={"plan_json": json.dumps(plan)},
+            transition_kind="save",
+            transition_id=transition_id,
+        )
+        return _cas_message(result, "Tasks saved.")
 
     return False, "There is nothing to edit at this step."
 
@@ -549,11 +870,19 @@ def advance(orch, user_id: str, draft_id: str,
     if phase == "generate":
         return False, phase, "This session already passed Analyze — generate the agent."
 
+    transition_id = None
     if fields:
-        ok, message = save_artifact(orch, user_id, draft_id, fields)
+        save_fields = dict(fields)
+        transition_id = save_fields.pop("transition_id", None)
+        ok, message = save_artifact(orch, user_id, draft_id, save_fields)
         if not ok:
             return False, phase, message
         row = get_session(orch, user_id, draft_id) or row
+    else:
+        try:
+            _expected, transition_id = _mutation_identity({}, row)
+        except ValueError:
+            transition_id = None
 
     if phase == "clarify":
         # HARD GATE — an unanswered question is an unresolved ambiguity, and a
@@ -578,11 +907,33 @@ def advance(orch, user_id: str, draft_id: str,
         return False, phase, "Write the specification before moving on."
 
     nxt = PHASES[PHASES.index(phase) + 1]
-    orch.history.db.update_draft_agent(draft_id, phase=nxt)
+    result = cas_draft_update(
+        orch.history.db,
+        draft_id=draft_id,
+        owner_user_id=user_id,
+        expected_revision=int(row.get("state_revision") or 0),
+        updates={"phase": nxt},
+        transition_kind="advance",
+        transition_id=transition_id,
+    )
+    if not result.applied:
+        return (
+            False,
+            phase,
+            f"This draft changed elsewhere (revision {result.current_revision}). "
+            "Refresh before continuing.",
+        )
     return True, nxt, f"{PHASE_LABELS[phase]} complete — now {PHASE_LABELS[nxt]}."
 
 
-def run_analyze(orch, user_id: str, draft_id: str) -> Dict[str, Any]:
+def run_analyze(
+    orch,
+    user_id: str,
+    draft_id: str,
+    *,
+    expected_revision: Optional[int] = None,
+    transition_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """The Analyze HARD GATE (T019). Runs the DETERMINISTIC 057 checker over the
     session's artifacts.
 
@@ -599,6 +950,17 @@ def run_analyze(orch, user_id: str, draft_id: str) -> Dict[str, Any]:
         return {"status": "unavailable"}
     if phase_of(row) not in ("analyze", "generate"):
         return {"status": "too_early", "phase": phase_of(row)}
+    current_revision = int(row.get("state_revision") or 0)
+    if expected_revision is None:
+        expected_revision = current_revision
+    if type(expected_revision) is not int or expected_revision < 0:
+        return {"status": "invalid_revision", "refresh": "refresh"}
+    if expected_revision != current_revision:
+        return {
+            "status": "conflict",
+            "current_revision": current_revision,
+            "refresh": "refresh",
+        }
 
     spec = session_spec(row)
     result = agent_analyze.check(
@@ -606,10 +968,27 @@ def run_analyze(orch, user_id: str, draft_id: str) -> Dict[str, Any]:
     record = result.as_dict()
     record["at"] = _now_ms()
     record["spec_fingerprint"] = spec_fingerprint(spec)
-    orch.history.db.update_draft_agent(
-        draft_id, analyze_result=json.dumps(record),
-        constitution_version=result.constitution_version if result.passed else None,
-        phase="generate" if result.passed else "analyze")
+    transition = cas_draft_update(
+        orch.history.db,
+        draft_id=draft_id,
+        owner_user_id=user_id,
+        expected_revision=expected_revision,
+        updates={
+            "analyze_result": json.dumps(record),
+            "constitution_version": (
+                result.constitution_version if result.passed else None
+            ),
+            "phase": "generate" if result.passed else "analyze",
+        },
+        transition_kind="analyze",
+        transition_id=transition_id,
+    )
+    if not transition.applied:
+        return {
+            "status": "conflict",
+            "current_revision": transition.current_revision,
+            "refresh": transition.refresh_action,
+        }
     if not result.passed:
         logger.info("byo authoring: Analyze blocked session %s (%d violations)",
                     draft_id, len(result.violations))
@@ -694,7 +1073,9 @@ def _spec_conformance_errors(code: str, tool_names: List[str],
 async def _generate_and_deliver(orch, *, user_id: str, agent_id: str, draft_id: str,
                                 tool_names: List[str], declared_scopes: List[str],
                                 tool_scopes: Optional[Dict[str, str]] = None,
-                                websocket=None) -> Dict[str, Any]:
+                                websocket=None,
+                                expected_revision: Optional[int] = None,
+                                generation_claim_id: Optional[str] = None) -> Dict[str, Any]:
     """Generate the bundle for an ALREADY-ANALYZED draft and push it to the host.
 
     Shared spine of the one-shot path and the guided flow. Never Popens the agent
@@ -713,7 +1094,23 @@ async def _generate_and_deliver(orch, *, user_id: str, agent_id: str, draft_id: 
     # present the id the registry knows, or registration is refused fail-closed
     # (user_agents.authorize_registration) and the refusal is silent on the wire.
     gen = await orch.lifecycle_manager.generate_code(
-        draft_id, websocket=websocket, target=BYO_TARGET, agent_id=agent_id)
+        draft_id,
+        websocket=websocket,
+        target=BYO_TARGET,
+        agent_id=agent_id,
+        expected_state_revision=expected_revision,
+        generation_claim_id=generation_claim_id,
+    )
+    if (gen or {}).get("generation_outcome") == "conflict" or (
+        gen or {}
+    ).get("status") == "conflict":
+        return {
+            "status": "conflict",
+            "agent_id": agent_id,
+            "draft_id": draft_id,
+            "current_revision": int((gen or {}).get("current_revision") or 0),
+            "refresh": "refresh",
+        }
     if (gen or {}).get("status") in ("error", "rejected"):
         return {"status": "generation_failed", "agent_id": agent_id,
                 "draft_id": draft_id, "error": (gen or {}).get("error_message")}
@@ -750,16 +1147,61 @@ async def _generate_and_deliver(orch, *, user_id: str, agent_id: str, draft_id: 
     await asyncio.to_thread(
         ua.mark_validated, orch.history.db, agent_id, AGENT_CONSTITUTION_VERSION,
         declared_tools=tool_names, declared_scopes=declared_scopes)
-    delivered = await orch.deliver_agent_bundle(
-        user_id, agent_id, files, AGENT_CONSTITUTION_VERSION)
+    runtime_manifest = (gen or {}).get("runtime_manifest")
+    if isinstance(runtime_manifest, dict):
+        from orchestrator.agent_generator import BYO_BUNDLE_FILENAMES
+
+        delivery_files = {
+            name: files[name]
+            for name in BYO_BUNDLE_FILENAMES
+            if name in files
+        }
+        if set(delivery_files) != set(BYO_BUNDLE_FILENAMES):
+            return {
+                "status": "generation_failed",
+                "agent_id": agent_id,
+                "draft_id": draft_id,
+                "error": "the finalized runtime bundle is incomplete",
+            }
+        delivered = await orch.deliver_agent_bundle(
+            user_id,
+            agent_id,
+            delivery_files,
+            AGENT_CONSTITUTION_VERSION,
+            runtime_manifest=runtime_manifest,
+            bundle_sha256=(gen or {}).get("bundle_sha256"),
+            revision_id=(gen or {}).get("revision_id"),
+            runtime_contract_version=(gen or {}).get(
+                "runtime_contract_version"
+            ),
+            required_runtime_lock_sha256=(gen or {}).get(
+                "required_runtime_lock_sha256"
+            ),
+            artifact_relative_path=(gen or {}).get(
+                "artifact_relative_path"
+            ),
+        )
+    else:
+        # Compatibility for injected feature-058 test generators. Production
+        # v2 generation always returns the finalized metadata above.
+        delivered = await orch.deliver_agent_bundle(
+            user_id, agent_id, files, AGENT_CONSTITUTION_VERSION
+        )
     logger.info("byo authoring: delivered %s to %d desktop host socket(s)",
                 agent_id, delivered)
     return {"status": "delivered" if delivered else "no_host",
             "agent_id": agent_id, "draft_id": draft_id, "delivered_to": delivered}
 
 
-async def generate_from_session(orch, user_id: str, draft_id: str,
-                                websocket=None) -> Dict[str, Any]:
+async def generate_from_session(
+    orch,
+    user_id: str,
+    draft_id: str,
+    websocket=None,
+    *,
+    expected_revision: Optional[int] = None,
+    transition_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """Generate + deliver the agent for a guided session.
 
     Generation is reachable ONLY post-Analyze-pass: :func:`generation_gate` is
@@ -775,6 +1217,25 @@ async def generate_from_session(orch, user_id: str, draft_id: str,
     row = await asyncio.to_thread(get_session, orch, user_id, draft_id)
     if row is None:
         return {"status": "unavailable"}
+    current_revision = int(row.get("state_revision") or 0)
+    if expected_revision is None:
+        expected_revision = current_revision
+    if type(expected_revision) is not int or expected_revision < 0:
+        return {"status": "invalid_revision", "refresh": "refresh"}
+    if expected_revision != current_revision:
+        return {
+            "status": "conflict",
+            "current_revision": current_revision,
+            "refresh": "refresh",
+        }
+    if transition_id is not None:
+        try:
+            parsed_transition = uuid.UUID(str(transition_id))
+        except (TypeError, ValueError, AttributeError):
+            return {"status": "invalid_transition", "refresh": "refresh"}
+        if parsed_transition.version != 4:
+            return {"status": "invalid_transition", "refresh": "refresh"}
+        transition_id = str(parsed_transition)
     ok, reason = generation_gate(orch, row)
     if not ok:
         logger.info("byo authoring: generate refused for session %s — %s", draft_id, reason)
@@ -791,8 +1252,25 @@ async def generate_from_session(orch, user_id: str, draft_id: str,
         # another user). Fail closed and send the session back to Analyze.
         record = result.as_dict()
         record["at"] = _now_ms()
-        await asyncio.to_thread(orch.history.db.update_draft_agent, draft_id,
-                                analyze_result=json.dumps(record), phase="analyze")
+        failed_transition = await asyncio.to_thread(
+            cas_draft_update,
+            orch.history.db,
+            draft_id=draft_id,
+            owner_user_id=user_id,
+            expected_revision=expected_revision,
+            updates={
+                "analyze_result": json.dumps(record),
+                "phase": "analyze",
+            },
+            transition_kind="analyze",
+            transition_id=transition_id,
+        )
+        if not failed_transition.applied:
+            return {
+                "status": "conflict",
+                "current_revision": failed_transition.current_revision,
+                "refresh": failed_transition.refresh_action,
+            }
         return {"status": "analyze_failed", "agent_id": agent_id,
                 "violations": record["violations"]}
 
@@ -805,14 +1283,27 @@ async def generate_from_session(orch, user_id: str, draft_id: str,
     # ``draft_agents.tools_spec``; without this it saw only the free-text
     # description and invented its own tools — so the agent the owner ran was not
     # the agent Analyze approved and the registry recorded.
-    await asyncio.to_thread(
-        orch.history.db.update_draft_agent, draft_id,
-        tools_spec=json.dumps([
+    generation_transition = await asyncio.to_thread(
+        cas_draft_update,
+        orch.history.db,
+        draft_id=draft_id,
+        owner_user_id=user_id,
+        expected_revision=expected_revision,
+        updates={"tools_spec": json.dumps([
             {"name": t.get("name"), "description": t.get("description", ""),
              "scope": t.get("scope") or _DEFAULT_SCOPE}
             for t in (plan.get("tools") or []) if t.get("name")
         ] or [{"name": n, "description": "", "scope": tool_scopes.get(n, _DEFAULT_SCOPE)}
-              for n in tool_names]))
+              for n in tool_names])},
+        transition_kind="claim_generation",
+        transition_id=transition_id,
+    )
+    if not generation_transition.applied:
+        return {
+            "status": "conflict",
+            "current_revision": generation_transition.current_revision,
+            "refresh": generation_transition.refresh_action,
+        }
 
     await asyncio.to_thread(
         ua.create_user_agent, orch.history.db, agent_id=agent_id,
@@ -822,7 +1313,9 @@ async def generate_from_session(orch, user_id: str, draft_id: str,
     return await _generate_and_deliver(
         orch, user_id=user_id, agent_id=agent_id, draft_id=draft_id,
         tool_names=tool_names, declared_scopes=declared_scopes,
-        tool_scopes=tool_scopes, websocket=websocket)
+        tool_scopes=tool_scopes, websocket=websocket,
+        expected_revision=generation_transition.current_revision,
+        generation_claim_id=str(uuid.uuid4()))
 
 
 async def revise(orch, user_id: str, agent_id: str) -> Dict[str, Any]:

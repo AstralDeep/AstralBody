@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "source_schema_revision": "057.001",
+  "provenance": {
+    "classification": "synthetic",
+    "source": "feature-060"
+  },
+  "sanitization": {
+    "contains_real_user_data": false,
+    "contains_credentials": false,
+    "reviewed": true
+  },
+  "files": {
+    "representative-057.sql": {
+      "sha256": "500c828c4f42dbdb86bf44e8db7996403cc61a6e113e66fa29a34fe9e45c9661",
+      "size_bytes": 11271
+    },
+    "keycloak-realm.json": {
+      "sha256": "b735aad99691ef7e5b1448c87cf85498a4e27b602333c07c5acad9149f0bb4fa",
+      "size_bytes": 2578
+    },
+    "legacy-agent-root/synthetic-same-name/.draft": {
+      "sha256": "bd1f679896ab90d6bf464df4f5ac90437de665a6540f51875b706fa28df9ae67",
+      "size_bytes": 37
+    },
+    "legacy-agent-root/synthetic-same-name/__init__.py": {
+      "sha256": "f61bbb5c97ba6244eeffcba6089afc5801105a90e5c065c25edbed3353f3e3f7",
+      "size_bytes": 79
+    },
+    "legacy-agent-root/synthetic-same-name/mcp_tools.py": {
+      "sha256": "2dff6ff159cadd6dccd45af8ea4ca8e9e188e198454489ababe312357d338b49",
+      "size_bytes": 246
+    }
+  },
+  "legacy_agent_root": {
+    "relative_path": "legacy-agent-root",
+    "server_agent_id": "fixture-server-agent",
+    "draft_id": "06000000-0000-4000-8000-000000000301",
+    "agent_slug": "synthetic-same-name"
+  },
+  "representative_tables": {
+    "users": 2,
+    "chats": 2,
+    "messages": 3,
+    "saved_components": 2,
+    "workspace_snapshot": 1,
+    "draft_agents": 2,
+    "user_agent": 3,
+    "scheduled_job": 2,
+    "job_run": 2,
+    "background_task": 3,
+    "agent_ownership": 3,
+    "interaction_log": 3
+  }
+}

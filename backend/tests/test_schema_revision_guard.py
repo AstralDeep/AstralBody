@@ -1,4 +1,4 @@
-"""SCHEMA_REVISION source-hash guard for shared/database.py (feature 052).
+"""Independent schema and user-agent-policy revision guards (060/T006).
 
 Editing _init_db, _apply_full_schema, or any _migrate_*/_cleanup_* helper
 without bumping SCHEMA_REVISION would leave already-marked databases on
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+from pathlib import Path
 
 import pytest
 
@@ -20,9 +21,13 @@ except Exception:  # pragma: no cover - import guard
     Database = None  # type: ignore
     SCHEMA_REVISION = None  # type: ignore
 
-EXPECTED_SCHEMA_REVISION = "057.001"
+EXPECTED_SCHEMA_REVISION = "060.004"
 EXPECTED_SOURCE_SHA256 = (
-    "0fde657d1f4090b19b085d2d163c6f0a79760c4ed5ba0cd90eda53dbe76f473a"
+    "f8a0d8398660564e82ca466f25d11bf6da07d290140d0deb99134de84288f393"
+)
+EXPECTED_USER_AGENT_POLICY_REVISION = "constitution=0.1.0;analyze=1"
+EXPECTED_USER_AGENT_POLICY_SOURCE_SHA256 = (
+    "c16c8c6709bbc72af7b69657a1105028b416fc982f53eb338ada9e34afc1374b"
 )
 
 _BUMP_INSTRUCTIONS = (
@@ -33,6 +38,16 @@ _BUMP_INSTRUCTIONS = (
     "EXPECTED_SOURCE_SHA256 in backend/tests/test_schema_revision_guard.py "
     "to the new values (print the hash via "
     "tests.test_schema_revision_guard.schema_source_sha256())."
+)
+
+_POLICY_BUMP_INSTRUCTIONS = (
+    "The baked user-agent constitution or deterministic Analyze policy changed. "
+    "Bump its owning AGENT_CONSTITUTION_VERSION or ANALYZE_POLICY_REVISION, "
+    "confirm USER_AGENT_POLICY_REVISION has canonical "
+    "'constitution=<semver>;analyze=<positive-integer>' form, then update "
+    "EXPECTED_USER_AGENT_POLICY_REVISION and "
+    "EXPECTED_USER_AGENT_POLICY_SOURCE_SHA256 together. A policy-only change "
+    "must not require a SCHEMA_REVISION bump."
 )
 
 
@@ -56,6 +71,19 @@ def schema_source_sha256() -> str:
         for name in _guarded_method_names()
     )
     return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+def user_agent_policy_source_sha256() -> str:
+    """Hash the exact baked constitution plus deterministic Analyze module."""
+    from orchestrator import agent_analyze, agent_constitution
+
+    constitution_path = Path(agent_constitution.__file__).resolve().parents[1] / (
+        "agent_constitution/agent_constitution.md"
+    )
+    source = constitution_path.read_bytes() + b"\0" + inspect.getsource(
+        agent_analyze
+    ).encode("utf-8")
+    return hashlib.sha256(source).hexdigest()
 
 
 def _skip_unless_importable():
@@ -86,4 +114,25 @@ def test_guard_covers_all_migration_helpers():
     assert "_init_db" in names
     assert "_apply_full_schema" in names
     assert "_migrate_backfill_tool_kinds_052" in names
+    assert "_migrate_runtime_reliability_060" in names
     assert any(name.startswith("_cleanup_") for name in names)
+
+
+def test_user_agent_policy_revision_is_exact_and_independent():
+    from orchestrator import agent_analyze, agent_constitution
+
+    assert agent_analyze.ANALYZE_POLICY_REVISION == "1"
+    assert (
+        agent_constitution.USER_AGENT_POLICY_REVISION
+        == EXPECTED_USER_AGENT_POLICY_REVISION
+    )
+    assert SCHEMA_REVISION == EXPECTED_SCHEMA_REVISION
+
+
+def test_user_agent_policy_source_hash_requires_policy_revision_bump():
+    actual = user_agent_policy_source_sha256()
+    assert actual == EXPECTED_USER_AGENT_POLICY_SOURCE_SHA256, (
+        f"user-agent policy source hash changed: {actual} != "
+        f"{EXPECTED_USER_AGENT_POLICY_SOURCE_SHA256}. "
+        f"{_POLICY_BUMP_INSTRUCTIONS}"
+    )

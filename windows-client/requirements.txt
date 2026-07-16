@@ -1,21 +1,3 @@
-# Exact pins so a tagged release rebuild resolves the same dependency set the
-# client was verified against (the release workflow installs this file, then
-# sigstore-signs the artifact — upstream majors must be opted into, not drift
-# in silently). Bump deliberately, then re-run the suite + screenshot harness.
-PySide6==6.11.1
-websockets==16.0
-# Windows tools agent (client-hosted A2A):
-aiohttp==3.14.1
-psutil==7.2.2
-pyperclip==1.11.0
-# Integrity verification (CLIENT-ONLY — frozen into the PyInstaller bundle;
-# never a backend/orchestrator runtime dependency, Constitution V preserved).
-# Not installed in the dev venv (lazily imported); major-bounded for release.
-sigstore>=3.0,<4
-# BYO agents (058, CLIENT-ONLY — same posture as sigstore): a delivered agent
-# bundle's mcp_tools.py builds its UI with astralprims and CANNOT pip-install
-# anything, so the host's interpreter (this exe, re-invoked as --byo-worker)
-# must already carry it. First-party package; not a backend/orchestrator dep.
-astralprims>=0.2.0
-# build only:
-# pyinstaller==6.21.0
+# Developer convenience input. Release jobs MUST install the complete hashed
+# requirements-release.lock.txt with --require-hashes instead.
+-r requirements.in

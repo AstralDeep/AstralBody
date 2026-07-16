@@ -40,7 +40,24 @@
 
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
 
-[Gates determined based on constitution file]
+[Gates determined based on constitution file. For changes that affect runtime
+infrastructure, name the qualifying persistent or ephemeral staging topology,
+the representative migrated dataset, real dependencies/client flows, and how
+evidence is bound to the candidate SHA or immutable artifact. For every
+maintained implementation language changed, name its tracked lint
+configuration and CI gate, explicitly including TypeScript/JavaScript. If the
+feature permits temporary client-platform evidence exceptions, name the exact
+eligible checks, non-waivable staging/trust checks, seven-day bound, append-only
+protected ledger outside the candidate tree, machine-verifiable protected
+release-owner approval/registration, durable next-release resolution receipts,
+and exact ledger snapshot. When candidate code can influence qualifying evidence
+or policy, identify the candidate-independent protected verifier, pinned policy
+identity, reconstructed trusted inputs, attested bounded-lifetime decision, and
+required gate bound to the installed protected workflow identity rather than a
+name-only check.]
+For a distributable release, identify the separately pinned protected publisher,
+its approval boundary, create-only/collision policy, and how candidate workflows
+remain unprivileged.]
 
 ## Project Structure
 

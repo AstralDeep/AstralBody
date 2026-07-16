@@ -21,6 +21,73 @@ data class DeviceCapabilities(
     val deviceType: String = "android",
 )
 
+/**
+ * Feature 060 account-scoped hydration request carried by `register_ui.resume`.
+ * Android remains an author-only client and never attaches `agent_host`.
+ */
+data class ConversationResume(
+    val activeChatId: String,
+    val requestGeneration: String,
+    val schemaVersion: Int = 1,
+)
+
+/**
+ * Complete generation and revision fence on a disposable preview frame.
+ * A null scope means the frame came from the bounded legacy compatibility
+ * path; a partially present or malformed scope is rejected by [Wire].
+ */
+data class TransientFrameScope(
+    val chatId: String,
+    val connectionGeneration: String,
+    val requestGeneration: String,
+    val baseRenderRevision: ULong,
+    val frameSequence: ULong,
+)
+
+/** Complete committed canvas carried atomically with a conversation transcript. */
+data class SnapshotCanvas(
+    val target: String,
+    val components: List<Component>,
+)
+
+/** Stable safe error projection carried by a terminal `operation_status`. */
+data class OperationStatusError(
+    val code: String,
+    val message: String,
+)
+
+/**
+ * Structured v2 desktop-host advertisement. Android validates the shared
+ * shape for parity but never emits it because Android is author-only.
+ */
+data class AgentHostRegistration(
+    val hostId: String,
+    val supportedRuntimeContractVersions: List<Int>,
+    val runtimeLockSha256: String,
+    val platform: String,
+    val clientVersion: String,
+)
+
+/** Server acknowledgement for a validated desktop-host advertisement. */
+data class AgentHostRegistered(
+    val hostId: String,
+    val hostSessionId: String,
+    val inventoryRequired: Boolean,
+    val acceptedAt: String,
+)
+
+/** Candidate-owned macOS personal-agent host applicability. */
+data class PersonalAgentHostCapability(
+    val supported: Boolean,
+    val runtimeContractVersions: List<Int>,
+    val sourceFeature: String?,
+)
+
+/** Exact immutable capability map shared by the dashboard and `system_config`. */
+data class CandidateCapabilityMap(
+    val macosPersonalAgentHost: PersonalAgentHostCapability,
+)
+
 /** A streaming error, as carried in a `ui_stream_data.error` or a `stream_error` payload. */
 data class StreamError(
     val code: String?,
@@ -66,9 +133,17 @@ data class ChatTranscript(val id: String?, val messages: List<ChatTurn>)
  * fallback so an unrecognized `type` is ignored rather than fatal.
  */
 sealed interface Inbound {
-    data class UiRender(val target: String, val components: List<Component>) : Inbound
+    data class UiRender(
+        val target: String,
+        val components: List<Component>,
+        val scope: TransientFrameScope? = null,
+    ) : Inbound
 
-    data class UiUpsert(val chatId: String?, val ops: List<CanvasOp>) : Inbound
+    data class UiUpsert(
+        val chatId: String?,
+        val ops: List<CanvasOp>,
+        val scope: TransientFrameScope? = null,
+    ) : Inbound
 
     data class UiStreamData(
         val streamId: String?,
@@ -80,6 +155,7 @@ sealed interface Inbound {
         val toolName: String?,
         /** 055 additive field — workspace identity when the stream is bridged; absent on legacy streams. */
         val componentId: String? = null,
+        val scope: TransientFrameScope? = null,
     ) : Inbound
 
     data class StreamSubscribed(
@@ -105,11 +181,73 @@ sealed interface Inbound {
 
     data class ChatLoaded(val chat: ChatTranscript) : Inbound
 
+    /**
+     * Feature 060 authoritative committed transcript + canvas projection.
+     * Every top-level field and every semantic transcript part is validated
+     * before this variant is constructed.
+     */
+    data class ConversationSnapshot(
+        val schemaVersion: Int,
+        val snapshotId: String,
+        val chatId: String,
+        val connectionGeneration: String,
+        val requestGeneration: String,
+        val snapshotPurpose: String,
+        val renderRevision: ULong,
+        val committedAt: String,
+        val transcript: List<JsonObject>,
+        val canvas: SnapshotCanvas,
+    ) : Inbound
+
+    /**
+     * Strict prelude that opens a commit-purpose request fence for a detached
+     * or server-originated update before its authoritative snapshot arrives.
+     */
+    data class ConversationCommitReady(
+        val schemaVersion: Int,
+        val chatId: String,
+        val connectionGeneration: String,
+        val requestGeneration: String,
+        val renderRevision: ULong,
+    ) : Inbound
+
     data class AgentList(val agents: List<Agent>) : Inbound
 
     data class HistoryList(val chats: List<ChatSummary>) : Inbound
 
     data class ChatStatus(val status: String?, val message: String?) : Inbound
+
+    /** Feature 060 server-owned durable operation projection. */
+    data class OperationStatus(
+        val operationId: String,
+        val action: String,
+        val surface: String,
+        val chatId: String?,
+        val connectionGeneration: String,
+        val requestGeneration: String,
+        val sequence: ULong,
+        val state: String,
+        val phase: String,
+        val label: String,
+        val terminal: Boolean,
+        val retryable: Boolean,
+        val error: OperationStatusError?,
+        val retryAfterMs: ULong?,
+        val updatedAt: String,
+    ) : Inbound
+
+    /** Feature 060 generation-fenced personal-agent runtime projection. */
+    data class AgentLifecycle(
+        val agentId: String,
+        val revisionId: String?,
+        val runtimeInstanceId: String?,
+        val lifecycleGeneration: ULong,
+        val stateRevision: ULong,
+        val state: String,
+        val reasonCode: String?,
+        val label: String,
+        val updatedAt: String,
+    ) : Inbound
 
     data class ChromeRender(val region: String, val html: String) : Inbound
 
@@ -132,8 +270,27 @@ sealed interface Inbound {
 
     data class AuthRequired(val reason: String?) : Inbound
 
-    /** Feature 044 — a server `error` reply, normalized from its three wire shapes. */
-    data class ErrorFrame(val code: String?, val message: String) : Inbound
+    /** Exact pre-admission refusal correlated to one client-only submission. */
+    data class AdmissionRefusal(
+        val submissionId: String,
+        val code: String,
+        val message: String,
+        val retryable: Boolean,
+        val retryAfterMs: ULong?,
+    ) : Inbound
+
+    /** Feature 044/060 — normalized error plus optional submission/conversation fence. */
+    data class ErrorFrame(
+        val code: String?,
+        val message: String,
+        val chatId: String? = null,
+        val connectionGeneration: String? = null,
+        val requestGeneration: String? = null,
+        val retryable: Boolean = false,
+        /** Present with [accepted] false when durable admission refused local work. */
+        val submissionId: String? = null,
+        val accepted: Boolean? = null,
+    ) : Inbound
 
     /** One step of the running turn's execution trail (`chat_step`). */
     data class ChatStep(val id: String?, val name: String?, val status: String?) : Inbound

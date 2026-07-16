@@ -15,17 +15,21 @@ Run standalone:  python -m win_agent.agent --port 8771
 from __future__ import annotations
 
 import argparse
+import hashlib
 import inspect
 import json
 import logging
 import os
-from typing import Any, Dict
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from aiohttp import web
 
 from astral_client import __version__
 from astral_client.audit_log import AuditLogger
 from .tools import TOOL_REGISTRY, set_context
+
+if TYPE_CHECKING:
+    from astral_client.deployment import EffectiveDeploymentProfile
 
 logger = logging.getLogger("win_agent")
 
@@ -54,7 +58,24 @@ def _advertised_tools() -> Dict[str, dict]:
     return {k: v for k, v in TOOL_REGISTRY.items() if k != "run_shell"}
 
 
-def build_card() -> Dict[str, Any]:
+def build_card(
+    deployment_profile: Optional["EffectiveDeploymentProfile"] = None,
+) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {
+        "host": "windows-client",
+        "platform": "windows",
+        "dangerous_bypass": _bypass_enabled(),
+    }
+    if deployment_profile is not None:
+        metadata.update(
+            {
+                "deployment_profile_sha256": deployment_profile.digest,
+                "deployment_release_id": deployment_profile.profile.release_id,
+                "deployment_endpoint_sha256": hashlib.sha256(
+                    deployment_profile.profile.websocket_endpoint.encode("utf-8")
+                ).hexdigest(),
+            }
+        )
     return {
         "name": AGENT_NAME,
         "description": AGENT_DESC,
@@ -66,16 +87,22 @@ def build_card() -> Dict[str, Any]:
             "output_schema": None, "tags": ["windows", "desktop"],
             "scope": info.get("scope", "tools:system"), "metadata": {},
         } for name, info in _advertised_tools().items()],
-        "metadata": {"host": "windows-client", "platform": "windows",
-                     "dangerous_bypass": _bypass_enabled()},
+        "metadata": metadata,
     }
 
 
-def _register_message() -> str:
+def _register_message(
+    deployment_profile: Optional["EffectiveDeploymentProfile"] = None,
+) -> str:
+    api_key = (
+        deployment_profile.managed_agent_api_key
+        if deployment_profile is not None
+        else (os.getenv("AGENT_API_KEY") or None)
+    )
     return json.dumps({
         "type": "register_agent",
-        "agent_card": build_card(),
-        "api_key": os.getenv("AGENT_API_KEY") or None,
+        "agent_card": build_card(deployment_profile),
+        "api_key": api_key,
     })
 
 
@@ -140,7 +167,7 @@ def dispatch(req: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def _card(request):
-    return web.json_response(build_card())
+    return web.json_response(build_card(request.app.get("deployment_profile")))
 
 
 async def _health(request):
@@ -150,7 +177,7 @@ async def _health(request):
 async def _agent_ws(request):
     ws = web.WebSocketResponse(max_msg_size=50 * 1024 * 1024)
     await ws.prepare(request)
-    await ws.send_str(_register_message())
+    await ws.send_str(_register_message(request.app.get("deployment_profile")))
     logger.info("orchestrator connected; registered %d Windows tools", len(TOOL_REGISTRY))
     async for msg in ws:
         if msg.type == web.WSMsgType.TEXT:
@@ -163,8 +190,11 @@ async def _agent_ws(request):
     return ws
 
 
-def make_app() -> web.Application:
+def make_app(
+    deployment_profile: Optional["EffectiveDeploymentProfile"] = None,
+) -> web.Application:
     app = web.Application()
+    app["deployment_profile"] = deployment_profile
     app.add_routes([
         web.get("/.well-known/agent-card.json", _card),
         web.get("/health", _health),
@@ -173,7 +203,12 @@ def make_app() -> web.Application:
     return app
 
 
-def start_agent_thread(host: str = "0.0.0.0", port: int = 8771):
+def start_agent_thread(
+    host: str = "0.0.0.0",
+    port: int = 8771,
+    *,
+    deployment_profile: Optional["EffectiveDeploymentProfile"] = None,
+):
     """Run the agent server in a daemon thread (so the desktop GUI can host it
     in-process). Returns the thread, or None on failure."""
     import asyncio
@@ -182,7 +217,7 @@ def start_agent_thread(host: str = "0.0.0.0", port: int = 8771):
     def _run():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        runner = web.AppRunner(make_app())
+        runner = web.AppRunner(make_app(deployment_profile))
         loop.run_until_complete(runner.setup())
         loop.run_until_complete(web.TCPSite(runner, host, port).start())
         logger.info("Windows tools agent listening on %s:%d", host, port)

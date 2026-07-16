@@ -1,0 +1,16 @@
+{
+  "document_type": "evidence_exception_request",
+  "schema_version": 1,
+  "exception_id": "90000000-0000-4000-8000-000000000007",
+  "candidate_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "release_id": "060-illegal-apple",
+  "platform": "ios",
+  "missing_checks": [
+    "apple_first_login_llm"
+  ],
+  "reason": "Apple first-login LLM evidence is mandatory for this release and cannot be waived.",
+  "requester_login": "fixture-author",
+  "requested_at": "2026-07-15T18:00:00Z",
+  "maximum_valid_days": 7,
+  "blocks_next_release": true
+}

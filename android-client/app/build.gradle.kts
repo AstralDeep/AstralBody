@@ -3,7 +3,6 @@ import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.compose.compiler)
     alias(libs.plugins.kover)
@@ -89,7 +88,7 @@ composeCompiler {
 }
 
 dependencies {
-    implementation(project(":core"))
+    implementation(projects.core)
 
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)
@@ -116,7 +115,7 @@ dependencies {
     implementation(libs.coil.compose)
 
     testImplementation(libs.junit)
-    testImplementation(kotlin("test")) // kotlin.test.* (assertEquals/Test) bridged to JUnit4
+    testImplementation(libs.kotlin.test.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.okhttp.mockwebserver)
 

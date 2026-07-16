@@ -2,6 +2,7 @@
 // broker (contracts/device-login.md): pacing (pending keeps interval,
 // slow_down raises it, never poll faster), terminal states, error mapping.
 import XCTest
+
 @testable import AstralCore
 
 final class DeviceLoginTests: XCTestCase {
@@ -17,7 +18,8 @@ final class DeviceLoginTests: XCTestCase {
 
         var transport: DeviceLoginClient.Transport {
             { [self] url, body in
-                lock.lock(); defer { lock.unlock() }
+                lock.lock()
+                defer { lock.unlock() }
                 let payload = (try? JSONValue.parse(body)) ?? .null
                 calls.append((url.lastPathComponent, payload))
                 guard !responses.isEmpty else {
@@ -30,21 +32,22 @@ final class DeviceLoginTests: XCTestCase {
     }
 
     static let startBody = """
-    {"handle":"h-opaque","user_code":"WDJB-MJHT",
-     "verification_uri":"https://idp/device",
-     "verification_uri_complete":"https://idp/device?user_code=WDJB-MJHT",
-     "expires_in":600,"interval":5,
-     "qr_png_base64":"\(Data([0x89, 0x50, 0x4E, 0x47]).base64EncodedString())"}
-    """
+        {"handle":"h-opaque","user_code":"WDJB-MJHT",
+         "verification_uri":"https://idp/device",
+         "verification_uri_complete":"https://idp/device?user_code=WDJB-MJHT",
+         "expires_in":600,"interval":5,
+         "qr_png_base64":"\(Data([0x89, 0x50, 0x4E, 0x47]).base64EncodedString())"}
+        """
 
     static let approvedBody = """
-    {"status":"approved","tokens":{"access_token":"at","refresh_token":"rt",
-     "expires_in":300,"token_type":"Bearer"}}
-    """
+        {"status":"approved","tokens":{"access_token":"at","refresh_token":"rt",
+         "expires_in":300,"token_type":"Bearer"}}
+        """
 
     func client(_ broker: ScriptedBroker) -> DeviceLoginClient {
-        DeviceLoginClient(serverBase: URL(string: "http://127.0.0.1:8001")!,
-                          transport: broker.transport)
+        DeviceLoginClient(
+            serverBase: URL(string: "http://127.0.0.1:8001")!,
+            transport: broker.transport)
     }
 
     func testStartParsesQRAndCode() async throws {
@@ -59,7 +62,7 @@ final class DeviceLoginTests: XCTestCase {
 
     func testBrokerUnavailableMapsTo503Error() async {
         let broker = ScriptedBroker([
-            (503, #"{"detail":{"error":"device_login_unavailable","detail":"realm lacks grant"}}"#),
+            (503, #"{"detail":{"error":"device_login_unavailable","detail":"realm lacks grant"}}"#)
         ])
         do {
             _ = try await client(broker).start()
@@ -133,7 +136,7 @@ final class DeviceLoginTests: XCTestCase {
 
     func testRefreshViaBroker() async throws {
         let broker = ScriptedBroker([
-            (200, #"{"access_token":"at2","refresh_token":"rt2","expires_in":300}"#),
+            (200, #"{"access_token":"at2","refresh_token":"rt2","expires_in":300}"#)
         ])
         let tokens = try await client(broker).refresh(refreshToken: "rt")
         XCTAssertEqual(tokens.accessToken, "at2")

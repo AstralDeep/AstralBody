@@ -16,6 +16,11 @@ from typing import Any, Dict, List, Optional
 
 from orchestrator.tool_permissions import VALID_SCOPES
 
+# This is intentionally independent from the baked constitution version. Any
+# deterministic change to the Analyze rules below must increment this positive
+# integer so already-validated user agents are rechecked on the next boot.
+ANALYZE_POLICY_REVISION = "1"
+
 # Reserved / non-user identity prefixes and stems a user agent may not take
 # (Constitution H — non-colliding identity). Meta pseudo-agents use "__".
 _RESERVED_PREFIXES = ("__",)
@@ -92,11 +97,12 @@ def check(draft_spec: Dict[str, Any], *, constitution_version: Optional[str] = N
     ``tool_scopes``), ``clarify_answers`` (list). ``db`` enables the H collision check.
     """
     if constitution_version is None:
-        try:
-            from orchestrator.agent_constitution import AGENT_CONSTITUTION_VERSION
-            constitution_version = AGENT_CONSTITUTION_VERSION
-        except Exception:
-            constitution_version = None
+        # The policy owner validates the baked asset at import time. Propagate
+        # any loader/validation failure instead of returning a passing result
+        # without a version binding.
+        from orchestrator.agent_constitution import AGENT_CONSTITUTION_VERSION
+
+        constitution_version = AGENT_CONSTITUTION_VERSION
 
     v: List[Violation] = []
     text = _text_of(draft_spec)

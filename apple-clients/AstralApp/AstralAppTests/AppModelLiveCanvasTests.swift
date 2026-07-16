@@ -1,3 +1,4 @@
+import AstralCore
 // Live-op rule (retires the 044 origin/co-viewer divergence): while a turn is
 // armed (`pendingReplace`), identity-keyed `ui_upsert`/stream ops apply
 // IMMEDIATELY to the visible canvas — morph-in-place, exactly as when no turn
@@ -8,22 +9,25 @@
 // is lost. The first live op clears the query-start skeleton (web parity:
 // first canvas content hides it) without ending the turn-active state.
 import XCTest
-import AstralCore
+
 @testable import AstralDeep
 
 @MainActor
 final class AppModelLiveCanvasTests: XCTestCase {
 
     private var workspaceCard: AstralComponent {
-        AstralComponent(json: .object([
-            "type": .string("card"), "component_id": .string("wc_abc123"),
-            "title": .string("Budget"),
-        ]))!
+        AstralComponent(
+            json: .object([
+                "type": .string("card"), "component_id": .string("wc_abc123"),
+                "title": .string("Budget"),
+            ]))!
     }
 
     private let doneStatus = #"{"type":"chat_status","status":"done"}"#
-    private let resultUpsert = #"{"type":"ui_upsert","ops":[{"op":"upsert","component_id":"wc_result","component":{"type":"card","component_id":"wc_result","title":"Result"}}]}"#
-    private let designedRender = #"{"type":"ui_render","target":"canvas","components":[{"type":"card","component_id":"wc_designed","title":"Designed"}]}"#
+    private let resultUpsert =
+        #"{"type":"ui_upsert","ops":[{"op":"upsert","component_id":"wc_result","component":{"type":"card","component_id":"wc_result","title":"Result"}}]}"#
+    private let designedRender =
+        #"{"type":"ui_render","target":"canvas","components":[{"type":"card","component_id":"wc_designed","title":"Designed"}]}"#
 
     private func reduce(_ model: AppModel, _ json: String) {
         model.handleFrame(InboundFrame.parse(json)!)
@@ -37,8 +41,8 @@ final class AppModelLiveCanvasTests: XCTestCase {
         model.sendChat("go")
         reduce(model, resultUpsert)
         XCTAssertEqual(model.canvas.map(\.componentId), ["wc_abc123", "wc_result"])
-        XCTAssertTrue(model.pendingCanvas.isEmpty)   // no render — nothing buffered
-        XCTAssertTrue(model.turnActive)              // the turn is still running
+        XCTAssertTrue(model.pendingCanvas.isEmpty)  // no render — nothing buffered
+        XCTAssertTrue(model.turnActive)  // the turn is still running
     }
 
     func testUpsertOnlyTurnCommitsTheLiveCanvas() {
@@ -61,7 +65,7 @@ final class AppModelLiveCanvasTests: XCTestCase {
         model.canvas = [workspaceCard]
         model.sendChat("go")
         reduce(model, designedRender)
-        XCTAssertEqual(model.canvas.map(\.componentId), ["wc_abc123"])   // visible canvas untouched
+        XCTAssertEqual(model.canvas.map(\.componentId), ["wc_abc123"])  // visible canvas untouched
         XCTAssertEqual(model.pendingCanvas.map(\.componentId), ["wc_designed"])
         reduce(model, doneStatus)
         XCTAssertEqual(model.canvas.map(\.componentId), ["wc_designed"])
@@ -72,7 +76,7 @@ final class AppModelLiveCanvasTests: XCTestCase {
         let model = AppModel()
         model.sendChat("go")
         reduce(model, designedRender)
-        reduce(model, resultUpsert)   // live AND mirrored into the buffer
+        reduce(model, resultUpsert)  // live AND mirrored into the buffer
         XCTAssertEqual(model.canvas.map(\.componentId), ["wc_result"])
         XCTAssertEqual(model.pendingCanvas.map(\.componentId), ["wc_designed", "wc_result"])
         reduce(model, doneStatus)
@@ -93,14 +97,16 @@ final class AppModelLiveCanvasTests: XCTestCase {
     func testBufferedRenderKeepsSkeleton() {
         let model = AppModel()
         model.sendChat("go")
-        reduce(model, designedRender)   // invisible until commit — keep the shimmer
+        reduce(model, designedRender)  // invisible until commit — keep the shimmer
         XCTAssertTrue(model.showSkeleton)
     }
 
     func testStreamOpsGoLiveMidTurnAndClearSkeleton() {
         let model = AppModel()
         model.sendChat("go")
-        reduce(model, #"{"type":"ui_stream_data","stream_id":"s1","seq":1,"components":[{"type":"text","content":"partial"}]}"#)
+        reduce(
+            model,
+            #"{"type":"ui_stream_data","stream_id":"s1","seq":1,"components":[{"type":"text","content":"partial"}]}"#)
         XCTAssertEqual(model.canvas.map(\.componentId), ["stream-s1"])
         XCTAssertFalse(model.showSkeleton)
         XCTAssertTrue(model.pendingCanvas.isEmpty)
@@ -112,6 +118,6 @@ final class AppModelLiveCanvasTests: XCTestCase {
         reduce(model, resultUpsert)
         reduce(model, doneStatus)
         model.sendChat("two")
-        XCTAssertTrue(model.showSkeleton)   // liveOpsThisTurn resets on arm
+        XCTAssertTrue(model.showSkeleton)  // liveOpsThisTurn resets on arm
     }
 }

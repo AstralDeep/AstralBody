@@ -4,7 +4,7 @@
 
 **Created**: 2026-07-15
 
-**Status**: Draft (specify step only — plan and tasks deferred)
+**Status**: Implementation and verification in progress
 
 **Input**: User description: "Review current main, including merged feature 058, for current and future non-security problems; exercise the Android, Windows, and web clients end to end; make the Windows release ship with its deployment connection profile instead of showing the first-run Configure AstralDeep dialog; and create the next collision-safe remediation specification. Security behavior is explicitly out of scope."
 
@@ -95,6 +95,11 @@ render frames; verify the intended chat and semantically equivalent committed UI
 3. **Given** stored transcript content contains structured assistant output, **When** any client
    reloads that chat, **Then** the visible transcript remains semantically equivalent rather than
    becoming blank or losing turns.
+4. **Given** a scheduled turn, persisted stream terminal, detached mutation, or long-running job
+   commits while the intended chat is active, **When** no client-originated turn generation exists
+   for that update, **Then** the server announces one fresh commit generation with the exact
+   six-field `conversation_commit_ready` prelude and the client applies only its one complete paired
+   snapshot without exposing a partial transcript or canvas.
 
 ---
 
@@ -223,10 +228,10 @@ and validate every tracked documentation link.
 
 ### User Story 8 - Prove release behavior before publication (Priority: P2)
 
-A maintainer receives deployment-like evidence for the actual artifacts and supported clients
-before a change can ship. Source-only tests are supplemented by a clean packaged Windows run, a
-real browser flow, a connected Android flow, and equivalent Apple coverage on an available Apple
-runner.
+A maintainer receives candidate-bound staging evidence for the actual artifacts and supported
+clients before a change can ship. Source-only tests are supplemented by a qualifying isolated
+candidate deployment, a clean packaged Windows run, a real browser flow, a connected Android flow,
+and equivalent Apple coverage on an available Apple runner.
 
 **Why this priority**: Current pipelines do not regularly exercise the packaged Windows worker,
 connected Android behavior, or live browser authentication path before release, allowing packaging,
@@ -239,8 +244,10 @@ round trip where the client supports hosting.
 **Acceptance Scenarios**:
 
 1. **Given** a pull request changes runtime, protocol, packaging, or client behavior, **When** its
-   release gates run, **Then** every affected shipping client completes its deployment-like smoke
-   flow before merge.
+   release gates run, **Then** the same immutable candidate is deployed with real configured
+   authentication, representative migrated data, and real workers, and every affected shipping
+   client completes its smoke flow before merge unless—and only while—an independently verified
+   FR-051 platform-unavailability exception covers that exact client evidence.
 2. **Given** the Windows candidate artifact, **When** it runs from a clean profile, **Then** both the
    normal application and packaged personal-agent worker complete their smoke checks and terminate
    cleanly.
@@ -259,15 +266,22 @@ warnings, and users relying on assistive technology can identify every interacti
 will stop working at the next major toolchain boundary, and two authoring switches lack accessible
 labels.
 
-**Independent Test**: Run a compatibility canary against the declared next toolchain and automated
-accessibility inspection on every changed surface; verify no removal blocker and no unnamed control.
+**Independent Test**: Once the next major toolchain has public, exactly resolvable artifacts, run a
+compatibility canary against those separately pinned releases and automated accessibility inspection
+on every changed surface; verify no removal blocker and no unnamed control. Before publication, CI
+MUST fail closed by default, verify official unavailability explicitly, and reject a stale
+`unreleased` declaration; that diagnostic is not a passing compatibility canary.
 
 **Acceptance Scenarios**:
 
-1. **Given** the next declared major client toolchain, **When** the compatibility canary runs,
+1. **Given** the next declared major client toolchain has public exact artifacts, **When** the
+   compatibility canary runs,
    **Then** configuration and tests complete without a known-removal blocker.
 2. **Given** an interactive authoring surface, **When** it is inspected through accessibility
    semantics, **Then** every control has a stable role, name, state, and focus behavior.
+3. **Given** a mobile text field has invoked the system keyboard, **When** the user completes entry
+   or dismisses it, **Then** the native iOS or Android keyboard action and dismissal gesture are
+   used and no application-drawn Done accessory overlays the keyboard.
 
 ### Edge Cases
 
@@ -286,8 +300,13 @@ accessibility inspection on every changed surface; verify no removal blocker and
 - Two owners choose the same agent name, or one owner creates two same-name drafts concurrently.
 - A mobile process is recreated before the first-turn chat acknowledgement arrives, during
   hydration, or after the server has committed structured output.
-- Chat hydration succeeds but its trailing canvas render is delayed, missing, or belongs to an old
-  connection generation.
+- A canonical hydration snapshot is delayed, incomplete, invalid, or scoped to an old connection or
+  request generation; any bounded-compatibility trailing render arrives late and may affect only a
+  disposable overlay, never the committed transcript or canvas.
+- A malformed, extra-field, foreign-chat, stale-revision, or duplicate
+  `conversation_commit_ready` arrives, or a valid server-originated prelude arrives while an
+  unfinished client commit owns the fence; it cannot replace/steal that fence or mutate committed
+  state, and the durable update remains recoverable through hydration.
 - A clean Windows profile is offline, the deployment is temporarily unavailable, or the local
   settings schema predates the bundled deployment profile.
 - An Apple user presses Save more than once, backgrounds the app, changes focus or window size,
@@ -383,9 +402,22 @@ accessibility inspection on every changed surface; verify no removal blocker and
 - **FR-027**: Active conversation state MUST be cleared only by an explicit new-chat, sign-out, or
   confirmed deletion action, not by process recreation or transient connection loss.
 - **FR-028**: Reconnect hydration MUST preserve the committed transcript and canvas until a complete,
-  correctly scoped replacement is ready, then replace them as one coherent state.
+  correctly scoped replacement is ready, then replace them as one coherent state. Every direct
+  turn, component mutation, scheduled turn, persisted stream terminal, detached/REST update, and
+  long-running-job result MUST likewise publish transcript plus the complete canvas as one durable
+  logical conversation commit and one authoritative snapshot, or leave the prior revision
+  authoritative. A web-targeted snapshot MUST carry the canonical server-rendered presentation in
+  the reserved per-component envelope defined by the continuity contract so the browser performs
+  the same atomic replacement without implementing a second primitive renderer; native snapshots
+  MUST remain semantic-only.
 - **FR-029**: Conversation and render updates MUST be scoped to the intended chat, connection
-  generation, and request generation so delayed updates cannot replace current content.
+  generation, and request generation so delayed updates cannot replace current content. Clients
+  MUST generate fresh request UUID4s for loads/resumes and submitted turns. A server-originated
+  scheduled, detached, persisted-stream, or long-job commit MUST instead use a fresh server UUID4
+  opened on a client only by an exact six-field `conversation_commit_ready` prelude
+  (`type`, `schema_version`, `chat_id`, `connection_generation`, `request_generation`, and
+  `render_revision`) that immediately precedes its one commit snapshot; invalid/stale preludes and a
+  prelude that would steal an unfinished client commit MUST be no-ops.
 - **FR-030**: Every client MUST decode all valid stored transcript content forms into semantically
   equivalent visible turns and MUST surface an explicit recovery state instead of silently emitting
   blank turns.
@@ -411,8 +443,9 @@ accessibility inspection on every changed surface; verify no removal blocker and
   non-sensitive diagnostics; it MUST NOT silently switch to a different deployment.
 - **FR-038**: Production packaging MUST fail before signing when its bundled profile is missing,
   invalid, placeholder-valued, internally inconsistent, or contains a value not approved for that
-  named release profile. An intentionally approved local-only profile remains valid; an accidental
-  fallback to a local default does not.
+  named release profile. Production authorities/endpoints MUST be non-local and contain no userinfo,
+  query, or fragment. An intentionally approved local-only generic/developer profile remains valid;
+  an accidental production fallback to a local default does not.
 - **FR-039**: The Windows artifact MUST expose a non-interactive deployment validation that proves
   the effective profile and packaged personal-agent runtime are complete without displaying or
   exporting credential values.
@@ -437,22 +470,102 @@ accessibility inspection on every changed surface; verify no removal blocker and
 - **FR-046**: All tracked documentation references affected by this feature MUST pass automated
   target validation, including files intentionally tracked beneath an otherwise ignored directory.
 - **FR-047**: Every interactive control changed by this feature MUST expose a stable accessible name,
-  role, state, and keyboard or focus behavior.
+  role, state, and keyboard or focus behavior. Mobile text entry and keyboard dismissal MUST use the
+  native platform IME/keyboard behavior; the application MUST NOT draw a replacement keyboard
+  dismissal control over the system keyboard.
 
 - **FR-048**: Release validation MUST exercise the actual packaged Windows application and hosted
   worker from a clean profile before signing, including startup, deployment validation, one benign
-  personal-agent round trip, output handling, and clean termination.
-- **FR-049**: Changes affecting runtime, protocol, packaging, or cross-client behavior MUST run a
-  deployment-like matrix covering a real web browser, the Windows artifact, a connected Android
-  emulator or device, and affected Apple clients on an Apple runner.
+  personal-agent round trip, output handling, and clean termination. Signing/publication MUST
+  consume those exact archived unsigned bytes from the same-SHA passing readiness run without
+  rebuilding. The existing detached Sigstore flow MUST leave the EXE bytes unchanged, create
+  `SHA256SUMS` and `cosign.bundle`, upload all three only to a draft/quarantined release, record the
+  identical pre/post-sign EXE digest plus official tag/release/asset/target-SHA identities, re-
+  download every asset by immutable ID, verify the checksum and exact Sigstore identity/issuer, and
+  only then make the release public; any failure MUST delete or retain the draft as non-public. The
+  official tag MUST be created as exactly `v${release_version}` at the protected readiness SHA, where
+  `release_version` is strict SemVer without a `v`, and any existing tag/release/asset collision MUST
+  fail without replacement. The release name MUST equal that exact tag, publication MUST mark it as
+  the latest release, and the publisher MUST confirm the resulting `/releases/latest` metadata so
+  the shipped v0.3.0 updater selects and verifies 0.4.0; a post-transition mismatch MUST remove only
+  the just-created release/tag, emit a protected failure, and never report publication success.
+  Candidate-modifiable workflows MUST have no
+  release-mutation authority.
+  To preserve the verifier shipped in v0.3.0, `release-windows.yml` MAY receive OIDC only as an exact-
+  byte-pinned compatibility bridge after the protected publisher verifies its installed blob and
+  creates `v0.4.0`; that bridge MUST have only `contents: read`, `actions: read`, and `id-token: write`,
+  retrieve the EXE by exact originating run/attempt/artifact identity, sign only those re-hashed
+  protected-decision bytes under the existing tag-ref SAN, pass the actual v0.3.0 verifier, and have
+  no tag/release mutation. Tag/
+  release creation, asset mutation, approval verification, and public transition MUST run in a
+  separately pinned protected publisher whose exact workflow SHA is checked before a scoped token is
+  issued. Immediately before any mutation, that publisher MUST prove the attested decision is still
+  before its protected `valid_until` and every used exception approval is still unexpired.
+- **FR-049**: Changes affecting runtime, protocol, packaging, or cross-client behavior MUST deploy
+  the same commit-derived candidate artifact in a qualifying persistent or isolated ephemeral
+  staging environment with real configured authentication, representative data migrated through
+  the normal product mechanism, and real background workers. That exact deployment MUST remain
+  reachable to and alive for a matrix covering a real web browser, the Windows artifact, a connected
+  Android emulator or device, and affected Apple clients on an Apple runner, with cleanup only after
+  the matrix finishes. Evidence MUST bind the candidate SHA, immutable artifact digests, fixture
+  fingerprints, target runner identities, one shared staging identity, and re-hashed raw bytes. The
+  per-producer workflow and stage-deploy trust manifests MUST be downloaded by exact artifact ID
+  from the current workflow run and independently verified through GitHub artifact attestations
+  against the expected repository/candidate and a protected reusable trusted-builder signer digest
+  and certificate identity pinned outside the candidate by repository rules/protected-environment
+  configuration. Each platform report's job and runner MUST match its verified producer manifest; a
+  candidate-controlled workflow ref, caller path, filename, or embedded hash is not a trust root.
+  The repository-required final decision MUST be produced and attested by that protected verifier,
+  which reconstructs bounded current-run inputs from GitHub identities and API state and executes
+  policy/coverage code pinned at its protected signer digest rather than candidate-controlled code;
+  a caller aggregate or candidate-declared success MUST NOT qualify. Repository rules MUST require
+  the installed protected workflow identity, not merely a reproducible check name; a candidate job
+  using the same name MUST NOT satisfy the merge gate.
+  Archived endpoints MUST contain no userinfo, query, or fragment.
+  Runner-local, caller-selected URL, mutable-reference, source-only, or mock fallbacks do not qualify. One reusable
+  readiness aggregate MUST run automatically for pull requests and main pushes using the immutable
+  event base, while explicit candidate reruns MAY use a verified manual ancestor.
+  The protected verifier/policy/schemas, bridge template, publisher/controller, broker, and rules
+  MUST be installed in a protected first landing while the automatic candidate caller remains
+  disabled. Only after the candidate rebases onto and verifies that trust-root landing MAY a second
+  checkpoint enable the PR/main caller and required check; no bootstrap run may depend on a trust
+  root that the same run is attempting to install. Every final decision MUST attest the exact current
+  protected debt-ledger commit/tree/canonical path-digest snapshot and reject stale or concurrently
+  moved heads even when no current exception is used.
 - **FR-050**: The matrix MUST cover sign-in, one ordinary rendered chat turn, reconnect and resume,
-  lifecycle status, and personal-agent authoring or hosting wherever that client supports it.
-- **FR-051**: Platform unavailability MUST block release or require a recorded, owner-approved
-  exception that names the missing evidence, expires within seven calendar days, and blocks the next
-  release if the evidence is still absent. First-login credential validation on both Apple platforms
-  is non-waivable for an Apple release intended to resolve this App Store rejection.
+  lifecycle status, and personal-agent authoring or hosting wherever that client supports it. macOS
+  hosting applicability MUST come from a complete server-owned capability value in the exercised
+  candidate—not a branch/spec path, live client count, or client-authored report. Unsupported makes
+  only the macOS-hosting check not applicable; supported-but-refused or unacknowledged is a failure.
+- **FR-051**: Temporary shipping-client runner/platform unavailability independent of product
+  behavior MUST block release or require a recorded, owner-approved exception that names the missing
+  platform/check evidence, expires within seven calendar days, and blocks the next release if the
+  evidence is still absent. Approval MUST be verified against the same-repository GitHub API and an
+  independently attested protected `release-evidence-exception` environment deployment reviewed by
+  an allowlisted release owner other than the requester. The approval request MUST expose and bind
+  the exact immutable exception artifact ID and digest before review, and the protected verifier MUST
+  re-query and re-hash those same bytes; a self-declared approver or post-request mutation is invalid.
+  An unavailable client report MUST still bind the exact built client artifact, verified qualifying
+  staging identity, and a protected immutable observation of the attempted target job/runner or
+  platform failure, with the always-running control producer identified separately. Failed
+  behavior, backend/docs results, qualifying staging, provenance/trust, and evidence-policy integrity
+  are not exception-eligible. First-login credential validation
+  on both Apple platforms is non-waivable for an Apple release intended to resolve this App Store
+  rejection. The immutable pre-review request artifact MUST contain only requester-known scope and
+  candidate/release identity; reviewer identity, approval time, expiry, and approval state MUST come
+  only from the protected approval record. Before the protected final decision passes, a separately
+  pinned registrar MUST append a canonical debt entry create-only to an externally protected,
+  non-force-push `release-evidence-debt` ref and return an attested immutable commit/path/digest
+  receipt. Current exception debt MUST NOT be committed into the candidate tree or used to derive
+  the candidate SHA it names. Exception history MUST remain append-only, and a later release MUST prove every prior
+  missing platform/check as passing and append a protected `release_evidence_debt_resolution` plus
+  attested receipt before its aggregate may pass; another exception cannot resolve prior debt. A
+  resolution applies only to its named debt, so a later outage for the same check is a new debt.
 - **FR-052**: Client build configuration MUST include a compatibility canary for the next declared
-  major toolchain and MUST remove known-removal blockers before adopting that toolchain.
+  major toolchain and MUST remove known-removal blockers before adopting that toolchain. Exact pins
+  MUST identify public, independently resolvable artifacts; while either major is unpublished, the
+  declaration MUST remain explicitly unavailable, fail closed as a canary, and use only a separate
+  official-availability diagnostic that cannot satisfy the canary success criterion.
 - **FR-053**: The feature MUST add no new product runtime dependency without the project approval
   required by the constitution; test-only tooling MUST remain isolated from released artifacts.
 - **FR-054**: On macOS and iOS first login, choosing Save for LLM API credentials MUST produce visible
@@ -472,7 +585,9 @@ accessibility inspection on every changed surface; verify no removal blocker and
   cancellation MUST terminate the complete process tree and close its pipes within five seconds.
 - **FR-059**: User-agent policy or constitution version changes MUST trigger their required
   revalidation independently of schema revision changes, including when the stored schema marker is
-  already current.
+  already current. Analyze policy and the baked agent constitution MUST have independent explicit
+  revision owners and one fail-closed canonical combined marker; feature 060 starts at
+  `constitution=0.1.0;analyze=1`.
 
 ### Key Entities
 
@@ -486,8 +601,10 @@ accessibility inspection on every changed surface; verify no removal blocker and
   last-known-good relationship, promotion state, and acknowledgement identity.
 - **Draft revision**: One owner-scoped, immutable authoring version used to detect stale transitions
   and isolate staged publication.
-- **Conversation resume state**: The intended active-chat identity and last coherent transcript and
-  canvas generation needed to restore the user's place without storing credentials.
+- **Conversation resume state**: The intended active-chat identity, active connection/request
+  fence, and last coherent transcript/canvas revision needed to restore the user's place without
+  storing credentials; server-generated commit fences are accepted only through the exact
+  `conversation_commit_ready` prelude.
 - **Deployment profile**: The versioned set of release-provided connection and client-mode values
   resolved once for a Windows client installation.
 - **Maintenance unit**: One independently claimable synthesis or maintenance input with attempt,
@@ -530,17 +647,27 @@ accessibility inspection on every changed surface; verify no removal blocker and
 - **SC-011**: Users see a visible operation or phase label and current status within two seconds for
   every release-smoke operation that exceeds that duration, and no progress sequence remains
   non-terminal after its operation ends.
-- **SC-012**: One release-candidate evidence set demonstrates sign-in, rendered chat, continuity,
-  and applicable personal-agent behavior on every affected shipping client before publication;
-  missing platform evidence is never silently treated as passing.
+- **SC-012**: One release-candidate evidence set identifies the qualifying staging topology,
+  representative migration, candidate SHA/artifact digests, and quantitative trials demonstrating
+  sign-in, rendered chat, continuity, and applicable personal-agent behavior on every affected
+  shipping client against one reachable deployment before publication, except only exact client
+  evidence covered by a current FR-051 request, protected approval, and registered-ledger receipt;
+  missing platform evidence,
+  duplicate checks, illegal N/A outcomes, unresolved prior exception debt, unverified bytes, or
+  conflicting staging identity is never silently treated as passing.
 - **SC-013**: All affected tracked documentation links resolve, the personal-agent operating guide
   is present in a clean checkout, and the documented enablement flow proves the running effective
   value on its first execution.
-- **SC-014**: The next-major-toolchain compatibility canary completes with zero known-removal
-  blockers, and automated accessibility inspection reports zero unnamed interactive controls on
-  changed surfaces.
-- **SC-015**: All new or changed behavior meets the repository's changed-code coverage gate and adds
-  no unapproved released dependency.
+- **SC-014**: Once exact public artifacts exist for both declared next-major tools, the
+  next-major-toolchain compatibility canary completes with zero known-removal blockers, and
+  automated accessibility inspection reports zero unnamed interactive controls on changed
+  surfaces. Until then, the independently verified official-availability diagnostic MUST confirm
+  that the artifacts remain unpublished and the canary MUST fail closed; that diagnostic does not
+  satisfy this criterion or authorize distribution.
+- **SC-015**: All new or changed behavior meets the repository's ≥90% changed executable-line
+  coverage gate in every changed maintained language and in aggregate, with missing applicable
+  reports or an unexpected empty event-base comparison failing automatically on pull requests and
+  main pushes, and adds no unapproved released dependency.
 - **SC-016**: Across 30 first-login trials on each Apple platform, Save is visibly acknowledged
   within 250 milliseconds, valid active-connection attempts reach the next page within five seconds
   in at least 95% of trials, every longer-than-one-second attempt shows a loading phase, and no
@@ -586,11 +713,14 @@ accessibility inspection on every changed surface; verify no removal blocker and
   iOS review target in addition to the reported Mac profile when available.
 - Generic developer builds may retain an explicit configuration workflow; the official deployment-
   specific production artifact may not fall back to it during ordinary clean launch.
-- Existing authentication, authorization, credential handling, and other security behavior remain
-  unchanged. Security review and security remediation are outside this feature by explicit user
-  direction.
-- Android, Windows, and web are locally testable in the current Windows environment. Apple behavior
-  requires an Apple runner or machine and cannot be substituted by a non-Apple client result.
+- Existing product-runtime authentication, authorization, credential handling, agent/data trust
+  boundaries, and other runtime security behavior remain unchanged. Security review and runtime
+  security remediation are outside this feature by explicit user direction. Release-artifact
+  provenance, CI evidence trust, and protected evidence-exception approval are in scope because
+  FR-048–FR-051 make them part of release correctness, not a product authorization-policy change.
+- Android, Apple, and web are locally testable in the current macOS pickup environment; Windows
+  source behavior is locally testable, while the packaged Windows artifact requires a Windows
+  runner or machine. No shipping client may substitute for another client's release evidence.
 - User-visible results may be semantically equivalent across clients without being byte-for-byte
   identical, provided content, ordering, state, and supported interactions are preserved.
 - At-most-one visible effect applies to handlers that honor the stable occurrence identity. Planning
@@ -601,8 +731,10 @@ accessibility inspection on every changed surface; verify no removal blocker and
 
 ## Out of Scope
 
-- Any change to authentication, authorization, secret storage, trust boundaries, permission policy,
-  or other security behavior.
+- Any change to product-runtime authentication, authorization, secret storage, agent/data trust
+  boundaries, permission policy, or other runtime security behavior. This exclusion does not cover
+  the candidate-independent release-provenance and CI evidence-trust controls required by
+  FR-048–FR-051.
 - Building the macOS personal-agent host itself, which remains owned by feature 059.
 - A visual redesign, new UI primitive family, or new agent-sharing/publishing capability.
 - Replacing the current scheduling, client, or deployment product with a different platform; this
