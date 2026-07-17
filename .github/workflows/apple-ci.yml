@@ -297,8 +297,11 @@ jobs:
           # Hosted macos-26 images may ship zero, one, or several pre-created
           # "Apple Watch Series 11 (46mm)" devices, so a name+OS destination is
           # ambiguous. Create one dedicated device and target it by exact UDID.
+          # There is both an iOS 26.5 and a watchOS 26.5 runtime; select the
+          # watchOS one explicitly or `simctl create` fails "Incompatible
+          # device" (403) when a Watch device type lands on an iOS runtime.
           runtime_id="$(xcrun simctl list runtimes available -j \
-            | python3 -c "import json,sys,os; rt=os.environ['WATCHOS_RUNTIME']; print(next(r['identifier'] for r in json.load(sys.stdin)['runtimes'] if r.get('isAvailable') and r.get('version')==rt))")"
+            | python3 -c "import json,sys,os; rt=os.environ['WATCHOS_RUNTIME']; print(next(r['identifier'] for r in json.load(sys.stdin)['runtimes'] if r.get('isAvailable') and r.get('version')==rt and 'watchos' in r.get('identifier','').lower()))")"
           [[ -n "$runtime_id" ]] || { echo "watchOS ${WATCHOS_RUNTIME} runtime not found" >&2; exit 1; }
           xcrun simctl delete "astral-watch-060" 2>/dev/null || true
           udid="$(xcrun simctl create "astral-watch-060" "Apple Watch Series 11 (46mm)" "$runtime_id")"

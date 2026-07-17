@@ -786,6 +786,13 @@ def test_deterministic_10000_interleavings_publish_one_visible_effect(
     visible_effects: list[str] = []
 
     for index in range(10_000):
+        # The loop performs ~11k serial DB round trips; on a loaded CI runner
+        # that exceeds the max 60 s lease, and the store correctly refuses the
+        # now-stale claim. This test exercises effect deduplication, not lease
+        # expiry, so renew the running claim well within the lease window (the
+        # same renewal a real long-running attempt performs per lease/3).
+        if index and index % 250 == 0:
+            stores[0].renew_claim(claim, lease_seconds=60)
         store = stores[index % len(stores)]
         reservation = store.reserve_effect(
             attempt,
