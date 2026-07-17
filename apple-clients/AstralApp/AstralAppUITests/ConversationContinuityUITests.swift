@@ -121,8 +121,12 @@ final class ConversationContinuityUITests: XCTestCase {
     }
 
     private func text(containing fragment: String) -> XCUIElement {
+        // iOS exposes static-text content as the LABEL; macOS exposes it as
+        // the VALUE (with an empty label). Match either, or every semantic
+        // assertion fails on macOS while the content is visibly on screen.
         app.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS[c] %@", fragment)
+            NSPredicate(
+                format: "label CONTAINS[c] %@ OR value CONTAINS[c] %@", fragment, fragment)
         ).firstMatch
     }
 
