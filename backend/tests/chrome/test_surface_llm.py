@@ -13,6 +13,8 @@ import json
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from llm_config.api import ListModelsResponse, TestConnectionResponse
 from llm_config.providers import CUSTOM_PROVIDER_KEY, all_presets
 from llm_config.user_store import PersistedLLMConfig
@@ -619,3 +621,94 @@ def test_test_requires_all_fields():
         orch, ws, "u1", ["user"], _payload(base_url="https://x.test/v1", api_key=SECRET, model=""),
     ))
     assert "required" in notice
+
+
+# ---------------------------------------------------------------------------
+# Settings-path save: dismissal is device-aware
+#
+# A save by an ALREADY-configured user unlocks no first-run gate, so nothing
+# closes the surface for them. Web can answer with a success notice because its
+# modal shell carries a ✕; an Apple surface is a full screen with no ✕ and no
+# system Back, so a notice re-render strands it on screen with the save already
+# committed (the reported macOS symptom). Natives get the close instruction.
+# ---------------------------------------------------------------------------
+
+def _native_orch(device):
+    from rote.rote import ROTE
+
+    orch = make_orch()
+    orch.rote = ROTE()
+    ws = FakeWS()
+    register(orch, ws)
+    orch.rote.register_device(ws, {"device_type": device})
+    return orch, ws
+
+
+def _close_frames(orch):
+    out = []
+    for _ws, text in orch.sent:
+        try:
+            frame = json.loads(text)
+        except (TypeError, ValueError):
+            continue
+        if (frame.get("type") == "chrome_surface"
+                and frame.get("surface_key") == ""
+                and not (frame.get("components") or [])):
+            out.append(frame)
+    return out
+
+
+@pytest.mark.parametrize("device", ["macos", "ios", "windows", "android"])
+def test_settings_path_save_closes_the_surface_on_native_clients(monkeypatch, device):
+    _probe_ok(monkeypatch)
+    orch, ws = _native_orch(device)
+    orch._llm_store.seed("u1", base_url="https://old.test/v1", model="old-model")
+
+    result = run(llm_surface.HANDLERS["chrome_llm_save"](
+        orch, ws, "u1", ["user"],
+        _payload(provider="custom", base_url="https://new.test/v1",
+                 api_key=SECRET, model="new-model"),
+    ))
+
+    # No re-render tuple: a stranded surface is the bug being guarded against.
+    assert result is None
+    assert len(_close_frames(orch)) == 1
+    assert orch._llm_store.get_sync("u1").model == "new-model"
+
+
+@pytest.mark.parametrize("device", ["macos", "android"])
+def test_rejected_save_keeps_the_native_surface_open_to_show_the_error(monkeypatch, device):
+    async def failing_probe(*, api_key, base_url, model, **kw):
+        return False, "auth_failed", "401 unauthorized"
+
+    monkeypatch.setattr("llm_config.ws_handlers.probe_chat_completion", failing_probe)
+    orch, ws = _native_orch(device)
+
+    surface, _params, notice = run(llm_surface.HANDLERS["chrome_llm_save"](
+        orch, ws, "u1", ["user"],
+        _payload(provider="custom", base_url="https://x.test/v1",
+                 api_key=SECRET, model="gpt-x"),
+    ))
+
+    # The surface only stays open when it still needs the user.
+    assert surface == "llm"
+    assert "Save rejected" in notice
+    assert _close_frames(orch) == []
+    assert orch._llm_store.get_sync("u1") is None
+
+
+def test_settings_path_save_keeps_the_web_success_notice(monkeypatch):
+    _probe_ok(monkeypatch)
+    orch, ws = _native_orch("browser")
+    orch._llm_store.seed("u1", base_url="https://old.test/v1", model="old-model")
+
+    surface, _params, notice = run(llm_surface.HANDLERS["chrome_llm_save"](
+        orch, ws, "u1", ["user"],
+        _payload(provider="custom", base_url="https://new.test/v1",
+                 api_key=SECRET, model="new-model"),
+    ))
+
+    # Web keeps its ✕, so it keeps the confirmation it always had.
+    assert surface == "llm"
+    assert "AI provider saved for your account" in notice
+    assert _close_frames(orch) == []

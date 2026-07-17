@@ -189,8 +189,27 @@ struct SurfaceView: View {
             if let surface = model.pendingSurface {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
-                        Text(surface.title.isEmpty ? "Settings" : surface.title)
-                            .font(.title2.bold()).foregroundStyle(p.text)
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(surface.title.isEmpty ? "Settings" : surface.title)
+                                .font(.title2.bold()).foregroundStyle(p.text)
+                            Spacer()
+                            // Web has the modal ✕ and Android the system Back;
+                            // without this the surface could only be left via
+                            // the top bar. Hidden while the 054 pin is set —
+                            // the same refusal web's `data-mandatory` card makes.
+                            if !model.mandatorySurface {
+                                Button {
+                                    model.closeSurface()
+                                } label: {
+                                    Image(systemName: "xmark")
+                                        .font(.system(size: 15, weight: .semibold))
+                                        .foregroundStyle(p.muted)
+                                        .padding(6)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Close")
+                            }
+                        }
                         ForEach(Array(surface.components.enumerated()), id: \.offset) { _, comp in
                             ComponentView(component: comp)
                         }

@@ -1292,42 +1292,54 @@ final class AppModel: NSObject {
     /// Feature 060 render frames are previews. A valid, strictly sequenced
     /// scope may update only the disposable overlay; committed state changes
     /// exclusively through a complete conversation_snapshot.
+    /// A chat-target preview turn, shaped exactly like the committed path
+    /// (`reduceUiRender`): the chat column is TEXT, so components are flattened
+    /// into it and never carried alongside. Carrying both rendered every
+    /// text-only answer twice — once as markdown, once as a duplicate card.
+    private func chatPreviewTurn(
+        _ components: [AstralComponent], frame: InboundFrame
+    ) -> ChatTurn? {
+        let text = flattenText(components)
+        guard !text.isEmpty else { return nil }
+        return ChatTurn(
+            id: "preview-\(frame.payload["frame_sequence"]?.numberValue ?? 0)",
+            role: "assistant",
+            text: text,
+            components: [])
+    }
+
+    /// Canvas-target preview components, filtered exactly like the committed
+    /// path (`reduceUiRender`): reasoning, doc cards and skeletons are chat /
+    /// loading artifacts and never belong on the canvas.
+    private func canvasPreviewComponents(
+        _ components: [AstralComponent]
+    ) -> [AstralComponent] {
+        components.filter {
+            !isReasoning($0) && !isDocCard($0.componentId) && !isSkeleton($0)
+        }
+    }
+
     private func reduceTransient(_ frame: InboundFrame) {
         guard continuity.acceptTransient(frame) else { return }
         switch frame.name {
         case "ui_render", "ui_update":
             let components = frame.renderComponents
             if frame.renderTarget == "chat" {
-                let text = flattenText(components)
                 let pendingUsers = transientTurns.filter { $0.role == "user" }
-                let response: [ChatTurn] =
-                    text.isEmpty && components.isEmpty
-                    ? []
-                    : [
-                        ChatTurn(
-                            id: "preview-\(frame.payload["frame_sequence"]?.numberValue ?? 0)",
-                            role: "assistant",
-                            text: text,
-                            components: components)
-                    ]
+                let response = chatPreviewTurn(components, frame: frame).map { [$0] } ?? []
                 transientTurns = pendingUsers + response
             } else {
-                transientCanvas = components
+                transientCanvas = canvasPreviewComponents(components)
             }
         case "ui_append":
             let components = frame.renderComponents
             if frame.renderTarget == "chat" {
-                let text = flattenText(components)
-                if !text.isEmpty || !components.isEmpty {
-                    transientTurns.append(
-                        ChatTurn(
-                            id: "preview-\(frame.payload["frame_sequence"]?.numberValue ?? 0)",
-                            role: "assistant",
-                            text: text,
-                            components: components))
+                if let turn = chatPreviewTurn(components, frame: frame) {
+                    transientTurns.append(turn)
                 }
             } else {
-                transientCanvas = (transientCanvas ?? canvas) + components
+                transientCanvas =
+                    (transientCanvas ?? canvas) + canvasPreviewComponents(components)
             }
         case "ui_upsert":
             transientCanvas = Canvas.apply(transientCanvas ?? canvas, frame.upsertOps)
@@ -1555,6 +1567,15 @@ final class AppModel: NSObject {
                 statusText = nil
                 stepTrail = []
                 asyncDetached = false
+                // The turn is over, so no further canvas work is coming. A
+                // committed snapshot always precedes `done` ("terminal status
+                // follows the sole committed-state frame"), so releasing the
+                // skeleton here cannot race one. A text-only turn produces no
+                // canvas ops and no snapshot at all, and would otherwise latch
+                // the skeleton forever — hiding a canvas that is already
+                // correct (the previous components, or the welcome).
+                pendingReplace = false
+                liveOpsThisTurn = false
             }
         case "thinking", "executing", "fixing", "processing_async":
             turnActive = true
@@ -1859,7 +1880,10 @@ final class AppModel: NSObject {
         liveOpsThisTurn = false
         // 055 uniform rule: purge the ephemeral welcome (`wel_` identities)
         // from the committed canvas at turn start — the server no longer
-        // sends the blanking `ui_render []` (wire-contract §1).
+        // sends the blanking `ui_render []` (wire-contract §1). Continuity
+        // mode keeps the welcome instead: there the canvas is replaced only by
+        // a committed snapshot, and a turn that never produces one must leave
+        // the run-examples screen exactly as it found it.
         if continuity.connectionGeneration == nil {
             canvas = canvas.dropWelcome()
         }
@@ -2192,6 +2216,21 @@ final class AppModel: NSObject {
     func retryPendingSurface() {
         guard !pendingSurfaceKey.isEmpty else { return }
         sendEvent("chrome_open", .object(["surface": .string(pendingSurfaceKey), "params": pendingSurfaceParams]))
+    }
+
+    /// Dismiss the open settings surface — the native twin of web's
+    /// `astral-modal-close` ✕ (`client.js closeModal()`) and Android's system
+    /// Back. Both are LOCAL dismissals, so this sends no frame; the server
+    /// keeps no per-socket surface state to release. Refused while the 054
+    /// mandatory pin is set, exactly as web's `data-mandatory` card refuses
+    /// every dismissal affordance (FR-013: sign-out stays the one escape).
+    func closeSurface() {
+        if mandatorySurface { return }
+        guard screen == .surface else { return }
+        screen = .chat
+        pendingSurface = nil
+        pendingSurfaceKey = ""
+        pendingSurfaceParams = .object([:])
     }
 
     func setToolEnabled(_ agent: Agent, tool: String, enabled: Bool) {

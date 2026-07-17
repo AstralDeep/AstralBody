@@ -183,10 +183,19 @@ async def _push_error_notice(orch, websocket, title: str, message: str,
             title, chrome_error_block(message, surface_key or None)))
 
 
-async def _push_close(orch, websocket):
+def is_native_sdui(orch, websocket) -> bool:
+    """Does this socket render surfaces as native SDUI components?
+
+    Native surfaces are full screens with no modal ✕ (web) and, on Apple, no
+    system Back (Android) — so a handler that leaves one on screen strands it.
+    """
+    return _device_type(orch, websocket) in _NATIVE_SDUI_DEVICE_TYPES
+
+
+async def push_close(orch, websocket):
     """Device-aware modal close: web clears the HTML modal region; native SDUI
     clients receive the documented empty-components ``chrome_surface`` form."""
-    if _device_type(orch, websocket) in _NATIVE_SDUI_DEVICE_TYPES:
+    if is_native_sdui(orch, websocket):
         await _push_surface(orch, websocket, "", "", False, [])
     else:
         await _push_modal(orch, websocket, "")
@@ -371,7 +380,7 @@ async def handle_chrome_event(orch, websocket, action: str, payload: dict,
 
     try:
         if action == "chrome_close":
-            await _push_close(orch, websocket)
+            await push_close(orch, websocket)
             return True
 
         if action == "chrome_open":

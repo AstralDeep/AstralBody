@@ -640,6 +640,17 @@ async def _handle_save(orch: Any, websocket: Any, user_id: str, roles: Any, payl
         unlocked = False
     if unlocked:
         return None
+    # Already-configured (settings-path) save: nothing was gated, so no unlock
+    # closed the surface. Web can answer with a success notice because its
+    # modal shell carries a ✕, and Android has system Back — but an Apple
+    # surface is a full screen with neither, so a notice re-render would strand
+    # it on screen with the save already done (the reported macOS symptom).
+    # Close it instead; a REJECTED save still returns its error notice above,
+    # so the surface only stays open when it still needs the user.
+    from orchestrator.chrome_events import is_native_sdui, push_close
+    if is_native_sdui(orch, websocket):
+        await push_close(orch, websocket)
+        return None
     suffix = " (kept the previously saved API key)" if used_saved else ""
     return (SURFACE_KEY, keep, notice_block(
         "success", f"AI provider saved for your account{suffix}."))

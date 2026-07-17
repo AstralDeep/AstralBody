@@ -5150,7 +5150,7 @@ class Orchestrator:
         try:
             from orchestrator import llm_gate
 
-            await llm_gate.unlock_after_save(
+            unlocked = await llm_gate.unlock_after_save(
                 self,
                 work.owner.owner_user_id or "legacy",
                 coordinator=self.work_admission,
@@ -5166,6 +5166,24 @@ class Orchestrator:
                 exc_info=True,
             )
             return terminal
+        # An already-configured owner unlocks no first-run gate, so nothing
+        # above closed the surface they saved from. Web's modal carries a ✕ and
+        # Android has system Back, but an Apple surface is a full screen with
+        # neither — leaving it up strands the user on a form whose work is
+        # already committed. Mirrors the chrome handler's non-operation path.
+        if not unlocked and work.frame.action == "chrome_llm_save":
+            try:
+                from orchestrator.chrome_events import is_native_sdui, push_close
+
+                if is_native_sdui(self, context.websocket) and (
+                    time.monotonic() < deadline
+                ):
+                    await push_close(self, context.websocket)
+            except Exception:
+                logger.debug(
+                    "credential save surface close failed (non-fatal)",
+                    exc_info=True,
+                )
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return terminal
