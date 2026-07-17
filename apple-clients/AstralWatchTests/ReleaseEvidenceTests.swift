@@ -173,7 +173,8 @@ private final class WatchEvidenceRecorder {
                 message: "ASTRAL_RELEASE_PLATFORM=\(declared) but this producer emits watchos evidence")
         }
         outputPath = try requiredEnvironment("ASTRAL_RELEASE_EVIDENCE_OUTPUT")
-        rawDirectoryPath = URL(fileURLWithPath: outputPath)
+        rawDirectoryPath =
+            URL(fileURLWithPath: outputPath)
             .deletingLastPathComponent().appendingPathComponent(rawDirectoryName).path
         candidateSha = try requiredEnvironment("ASTRAL_RELEASE_CANDIDATE_SHA")
         releaseId = try requiredEnvironment("ASTRAL_RELEASE_ID")
@@ -335,29 +336,35 @@ final class ReleaseEvidenceTests: XCTestCase {
         failedCheckIds = []
         var checks: [[String: Any]] = []
 
-        checks.append(await runCheck("sign_in", recorder: recorder) {
-            try await self.performDeviceLoginSignIn(recorder: recorder)
-        })
-        checks.append(await runCheck("rendered_chat", recorder: recorder) {
-            try self.runRenderedChat()
-        })
-        checks.append(await runCheck("reconnect_resume", recorder: recorder) {
-            try await self.runResumeTrials()
-        })
-        checks.append(await runCheck("agent_lifecycle", recorder: recorder) {
-            try self.runAgentLifecycle()
-        })
-        checks.append(await runCheck("accessibility_semantics", recorder: recorder) {
-            try self.runAccessibilityContract()
-        })
-        checks.append(await runCheck("personal_agent", recorder: recorder) {
-            var production = CheckProduction()
-            production.applicabilityReason =
-                "The shipping Watch app has no personal-agent authoring surface; the canonical "
-                + "authoring check applies only to the web, windows, android, macos, and ios clients."
-            production.raw = ["authoring_surface_present": false]
-            return production
-        })
+        checks.append(
+            await runCheck("sign_in", recorder: recorder) {
+                try await self.performDeviceLoginSignIn(recorder: recorder)
+            })
+        checks.append(
+            await runCheck("rendered_chat", recorder: recorder) {
+                try self.runRenderedChat()
+            })
+        checks.append(
+            await runCheck("reconnect_resume", recorder: recorder) {
+                try await self.runResumeTrials()
+            })
+        checks.append(
+            await runCheck("agent_lifecycle", recorder: recorder) {
+                try self.runAgentLifecycle()
+            })
+        checks.append(
+            await runCheck("accessibility_semantics", recorder: recorder) {
+                try self.runAccessibilityContract()
+            })
+        checks.append(
+            await runCheck("personal_agent", recorder: recorder) {
+                var production = CheckProduction()
+                production.applicabilityReason =
+                    "The shipping Watch app has no personal-agent authoring surface; the canonical "
+                    + "authoring check applies only to the web, windows, android, macos, and ios clients."
+                production.raw = ["authoring_surface_present": false]
+                return production
+            })
 
         let outcome = failedCheckIds.isEmpty ? "passed" : "failed"
         do {

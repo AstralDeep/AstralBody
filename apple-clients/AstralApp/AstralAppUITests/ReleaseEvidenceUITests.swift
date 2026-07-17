@@ -194,7 +194,8 @@ private final class EvidenceRecorder {
         }
         outputPath = try requiredEnvironment("ASTRAL_RELEASE_EVIDENCE_OUTPUT")
         rawDirectoryName = "\(platform)-raw"
-        rawDirectoryPath = URL(fileURLWithPath: outputPath)
+        rawDirectoryPath =
+            URL(fileURLWithPath: outputPath)
             .deletingLastPathComponent().appendingPathComponent(rawDirectoryName).path
         candidateSha = try requiredEnvironment("ASTRAL_RELEASE_CANDIDATE_SHA")
         releaseId = try requiredEnvironment("ASTRAL_RELEASE_ID")
@@ -368,49 +369,57 @@ final class ReleaseEvidenceUITests: XCTestCase {
 
         // apple_first_login_llm runs first: its 30 fixture-driven launches are
         // independent of the live staging session and must not disturb it.
-        checks.append(runCheck("apple_first_login_llm", recorder: recorder) {
-            try self.runFirstLoginTrials()
-        })
+        checks.append(
+            runCheck("apple_first_login_llm", recorder: recorder) {
+                try self.runFirstLoginTrials()
+            })
 
         var liveBlocked: String?
-        checks.append(runCheck("sign_in", recorder: recorder) {
-            do {
-                return try self.performLiveSignIn(recorder: recorder)
-            } catch {
-                liveBlocked = "sign_in"
-                throw error
-            }
-        })
+        checks.append(
+            runCheck("sign_in", recorder: recorder) {
+                do {
+                    return try self.performLiveSignIn(recorder: recorder)
+                } catch {
+                    liveBlocked = "sign_in"
+                    throw error
+                }
+            })
 
-        checks.append(runCheck("rendered_chat", recorder: recorder, blockedBy: liveBlocked) {
-            do {
-                return try self.runRenderedChat()
-            } catch {
-                liveBlocked = liveBlocked ?? "rendered_chat"
-                throw error
-            }
-        })
+        checks.append(
+            runCheck("rendered_chat", recorder: recorder, blockedBy: liveBlocked) {
+                do {
+                    return try self.runRenderedChat()
+                } catch {
+                    liveBlocked = liveBlocked ?? "rendered_chat"
+                    throw error
+                }
+            })
 
-        checks.append(runCheck("reconnect_resume", recorder: recorder, blockedBy: liveBlocked) {
-            try self.runResumeTrials()
-        })
+        checks.append(
+            runCheck("reconnect_resume", recorder: recorder, blockedBy: liveBlocked) {
+                try self.runResumeTrials()
+            })
 
-        checks.append(runCheck("agent_lifecycle", recorder: recorder, blockedBy: liveBlocked) {
-            try self.observeAgentLifecycle(recorder: recorder)
-        })
+        checks.append(
+            runCheck("agent_lifecycle", recorder: recorder, blockedBy: liveBlocked) {
+                try self.observeAgentLifecycle(recorder: recorder)
+            })
 
-        checks.append(runCheck("personal_agent", recorder: recorder, blockedBy: liveBlocked) {
-            try self.runAuthoringFlow()
-        })
+        checks.append(
+            runCheck("personal_agent", recorder: recorder, blockedBy: liveBlocked) {
+                try self.runAuthoringFlow()
+            })
 
-        checks.append(runCheck("accessibility_semantics", recorder: recorder, blockedBy: liveBlocked) {
-            try self.runAccessibilityInspection()
-        })
+        checks.append(
+            runCheck("accessibility_semantics", recorder: recorder, blockedBy: liveBlocked) {
+                try self.runAccessibilityInspection()
+            })
 
         if recorder.platform == "macos" {
-            checks.append(runCheck("macos_personal_agent_host", recorder: recorder) {
-                self.macOSPersonalAgentHostProduction(recorder: recorder, liveBlocked: liveBlocked)
-            })
+            checks.append(
+                runCheck("macos_personal_agent_host", recorder: recorder) {
+                    self.macOSPersonalAgentHostProduction(recorder: recorder, liveBlocked: liveBlocked)
+                })
         }
 
         let outcome = failedCheckIds.isEmpty ? "passed" : "failed"
