@@ -883,17 +883,22 @@ struct ParamPickerComponent: View {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     if operation.isLoading {
                         ProgressView().controlSize(.small).tint(p.primary)
+                            .accessibilityHidden(true)
                     }
+                    // The accessibility contract lives on the Text itself, with
+                    // no `.accessibilityElement(children:)` wrapper: wrapping —
+                    // even a Text — mints a generic AXGroup, and macOS AXGroups
+                    // drop AXValue, so XCUIElement.value (and VoiceOver's value
+                    // readout) read as empty on macOS.
                     Text(operation.presentedLabel)
                         .font(.caption)
                         .foregroundStyle(operation.errorCode == nil ? p.muted : p.error)
                         .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("llm-save-status")
+                        .accessibilityLabel("AI provider setup status")
+                        .accessibilityValue(operation.presentedLabel)
+                        .accessibilityAddTraits(.updatesFrequently)
                 }
-                .accessibilityElement(children: .ignore)
-                .accessibilityIdentifier("llm-save-status")
-                .accessibilityLabel("AI provider setup status")
-                .accessibilityValue(operation.presentedLabel)
-                .accessibilityAddTraits(.updatesFrequently)
             }
         }
         .padding(14)

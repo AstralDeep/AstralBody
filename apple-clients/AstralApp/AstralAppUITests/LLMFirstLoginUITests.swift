@@ -18,8 +18,7 @@ final class LLMFirstLoginUITests: XCTestCase {
         XCTAssertTrue(form.waitForExistence(timeout: 5))
         XCTAssertTrue(apiKey.waitForExistence(timeout: 2))
         XCTAssertTrue(save.waitForExistence(timeout: 2))
-        apiKey.tap()
-        apiKey.typeText("ui-only-placeholder")
+        focusAndType(apiKey, "ui-only-placeholder")
 
         save.tap()
         let status = element("llm-save-status")
@@ -33,8 +32,7 @@ final class LLMFirstLoginUITests: XCTestCase {
 
         // Editing and focus stay responsive while the operation is active.
         XCTAssertTrue(apiKey.isEnabled)
-        apiKey.tap()
-        apiKey.typeText("x")
+        focusAndType(apiKey, "x")
 
         let activePhaseObserved = waitForStatus(
             status,
@@ -61,8 +59,7 @@ final class LLMFirstLoginUITests: XCTestCase {
         let apiKey = app.secureTextFields["param-field-api_key"]
         let save = app.buttons["llm-save-button"]
         XCTAssertTrue(apiKey.waitForExistence(timeout: 5))
-        apiKey.tap()
-        apiKey.typeText("invalid-ui-placeholder")
+        focusAndType(apiKey, "invalid-ui-placeholder")
         save.tap()
 
         let status = element("llm-save-status")
@@ -72,8 +69,7 @@ final class LLMFirstLoginUITests: XCTestCase {
         XCTAssertTrue(waitForEnabled(save, enabled: true, timeout: 2))
         XCTAssertEqual(save.value as? String, "Ready")
 
-        apiKey.tap()
-        apiKey.typeText("-corrected")
+        focusAndType(apiKey, "-corrected")
     }
 
     func testProviderUnavailableTerminalIsExplicitAndRetryable() {
@@ -81,8 +77,7 @@ final class LLMFirstLoginUITests: XCTestCase {
         let apiKey = app.secureTextFields["param-field-api_key"]
         let save = app.buttons["llm-save-button"]
         XCTAssertTrue(apiKey.waitForExistence(timeout: 5))
-        apiKey.tap()
-        apiKey.typeText("unavailable-ui-placeholder")
+        focusAndType(apiKey, "unavailable-ui-placeholder")
         save.tap()
 
         let status = element("llm-save-status")
@@ -98,8 +93,7 @@ final class LLMFirstLoginUITests: XCTestCase {
         let apiKey = app.secureTextFields["param-field-api_key"]
         let save = app.buttons["llm-save-button"]
         XCTAssertTrue(apiKey.waitForExistence(timeout: 5))
-        apiKey.tap()
-        apiKey.typeText("timeout-ui-placeholder")
+        focusAndType(apiKey, "timeout-ui-placeholder")
 
         save.tap()
         let status = element("llm-save-status")
@@ -126,6 +120,29 @@ final class LLMFirstLoginUITests: XCTestCase {
         app.launchArguments = ["--astral-ui-test-first-login", scenario]
         app.launchEnvironment["ASTRAL_UI_TESTING"] = "1"
         app.launch()
+    }
+
+    /// Tap until the field actually owns keyboard focus, then type. Hosted CI
+    /// VMs can drop the focus a tap requested; typing without focus hard-fails
+    /// with "Neither element nor any descendant has keyboard focus".
+    private func focusAndType(_ field: XCUIElement, _ text: String) {
+        for attempt in 0..<5 {
+            if attempt > 0 { Thread.sleep(forTimeInterval: 0.4) }
+            field.tap()
+            if fieldHasFocus(field) { break }
+        }
+        field.typeText(text)
+    }
+
+    private func fieldHasFocus(_ field: XCUIElement) -> Bool {
+        #if os(macOS)
+            // XCUIElement exposes no focus attribute on macOS, and the macOS
+            // lane has never shown the tap-without-focus flake — one tap is
+            // authoritative there.
+            return true
+        #else
+            return (field.value(forKey: "hasKeyboardFocus") as? Bool) ?? false
+        #endif
     }
 
     private func element(_ identifier: String) -> XCUIElement {
