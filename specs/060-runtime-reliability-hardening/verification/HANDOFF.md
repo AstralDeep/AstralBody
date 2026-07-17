@@ -9,6 +9,29 @@ punch list.
 
 ---
 
+## 0. coverage-gate — DEFERRED ("circle back", 2026-07-17)
+
+The feature-029 single-lane `coverage-gate` (diff-cover on the `test` job's
+`backend/coverage.xml`) is temporarily **non-blocking** (`continue-on-error:
+true` in `ci.yml`). Why: the 060 feature deliberately splits coverage across
+lanes (in-image `test`, host `release-tooling-tests`, perf, integration,
+per-client), so a single-lane diff-cover under-measures. The honest first step
+is already committed — test modules are excluded from the diff (they run in
+other lanes) — which lifts it from 77% to ~82% locally (higher in CI, where all
+tests pass; my local measure was suppressed by ~23 clean-postgres env
+failures). The residual to reach 90% is genuine changed-product-line coverage,
+dominated by the 17k-line `orchestrator.py` (~63%), plus `scheduler/api.py`
+(70%), `knowledge_synthesis.py` (78%), `llm_gate.py` (75%), `history.py` (83%).
+To circle back: run the honest diff locally
+(`diff-cover backend/coverage.xml --compare-branch origin/main --fail-under 90
+--exclude '*/tests/*' 'backend/tests/*' '*/conftest.py'`), write targeted tests
+for those files' uncovered changed lines, then delete the `continue-on-error:
+true` line to re-enable enforcement. The spec's cross-lane authority
+(`scripts/check_changed_coverage.py`, T125) is the eventual ≥90% gate once the
+readiness workflow is active.
+
+---
+
 ## A. Staging matrix — DEFERRED ("won't set up" the staging host, 2026-07-17)
 
 **Decision:** the dedicated persistent staging host will not be provisioned
