@@ -1,0 +1,479 @@
+# Spec 060 (T119) — the environment-approved protected publisher: the ONLY
+# write authority in the Windows release path, using ONLY the built-in
+# short-lived GITHUB_TOKEN (no GitHub App, installation token, or custom token
+# broker). It trusts no controller state: the trusted decision is re-verified
+# in-job, the tag is created create-only at the decision SHA, the detached
+# signature comes exclusively from the byte-pinned bridge run artifact, and
+# exactly three assets reach a DRAFT release that is published (official mode
+# only) after the shipped v0.3.0 updater policy re-validates everything.
+name: release-windows-publisher
+
+on:
+  workflow_call:
+    inputs:
+      candidate_sha:
+        description: Decision-bound candidate commit to publish
+        required: true
+        type: string
+      release_version:
+        description: Strict SemVer release version (no leading v)
+        required: true
+        type: string
+      mode:
+        description: disposable rehearses draft-only; official publishes
+        required: true
+        type: string
+      readiness_run_id:
+        description: Run id whose protected-decision produced the trusted decision
+        required: true
+        type: string
+      decision_artifact_id:
+        description: Exact artifact id of the verified trusted decision
+        required: true
+        type: string
+      requester:
+        description: Login that requested publication via the controller
+        required: true
+        type: string
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: release-publisher
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      RELEASE_VERSION: ${{ inputs.release_version }}
+      PUBLISH_MODE: ${{ inputs.mode }}
+      READINESS_RUN_ID: ${{ inputs.readiness_run_id }}
+      DECISION_ARTIFACT_ID: ${{ inputs.decision_artifact_id }}
+      REQUESTER_LOGIN: ${{ inputs.requester }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: windows-client/requirements-release.lock.txt
+      # sigstore (the shipped updater's verifier dependency) comes from the
+      # same complete hash lock the Windows client ships with.
+      - name: Install the hash-locked client verifier environment
+        run: python -m pip install --require-hashes -r windows-client/requirements-release.lock.txt
+      # Defense in depth: the publisher re-downloads and re-verifies the exact
+      # decision itself; controller conclusions are never trusted.
+      - name: Re-download and re-verify the trusted decision by exact id
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/060/decision build/060/bridge build/060/redownload
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$DECISION_ARTIFACT_ID/zip" > build/060/decision.zip
+          unzip -o -q build/060/decision.zip -d build/060/decision
+          gh attestation verify build/060/decision/trusted-release-decision.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release-trusted-builder.yml"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re
+          from datetime import datetime, timezone
+
+          decision_path = pathlib.Path("build/060/decision/trusted-release-decision.json")
+          decision = json.loads(decision_path.read_text(encoding="utf-8"))
+          if decision["candidate_sha"] != os.environ["CANDIDATE_SHA"]:
+              raise SystemExit("decision candidate SHA differs from the requested candidate")
+          if decision["decision"] != "passed":
+              raise SystemExit("trusted decision did not pass")
+          if decision["required_check_name"] != "release-readiness / protected-decision":
+              raise SystemExit("decision carries the wrong required check name")
+          valid_until = datetime.fromisoformat(decision["valid_until"].replace("Z", "+00:00"))
+          if valid_until <= datetime.now(timezone.utc):
+              raise SystemExit("trusted decision expired (valid_until elapsed)")
+          if not re.fullmatch(
+              r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)",
+              os.environ["RELEASE_VERSION"],
+          ):
+              raise SystemExit("release_version must be strict SemVer without a leading v")
+          member = decision["evidence_set_artifact"]
+          lines = [
+              f"DECISION_SHA256={hashlib.sha256(decision_path.read_bytes()).hexdigest()}",
+              f"EVIDENCE_ARTIFACT_ID={member['artifact_id']}",
+              f"EVIDENCE_MEMBER={member['member']}",
+              f"DECISION_RUN_ID={decision['workflow']['run_id']}",
+              f"DECISION_RUN_ATTEMPT={decision['workflow']['run_attempt']}",
+              f"RELEASE_ID={decision['release_id']}",
+              f"EVIDENCE_SET_ID={decision['readiness_evidence_set_id']}",
+          ]
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
+              handle.write("\n".join(lines) + "\n")
+          PY
+      - name: Resolve the matrix-tested executable digest from the evidence set
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$EVIDENCE_ARTIFACT_ID/zip" > build/060/evidence.zip
+          unzip -o -q build/060/evidence.zip -d build/060/evidence
+          python3 - <<'PY'
+          import json, os, pathlib
+
+          evidence_set = json.loads(pathlib.Path(
+              "build/060/evidence", os.environ["EVIDENCE_MEMBER"]
+          ).read_text(encoding="utf-8"))
+          windows = next(
+              item for item in evidence_set["evidence"] if item["platform"] == "windows"
+          )
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
+              handle.write(f"EXE_SHA256={windows['artifact']['sha256']}\n")
+              handle.write(f"TESTED_REFERENCE={windows['artifact']['immutable_reference']}\n")
+              handle.write(f"TESTED_BUILD_IDENTITY={windows['artifact']['build_identity']}\n")
+          PY
+      - name: Re-check collisions and create the tag create-only at the decision SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="v$RELEASE_VERSION"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" > /dev/null 2>&1; then
+            echo "::error::tag $TAG already exists — replacement is refused" >&2
+            exit 1
+          fi
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > /dev/null 2>&1; then
+            echo "::error::a release for $TAG already exists — replacement is refused" >&2
+            exit 1
+          fi
+          # Create-only via the git data API; an existing ref fails the call.
+          gh api "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f "ref=refs/tags/$TAG" \
+            -f "sha=$CANDIDATE_SHA" > /dev/null
+          echo '{"tag_created": true}' > build/060/publish-state.json
+      - name: Wait for the tag-triggered bridge signing run
+        shell: bash
+        run: |
+          set -euo pipefail
+          BRIDGE_RUN_ID=""
+          for _ in $(seq 1 90); do
+            BRIDGE_RUN_ID="$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/release-windows.yml/runs?event=push&head_sha=$CANDIDATE_SHA&per_page=10" \
+              --jq '[.workflow_runs[] | select(.status == "completed")][0].id // empty')"
+            test -n "$BRIDGE_RUN_ID" && break
+            sleep 20
+          done
+          test -n "$BRIDGE_RUN_ID" || { echo "::error::bridge run did not complete in time" >&2; exit 1; }
+          CONCLUSION="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BRIDGE_RUN_ID" --jq .conclusion)"
+          test "$CONCLUSION" = "success" || { echo "::error::bridge run concluded $CONCLUSION" >&2; exit 1; }
+          BRIDGE_ARTIFACT_ID="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BRIDGE_RUN_ID/artifacts?per_page=100" \
+            --jq '[.artifacts[] | select(.name | startswith("windows-bridge-signing-"))][0].id // empty')"
+          test -n "$BRIDGE_ARTIFACT_ID" || { echo "::error::bridge run uploaded no windows-bridge-signing- artifact" >&2; exit 1; }
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$BRIDGE_ARTIFACT_ID/zip" > build/060/bridge.zip
+          unzip -o -q build/060/bridge.zip -d build/060/bridge
+          echo "BRIDGE_RUN_ID=$BRIDGE_RUN_ID" >> "$GITHUB_ENV"
+          echo "BRIDGE_ARTIFACT_ID=$BRIDGE_ARTIFACT_ID" >> "$GITHUB_ENV"
+      - name: Verify the signed bytes with the shipped v0.3.0 policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          DOWNLOADED="$(sha256sum build/060/bridge/AstralDeep.exe | cut -d ' ' -f 1)"
+          test "$DOWNLOADED" = "$EXE_SHA256" || {
+            echo "::error::bridge-signed executable digest differs from the matrix-tested digest" >&2
+            exit 1
+          }
+          python -m sigstore verify identity build/060/bridge/AstralDeep.exe \
+            --bundle build/060/bridge/cosign.bundle \
+            --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release-windows.yml@refs/tags/$TAG" \
+            --cert-oidc-issuer https://token.actions.githubusercontent.com
+          # The publisher and the bridge must record the SAME bridge byte hash.
+          BRIDGE_WORKFLOW_SHA256="$(git show "$CANDIDATE_SHA:.github/workflows/release-windows.yml" | sha256sum | cut -d ' ' -f 1)"
+          REPORTED="$(python3 -c "import json; print(json.load(open('build/060/bridge/bridge-signing-manifest.json'))['bridge_workflow_sha256'])")"
+          test "$BRIDGE_WORKFLOW_SHA256" = "$REPORTED" || {
+            echo "::error::bridge bytes differ between the signer run and the pinned commit" >&2
+            exit 1
+          }
+          echo "BRIDGE_WORKFLOW_SHA256=$BRIDGE_WORKFLOW_SHA256" >> "$GITHUB_ENV"
+      - name: Create the draft release and upload exactly three assets create-only
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s  AstralDeep.exe\n' "$EXE_SHA256" > build/060/bridge/SHA256SUMS
+          RELEASE_DB_ID="$(gh api "repos/$GITHUB_REPOSITORY/releases" \
+            -f "tag_name=$TAG" -f "name=$TAG" \
+            -F draft=true -F prerelease=false --jq .id)"
+          echo "RELEASE_DB_ID=$RELEASE_DB_ID" >> "$GITHUB_ENV"
+          python3 -c "import json; json.dump({'tag_created': True, 'release_db_id': int('$RELEASE_DB_ID')}, open('build/060/publish-state.json', 'w'))"
+          # gh release upload is create-only without an overwrite flag; an
+          # existing same-name asset fails the step.
+          gh release upload "$TAG" \
+            build/060/bridge/AstralDeep.exe \
+            build/060/bridge/SHA256SUMS \
+            build/060/bridge/cosign.bundle
+      - name: Re-download all three assets by numeric asset database id
+        shell: bash
+        run: |
+          set -euo pipefail
+          ASSETS_JSON="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_DB_ID" --jq '[.assets[] | {name, id}]')"
+          COUNT="$(printf '%s' "$ASSETS_JSON" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")"
+          test "$COUNT" = "3" || { echo "::error::draft must carry exactly 3 assets, found $COUNT" >&2; exit 1; }
+          for name in AstralDeep.exe SHA256SUMS cosign.bundle; do
+            ASSET_ID="$(printf '%s' "$ASSETS_JSON" | python3 -c "import json,sys; assets=json.load(sys.stdin); print(next(a['id'] for a in assets if a['name'] == '$name'))")"
+            gh api "repos/$GITHUB_REPOSITORY/releases/assets/$ASSET_ID" \
+              -H "Accept: application/octet-stream" > "build/060/redownload/$name"
+            VAR="$(printf '%s' "$name" | tr '[:lower:].' '[:upper:]_')"
+            echo "ASSET_ID_$VAR=$ASSET_ID" >> "$GITHUB_ENV"
+          done
+          REDOWNLOADED="$(sha256sum build/060/redownload/AstralDeep.exe | cut -d ' ' -f 1)"
+          test "$REDOWNLOADED" = "$EXE_SHA256" || { echo "::error::re-downloaded executable digest drifted" >&2; exit 1; }
+          grep -F "$EXE_SHA256  AstralDeep.exe" build/060/redownload/SHA256SUMS
+          python -m sigstore verify identity build/060/redownload/AstralDeep.exe \
+            --bundle build/060/redownload/cosign.bundle \
+            --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release-windows.yml@refs/tags/$TAG" \
+            --cert-oidc-issuer https://token.actions.githubusercontent.com
+      - name: Emit and schema-validate the draft verification provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          TOKEN_BROKER_POLICY_SHA256="$(git show "$GITHUB_WORKFLOW_SHA:.github/workflows/release-windows-publisher.yml" | sha256sum | cut -d ' ' -f 1)"
+          export TOKEN_BROKER_POLICY_SHA256
+          REVIEWER_LOGIN="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" --jq '.[0].user.login // empty')"
+          test -n "$REVIEWER_LOGIN" || { echo "::error::no release-publisher environment approval recorded" >&2; exit 1; }
+          test "$REVIEWER_LOGIN" != "$REQUESTER_LOGIN" || { echo "::error::the requester cannot approve their own publication" >&2; exit 1; }
+          REVIEWER_DATABASE_ID="$(gh api "users/$REVIEWER_LOGIN" --jq .id)"
+          DEPLOYMENT_ID="$(gh api "repos/$GITHUB_REPOSITORY/deployments?environment=release-publisher&per_page=1" --jq '.[0].id')"
+          export REVIEWER_LOGIN REVIEWER_DATABASE_ID DEPLOYMENT_ID
+          python3 - <<'PY'
+          import hashlib, importlib.util, json, os, pathlib, sys, uuid
+          from datetime import datetime, timezone
+
+          spec = importlib.util.spec_from_file_location(
+              "astral_release_evidence_validator", "scripts/validate_release_evidence.py"
+          )
+          validator = importlib.util.module_from_spec(spec)
+          sys.modules[spec.name] = validator
+          spec.loader.exec_module(validator)
+          schema = validator.load_json_document(
+              "specs/060-runtime-reliability-hardening/contracts/release-evidence.schema.json"
+          )
+
+          env = os.environ
+          repo = env["GITHUB_REPOSITORY"]
+          tag = env["TAG"]
+          now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+          decision = json.loads(pathlib.Path(
+              "build/060/decision/trusted-release-decision.json"
+          ).read_text(encoding="utf-8"))
+
+          def digest(path: str) -> str:
+              return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+
+          def asset(name: str, kind: str, asset_env: str) -> dict:
+              asset_id = env[asset_env]
+              return {
+                  "name": name,
+                  "kind": kind,
+                  "immutable_reference": (
+                      f"gh://{repo}/releases/{env['RELEASE_DB_ID']}/assets/{asset_id}"
+                  ),
+                  "sha256": digest(f"build/060/redownload/{name}"),
+                  "build_identity": env["TESTED_BUILD_IDENTITY"],
+              }
+
+          payload = {
+              "bridge_workflow_sha256": env["BRIDGE_WORKFLOW_SHA256"],
+              "candidate_sha": env["CANDIDATE_SHA"],
+              "controller_digest": env["GITHUB_WORKFLOW_SHA"],
+              "publisher_digest": env["GITHUB_WORKFLOW_SHA"],
+              "release_id": env["RELEASE_ID"],
+              "release_version": env["RELEASE_VERSION"],
+              "requested_tag": tag,
+              "requester_login": env["REQUESTER_LOGIN"],
+              "target_commit_sha": env["CANDIDATE_SHA"],
+              "trusted_decision_immutable_reference": (
+                  f"gh://{repo}/runs/{env['DECISION_RUN_ID']}"
+                  f"/attempts/{env['DECISION_RUN_ATTEMPT']}"
+                  f"/artifacts/{env['DECISION_ARTIFACT_ID']}"
+                  "/members/trusted-release-decision.json"
+              ),
+              "trusted_decision_sha256": env["DECISION_SHA256"],
+          }
+          approval_payload_sha256 = hashlib.sha256(
+              json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"), allow_nan=False).encode("utf-8")
+          ).hexdigest()
+
+          document = {
+              "document_type": "windows_draft_verification_provenance",
+              "schema_version": 1,
+              "publication_id": str(uuid.uuid4()),
+              "candidate_sha": env["CANDIDATE_SHA"],
+              "release_id": env["RELEASE_ID"],
+              "release_version": env["RELEASE_VERSION"],
+              "readiness_evidence_set_id": env["EVIDENCE_SET_ID"],
+              "trusted_decision": {
+                  "decision_id": decision["decision_id"],
+                  "evidence_set_id": env["EVIDENCE_SET_ID"],
+                  "manifest_artifact": {
+                      "name": "trusted-release-decision.json",
+                      "kind": "protected_decision",
+                      "immutable_reference": payload["trusted_decision_immutable_reference"],
+                      "sha256": env["DECISION_SHA256"],
+                      "build_identity": f"protected-decision:{env['READINESS_RUN_ID']}",
+                  },
+                  "required_check_name": "release-readiness / protected-decision",
+                  "protected_builder_digest": decision["trusted_builder"]["signer_digest"],
+                  "protected_builder_certificate_identity": (
+                      decision["trusted_builder"]["certificate_identity"]
+                  ),
+                  "protected_policy_sha256": decision["policy_sha256"],
+                  "valid_until": decision["valid_until"],
+                  "attestation_verified_at": now,
+                  "verification_outcome": "passed",
+              },
+              "readiness_workflow": decision["workflow"],
+              "publication_workflow": {
+                  "name": env["GITHUB_WORKFLOW"],
+                  "run_id": env["GITHUB_RUN_ID"],
+                  "run_attempt": int(env["GITHUB_RUN_ATTEMPT"]),
+                  "job_id": env["GITHUB_JOB"],
+              },
+              "protected_publisher": {
+                  "repository": repo,
+                  "controller_workflow_path": ".github/workflows/release-windows-publisher-controller.yml",
+                  "controller_digest": env["GITHUB_WORKFLOW_SHA"],
+                  "workflow_path": ".github/workflows/release-windows-publisher.yml",
+                  "signer_digest": env["GITHUB_WORKFLOW_SHA"],
+                  "certificate_identity": (
+                      f"https://github.com/{repo}/.github/workflows/"
+                      f"release-windows-publisher.yml@{env['GITHUB_REF']}"
+                  ),
+                  "bridge_workflow_path": ".github/workflows/release-windows.yml",
+                  "bridge_workflow_sha256": env["BRIDGE_WORKFLOW_SHA256"],
+                  "token_broker_policy_sha256": env["TOKEN_BROKER_POLICY_SHA256"],
+                  "approval_environment": "release-publisher",
+                  "deployment_id": int(env["DEPLOYMENT_ID"]),
+                  "approval_state": "approved",
+                  "reviewer_login": env["REVIEWER_LOGIN"],
+                  "reviewer_database_id": int(env["REVIEWER_DATABASE_ID"]),
+                  "requester_login": env["REQUESTER_LOGIN"],
+                  "github_api_reference": f"ghapi://{repo}/deployments/{env['DEPLOYMENT_ID']}",
+                  "approval_payload_sha256": approval_payload_sha256,
+                  "approved_at": now,
+              },
+              "tested_executable": {
+                  "name": "AstralDeep.exe",
+                  "kind": "windows_exe",
+                  "immutable_reference": env["TESTED_REFERENCE"],
+                  "sha256": env["EXE_SHA256"],
+                  "build_identity": env["TESTED_BUILD_IDENTITY"],
+              },
+              "draft_executable": asset("AstralDeep.exe", "windows_exe", "ASSET_ID_ASTRALDEEP_EXE"),
+              "draft_checksum_manifest": asset("SHA256SUMS", "checksum_manifest", "ASSET_ID_SHA256SUMS"),
+              "draft_signature_bundle": asset("cosign.bundle", "sigstore_bundle", "ASSET_ID_COSIGN_BUNDLE"),
+              "draft_release": {
+                  "repository": repo,
+                  "tag": tag,
+                  "release_name": tag,
+                  "latest_disposition": "make_latest_on_publish",
+                  "draft_state": True,
+                  "prerelease": False,
+                  "asset_count": 3,
+                  "tag_preexisting": False,
+                  "release_preexisting": False,
+                  "assets_replaced": False,
+                  "release_database_id": int(env["RELEASE_DB_ID"]),
+                  "executable_asset_database_id": int(env["ASSET_ID_ASTRALDEEP_EXE"]),
+                  "executable_asset_name": "AstralDeep.exe",
+                  "checksum_asset_database_id": int(env["ASSET_ID_SHA256SUMS"]),
+                  "checksum_asset_name": "SHA256SUMS",
+                  "signature_bundle_asset_database_id": int(env["ASSET_ID_COSIGN_BUNDLE"]),
+                  "signature_bundle_asset_name": "cosign.bundle",
+                  "target_commit_sha": env["CANDIDATE_SHA"],
+                  "draft_verified_at": now,
+              },
+              "generated_at": now,
+              "signing": {
+                  "signature_mode": "detached_sigstore_bundle",
+                  "signer_identity": (
+                      f"https://github.com/{repo}/.github/workflows/"
+                      f"release-windows.yml@refs/tags/{tag}"
+                  ),
+                  "oidc_issuer": "https://token.actions.githubusercontent.com",
+                  "signature_verifier": "astraldeep-v0.3.0-sigstore-identity-policy",
+                  "bridge_workflow_sha256": env["BRIDGE_WORKFLOW_SHA256"],
+                  "legacy_v0_3_0_verifier_outcome": "passed",
+                  "verification_outcome": "passed",
+                  "executable_bytes_modified": False,
+                  "rebuild_performed": False,
+              },
+          }
+          validator.validate_document(document, schema)
+          out = pathlib.Path("build/060/windows-draft-provenance")
+          out.mkdir(parents=True, exist_ok=True)
+          out.joinpath("windows-draft-verification-provenance.json").write_text(
+              json.dumps(document, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+              encoding="utf-8",
+          )
+          summary = pathlib.Path(env["GITHUB_STEP_SUMMARY"])
+          with summary.open("a", encoding="utf-8") as handle:
+              handle.write("## windows_draft_verification_provenance\n")
+              handle.write(f"- tag: `{tag}` (draft only; proves draft readiness)\n")
+              handle.write(f"- executable sha256: `{env['EXE_SHA256']}`\n")
+              handle.write(f"- publication_id: `{document['publication_id']}`\n")
+          PY
+      - name: Upload the draft provenance record
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-draft-provenance
+          path: build/060/windows-draft-provenance/
+          if-no-files-found: error
+          retention-days: 90
+      # OFFICIAL MODE ONLY: flip draft to published + latest, then confirm the
+      # shipped updater would actually select this release from the live
+      # /releases/latest shape; a mismatch deletes ONLY the just-created
+      # release and tag and fails the job.
+      - name: Publish and confirm updater selection (official mode)
+        if: ${{ inputs.mode == 'official' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_DB_ID" \
+            -F draft=false -f make_latest=true > /dev/null
+          gh api "repos/$GITHUB_REPOSITORY/releases/latest" > build/060/latest.json
+          python3 - <<'PY'
+          import importlib.util, json, os, pathlib, sys
+
+          spec = importlib.util.spec_from_file_location(
+              "astral_client_integrity", "windows-client/astral_client/integrity.py"
+          )
+          integrity = importlib.util.module_from_spec(spec)
+          sys.modules[spec.name] = integrity
+          spec.loader.exec_module(integrity)
+
+          latest = json.loads(pathlib.Path("build/060/latest.json").read_text(encoding="utf-8"))
+          integrity._api_get = lambda *args, **kwargs: latest
+          assets = integrity.latest_release()
+          if assets is None or assets.tag != os.environ["TAG"]:
+              raise SystemExit(
+                  f"shipped updater selected {getattr(assets, 'tag', None)!r}, "
+                  f"expected {os.environ['TAG']!r}"
+              )
+          if assets.release_id != int(os.environ["RELEASE_DB_ID"]):
+              raise SystemExit("shipped updater resolved a different release id")
+          print(f"shipped v0.3.0 updater parser selects {assets.tag}")
+          PY
+      # Disposable mode NEVER publishes: the draft and tag are force-cleaned at
+      # the end regardless of outcome. Official mode cleans up only when a
+      # step failed, deleting ONLY the release and tag this run created.
+      - name: Force-clean the just-created draft and tag
+        if: ${{ always() && (inputs.mode == 'disposable' || failure()) }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${RELEASE_DB_ID:-}" ]; then
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$RELEASE_DB_ID" || true
+          fi
+          if [ -n "${TAG:-}" ] && [ -f build/060/publish-state.json ]; then
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" || true
+          fi

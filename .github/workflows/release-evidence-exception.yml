@@ -1,0 +1,443 @@
+# Spec 060 (T119) — the protected bounded-exception / debt-resolution
+# registrar. A requester's immutable evidence_exception_request artifact is
+# re-verified read-only, then a DIFFERENT allowlisted release owner approves
+# the environment-gated register job, which appends exactly one create-only
+# ledger entry on the protected refs/heads/release-evidence-debt branch with
+# the built-in short-lived GITHUB_TOKEN (no GitHub App, installation token, or
+# custom token broker) and uploads an attested receipt manifest.
+name: release-evidence-exception
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Which protected ledger transition to register
+        required: true
+        type: choice
+        options:
+          - approve-exception
+          - register-resolution
+        default: approve-exception
+      source_run_id:
+        description: Run id that uploaded the immutable request artifact
+        required: true
+        type: string
+      request_artifact_id:
+        description: Exact artifact id of the immutable request artifact
+        required: true
+        type: string
+      exception_id:
+        description: Exception UUID (the debt entry / the debt a resolution names)
+        required: true
+        type: string
+      resolution_id:
+        description: Resolution UUID (register-resolution only)
+        required: false
+        type: string
+        default: ""
+      candidate_sha:
+        description: Candidate commit the request binds
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Read-only pre-verification: anyone can run it; it mutates nothing and
+  #    prints the exact identity the release owner is being asked to approve. ──
+  verify-request:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      request_sha256: ${{ steps.verify.outputs.request_sha256 }}
+      requester_login: ${{ steps.verify.outputs.requester_login }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+      - name: Download and re-verify the immutable request artifact
+        id: verify
+        shell: bash
+        env:
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          REQUEST_ARTIFACT_ID: ${{ inputs.request_artifact_id }}
+          ACTION_INPUT: ${{ inputs.action }}
+          EXCEPTION_ID: ${{ inputs.exception_id }}
+          RESOLUTION_ID: ${{ inputs.resolution_id }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p build/060/exception-request
+          OWNING_RUN="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$REQUEST_ARTIFACT_ID" --jq .workflow_run.id)"
+          test "$OWNING_RUN" = "$SOURCE_RUN_ID" || { echo "::error::artifact $REQUEST_ARTIFACT_ID belongs to run $OWNING_RUN, not $SOURCE_RUN_ID" >&2; exit 1; }
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$REQUEST_ARTIFACT_ID/zip" > build/060/request.zip
+          unzip -o -q build/060/request.zip -d build/060/exception-request
+          python3 - >> "$GITHUB_OUTPUT" <<'PY'
+          import hashlib, importlib.util, json, os, pathlib, sys
+
+          spec = importlib.util.spec_from_file_location(
+              "astral_release_evidence_validator", "scripts/validate_release_evidence.py"
+          )
+          validator = importlib.util.module_from_spec(spec)
+          sys.modules[spec.name] = validator
+          spec.loader.exec_module(validator)
+          schema = validator.load_json_document(
+              "specs/060-runtime-reliability-hardening/contracts/release-evidence.schema.json"
+          )
+
+          action = os.environ["ACTION_INPUT"]
+          documents = []
+          for path in sorted(pathlib.Path("build/060/exception-request").rglob("*.json")):
+              document = json.loads(path.read_text(encoding="utf-8"))
+              if action == "approve-exception" and document.get("document_type") == "evidence_exception_request":
+                  documents.append((path, document))
+              if action == "register-resolution" and document.get("document_type") == "release_evidence_debt_resolution":
+                  documents.append((path, document))
+          if len(documents) != 1:
+              raise SystemExit(f"expected exactly one request document, found {len(documents)}")
+          path, document = documents[0]
+          if action == "approve-exception":
+              # The request must satisfy the tracked schema, name a shipping
+              # client, and never waive a non-waivable check. Ineligible
+              # scopes (backend, docs, staging, trust/policy integrity) are
+              # unrepresentable as platforms and refused here fail-closed.
+              validator.validate_document(document, schema)
+              non_waivable = {"apple_first_login_llm", "candidate_staging"}
+              if set(document["missing_checks"]) & non_waivable:
+                  raise SystemExit("request waives a non-waivable check")
+              if document["platform"] not in {"web", "windows", "android", "macos", "ios", "watchos"}:
+                  raise SystemExit("only shipping-client platforms are exception-eligible")
+              if document["exception_id"] != os.environ["EXCEPTION_ID"]:
+                  raise SystemExit("exception_id input differs from the request artifact")
+          else:
+              if document.get("resolution_id") != os.environ["RESOLUTION_ID"]:
+                  raise SystemExit("resolution_id input differs from the request artifact")
+              if document.get("exception_id") != os.environ["EXCEPTION_ID"]:
+                  raise SystemExit("exception_id input differs from the request artifact")
+          if document.get("candidate_sha") != os.environ["CANDIDATE_SHA"]:
+              raise SystemExit("candidate_sha input differs from the request artifact")
+          digest = hashlib.sha256(path.read_bytes()).hexdigest()
+          summary = pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"])
+          with summary.open("a", encoding="utf-8") as handle:
+              handle.write("## Exception request identity\n")
+              handle.write(f"- member: `{path}`\n- sha256: `{digest}`\n")
+              handle.write(f"- requester_login: `{document.get('requester_login', '')}`\n")
+              handle.write(f"- candidate_sha: `{document.get('candidate_sha')}`\n")
+          print(f"request_sha256={digest}")
+          print(f"requester_login={document.get('requester_login', '')}")
+          PY
+
+  # ── The protected registrar: environment-approved, job-scoped write, and
+  #    structurally refuses self-approval (requester must differ from the
+  #    dispatching approver). ──
+  register:
+    needs: verify-request
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: release-evidence-exception
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      APPROVER: ${{ github.actor }}
+      ACTION_INPUT: ${{ inputs.action }}
+      SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+      REQUEST_ARTIFACT_ID: ${{ inputs.request_artifact_id }}
+      EXCEPTION_ID: ${{ inputs.exception_id }}
+      RESOLUTION_ID: ${{ inputs.resolution_id }}
+      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      REQUEST_SHA256: ${{ needs.verify-request.outputs.request_sha256 }}
+      REQUESTER_LOGIN: ${{ needs.verify-request.outputs.requester_login }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+      - name: Refuse self-approval structurally
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$REQUESTER_LOGIN"
+          if [ "$REQUESTER_LOGIN" = "$APPROVER" ]; then
+            echo "::error::the requester ($REQUESTER_LOGIN) cannot approve their own request" >&2
+            exit 1
+          fi
+      - name: Re-download and re-hash the exact request bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/060/exception-request
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$REQUEST_ARTIFACT_ID/zip" > build/060/request.zip
+          unzip -o -q build/060/request.zip -d build/060/exception-request
+      - name: Append the create-only ledger entry and emit the attested receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, importlib.util, json, os, pathlib, subprocess, sys, uuid
+          from datetime import datetime, timedelta, timezone
+
+          spec = importlib.util.spec_from_file_location(
+              "astral_release_evidence_validator", "scripts/validate_release_evidence.py"
+          )
+          validator = importlib.util.module_from_spec(spec)
+          sys.modules[spec.name] = validator
+          spec.loader.exec_module(validator)
+          evidence_schema = validator.load_json_document(
+              "specs/060-runtime-reliability-hardening/contracts/release-evidence.schema.json"
+          )
+          trust_schema = validator.load_json_document(
+              "specs/060-runtime-reliability-hardening/contracts/release-trust.schema.json"
+          )
+
+          def gh(*args: str) -> str:
+              return subprocess.run(
+                  ["gh", "api", *args], check=True, capture_output=True, text=True
+              ).stdout.strip()
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          action = os.environ["ACTION_INPUT"]
+          approver = os.environ["APPROVER"]
+          requester = os.environ["REQUESTER_LOGIN"]
+          if requester == approver:
+              raise SystemExit("self-approval is refused")
+          non_waivable = {"apple_first_login_llm", "candidate_staging"}
+
+          documents = []
+          expected = (
+              "evidence_exception_request"
+              if action == "approve-exception"
+              else "release_evidence_debt_resolution"
+          )
+          for path in sorted(pathlib.Path("build/060/exception-request").rglob("*.json")):
+              document = json.loads(path.read_text(encoding="utf-8"))
+              if document.get("document_type") == expected:
+                  documents.append((path, document))
+          if len(documents) != 1:
+              raise SystemExit(f"expected exactly one {expected} document")
+          request_path, request = documents[0]
+          request_bytes = request_path.read_bytes()
+          request_sha = hashlib.sha256(request_bytes).hexdigest()
+          if request_sha != os.environ["REQUEST_SHA256"]:
+              raise SystemExit("request bytes changed between verification and registration")
+
+          now = datetime.now(timezone.utc)
+          approved_at = now.isoformat().replace("+00:00", "Z")
+          expires_at = (now + timedelta(days=7)).isoformat().replace("+00:00", "Z")
+
+          if action == "approve-exception":
+              validator.validate_document(request, evidence_schema)
+              if set(request["missing_checks"]) & non_waivable:
+                  raise SystemExit("request waives a non-waivable check")
+              if request["platform"] not in {"web", "windows", "android", "macos", "ios", "watchos"}:
+                  raise SystemExit("only shipping-client platforms are exception-eligible")
+              entry_path = f"debts/{request['exception_id']}.json"
+          else:
+              entry_path = f"resolutions/{request['resolution_id']}.json"
+
+          run_meta = json.loads(gh(
+              f"repos/{repo}/actions/runs/{os.environ['SOURCE_RUN_ID']}"
+          ) or "{}")
+          member = request_path.relative_to("build/060/exception-request").as_posix()
+          exception_artifact = {
+              "kind": "github_actions_artifact_member",
+              "repository": repo,
+              "run_id": os.environ["SOURCE_RUN_ID"],
+              "run_attempt": int(run_meta.get("run_attempt", 1)),
+              "artifact_id": os.environ["REQUEST_ARTIFACT_ID"],
+              "artifact_name": json.loads(gh(
+                  f"repos/{repo}/actions/artifacts/{os.environ['REQUEST_ARTIFACT_ID']}"
+              ))["name"],
+              "member": member,
+              "immutable_reference": (
+                  f"gh://{repo}/runs/{os.environ['SOURCE_RUN_ID']}"
+                  f"/attempts/{int(run_meta.get('run_attempt', 1))}"
+                  f"/artifacts/{os.environ['REQUEST_ARTIFACT_ID']}/members/{member}"
+              ),
+              "sha256": request_sha,
+          }
+
+          reviewer_database_id = int(gh(f"users/{approver}", "--jq", ".id"))
+          deployment_id = int(gh(
+              f"repos/{repo}/deployments?environment=release-evidence-exception&per_page=1",
+              "--jq", ".[0].id",
+          ))
+          if action == "approve-exception":
+              ledger_entry = {
+                  "document_type": "release_evidence_debt",
+                  "schema_version": 1,
+                  "approval_id": str(uuid.uuid4()),
+                  "exception_id": request["exception_id"],
+                  "repository": repo,
+                  "candidate_sha": request["candidate_sha"],
+                  "release_id": request["release_id"],
+                  "platform": request["platform"],
+                  "missing_checks": list(request["missing_checks"]),
+                  "reason": request["reason"],
+                  "requester_login": requester,
+                  "reviewer_login": approver,
+                  "reviewer_database_id": reviewer_database_id,
+                  "approved_at": approved_at,
+                  "expires_at": expires_at,
+                  "exception_request_artifact": exception_artifact,
+                  "maximum_valid_days": 7,
+                  "blocks_next_release": True,
+                  "registered_at": approved_at,
+              }
+          else:
+              ledger_entry = dict(request)
+              ledger_entry["resolved_at"] = approved_at
+          entry_bytes = (
+              json.dumps(ledger_entry, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+          ).encode("utf-8")
+          entry_sha256 = hashlib.sha256(entry_bytes).hexdigest()
+
+          # Create-only append on the protected ledger ref via the git data
+          # API with the built-in token: parent = current head; the ref update
+          # refuses non-fast-forward, so a concurrently moved head fails.
+          head_sha = gh(f"repos/{repo}/git/ref/heads/release-evidence-debt", "--jq", ".object.sha")
+          base_tree = gh(f"repos/{repo}/git/commits/{head_sha}", "--jq", ".tree.sha")
+          existing = gh(
+              f"repos/{repo}/git/trees/{base_tree}?recursive=1", "--jq", "[.tree[].path]"
+          )
+          if entry_path in json.loads(existing or "[]"):
+              raise SystemExit(f"ledger path already exists (create-only): {entry_path}")
+          blob_sha = json.loads(subprocess.run(
+              ["gh", "api", f"repos/{repo}/git/blobs", "--input", "-"],
+              input=json.dumps({"content": entry_bytes.decode("utf-8"), "encoding": "utf-8"}),
+              check=True, capture_output=True, text=True,
+          ).stdout)["sha"]
+          new_tree = json.loads(subprocess.run(
+              ["gh", "api", f"repos/{repo}/git/trees", "--input", "-"],
+              input=json.dumps({
+                  "base_tree": base_tree,
+                  "tree": [{"path": entry_path, "mode": "100644", "type": "blob", "sha": blob_sha}],
+              }),
+              check=True, capture_output=True, text=True,
+          ).stdout)["sha"]
+          commit_sha = json.loads(subprocess.run(
+              ["gh", "api", f"repos/{repo}/git/commits", "--input", "-"],
+              input=json.dumps({
+                  "message": f"{action}: {entry_path}",
+                  "tree": new_tree,
+                  "parents": [head_sha],
+              }),
+              check=True, capture_output=True, text=True,
+          ).stdout)["sha"]
+          subprocess.run(
+              ["gh", "api", "-X", "PATCH",
+               f"repos/{repo}/git/refs/heads/release-evidence-debt",
+               "-f", f"sha={commit_sha}", "-F", "force=false"],
+              check=True, capture_output=True, text=True,
+          )
+
+          workflow_ref = os.environ["GITHUB_WORKFLOW_REF"].split("@", 1)[0]
+          workflow_ref = f"{workflow_ref}@{os.environ['GITHUB_WORKFLOW_SHA']}"
+          common = {
+              "schema_version": 1,
+              "manifest_id": str(uuid.uuid4()),
+              "exception_id": request["exception_id"],
+              "repository": repo,
+              "candidate_sha": request["candidate_sha"],
+              "release_id": request["release_id"],
+              "ledger_repository": repo,
+              "ledger_ref": "refs/heads/release-evidence-debt",
+              "ledger_parent_sha": head_sha,
+              "ledger_commit_sha": commit_sha,
+              "ledger_entry_path": entry_path,
+              "ledger_entry_sha256": entry_sha256,
+              "ledger_entry_immutable_reference": (
+                  f"ghgit://{repo}/commits/{commit_sha}/paths/{entry_path}"
+              ),
+              "ledger_entry": ledger_entry,
+              "workflow": {
+                  "name": os.environ["GITHUB_WORKFLOW"],
+                  "run_id": os.environ["GITHUB_RUN_ID"],
+                  "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+                  "job_id": os.environ["GITHUB_JOB"],
+              },
+              "workflow_ref": workflow_ref,
+              "runner": {
+                  "os": "linux",
+                  "architecture": "x86_64",
+                  "runner_image": f"{os.environ.get('ImageOS', 'ubuntu')}-{os.environ.get('ImageVersion', 'hosted')}",
+                  "runner_name": os.environ.get("RUNNER_NAME", "unknown"),
+                  "runner_environment": "github_hosted",
+              },
+              "trusted_builder": {
+                  "repository": repo,
+                  "workflow_path": ".github/workflows/release-evidence-exception.yml",
+                  "signer_digest": os.environ["GITHUB_WORKFLOW_SHA"],
+                  "certificate_identity": (
+                      f"https://github.com/{repo}/.github/workflows/"
+                      f"release-evidence-exception.yml@{os.environ['GITHUB_REF']}"
+                  ),
+              },
+              "generated_at": approved_at,
+          }
+          if action == "approve-exception":
+              payload = {
+                  "candidate_sha": request["candidate_sha"],
+                  "exception_artifact_id": exception_artifact["artifact_id"],
+                  "exception_artifact_immutable_reference": exception_artifact["immutable_reference"],
+                  "exception_artifact_sha256": exception_artifact["sha256"],
+                  "exception_id": request["exception_id"],
+                  "release_id": request["release_id"],
+              }
+              payload_sha256 = hashlib.sha256(
+                  json.dumps(
+                      payload, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"), allow_nan=False,
+                  ).encode("utf-8")
+              ).hexdigest()
+              receipt = {
+                  "document_type": "trusted_exception_approval",
+                  **common,
+                  "approval_id": ledger_entry["approval_id"],
+                  "protected_environment": "release-evidence-exception",
+                  "deployment_id": deployment_id,
+                  "approval_state": "approved",
+                  "reviewer_login": approver,
+                  "reviewer_database_id": reviewer_database_id,
+                  "requester_login": requester,
+                  "github_api_reference": f"ghapi://{repo}/deployments/{deployment_id}",
+                  "approved_at": approved_at,
+                  "expires_at": expires_at,
+                  "exception_artifact": exception_artifact,
+                  "approval_payload_sha256": payload_sha256,
+              }
+          else:
+              receipt = {
+                  "document_type": "trusted_debt_resolution",
+                  **common,
+                  "resolution_id": request["resolution_id"],
+              }
+          validator.validate_document(receipt, trust_schema)
+          out = pathlib.Path("build/060/exception-receipt")
+          out.mkdir(parents=True, exist_ok=True)
+          out.joinpath("receipt.json").write_text(
+              json.dumps(receipt, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+              encoding="utf-8",
+          )
+          out.joinpath("ledger-entry.json").write_bytes(entry_bytes)
+          print(f"appended {entry_path} at {commit_sha}")
+          PY
+      - name: Attest the registrar receipt
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: build/060/exception-receipt/receipt.json
+      - name: Upload the attested receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-evidence-exception-${{ inputs.exception_id }}
+          path: build/060/exception-receipt/
+          if-no-files-found: error
+          retention-days: 90

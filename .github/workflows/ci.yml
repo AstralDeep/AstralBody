@@ -122,6 +122,9 @@ jobs:
             backend/tests/test_android_next_major_canary.py
             backend/tests/test_candidate_staging_060.py
             backend/tests/test_release_evidence_validator.py
+            backend/tests/test_prepare_release_evidence_060.py
+            backend/tests/test_release_workflows_060.py
+            backend/tests/test_release_evidence_producers.py
             windows-client/tests/test_release_lock_060.py
           )
           test "${#RELEASE_TOOL_TESTS[@]}" -gt 0
@@ -474,6 +477,30 @@ jobs:
           # Only required if the repo is organization-owned; no-op when unset.
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 
+  # ── Feature 060 (T107/T119/T120): the same-candidate release-readiness
+  #    evidence matrix. The caller job id is EXACTLY `release-readiness` so
+  #    the ruleset-required check is "release-readiness / protected-decision".
+  #    Dark until the T120 second checkpoint sets the RELEASE_READINESS_ACTIVE
+  #    repository variable. ──
+  release-readiness:
+    if: ${{ vars.RELEASE_READINESS_ACTIVE == 'true' }}
+    needs: [build]
+    # Reusable-workflow grants are capped by the caller job: the called
+    # pipeline needs OIDC attest (trusted builder), Actions API reads
+    # (protected decision), and GHCR push (candidate image publication).
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+      packages: write
+    uses: ./.github/workflows/release-readiness.yml
+    with:
+      candidate_sha: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      base_sha: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+      request_id: ci-${{ github.run_id }}
+    secrets: inherit
+
   # ── FR-038: publish the EXACT verified image to GHCR on main pushes only.
   #    Needs every verification gate, so a publish failure is distinguishable
   #    from a verification failure (the gates stay green/visible). ──
@@ -490,6 +517,8 @@ jobs:
       - coverage-gate
       - smoke
       - secret-scan
+      # T120 activation (second checkpoint) adds `- release-readiness` here so
+      # main image publication depends on the protected decision check.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read

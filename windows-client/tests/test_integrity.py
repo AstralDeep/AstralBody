@@ -1,4 +1,4 @@
-"""Tests for the desktop client integrity verifier (feature 039).
+"""Tests for the desktop client integrity verifier (features 039 + 060).
 
 Covers:
   - SHA256SUMS parsing (extracts the exe's hash)
@@ -7,6 +7,11 @@ Covers:
   - bad sigstore signature ⇒ refuse
   - happy path (good hash + good signature) ⇒ ok
   - latest_release missing any asset ⇒ None
+  - publisher-contract bridge compatibility (spec 060, FR-048 clauses 8-11):
+    API-shaped ``/releases/latest`` payloads must carry name == tag, a strict
+    ``v<semver>`` tag, non-draft/non-prerelease state, and exactly the three
+    canonical assets with positive numeric ids; the pinned SAN/issuer constants
+    must never move.
 
 Network is fully mocked (urllib + sigstore). Pure Python, no PySide6.
 """
@@ -73,7 +78,7 @@ def test_semver_precedence_and_upgrade_from_0_3_0():
 def test_release_assets_require_immutable_distinct_asset_identities(monkeypatch):
     payload = {
         "id": 42,
-        "name": "0.4.0",
+        "name": "v0.4.0",
         "tag_name": "v0.4.0",
         "html_url": "https://github.invalid/releases/42",
         "assets": [
@@ -242,7 +247,7 @@ def test_latest_release_parses(monkeypatch):
         "_api_get",
         lambda path: {
             "id": 11,
-            "name": "1.2.3",
+            "name": "v1.2.3",
             "tag_name": "v1.2.3",
             "html_url": "h",
             "assets": [
@@ -459,3 +464,173 @@ def test_check_at_launch_never_raises_on_error():
     n = integrity.check_at_launch("0.2.0", "C:/AstralDeep.exe", frozen=True,
                                   workdir="/tmp", _release=boom)
     assert n["status"] == "error" and n["message"] == ""
+
+
+# --------------------------------------------------------------------------- #
+# Publisher-contract bridge compatibility (spec 060, FR-048 clauses 8-11).
+#
+# The protected publisher creates tag exactly v<strict-semver>, names the
+# release exactly its tag, uploads exactly the three canonical assets, and only
+# ever transitions a non-draft, non-prerelease release to public/latest. These
+# tests pin the shipped updater's /releases/latest parser to that contract so
+# the T119 release-windows.yml rewrite cannot silently drift what the client
+# accepts — nor silently move the SAN/issuer the verifier pins.
+# --------------------------------------------------------------------------- #
+
+def _latest_payload(**overrides):
+    """A fully API-shaped /releases/latest response for the 0.4.0 candidate."""
+    payload = {
+        "id": 60001,
+        "name": "v0.4.0",
+        "tag_name": "v0.4.0",
+        "draft": False,
+        "prerelease": False,
+        "html_url": "https://releases.invalid/v0.4.0",
+        "assets": [
+            {
+                "id": 60011,
+                "name": "AstralDeep.exe",
+                "browser_download_url": "https://releases.invalid/AstralDeep.exe",
+            },
+            {
+                "id": 60012,
+                "name": "SHA256SUMS",
+                "browser_download_url": "https://releases.invalid/SHA256SUMS",
+            },
+            {
+                "id": 60013,
+                "name": "cosign.bundle",
+                "browser_download_url": "https://releases.invalid/cosign.bundle",
+            },
+        ],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _serve_latest(monkeypatch, payload):
+    """Serve ``payload`` through the _api_get seam for /releases/latest only."""
+    expected_path = f"repos/{integrity._REPO}/releases/latest"
+    monkeypatch.setattr(
+        integrity, "_api_get", lambda path: payload if path == expected_path else None
+    )
+
+
+def test_bridge_happy_path_0_4_0_selected_over_installed_0_3_0(monkeypatch, tmp_path):
+    _serve_latest(monkeypatch, _latest_payload())
+    rel = integrity.latest_release()
+    assert rel is not None
+    assert rel.version == "0.4.0" and rel.tag == "v0.4.0"
+    assert rel.release_id == 60001
+    assert rel.asset_ids == (60011, 60012, 60013)
+    assert integrity.is_newer_version(rel.version, "0.3.0") is True
+    # The shipped v0.3.0 updater flow selects 0.4.0 as a verified update.
+    n = integrity.check_at_launch(
+        "0.3.0", "C:/AstralDeep.exe", frozen=True, workdir=str(tmp_path),
+        _verify_latest=_verok,
+    )
+    assert n["status"] == "update_available" and n["version"] == "0.4.0"
+
+
+def test_bridge_latest_selection_never_offers_older_or_equal(monkeypatch, tmp_path):
+    # /releases/latest returning an OLDER release than the installed 0.3.0
+    # must never be offered (latest-disposition selection semantics).
+    _serve_latest(monkeypatch, _latest_payload(name="v0.2.9", tag_name="v0.2.9"))
+    n = integrity.check_at_launch(
+        "0.3.0", "C:/AstralDeep.exe", frozen=True, workdir=str(tmp_path),
+        _verify_running=_verok, _verify_latest=_verok,
+    )
+    assert n["status"] == "current_newer"
+    # The SAME installed version verifies in place; no update is offered.
+    _serve_latest(monkeypatch, _latest_payload(name="v0.3.0", tag_name="v0.3.0"))
+    n = integrity.check_at_launch(
+        "0.3.0", "C:/AstralDeep.exe", frozen=True, workdir=str(tmp_path),
+        _verify_running=_verok, _verify_latest=_verok,
+    )
+    assert n["status"] == "verified"
+
+
+@pytest.mark.parametrize("bad_name", ["0.4.0", "AstralDeep 0.4.0", "", None])
+def test_bridge_rejects_release_name_tag_mismatch(monkeypatch, bad_name):
+    _serve_latest(monkeypatch, _latest_payload(name=bad_name))
+    assert integrity.latest_release() is None
+
+
+@pytest.mark.parametrize("field", ["draft", "prerelease"])
+def test_bridge_rejects_draft_and_prerelease(monkeypatch, field):
+    _serve_latest(monkeypatch, _latest_payload(**{field: True}))
+    assert integrity.latest_release() is None
+
+
+@pytest.mark.parametrize(
+    "tag",
+    [
+        "0.4.0",       # missing v prefix
+        "V0.4.0",      # wrong-case prefix
+        "vv0.4.0",     # v inside the version
+        "v 0.4.0",     # whitespace after prefix
+        "v0.4.0 ",     # trailing whitespace
+        "v0.4.0\n",    # line terminator
+        "v01.4.0",     # leading-zero core
+        "v0.4.0-01",   # leading-zero numeric prerelease
+        "v",           # empty version
+    ],
+)
+def test_bridge_rejects_non_strict_semver_tags(monkeypatch, tag):
+    _serve_latest(monkeypatch, _latest_payload(name=tag, tag_name=tag))
+    assert integrity.latest_release() is None
+
+
+def test_bridge_rejects_extra_asset(monkeypatch):
+    payload = _latest_payload()
+    payload["assets"].append(
+        {"id": 60014, "name": "AstralDeep-Setup.msi", "browser_download_url": "u/msi"}
+    )
+    _serve_latest(monkeypatch, payload)
+    assert integrity.latest_release() is None
+
+
+def test_bridge_rejects_missing_asset(monkeypatch):
+    payload = _latest_payload()
+    payload["assets"] = payload["assets"][:2]  # no cosign.bundle
+    _serve_latest(monkeypatch, payload)
+    assert integrity.latest_release() is None
+
+
+def test_bridge_rejects_renamed_asset(monkeypatch):
+    payload = _latest_payload()
+    payload["assets"][0]["name"] = "astraldeep.exe"  # exact-name contract
+    _serve_latest(monkeypatch, payload)
+    assert integrity.latest_release() is None
+
+
+def test_bridge_rejects_duplicate_canonical_asset(monkeypatch):
+    payload = _latest_payload()
+    # Two exe rows, no bundle — still 3 assets but not exactly one of each.
+    payload["assets"][2] = dict(payload["assets"][0], id=60014)
+    _serve_latest(monkeypatch, payload)
+    assert integrity.latest_release() is None
+
+
+@pytest.mark.parametrize("bad_id", [0, -3, True, "60011", None])
+def test_bridge_rejects_non_positive_or_non_numeric_asset_ids(monkeypatch, bad_id):
+    payload = _latest_payload()
+    payload["assets"][0]["id"] = bad_id
+    _serve_latest(monkeypatch, payload)
+    assert integrity.latest_release() is None
+
+
+def test_bridge_identity_constants_are_pinned():
+    """FR-048 clause 13: the bridge signs under the EXISTING tag-ref SAN.
+
+    The T119 release-windows.yml rewrite keeps the file path and the OIDC
+    issuer the shipped verifier accepts — if either constant moves, every
+    already-shipped client fail-closes on the next release.
+    """
+    assert integrity._SIGNING_WORKFLOW == (
+        "https://github.com/AstralDeep/AstralDeep/.github/workflows/release-windows.yml"
+    )
+    assert integrity._EXPECTED_ISSUER == "https://token.actions.githubusercontent.com"
+    assert integrity._EXE_NAME == "AstralDeep.exe"
+    assert integrity._SHA_NAME == "SHA256SUMS"
+    assert integrity._BUNDLE_NAME == "cosign.bundle"

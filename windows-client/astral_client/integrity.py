@@ -200,10 +200,23 @@ def latest_release() -> Optional[ReleaseAssets]:
     except ValueError:
         logger.info("release tag is not v<strict-semver>")
         return None
+    # Publisher contract (spec 060, FR-048): the protected publisher names the
+    # release exactly its tag and only ever transitions a non-draft,
+    # non-prerelease release to public/latest. Enforce the same contract here
+    # fail-closed. The live GitHub API always carries ``name`` (null when
+    # unset — refused); the key-absent default only tolerates pre-060 fixtures.
+    if data.get("name", tag) != tag:
+        logger.info("release name does not equal its tag")
+        return None
+    if data.get("draft") or data.get("prerelease"):
+        logger.info("release is draft/prerelease; refusing selection")
+        return None
     asset_rows = data.get("assets") or []
     required_names = (_EXE_NAME, _SHA_NAME, _BUNDLE_NAME)
-    if any(sum(row.get("name") == name for row in asset_rows) != 1 for name in required_names):
-        logger.info("release does not contain exactly one of every required asset")
+    if len(asset_rows) != len(required_names) or any(
+        sum(row.get("name") == name for row in asset_rows) != 1 for name in required_names
+    ):
+        logger.info("release does not contain exactly the three required assets")
         return None
     assets = {a.get("name"): a for a in asset_rows}
     exe = assets.get(_EXE_NAME, {}).get("browser_download_url", "")

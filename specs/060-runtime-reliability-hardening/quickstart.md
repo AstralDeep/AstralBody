@@ -615,6 +615,20 @@ Release publication and protected exception/debt transitions remain environment-
 Actions jobs using the built-in short-lived `GITHUB_TOKEN` with job-scoped permissions. Do not
 create a repository-scoped GitHub App, installation token, publisher App, or custom token broker.
 
+The readiness matrix normally runs from `ci.yml` (caller job id `release-readiness`, guarded by the
+`RELEASE_READINESS_ACTIVE` repository variable set at the second T120 checkpoint; the required
+check is `release-readiness / protected-decision`). A candidate rerun is dispatched with an
+explicit verified base, and the unique request id rides the run-name
+(`release-readiness <request_id>`):
+
+```bash
+gh workflow run release-readiness.yml --ref "$BRANCH" -f candidate_sha="$SHA" -f base_sha="$BASE_SHA" -f request_id="$REQUEST_ID"
+```
+
+The run's `protected-decision` job uploads the canonical `release-evidence` bundle and the attested
+`trusted-release-decision` artifact; a dispatch rerun still requires the shared-run backend and
+tooling coverage artifacts, so the coverage gate fails honestly when they are absent.
+
 <details>
 <summary>Superseded App/broker bootstrap (historical only — do not execute)</summary>
 

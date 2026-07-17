@@ -1,0 +1,260 @@
+# Spec 060 (T107/T119) — the protected trust root of the release-readiness
+# pipeline. Call-only by design: this workflow reconstructs producer job,
+# runner, and artifact identities from the SHARED run's GitHub API state (a
+# reusable call shares github.run_id with its caller) and NEVER from
+# producer-uploaded bytes, writes one trusted_workflow_provenance manifest per
+# evidence producer, consumes stage-deploy's trusted_stage_deploy manifest,
+# attests every manifest, and uploads them as the `trusted-manifests` run
+# artifact. The protected commit SHA of THIS FILE is the validator's
+# --protected-builder-sha (repository variable RELEASE_TRUSTED_BUILDER_SHA,
+# recorded at the first T120 checkpoint); its attestation certificate identity
+# is RELEASE_TRUSTED_BUILDER_IDENTITY.
+name: release-trusted-builder
+
+on:
+  workflow_call:
+    inputs:
+      candidate_sha:
+        description: Exact candidate commit the shared run is testing
+        required: true
+        type: string
+      request_id:
+        description: Optional caller correlation id (rides the run-name only)
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  id-token: write
+  attestations: write
+  actions: read
+  contents: read
+
+jobs:
+  attest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      RELEASE_TRUSTED_BUILDER_SHA: ${{ vars.RELEASE_TRUSTED_BUILDER_SHA }}
+      RELEASE_TRUSTED_BUILDER_IDENTITY: ${{ vars.RELEASE_TRUSTED_BUILDER_IDENTITY }}
+    steps:
+      # Identity reconstruction source: the CURRENT run's own job and artifact
+      # listings. Self-declared values inside any downloaded artifact are never
+      # a trust root here.
+      - name: Reconstruct producer identities from the shared run API state
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/060/trust/producers build/060/trust/stage build/060/api
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
+            --paginate --jq '.jobs[]' > build/060/api/jobs.ndjson
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/${{ github.run_id }}/artifacts?per_page=100" \
+            --paginate --jq '.artifacts[]' > build/060/api/artifacts.ndjson
+
+      - name: Download evidence and stage artifacts by exact artifact id
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+
+          api = pathlib.Path("build/060/api")
+          artifacts = [
+              json.loads(line)
+              for line in api.joinpath("artifacts.ndjson").read_text(encoding="utf-8").splitlines()
+              if line.strip()
+          ]
+          wanted = {}
+          for artifact in artifacts:
+              name = artifact["name"]
+              if name.startswith("evidence-") or name.startswith("stage-outputs-"):
+                  # Exact-id selection; a duplicate name from a reused run is refused.
+                  if name in wanted:
+                      raise SystemExit(f"duplicate run artifact name: {name}")
+                  wanted[name] = artifact
+          if not any(name.startswith("stage-outputs-") for name in wanted):
+              raise SystemExit("shared run exposes no stage-outputs artifact")
+          downloads = pathlib.Path("build/060/downloads")
+          downloads.mkdir(parents=True, exist_ok=True)
+          for name, artifact in sorted(wanted.items()):
+              zip_path = downloads / f"{artifact['id']}.zip"
+              with zip_path.open("wb") as handle:
+                  subprocess.run(
+                      ["gh", "api",
+                       f"repos/{os.environ['GITHUB_REPOSITORY']}/actions/artifacts/{artifact['id']}/zip"],
+                      check=True, stdout=handle,
+                  )
+              target = downloads / str(artifact["id"])
+              target.mkdir(parents=True, exist_ok=True)
+              subprocess.run(["unzip", "-o", "-q", str(zip_path), "-d", str(target)], check=True)
+          api.joinpath("selected.json").write_text(
+              json.dumps({name: a["id"] for name, a in wanted.items()}, indent=2),
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Write one trusted manifest per producer and the stage manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re, uuid
+          from datetime import datetime, timezone
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          run_id = os.environ["GITHUB_RUN_ID"]
+          run_attempt = int(os.environ["GITHUB_RUN_ATTEMPT"])
+          candidate = os.environ["CANDIDATE_SHA"]
+          if not re.fullmatch(r"[0-9a-f]{40}", candidate):
+              raise SystemExit("candidate_sha must be one exact lowercase commit SHA")
+          builder_sha = os.environ.get("RELEASE_TRUSTED_BUILDER_SHA", "")
+          builder_identity = os.environ.get("RELEASE_TRUSTED_BUILDER_IDENTITY", "")
+          if not builder_sha or not builder_identity:
+              raise SystemExit(
+                  "RELEASE_TRUSTED_BUILDER_SHA / RELEASE_TRUSTED_BUILDER_IDENTITY "
+                  "repository variables are unset (T120 checkpoint 1)"
+              )
+          workflow_ref = os.environ["GITHUB_WORKFLOW_REF"].split("@", 1)[0]
+          workflow_ref = f"{workflow_ref}@{os.environ['GITHUB_WORKFLOW_SHA']}"
+
+          api = pathlib.Path("build/060/api")
+          jobs = [
+              json.loads(line)
+              for line in api.joinpath("jobs.ndjson").read_text(encoding="utf-8").splitlines()
+              if line.strip()
+          ]
+          selected = json.loads(api.joinpath("selected.json").read_text(encoding="utf-8"))
+
+          def job_for(job_id: str) -> dict:
+              matches = [
+                  job for job in jobs
+                  if job_id in [part.strip() for part in job.get("name", "").split("/")]
+              ]
+              if len(matches) != 1:
+                  raise SystemExit(f"expected exactly one run job for {job_id}: {len(matches)}")
+              return matches[0]
+
+          def runner_identity(job: dict) -> dict:
+              labels = [str(item).lower() for item in job.get("labels", [])]
+              text = " ".join(labels)
+              os_name = "windows" if "windows" in text else "macos" if "macos" in text else "linux"
+              return {
+                  "os": os_name,
+                  "architecture": "arm64" if os_name == "macos" else "x86_64",
+                  "runner_image": ",".join(labels) or "unknown",
+                  "runner_name": job.get("runner_name") or "unknown",
+                  "runner_environment": (
+                      "self_hosted" if "self-hosted" in text else "github_hosted"
+                  ),
+              }
+
+          def members(artifact_id: str, root: pathlib.Path) -> list[dict]:
+              records = []
+              for path in sorted(root.rglob("*")):
+                  if not path.is_file():
+                      continue
+                  member = path.relative_to(root).as_posix()
+                  digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                  records.append({
+                      "kind": "github_actions_artifact_member",
+                      "repository": repo,
+                      "run_id": run_id,
+                      "run_attempt": run_attempt,
+                      "artifact_id": str(artifact_id),
+                      "artifact_name": name_by_id[str(artifact_id)],
+                      "member": member,
+                      "immutable_reference": (
+                          f"gh://{repo}/runs/{run_id}/attempts/{run_attempt}"
+                          f"/artifacts/{artifact_id}/members/{member}"
+                      ),
+                      "sha256": digest,
+                  })
+              return records
+
+          name_by_id = {str(v): k for k, v in selected.items()}
+          now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+          producers = ("backend", "web", "windows", "android", "macos", "ios", "watchos", "docs")
+          index = {"producers": {}, "stage": {}}
+          for platform in producers:
+              artifact_name = f"evidence-{platform}"
+              if artifact_name not in selected:
+                  raise SystemExit(f"missing run artifact: {artifact_name}")
+              artifact_id = selected[artifact_name]
+              job = job_for(f"{platform}-producer")
+              manifest = {
+                  "document_type": "trusted_workflow_provenance",
+                  "schema_version": 1,
+                  "manifest_id": str(uuid.uuid4()),
+                  "repository": repo,
+                  "candidate_sha": candidate,
+                  "workflow": {
+                      "name": os.environ["GITHUB_WORKFLOW"],
+                      "run_id": run_id,
+                      "run_attempt": run_attempt,
+                      "job_id": f"{platform}-producer",
+                  },
+                  "workflow_ref": workflow_ref,
+                  "runner": runner_identity(job),
+                  "trusted_builder": {
+                      "repository": repo,
+                      "workflow_path": ".github/workflows/release-trusted-builder.yml",
+                      "signer_digest": builder_sha,
+                      "certificate_identity": builder_identity,
+                  },
+                  "generated_at": now,
+                  "artifacts": members(
+                      artifact_id, pathlib.Path("build/060/downloads") / str(artifact_id)
+                  ),
+              }
+              out = pathlib.Path(f"build/060/trust/producers/{platform}.json")
+              out.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+              index["producers"][platform] = {
+                  "manifest_id": manifest["manifest_id"],
+                  "role": "producer",
+                  "member": f"producers/{platform}.json",
+                  "source_artifact_id": str(artifact_id),
+              }
+
+          # The stage manifest is produced by run_candidate_staging.py
+          # --trusted-manifest under the stage-deploy env gate; it is carried
+          # through unchanged and attested here so the protected decision can
+          # verify one signer for the whole trust set.
+          stage_names = [n for n in selected if n.startswith("stage-outputs-")]
+          if len(stage_names) != 1:
+              raise SystemExit(f"expected exactly one stage-outputs artifact: {stage_names}")
+          stage_dir = pathlib.Path("build/060/downloads") / str(selected[stage_names[0]])
+          stage_manifest = stage_dir / "trusted-stage-deploy.json"
+          if not stage_manifest.is_file():
+              raise SystemExit("stage-outputs artifact lacks trusted-stage-deploy.json")
+          document = json.loads(stage_manifest.read_text(encoding="utf-8"))
+          if document.get("document_type") != "trusted_stage_deploy":
+              raise SystemExit("stage manifest has the wrong document_type")
+          target = pathlib.Path("build/060/trust/stage/trusted-stage-deploy.json")
+          target.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          index["stage"] = {
+              "manifest_id": document.get("manifest_id"),
+              "role": "stage_deploy",
+              "member": "stage/trusted-stage-deploy.json",
+              "source_artifact_id": str(selected[stage_names[0]]),
+          }
+          pathlib.Path("build/060/trust/receipt-index.json").write_text(
+              json.dumps(index, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+          )
+          PY
+
+      - name: Attest every trusted manifest
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: |
+            build/060/trust/producers/*.json
+            build/060/trust/stage/*.json
+
+      - name: Upload trusted manifests and receipt index
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: trusted-manifests
+          path: build/060/trust/
+          if-no-files-found: error
+          retention-days: 14

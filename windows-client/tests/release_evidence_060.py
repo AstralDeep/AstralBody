@@ -468,6 +468,9 @@ def test_windows_upgrade_from_0_3_0_selects_candidate_release(monkeypatch):
     fixture = {
         "id": 60001,
         "tag_name": f"v{version}",
+        "name": f"v{version}",
+        "draft": False,
+        "prerelease": False,
         "html_url": "https://releases.invalid/candidate",
         "assets": [
             {

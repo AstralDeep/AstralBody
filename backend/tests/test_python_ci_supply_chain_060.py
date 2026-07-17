@@ -5,8 +5,17 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+if not (
+    (REPO_ROOT / "tooling").is_dir() and (REPO_ROOT / ".github").is_dir()
+):  # repo root absent inside the product image
+    pytest.skip(
+        "repo-root tooling files are not part of the product image",
+        allow_module_level=True,
+    )
 TOOLING_ROOT = REPO_ROOT / "tooling" / "python-ci"
 INPUT = TOOLING_ROOT / "requirements.in"
 LOCK = TOOLING_ROOT / "requirements.lock.txt"
@@ -14,7 +23,7 @@ CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 WINDOWS_CANDIDATE = (
     REPO_ROOT / ".github" / "workflows" / "build-windows-candidate.yml"
 )
-LEGACY_WINDOWS_RELEASE = (
+WINDOWS_RELEASE_BRIDGE = (
     REPO_ROOT / ".github" / "workflows" / "release-windows.yml"
 )
 LOCK_INSTALL = (
@@ -159,6 +168,9 @@ def test_release_tooling_job_covers_every_maintained_script_non_vacuously() -> N
         "backend/tests/test_android_next_major_canary.py",
         "backend/tests/test_candidate_staging_060.py",
         "backend/tests/test_release_evidence_validator.py",
+        "backend/tests/test_prepare_release_evidence_060.py",
+        "backend/tests/test_release_workflows_060.py",
+        "backend/tests/test_release_evidence_producers.py",
         "windows-client/tests/test_release_lock_060.py",
     ):
         assert test_path in job
@@ -177,17 +189,33 @@ def test_windows_candidate_installs_test_lock_only_after_candidate_build() -> No
     assert "tooling/python-ci/requirements.lock.txt" in workflow
 
 
-def test_legacy_windows_release_uses_only_complete_release_lock() -> None:
-    workflow = LEGACY_WINDOWS_RELEASE.read_text(encoding="utf-8")
-    install = (
-        "python -m pip install --require-hashes -r "
-        "windows-client/requirements-release.lock.txt"
-    )
-    assert install in workflow
-    assert workflow.index(install) < workflow.index("- name: Build the exe")
+def test_windows_release_bridge_signs_archived_bytes_without_rebuild() -> None:
+    """The 060 bridge signs the exact archived build-once EXE (T119).
+
+    No rebuild toolchain, no requirements install, no ad-hoc tool install:
+    sigstore comes only from its SHA-pinned official action, and the bridge
+    holds read/read/id-token permissions — never release-mutation authority.
+    """
+
+    workflow = WINDOWS_RELEASE_BRIDGE.read_text(encoding="utf-8")
+    lower = workflow.lower()
+    assert "pyinstaller" not in lower
+    assert "astraldeep.spec" not in lower
+    assert re.search(r"pip install[^\n]*requirements", workflow) is None
     assert "pip install --upgrade" not in workflow
-    assert "pip install -r windows-client/requirements.txt" not in workflow
+    assert "pip install" not in workflow
     assert "sigstore>=" not in workflow
+    assert re.search(
+        r"(?m)^\s*uses:\s*sigstore/gh-action-sigstore-python@[0-9a-f]{40}\s+# v\d+(?:\.\d+)*$",
+        workflow,
+    ), "the bridge must obtain sigstore from the SHA-pinned official action"
+    grants = {
+        f"{key}: {value}"
+        for key, value in re.findall(
+            r"(?m)^\s*([a-z-]+):\s*(read|write)\s*(?:#.*)?$", workflow
+        )
+    }
+    assert grants == {"contents: read", "actions: read", "id-token: write"}
 
 
 def test_ci_only_python_manifest_cannot_enter_product_artifacts() -> None:
